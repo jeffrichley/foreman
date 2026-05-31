@@ -111,6 +111,16 @@ DX" are not acceptance criteria — they are findings. Flag every instance.
 changes` disagree about which files change, that is `important`. If
 `Acceptance criteria` and `Out of scope` contradict each other, that is
 `critical`.
+
+**PR diff contains files the spec didn't write.** The Planner writes
+ONLY the spec document (typically
+`docs/superpowers/specs/foreman-issue-<N>-spec.md`). The PR diff
+(provided as `<pr_diff>` below) should contain ONLY that single file.
+Any other file in the diff — workflow YAML, code changes, configs,
+README edits — is scope drift carried in from stale branch state, not
+part of the spec's work. This is `critical`: the Worker would inherit
+work that wasn't planned. Target: the unexpected file's path.
+Needed: "remove this file from the PR; it's not part of the spec."
 </verification_rules>
 
 <severity_rubric>
