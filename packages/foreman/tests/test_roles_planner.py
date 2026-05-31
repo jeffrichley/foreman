@@ -23,6 +23,7 @@ from foreman.roles.planner import (
     parse_issue_url,
     run_planner,
 )
+from foreman.schemas.planner import PlannerOutput
 
 # ----------------------------------------------------------------------
 # parse_issue_url
@@ -158,7 +159,12 @@ def _make_config(clone: Path) -> Config:
     )
 
 
-def _make_llm_payload(**overrides: Any) -> dict[str, Any]:
+def _make_llm_output(**overrides: Any) -> PlannerOutput:
+    """Build a ``PlannerOutput`` instance for use as the fake provider's return.
+
+    Post-refactor the provider returns Pydantic instances (not dicts), so
+    test doubles must mirror that contract.
+    """
     base: dict[str, Any] = {
         "spec_doc_content": "# Spec: SSML support (issue #42)\n\n## Goal\nx\n",
         "pr_title": "spec: add SSML support",
@@ -168,7 +174,7 @@ def _make_llm_payload(**overrides: Any) -> dict[str, Any]:
         "confidence": "high",
     }
     base.update(overrides)
-    return base
+    return PlannerOutput.model_validate(base)
 
 
 # ----------------------------------------------------------------------
@@ -191,7 +197,7 @@ async def test_run_planner_dispatches_and_advances_label(
     fake_registry.get_host_provider.return_value = fake_host
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_llm_payload())
+    fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
 
     result = await run_planner(
         issue_url="https://github.com/jeffrichley/voice/issues/42",
@@ -206,6 +212,9 @@ async def test_run_planner_dispatches_and_advances_label(
     fake_provider.run_agent.assert_called_once()
     call_kwargs = fake_provider.run_agent.call_args.kwargs
     assert call_kwargs["allowed_tools"] == ["Read", "Glob", "Grep"]
+    # Pydantic-first contract: dispatcher passes the model class, not a schema dict
+    assert call_kwargs["output_model"] is PlannerOutput
+    assert "output_schema" not in call_kwargs
     # No env injection (decoupled from gh CLI)
     assert "env" not in call_kwargs or call_kwargs["env"] is None
 
@@ -254,7 +263,7 @@ async def test_run_planner_does_not_inject_env_into_provider(
     fake_registry.get_host_provider.return_value = fake_host
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_llm_payload())
+    fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
 
     await run_planner(
         issue_url="https://github.com/jeffrichley/voice/issues/42",
@@ -286,7 +295,7 @@ async def test_run_planner_rejects_url_pointing_at_wrong_project(
     fake_registry = MagicMock()
     fake_registry.get_host_provider.return_value = fake_host
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_llm_payload())
+    fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
 
     with pytest.raises(ValueError, match="does not match project"):
         await run_planner(

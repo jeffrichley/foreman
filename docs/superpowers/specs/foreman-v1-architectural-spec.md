@@ -125,17 +125,32 @@ Single interface that all role modules dispatch through; first concrete
 implementation is the **Anthropic Agent SDK** (`claude-agent-sdk` Python
 package).
 
-Per-role agent dispatch:
+Per-role agent dispatch (**Pydantic-first**, per the official
+claude-agent-sdk structured-output pattern — see
+<https://code.claude.com/docs/en/agent-sdk/structured-outputs>):
 
 ```python
-result = provider.run_agent(
+result: PlannerOutput = await provider.run_agent(
     system_prompt=role_prompt,
     user_prompt=ticket_context,
-    tools=role_tool_set,         # see §4.1
-    output_schema=role_output_schema,
-    working_dir=worktree_path,
+    allowed_tools=role_tool_set,    # see §4.1
+    output_model=PlannerOutput,     # Pydantic model class, not a dict
+    cwd=worktree_path,
 )
 ```
+
+Callers pass a `type[BaseModel]` and receive a validated instance of that
+model. The provider hoists the JSON-schema marshalling the SDK requires
+(`model.model_json_schema()` going in, `model.model_validate()` coming
+out) so role-runners don't repeat that boilerplate.
+
+The provider also surfaces SDK-recognised failure modes as specific
+exceptions:
+- `StructuredOutputRetryError` — `ResultMessage.subtype ==
+  "error_max_structured_output_retries"` (the SDK gave up trying to
+  satisfy the schema).
+- `StructuredOutputMissingError` — the agent loop terminated without ever
+  producing a successful `ResultMessage` carrying `structured_output`.
 
 Prompt caching wired from day one (system prompt + repo context).
 

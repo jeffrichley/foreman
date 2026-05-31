@@ -135,14 +135,13 @@ async def run_planner(
     system_prompt = _load_planner_prompt()
     user_prompt = _build_user_prompt(issue=issue)
 
-    raw = await provider.run_agent(
+    llm_output = await provider.run_agent(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         allowed_tools=PLANNER_ALLOWED_TOOLS,
-        output_schema=PlannerOutput.model_json_schema(),
+        output_model=PlannerOutput,
         cwd=wt_path,
     )
-    llm_output = PlannerOutput.model_validate(raw)
 
     branch = f"foreman/issue-{issue_number}"
     host.commit_files_to_worktree(
