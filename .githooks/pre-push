@@ -1,0 +1,4 @@
+#!/bin/sh
+# Pre-push quality gate: run the same fast gate CI runs.
+# Emergency bypass (use sparingly): git push --no-verify
+exec just check

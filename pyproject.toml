@@ -1,0 +1,84 @@
+# Root pyproject — foreman workspace (uv).
+# Member packages live under packages/*. Each owns its [project] metadata.
+# This file holds: workspace declaration, dev deps, shared ruff/pytest config.
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+foreman = { workspace = true }
+
+[dependency-groups]
+# Dev tools only; real package deps live in member pyprojects.
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.14",
+    "mypy>=1.11",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = [
+    "packages/foreman/src",
+]
+extend-exclude = [
+    ".venv",
+    ".tmp",
+]
+
+[tool.ruff.lint]
+select = [
+    "F",
+    "E",
+    "I",
+    "UP",
+    "B",
+    "RUF100",
+]
+ignore = [
+    "E501",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+line-ending = "auto"
+skip-magic-trailing-comma = false
+docstring-code-format = true
+
+[tool.mypy]
+python_version = "3.12"
+files = [
+    "packages/foreman/src",
+]
+warn_unused_ignores = true
+no_implicit_optional = true
+check_untyped_defs = true
+
+# Optional-dep override pattern (madrigal-style). Uncomment + edit if your
+# package lazy-imports heavy/optional deps so the rest of the module stays
+# importable without them installed:
+#
+# [[tool.mypy.overrides]]
+# module = [
+#     "torch",
+#     "torch.*",
+#     "some_optional_lib",
+# ]
+# ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = [
+    "packages/foreman/tests",
+]
+asyncio_mode = "auto"
+addopts = "--import-mode=importlib"
+
+# Custom marker pattern (madrigal-style). Uncomment + edit when you have
+# tests that require expensive external resources (GPU, real cloud API,
+# real engine) and should be opt-in:
+#
+# markers = [
+#     "real_engine: requires real engine + heavy deps. Skipped without FOREMAN_REAL_ENGINE_OK=1.",
+# ]
