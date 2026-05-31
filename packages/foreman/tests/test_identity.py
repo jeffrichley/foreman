@@ -13,8 +13,9 @@ from unittest.mock import patch
 import pytest
 from github import Github
 
-from foreman.auth import InstallationToken
+from foreman.auth import AppMetadata, InstallationToken
 from foreman.config import AppsConfig, ProjectConfig
+from foreman.git_hosts.github import GitHubProvider
 from foreman.identity import IdentityRegistry
 
 
@@ -136,5 +137,85 @@ def test_get_client_caches_github_instance() -> None:
         first = reg.get_client("planner")
         second = reg.get_client("planner")
     assert first is second
+
+
+# ----------------------------------------------------------------------
+# get_host_provider
+# ----------------------------------------------------------------------
+
+
+def _fake_app_metadata(
+    *, app_id: int = 123456, slug: str = "foreman-planner"
+) -> AppMetadata:
+    return AppMetadata(app_id=app_id, slug=slug, name="Foreman Planner")
+
+
+def test_get_host_provider_returns_github_provider() -> None:
+    fake_token = _fresh_token(token="ghs_installtoken_abc")
+    with (
+        patch("foreman.identity.mint_installation_token", return_value=fake_token),
+        patch(
+            "foreman.identity.fetch_app_metadata", return_value=_fake_app_metadata()
+        ),
+    ):
+        reg = IdentityRegistry(_make_project())
+        host = reg.get_host_provider("planner")
+    assert isinstance(host, GitHubProvider)
+
+
+def test_get_host_provider_passes_bot_identity_built_from_app_meta_and_token() -> None:
+    fake_token = _fresh_token(token="ghs_installtoken_abc")
+    fake_meta = _fake_app_metadata(app_id=987654, slug="foreman-planner")
+    with (
+        patch("foreman.identity.mint_installation_token", return_value=fake_token),
+        patch("foreman.identity.fetch_app_metadata", return_value=fake_meta),
+    ):
+        reg = IdentityRegistry(_make_project())
+        host = reg.get_host_provider("planner")
+    # GitHubProvider stores the identity privately; tap it for verification.
+    identity = host._identity  # type: ignore[attr-defined]
+    assert identity.slug == "foreman-planner"
+    assert identity.user_id == 987654
+    assert identity.token == "ghs_installtoken_abc"
+
+
+def test_app_metadata_fetched_once_per_role_across_calls() -> None:
+    """``GET /app`` is stable across token refreshes — cache it for the
+    registry's lifetime."""
+    fake_token = _fresh_token()
+    fake_meta = _fake_app_metadata()
+    with (
+        patch("foreman.identity.mint_installation_token", return_value=fake_token),
+        patch(
+            "foreman.identity.fetch_app_metadata", return_value=fake_meta
+        ) as mock_fetch,
+    ):
+        reg = IdentityRegistry(_make_project())
+        reg.get_host_provider("planner")
+        reg.get_host_provider("planner")
+        reg.get_host_provider("planner")
+    assert mock_fetch.call_count == 1
+
+
+def test_app_metadata_fetched_with_resolved_credentials() -> None:
+    fake_token = _fresh_token()
+    fake_meta = _fake_app_metadata()
+    with (
+        patch("foreman.identity.mint_installation_token", return_value=fake_token),
+        patch(
+            "foreman.identity.fetch_app_metadata", return_value=fake_meta
+        ) as mock_fetch,
+    ):
+        reg = IdentityRegistry(_make_project())
+        reg.get_host_provider("planner")
+    args = mock_fetch.call_args.args
+    assert args[0] == 123456
+    assert args[1] == Path("/tmp/planner.pem")
+
+
+def test_get_host_provider_unknown_role_raises() -> None:
+    reg = IdentityRegistry(_make_project())
+    with pytest.raises(ValueError, match="Unknown role"):
+        reg.get_host_provider("reviewer")
 
 
