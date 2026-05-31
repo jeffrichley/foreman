@@ -33,6 +33,19 @@ class InstallationToken:
     expires_at: int
 
 
+@dataclass(frozen=True)
+class AppMetadata:
+    """Metadata about a GitHub App — returned by ``GET /app``.
+
+    Used to construct the per-role :class:`~foreman.git_host.BotIdentity` so
+    commit attribution + push auth use the App's bot name + numeric id.
+    """
+
+    app_id: int
+    slug: str
+    name: str
+
+
 def _read_private_key(path: Path | str) -> str:
     return Path(path).read_text(encoding="utf-8")
 
@@ -71,6 +84,32 @@ def _parse_github_expires_at(value: str) -> int:
     """Convert GitHub's ISO 8601 ``expires_at`` (UTC, trailing Z) to unix seconds."""
     iso = value.replace("Z", "+00:00")
     return int(_dt.datetime.fromisoformat(iso).timestamp())
+
+
+def fetch_app_metadata(app_id: int, private_key_path: Path | str) -> AppMetadata:
+    """Fetch the App's name + slug via ``GET /app``.
+
+    Used to construct :class:`~foreman.git_host.BotIdentity` so commit
+    attribution uses the App's bot identity (``<slug>[bot]``) and the
+    GitHub-noreply email convention (``<app_id>+<slug>[bot]@users.noreply.github.com``).
+    """
+    private_key = _read_private_key(private_key_path)
+    app_jwt = _mint_app_jwt(app_id, private_key)
+    resp = requests.get(
+        "https://api.github.com/app",
+        headers={
+            "Authorization": f"Bearer {app_jwt}",
+            "Accept": "application/vnd.github+json",
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return AppMetadata(
+        app_id=int(data["id"]),
+        slug=str(data["slug"]),
+        name=str(data["name"]),
+    )
 
 
 def mint_installation_token(

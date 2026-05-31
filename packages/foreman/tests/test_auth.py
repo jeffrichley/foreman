@@ -12,8 +12,10 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from foreman.auth import (
+    AppMetadata,
     InstallationToken,
     _mint_app_jwt,
+    fetch_app_metadata,
     mint_installation_token,
 )
 
@@ -102,6 +104,31 @@ def test_mint_installation_token_calls_github_and_returns_token(
     assert get_headers["Authorization"].startswith("Bearer ey")  # JWT starts with "eyJ"
     post_headers = fake_post.call_args.kwargs["headers"]
     assert post_headers["Authorization"].startswith("Bearer ey")
+
+
+def test_fetch_app_metadata_returns_appmetadata(private_key_file: Path) -> None:
+    """``GET /app`` returns the App's slug and numeric id, used to build the
+    per-role :class:`~foreman.git_host.BotIdentity`."""
+    fake_get = MagicMock()
+    fake_get.return_value.json.return_value = {
+        "id": 12345,
+        "slug": "foreman-planner",
+        "name": "Foreman Planner",
+    }
+    fake_get.return_value.raise_for_status.return_value = None
+
+    with patch("foreman.auth.requests.get", fake_get):
+        meta = fetch_app_metadata(app_id=12345, private_key_path=private_key_file)
+
+    assert isinstance(meta, AppMetadata)
+    assert meta.app_id == 12345
+    assert meta.slug == "foreman-planner"
+    assert meta.name == "Foreman Planner"
+    # Hit the right endpoint with a Bearer JWT
+    url = fake_get.call_args.args[0]
+    assert url == "https://api.github.com/app"
+    headers = fake_get.call_args.kwargs["headers"]
+    assert headers["Authorization"].startswith("Bearer ey")
 
 
 def test_mint_installation_token_raises_on_http_error(private_key_file: Path) -> None:
