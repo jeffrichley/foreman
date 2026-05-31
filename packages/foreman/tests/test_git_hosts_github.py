@@ -11,7 +11,9 @@ from __future__ import annotations
 import re
 import subprocess
 import traceback
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -452,3 +454,197 @@ def test_sanitize_cmd_preserves_non_token_args() -> None:
     assert sanitize_cmd(cmd) == cmd
     # And a branch name that contains underscores + alphanum but no prefix.
     assert sanitize_cmd(["foreman_planner_branch_42"]) == ["foreman_planner_branch_42"]
+
+
+# ----------------------------------------------------------------------
+# Defect (issue #10) — env-var leak into target-repo hooks
+#
+# When Foreman runs git push, the target repo's pre-push hook inherits
+# the parent process's environment. If VIRTUAL_ENV (or other Python/uv
+# vars) point at Foreman's venv, ``uv run --no-sync`` in the hook will
+# detect the mismatch and create a fresh empty .venv in the target
+# worktree — then mypy/pytest fail because the venv has no deps.
+#
+# Fix: _git filters these vars out of the subprocess env before running.
+# ----------------------------------------------------------------------
+
+
+def _capture_push_run(
+    wt: Path, *, env_capture: dict[str, dict[str, str] | None]
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """Return a fake subprocess.run that records ``env=`` from the push call."""
+    real_run = subprocess.run
+
+    def fake_run(cmd: Any, *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git" and cmd[1] == "push":
+            env_capture["env"] = kwargs.get("env")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return real_run(cmd, *args, **kwargs)
+
+    return fake_run
+
+
+def _setup_push_worktree(tmp_path: Path) -> Path:
+    """Init a worktree with a remote configured, ready for push_branch."""
+    wt = _init_worktree(tmp_path)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/owner/name.git"],
+        cwd=wt,
+        check=True,
+        capture_output=True,
+    )
+    return wt
+
+
+def test_git_subprocess_drops_virtual_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #10: VIRTUAL_ENV must not leak into the git subprocess env."""
+    monkeypatch.setenv("VIRTUAL_ENV", "sentinel-do-not-leak")
+    wt = _setup_push_worktree(tmp_path)
+    capture: dict[str, dict[str, str] | None] = {"env": None}
+
+    provider = GitHubProvider(identity=_identity("ghs_abc"), client=MagicMock())
+    with patch(
+        "foreman.git_hosts.github.subprocess.run",
+        side_effect=_capture_push_run(wt, env_capture=capture),
+    ):
+        provider.push_branch(worktree_path=wt, branch="foreman/issue-7")
+
+    env = capture["env"]
+    assert env is not None, "subprocess.run for git push must receive an explicit env="
+    assert "VIRTUAL_ENV" not in env, (
+        "VIRTUAL_ENV leaked into git subprocess — pre-push hooks will mis-detect "
+        "Foreman's venv and create a stray .venv in the target worktree"
+    )
+
+
+def test_git_subprocess_drops_python_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #10: PYTHONPATH must not leak (would pull foreman modules into hook)."""
+    monkeypatch.setenv("PYTHONPATH", "E:/workspaces/ai/agents/foreman/src")
+    wt = _setup_push_worktree(tmp_path)
+    capture: dict[str, dict[str, str] | None] = {"env": None}
+
+    provider = GitHubProvider(identity=_identity("ghs_abc"), client=MagicMock())
+    with patch(
+        "foreman.git_hosts.github.subprocess.run",
+        side_effect=_capture_push_run(wt, env_capture=capture),
+    ):
+        provider.push_branch(worktree_path=wt, branch="foreman/issue-7")
+
+    env = capture["env"]
+    assert env is not None
+    assert "PYTHONPATH" not in env
+
+
+def test_git_subprocess_preserves_path_and_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #10: harmless host vars must still be inherited (hooks need them)."""
+    # Set up the worktree FIRST (uses real git on the host PATH) so the
+    # monkeypatched sentinel values don't break worktree initialization.
+    wt = _setup_push_worktree(tmp_path)
+
+    # Sentinel values for vars the filter MUST preserve. Use values that
+    # are uniquely identifiable in the captured env dict so we don't get
+    # false positives from the real host values.
+    monkeypatch.setenv("HOME", "/tmp/foreman-test-home-sentinel")
+    monkeypatch.setenv("USERPROFILE", "C:/Users/foreman-test-sentinel")
+    monkeypatch.setenv("GH_TOKEN", "ghp_legacy_token_sentinel")
+    monkeypatch.setenv("LANG", "en_US.UTF-8")
+    # PATH is left at the real host value — overwriting it would break
+    # any nested real-git calls during the push setup. We assert it
+    # passes through (non-empty) rather than equals a sentinel.
+
+    capture: dict[str, dict[str, str] | None] = {"env": None}
+
+    provider = GitHubProvider(identity=_identity("ghs_abc"), client=MagicMock())
+    with patch(
+        "foreman.git_hosts.github.subprocess.run",
+        side_effect=_capture_push_run(wt, env_capture=capture),
+    ):
+        provider.push_branch(worktree_path=wt, branch="foreman/issue-7")
+
+    env = capture["env"]
+    assert env is not None
+    # Things hooks legitimately depend on must still be there.
+    assert env.get("PATH"), "PATH must be preserved — hooks need it to find executables"
+    assert env.get("HOME") == "/tmp/foreman-test-home-sentinel"
+    assert env.get("USERPROFILE") == "C:/Users/foreman-test-sentinel"
+    assert env.get("GH_TOKEN") == "ghp_legacy_token_sentinel"
+    assert env.get("LANG") == "en_US.UTF-8"
+
+
+@pytest.mark.parametrize(
+    "var",
+    [
+        "VIRTUAL_ENV",
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "UV_PROJECT_ENVIRONMENT",
+        "UV_PROJECT",
+        "UV_PYTHON",
+        "UV_WORKING_DIR",
+        "UV_SYSTEM_PYTHON",
+        "UV_PYTHON_PREFERENCE",
+        "UV_PYTHON_SEARCH_PATH",
+        "UV_MANAGED_PYTHON",
+        "UV_NO_MANAGED_PYTHON",
+        "CONDA_PREFIX",
+    ],
+)
+def test_git_subprocess_drops_all_blocked_vars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, var: str
+) -> None:
+    """Issue #10: every Python/uv env var that could mis-direct a foreign
+    worktree's hooks must be dropped.
+
+    The blocklist covers anything that could:
+    - point a Python tool at the wrong interpreter (VIRTUAL_ENV, PYTHONHOME,
+      CONDA_PREFIX, UV_PYTHON, UV_SYSTEM_PYTHON, UV_MANAGED_PYTHON,
+      UV_NO_MANAGED_PYTHON, UV_PYTHON_PREFERENCE, UV_PYTHON_SEARCH_PATH)
+    - point uv at the wrong project/env directory (UV_PROJECT,
+      UV_PROJECT_ENVIRONMENT, UV_WORKING_DIR)
+    - leak foreman's importable modules into the hook (PYTHONPATH)
+
+    UV_CACHE_DIR is intentionally NOT blocked — cache sharing across
+    repos is safe and desirable.
+    """
+    monkeypatch.setenv(var, "sentinel-do-not-leak")
+    wt = _setup_push_worktree(tmp_path)
+    capture: dict[str, dict[str, str] | None] = {"env": None}
+
+    provider = GitHubProvider(identity=_identity("ghs_abc"), client=MagicMock())
+    with patch(
+        "foreman.git_hosts.github.subprocess.run",
+        side_effect=_capture_push_run(wt, env_capture=capture),
+    ):
+        provider.push_branch(worktree_path=wt, branch="foreman/issue-7")
+
+    env = capture["env"]
+    assert env is not None, f"subprocess.run for git push must receive env= (var={var})"
+    assert var not in env, (
+        f"{var}=sentinel-do-not-leak leaked into git subprocess env"
+    )
+
+
+def test_git_subprocess_preserves_uv_cache_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #10: UV_CACHE_DIR is safe to share — must NOT be blocked."""
+    monkeypatch.setenv("UV_CACHE_DIR", "C:/Users/test/.cache/uv")
+    wt = _setup_push_worktree(tmp_path)
+    capture: dict[str, dict[str, str] | None] = {"env": None}
+
+    provider = GitHubProvider(identity=_identity("ghs_abc"), client=MagicMock())
+    with patch(
+        "foreman.git_hosts.github.subprocess.run",
+        side_effect=_capture_push_run(wt, env_capture=capture),
+    ):
+        provider.push_branch(worktree_path=wt, branch="foreman/issue-7")
+
+    env = capture["env"]
+    assert env is not None
+    assert env.get("UV_CACHE_DIR") == "C:/Users/test/.cache/uv"
