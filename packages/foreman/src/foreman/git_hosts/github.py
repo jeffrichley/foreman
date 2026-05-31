@@ -21,69 +21,18 @@ Both conventions are verified end-to-end in
 
 from __future__ import annotations
 
-import os
 import subprocess
 from pathlib import Path
 
 from github import Github
 
+from foreman._env_filter import filtered_subprocess_env as _filtered_subprocess_env
 from foreman.git_host import BotIdentity, GitHostProvider, IssueRef, PRRef
 from foreman.git_hosts._errors import GitCommandError
 
-# Env vars that would mis-direct any Python / uv tool running inside a
-# DIFFERENT repo's worktree (e.g. a target repo's pre-push hook calling
-# ``uv run --no-sync just check``).
-#
-# When Foreman runs ``git push`` via subprocess, the target repo's hook
-# inherits the parent's environment. If VIRTUAL_ENV (or any of the vars
-# below) point at Foreman's venv, ``uv run --no-sync`` detects the
-# mismatch with the target worktree, ignores the env var, and creates a
-# fresh empty ``.venv`` in the target repo — subsequent mypy/pytest then
-# fail because the new venv has no deps installed.
-#
-# Issue #10 surfaced this on 3 consecutive Foreman dogfood runs on
-# 2026-05-31. Workaround was ``env -u VIRTUAL_ENV git push`` by hand.
-#
-# UV_CACHE_DIR is intentionally NOT on the blocklist — cache sharing
-# across repos is safe and desirable (faster syncs).
-_FOREIGN_WORKTREE_BLOCKED_ENV_VARS = frozenset(
-    {
-        # --- Python interpreter / module path ---
-        "VIRTUAL_ENV",  # load-bearing — the one that triggered #10
-        "PYTHONHOME",  # would mis-direct python interpreter selection
-        "PYTHONPATH",  # would pull foreman modules into hook imports
-        "CONDA_PREFIX",  # uv also detects this as an "active env"
-        # --- uv project / interpreter selection ---
-        # Sourced from https://docs.astral.sh/uv/reference/environment/
-        "UV_PROJECT",  # equivalent to --project
-        "UV_PROJECT_ENVIRONMENT",  # path to project venv dir
-        "UV_WORKING_DIR",  # equivalent to --directory
-        "UV_PYTHON",  # path to interpreter for all ops
-        "UV_SYSTEM_PYTHON",  # use first python on PATH
-        "UV_PYTHON_PREFERENCE",  # system vs managed
-        "UV_PYTHON_SEARCH_PATH",  # PATH override for python discovery
-        "UV_MANAGED_PYTHON",  # force use of uv-managed python
-        "UV_NO_MANAGED_PYTHON",  # forbid uv-managed python
-    }
-)
-
-
-def _filtered_subprocess_env() -> dict[str, str]:
-    """Return ``os.environ`` minus env vars that would mis-direct a foreign worktree.
-
-    See :data:`_FOREIGN_WORKTREE_BLOCKED_ENV_VARS` for rationale.
-
-    Returns:
-        A copy of the current process environment with the blocklist removed.
-        Everything else (PATH, HOME, USERPROFILE, GIT_*, GH_TOKEN, LANG,
-        UV_CACHE_DIR, ...) is preserved so the target repo's hooks behave
-        the same as they would for a human invocation.
-    """
-    return {
-        k: v
-        for k, v in os.environ.items()
-        if k not in _FOREIGN_WORKTREE_BLOCKED_ENV_VARS
-    }
+# The same filter is applied by :class:`~foreman.worktree.WorktreeManager`
+# when running ``uv sync`` in a newly-created worktree — see the
+# :mod:`foreman._env_filter` module docstring for the issue #10 history.
 
 
 class GitHubProvider(GitHostProvider):
