@@ -27,8 +27,9 @@ class AnthropicSDKProvider(ProviderFacade):
         output_schema: dict[str, Any],
         cwd: Path,
         max_turns: int = 40,
+        env: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        options = ClaudeAgentOptions(
+        options_kwargs: dict[str, Any] = dict(
             system_prompt=system_prompt,
             cwd=str(cwd),
             allowed_tools=allowed_tools,
@@ -36,6 +37,9 @@ class AnthropicSDKProvider(ProviderFacade):
             max_turns=max_turns,
             output_format={"type": "json_schema", "schema": output_schema},
         )
+        if env is not None:
+            options_kwargs["env"] = env
+        options = ClaudeAgentOptions(**options_kwargs)
         structured: dict[str, Any] | None = None
         async for message in query(prompt=user_prompt, options=options):
             if isinstance(message, ResultMessage) and message.structured_output:

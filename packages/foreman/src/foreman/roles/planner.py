@@ -18,6 +18,7 @@ the PR).
 
 from __future__ import annotations
 
+import os
 import re
 from importlib import resources
 from pathlib import Path
@@ -85,6 +86,14 @@ async def run_planner(
     repo = gh.get_repo(actual_repo_slug)
     issue = repo.get_issue(issue_number)
 
+    # Resolve planner-bot token for injection into the agent subprocess so
+    # the agent's `gh` CLI calls (e.g., `gh pr create`) run as the bot,
+    # not as whatever GH_TOKEN the parent foreman process inherited.
+    # Without this, the spec PR would open under Jeff's identity, not
+    # @foreman-planner-bot — violating the bot-attribution success criterion.
+    planner_token = identity.get_token("planner")
+    agent_env = {**os.environ, "GH_TOKEN": planner_token}
+
     wt_mgr = WorktreeManager(worktrees_root=worktrees_root)
     wt_path = wt_mgr.create(
         clone_path=Path(project.local_clone_path),
@@ -105,6 +114,7 @@ async def run_planner(
         allowed_tools=PLANNER_ALLOWED_TOOLS,
         output_schema=PlannerOutput.model_json_schema(),
         cwd=wt_path,
+        env=agent_env,
     )
     output = PlannerOutput.model_validate(raw)
 

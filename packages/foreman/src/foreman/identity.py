@@ -27,6 +27,16 @@ class IdentityRegistry:
         self._clients[role] = client
         return client
 
+    def get_token(self, role: str) -> str:
+        """Return the resolved GitHub token for a role.
+
+        Used by role dispatchers that need to inject the token into a
+        subprocess environment (e.g., to make the agent's ``gh`` CLI act
+        as the bot, not the parent process's identity). Mirrors
+        ``get_client`` but returns the raw token string.
+        """
+        return self._resolve_token(role)
+
     def _resolve_token(self, role: str) -> str:
         if role == "planner":
             return self._project.bots.resolve_planner_token()

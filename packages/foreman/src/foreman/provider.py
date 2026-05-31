@@ -29,6 +29,7 @@ class ProviderFacade(ABC):
         output_schema: dict[str, Any],
         cwd: Path,
         max_turns: int = 40,
+        env: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Run an agent and return its structured output as a dict.
 
@@ -39,6 +40,12 @@ class ProviderFacade(ABC):
             output_schema: JSON schema the agent's output must match.
             cwd: Working directory for file ops (the per-ticket worktree).
             max_turns: Safety cap on agent loop iterations.
+            env: Environment variables for the agent subprocess. When ``None``,
+                the subprocess inherits the parent's full environment. When
+                provided, callers are responsible for including parent vars
+                they want preserved (e.g., ``{**os.environ, "GH_TOKEN": ...}``).
+                Used by role dispatchers to inject per-role bot tokens so the
+                agent's ``gh`` calls act as the bot identity, not the parent.
 
         Returns:
             Dict matching `output_schema`.
