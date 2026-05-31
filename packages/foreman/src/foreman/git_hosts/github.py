@@ -27,6 +27,7 @@ from pathlib import Path
 from github import Github
 
 from foreman.git_host import BotIdentity, GitHostProvider, IssueRef, PRRef
+from foreman.git_hosts._errors import GitCommandError
 
 
 class GitHubProvider(GitHostProvider):
@@ -150,13 +151,28 @@ class GitHubProvider(GitHostProvider):
     # ------------------------------------------------------------------
     @staticmethod
     def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["git", *args],
-            cwd=cwd,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        """Run a ``git`` subprocess, surfacing stderr and redacting tokens on failure.
+
+        On ``CalledProcessError`` we raise :class:`GitCommandError` so callers
+        see git's actual stderr (Defect B) and so any token-shaped strings in
+        the argv or stderr are redacted before they hit logs or tracebacks
+        (Defect C).
+        """
+        try:
+            return subprocess.run(
+                ["git", *args],
+                cwd=cwd,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            raise GitCommandError(
+                f"git {args[0] if args else ''} failed",
+                returncode=exc.returncode,
+                cmd=exc.cmd if isinstance(exc.cmd, list) else [str(exc.cmd)],
+                stderr=exc.stderr or "",
+            ) from None
 
 
 def _extract_repo_slug(remote_url: str) -> str:

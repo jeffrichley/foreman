@@ -8,13 +8,16 @@ constructed token URL without needing a real remote.
 
 from __future__ import annotations
 
+import re
 import subprocess
+import traceback
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from foreman.git_host import BotIdentity
+from foreman.git_hosts._errors import GitCommandError, sanitize_cmd
 from foreman.git_hosts.github import GitHubProvider, _extract_repo_slug
 
 
@@ -273,3 +276,179 @@ def test_push_branch_uses_installation_token_url(tmp_path: Path) -> None:
     assert url == "https://x-access-token:ghs_abc@github.com/owner/name.git"
     # refspec is branch:branch (so server-side rejects accidental force-push semantics)
     assert pushed[3] == "foreman/issue-7:foreman/issue-7"
+
+
+# ----------------------------------------------------------------------
+# Defect B — git stderr surfaces in the raised exception
+# ----------------------------------------------------------------------
+
+
+def _make_called_process_error(
+    cmd: list[str], stderr: str
+) -> subprocess.CalledProcessError:
+    return subprocess.CalledProcessError(returncode=1, cmd=cmd, output="", stderr=stderr)
+
+
+def test_git_failure_surfaces_stderr_message_on_push_branch(tmp_path: Path) -> None:
+    """Defect B: git's stderr (the real diagnostic) must appear in str(exc)."""
+    wt = _init_worktree(tmp_path)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/owner/name.git"],
+        cwd=wt,
+        check=True,
+        capture_output=True,
+    )
+
+    real_run = subprocess.run
+    stderr_msg = (
+        "refusing to allow a GitHub App to create or update workflow "
+        ".github/workflows/release.yml without workflows permission"
+    )
+
+    def fake_run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git" and cmd[1] == "push":
+            raise _make_called_process_error(cmd, stderr_msg)
+        return real_run(cmd, *args, **kwargs)
+
+    provider = GitHubProvider(identity=_identity("ghs_abc"), client=MagicMock())
+
+    with patch("foreman.git_hosts.github.subprocess.run", side_effect=fake_run):
+        with pytest.raises(GitCommandError) as excinfo:
+            provider.push_branch(worktree_path=wt, branch="foreman/issue-7")
+
+    exc = excinfo.value
+    assert "workflows permission" in str(exc)
+    assert "workflows permission" in exc.stderr
+    assert exc.returncode == 1
+
+
+def test_git_failure_preserves_stderr_attribute_on_configure_identity(
+    tmp_path: Path,
+) -> None:
+    """Failures in non-push git ops must also raise GitCommandError with stderr."""
+    wt = _init_worktree(tmp_path)
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if (
+            isinstance(cmd, list)
+            and len(cmd) > 1
+            and cmd[0] == "git"
+            and cmd[1] == "config"
+        ):
+            raise _make_called_process_error(cmd, "fatal: not in a git repo")
+        return real_run(cmd, *args, **kwargs)
+
+    provider = GitHubProvider(identity=_identity(), client=MagicMock())
+    with patch("foreman.git_hosts.github.subprocess.run", side_effect=fake_run):
+        with pytest.raises(GitCommandError) as excinfo:
+            provider.configure_worktree_identity(wt)
+
+    assert "not in a git repo" in excinfo.value.stderr
+    assert excinfo.value.returncode == 1
+
+
+# ----------------------------------------------------------------------
+# Defect C — install token never leaks into any error surface
+# ----------------------------------------------------------------------
+
+
+LIVE_TOKEN = "ghs_FAKETOKEN1234567890abcdef"
+
+
+def test_push_branch_failure_redacts_token_from_every_surface(tmp_path: Path) -> None:
+    """Defect C: a known token must not appear in str/repr/attrs/traceback."""
+    wt = _init_worktree(tmp_path)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/owner/name.git"],
+        cwd=wt,
+        check=True,
+        capture_output=True,
+    )
+
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git" and cmd[1] == "push":
+            # stderr also references the URL — git often echoes the remote on
+            # failure. Make sure redaction covers stderr too.
+            raise _make_called_process_error(
+                cmd,
+                stderr=(
+                    f"remote: error pushing to "
+                    f"https://x-access-token:{LIVE_TOKEN}@github.com/owner/name.git"
+                ),
+            )
+        return real_run(cmd, *args, **kwargs)
+
+    provider = GitHubProvider(identity=_identity(LIVE_TOKEN), client=MagicMock())
+
+    with patch("foreman.git_hosts.github.subprocess.run", side_effect=fake_run):
+        with pytest.raises(GitCommandError) as excinfo:
+            provider.push_branch(worktree_path=wt, branch="foreman/issue-7")
+
+    exc = excinfo.value
+    token_re = re.compile(re.escape(LIVE_TOKEN))
+
+    # Direct surfaces
+    assert not token_re.search(str(exc)), "token leaked into str(exc)"
+    assert not token_re.search(repr(exc)), "token leaked into repr(exc)"
+    assert not token_re.search(exc.stderr), "token leaked into exc.stderr"
+    for arg in exc.cmd:
+        assert not token_re.search(arg), f"token leaked into exc.cmd arg: {arg!r}"
+
+    # All other public attributes (anything string-valued)
+    for attr_name in dir(exc):
+        if attr_name.startswith("_"):
+            continue
+        try:
+            value = getattr(exc, attr_name)
+        except Exception:
+            continue
+        if isinstance(value, str):
+            assert not token_re.search(value), (
+                f"token leaked into exc.{attr_name}"
+            )
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                if isinstance(item, str):
+                    assert not token_re.search(item), (
+                        f"token leaked into exc.{attr_name}"
+                    )
+
+    # Traceback formatting (this is the surface that hit the chat transcript)
+    formatted_tb = "".join(
+        traceback.format_exception(type(exc), exc, exc.__traceback__)
+    )
+    assert not token_re.search(formatted_tb), "token leaked into formatted traceback"
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "ghs_installationTOKEN0000000000000000",
+        "ghp_classicPAT00000000000000000000000",
+        "gho_oauthToken000000000000000000000000",
+        "github_pat_finegrained_AAAAA_BBBBBBBBBBBBBBBB",
+    ],
+)
+def test_sanitize_cmd_redacts_all_github_token_prefixes(token: str) -> None:
+    """Defect C: every documented GitHub token prefix is redacted."""
+    cmd = ["git", "push", f"https://x-access-token:{token}@github.com/o/r.git", "br:br"]
+    sanitized = sanitize_cmd(cmd)
+    joined = " ".join(sanitized)
+    assert token not in joined
+    assert "[REDACTED]" in joined
+
+
+def test_sanitize_cmd_preserves_non_token_args() -> None:
+    """Defect C: legitimate args must pass through unchanged."""
+    cmd = [
+        "git",
+        "push",
+        "https://github.com/owner/name.git",
+        "foreman/issue-10:foreman/issue-10",
+    ]
+    assert sanitize_cmd(cmd) == cmd
+    # And a branch name that contains underscores + alphanum but no prefix.
+    assert sanitize_cmd(["foreman_planner_branch_42"]) == ["foreman_planner_branch_42"]
