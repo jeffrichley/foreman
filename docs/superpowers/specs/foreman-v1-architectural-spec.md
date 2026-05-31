@@ -114,11 +114,16 @@ on Planner entry, destroyed on pipeline completion.
 - On `foreman:failed`: worktree left in place for human inspection; operator
   runs `foreman worktree clean <ticket>` after diagnosis
 
-### 2.5 Provider facade & Anthropic Agent SDK
+### 2.5 Two facades: Provider + GitHostProvider
 
-**Provider facade is the first abstraction.** Single interface that all role
-modules dispatch through; first concrete implementation is the
-**Anthropic Agent SDK** (`claude-agent-sdk` Python package).
+Foreman core sits behind **two abstractions**, each isolating a different
+axis of swap-ability.
+
+#### Provider facade (LLM vendor seam)
+
+Single interface that all role modules dispatch through; first concrete
+implementation is the **Anthropic Agent SDK** (`claude-agent-sdk` Python
+package).
 
 Per-role agent dispatch:
 
@@ -136,6 +141,42 @@ Prompt caching wired from day one (system prompt + repo context).
 
 Vendor swappable in theory (`opencode`, `codex`, etc. via thin adapters), but
 YAGNI for v1.
+
+#### GitHostProvider facade (git-host seam)
+
+`GitHostProvider` is the abstraction over the **git hosting platform**
+(GitHub today; GitLab / Bitbucket later). It owns every deterministic
+host-platform operation that any role needs:
+
+| Method | Used by |
+|---|---|
+| `get_issue(repo, n) -> IssueRef` | Planner |
+| `get_default_branch(repo) -> str` | Planner / Worker / Fixer |
+| `configure_worktree_identity(wt)` | Planner / Worker / Fixer |
+| `commit_files_to_worktree(wt, files, msg) -> sha` | Planner / Worker / Fixer |
+| `push_branch(wt, branch)` | Planner / Worker / Fixer |
+| `open_pull_request(repo, title, body, base, head) -> PRRef` | Planner |
+| `update_issue_labels(repo, n, add, remove)` | All roles |
+
+The LLM never sees this surface. Per the "Looper pattern" (Foreman issue
+#8): the LLM returns spec content + metadata; **core** dispatches the
+side-effecting host operations. This pattern is why the Planner LLM can
+drop down to a Read/Glob/Grep-only tool surface (see §4.1) — it has no
+need for `Bash` or `Edit/Write`.
+
+Each `GitHostProvider` instance is bound to one role's `BotIdentity`
+(slug + numeric App id + installation token). Token refresh stays inside
+`IdentityRegistry`; the provider just consumes whatever fresh identity it
+was constructed with.
+
+The GitHub implementation combines PyGithub (API operations) with
+subprocess git (worktree operations). Push auth uses the GitHub-Apps
+HTTPS-URL convention `https://x-access-token:<token>@github.com/...` and
+commit attribution uses `<slug>[bot]` + the noreply email pattern, both
+verified in the App-auth spike script.
+
+A future `GitLabProvider` is a clean drop-in — same method surface, different
+implementation. Role dispatchers and LLM prompts stay untouched.
 
 ## 3. Operations
 
@@ -198,14 +239,24 @@ state), but load-bearing for observability and debugging.
 ### 4.1 Tool capabilities matrix
 
 Each role gets a scoped tool set via the Anthropic Agent SDK. All file ops
-scope to the worktree path.
+scope to the worktree path. **Host-platform side effects (commit, push, PR,
+labels) are performed by Foreman core via `GitHostProvider` (see §2.5), not
+by the LLM** — so columns for `Edit/Write`, `Bash`, and `gh` reflect what
+the LLM is permitted to do directly, with `—` meaning core handles it.
 
-| Role | Read | Glob/Grep | Edit/Write | Bash | gh (read) | gh (write) |
-|---|---|---|---|---|---|---|
-| **Planner** | ✓ | ✓ | ✓ (spec + notes) | ✓ (worktree) | ✓ | ✓ (create PR, set label) |
-| **Reviewer** | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ (review, label) |
-| **Fixer** | ✓ | ✓ | ✓ | ✓ (worktree) | ✓ | ✓ (commit+push, label) |
-| **Worker** | ✓ | ✓ | ✓ | ✓ (worktree) | ✓ | ✓ (commit+push, label) |
+| Role | Read | Glob/Grep | Edit/Write | Bash | host ops |
+|---|---|---|---|---|---|
+| **Planner** | ✓ | ✓ | ✗ (spec content returned via structured output) | ✗ | — core via `GitHostProvider` |
+| **Reviewer** | ✓ | ✓ | ✗ | ✗ | — core via `GitHostProvider` |
+| **Fixer** | ✓ | ✓ | ✓ | ✓ (worktree, read-only git allowlist outside it) | — core via `GitHostProvider` |
+| **Worker** | ✓ | ✓ | ✓ | ✓ (worktree, read-only git allowlist outside it) | — core via `GitHostProvider` |
+
+**Planner is now read-only on the filesystem.** Post-refactor (Foreman
+issue #8 — the "Looper pattern"), the Planner LLM returns spec doc content
+as part of its structured output and Foreman core writes/commits/pushes/
+opens-the-PR. This trims the Planner's tool surface from
+`Read/Glob/Grep/Edit/Write/Bash` down to `Read/Glob/Grep` and removes the
+need to inject a per-role `GH_TOKEN` into the agent subprocess.
 
 **Critical constraint:** Reviewer is read-only on files + bash. Reviewer can
 flag findings, post review comments, change labels — but cannot modify files.
@@ -215,16 +266,25 @@ they don't like. If Reviewer needs git-log-style history search later, we add a
 push/commit/checkout/reset), NOT full Bash.
 
 **Hard blocklists for all roles:**
-- `gh repo delete` — never
+- `gh repo delete` — never (and `gh` is no longer in any role's allowed tool
+  set; PR/label ops route through `GitHostProvider`)
 - `git push --force` — never; if Fixer/Worker need to rewrite history, they
   fail back to human
 
-**Bash scoping:** All Bash ops constrained to the worktree's working directory.
+**Bash scoping:** Where Bash is granted (Fixer / Worker), it is constrained
+to the worktree's working directory.
 
 ### 4.2 Structured handoff (B-strict)
 
 Each role returns a structured JSON output (validated against a role-specific
 Pydantic schema). All outputs persist to SQLite for audit + replay.
+
+Per role, the LLM output is the *spec contract content*; the
+side-effect-completed `RunResult` (LLM output + host-side `PRRef`,
+commit SHA, etc.) is what `run_<role>` returns to the daemon. This
+separation keeps the LLM decoupled from any specific git hosting platform
+— a future GitLab provider drops in via §2.5's `GitHostProvider`
+abstraction without touching role prompts.
 
 **Default forwarding to next node: nothing.** Each next role starts fresh from
 GitHub state alone. The artifact (spec PR, review comments) IS the contract.
