@@ -4,7 +4,12 @@ dynamic = ["version"]
 description = "Multi-identity GitHub-issue-to-PR orchestrator on agent-core substrate."
 license = "MIT"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "PyGithub>=2.0,<3",
+    "claude-agent-sdk>=0.1,<1",
+    "pydantic>=2.5,<3",
+    "click>=8.1,<9",
+]
 
 [build-system]
 requires = ["hatchling", "uv-dynamic-versioning"]
