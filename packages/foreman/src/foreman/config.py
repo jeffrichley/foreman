@@ -1,11 +1,14 @@
 """Foreman configuration — TOML loading with env-var override hierarchy.
 
 Hierarchy (highest precedence first):
-1. Env var (e.g., FOREMAN_PLANNER_BOT_TOKEN)
-2. Config file value (e.g., bots.planner_token in ~/.foreman/config.toml)
+1. Env var (e.g., ``FOREMAN_PLANNER_APP_ID``)
+2. Config file value (e.g., ``apps.planner_app_id`` in
+   ``~/.foreman/config.toml``)
 
-Tokens are secrets — env-var precedence lets CI / Docker / one-off testing
-inject them without touching the config file.
+App ids are not secret on their own, but lookup through env vars matches the
+pattern previously used for PATs and lets CI / Docker / one-off testing
+inject them without touching the config file. The private-key path is
+config-file-only (its file content is the secret; chmod-600 the .pem itself).
 """
 
 from __future__ import annotations
@@ -18,31 +21,44 @@ from pydantic import BaseModel, Field
 
 
 class AdminConfig(BaseModel):
-    """Admin identity (Jeff's PAT) used for `foreman project add` ops."""
+    """Admin identity (Jeff's PAT) used for ``foreman project add`` ops."""
 
     github_token_env: str = "FOREMAN_ADMIN_TOKEN"
 
 
-class BotConfig(BaseModel):
-    """Per-role bot credentials with env-var override.
+class AppsConfig(BaseModel):
+    """Per-role GitHub App credentials.
 
-    For walking skeleton: only planner is needed. Reviewer/fixer/worker fields
-    are placeholders for thickening; resolution methods will raise until set.
+    For walking skeleton: only planner is wired. Other roles (reviewer,
+    fixer, worker) will be added during thickening; resolution methods will
+    raise until set.
+
+    Each role needs:
+      * ``<role>_app_id_env``: env var name holding the App id (stringified int).
+      * ``<role>_app_id``: optional fallback if env var unset.
+      * ``<role>_private_key_path``: filesystem path to the App's RSA private
+        key (PEM). Typical location: ``~/.foreman/keys/<role>.pem``.
     """
 
-    planner_env: str = "FOREMAN_PLANNER_BOT_TOKEN"
-    planner_token: str | None = None
+    planner_app_id_env: str = "FOREMAN_PLANNER_APP_ID"
+    planner_app_id: int | None = None
+    planner_private_key_path: str | None = None
 
-    def resolve_planner_token(self) -> str:
-        env_value = os.environ.get(self.planner_env)
+    def resolve_planner_app_id(self) -> int:
+        env_value = os.environ.get(self.planner_app_id_env)
         if env_value:
-            return env_value
-        if self.planner_token:
-            return self.planner_token
+            return int(env_value)
+        if self.planner_app_id is not None:
+            return self.planner_app_id
         raise RuntimeError(
-            f"No planner token: env var {self.planner_env} not set and "
-            "bots.planner_token not in config file"
+            f"No planner app_id: env var {self.planner_app_id_env} not set "
+            "and apps.planner_app_id not in config file"
         )
+
+    def resolve_planner_private_key_path(self) -> Path:
+        if not self.planner_private_key_path:
+            raise RuntimeError("apps.planner_private_key_path not set in config file")
+        return Path(self.planner_private_key_path)
 
 
 class ProjectConfig(BaseModel):
@@ -52,7 +68,7 @@ class ProjectConfig(BaseModel):
     local_clone_path: str = Field(
         ..., description="Local path to the repo's clone (worktrees branch from here)"
     )
-    bots: BotConfig = Field(default_factory=BotConfig)
+    apps: AppsConfig = Field(default_factory=AppsConfig)
 
 
 class Config(BaseModel):

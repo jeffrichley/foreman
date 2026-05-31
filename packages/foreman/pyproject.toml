@@ -6,9 +6,11 @@ license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "PyGithub>=2.0,<3",
+    "PyJWT[crypto]>=2.8,<3",
     "claude-agent-sdk>=0.1,<1",
     "pydantic>=2.5,<3",
     "click>=8.1,<9",
+    "requests>=2.31,<3",
 ]
 
 [project.scripts]

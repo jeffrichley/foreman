@@ -19,9 +19,10 @@ def test_cli_plan_invokes_run_planner(tmp_path: Path) -> None:
 repo = "jeffrichley/voice"
 local_clone_path = "/tmp/voice"
 
-[projects.voice.bots]
-planner_env = "FOREMAN_PLANNER_BOT_TOKEN"
-planner_token = "test-token"
+[projects.voice.apps]
+planner_app_id_env = "FOREMAN_PLANNER_APP_ID"
+planner_app_id = 123456
+planner_private_key_path = "/tmp/planner.pem"
 """
     )
 

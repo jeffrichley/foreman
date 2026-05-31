@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from foreman.config import BotConfig, Config, ProjectConfig
+from foreman.config import AppsConfig, Config, ProjectConfig
 from foreman.roles.planner import parse_issue_url, run_planner
 
 
@@ -53,14 +53,17 @@ async def test_run_planner_dispatches_and_advances_label(
     subprocess.run(["git", "add", "."], cwd=clone, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "seed"], cwd=clone, check=True, capture_output=True)
 
-    monkeypatch.setenv("FOREMAN_PLANNER_BOT_TOKEN", "fake-token")
+    monkeypatch.setenv("FOREMAN_PLANNER_APP_ID", "123456")
 
     cfg = Config(
         projects={
             "voice": ProjectConfig(
                 repo="jeffrichley/voice",
                 local_clone_path=str(clone),
-                bots=BotConfig(planner_env="FOREMAN_PLANNER_BOT_TOKEN"),
+                apps=AppsConfig(
+                    planner_app_id_env="FOREMAN_PLANNER_APP_ID",
+                    planner_private_key_path="/tmp/planner.pem",
+                ),
             )
         }
     )
@@ -137,14 +140,17 @@ async def test_run_planner_injects_bot_token_into_agent_env(
 
     # Parent process has a *different* GH_TOKEN — proves we don't just leak it
     monkeypatch.setenv("GH_TOKEN", "parent-pat-do-not-use")
-    monkeypatch.setenv("FOREMAN_PLANNER_BOT_TOKEN", "planner-bot-token-xyz")
+    monkeypatch.setenv("FOREMAN_PLANNER_APP_ID", "123456")
 
     cfg = Config(
         projects={
             "voice": ProjectConfig(
                 repo="jeffrichley/voice",
                 local_clone_path=str(clone),
-                bots=BotConfig(planner_env="FOREMAN_PLANNER_BOT_TOKEN"),
+                apps=AppsConfig(
+                    planner_app_id_env="FOREMAN_PLANNER_APP_ID",
+                    planner_private_key_path="/tmp/planner.pem",
+                ),
             )
         }
     )
@@ -177,7 +183,7 @@ async def test_run_planner_injects_bot_token_into_agent_env(
 
     with patch("foreman.roles.planner.IdentityRegistry") as mock_reg:
         mock_reg.return_value.get_client.return_value = fake_gh
-        mock_reg.return_value.get_token.return_value = "planner-bot-token-xyz"
+        mock_reg.return_value.get_token.return_value = "ghs_planner_install_token"
         await run_planner(
             issue_url="https://github.com/jeffrichley/voice/issues/42",
             config=cfg,
@@ -189,8 +195,8 @@ async def test_run_planner_injects_bot_token_into_agent_env(
     call_kwargs = fake_provider.run_agent.call_args.kwargs
     assert "env" in call_kwargs, "run_agent must be called with an `env` kwarg"
     agent_env = call_kwargs["env"]
-    assert agent_env["GH_TOKEN"] == "planner-bot-token-xyz", (
-        "Planner-bot token must override the parent GH_TOKEN in the agent env"
+    assert agent_env["GH_TOKEN"] == "ghs_planner_install_token", (
+        "Planner installation token must override the parent GH_TOKEN in the agent env"
     )
     # Confirm we asked the registry for the planner role's token specifically
     mock_reg.return_value.get_token.assert_called_with("planner")

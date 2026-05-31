@@ -329,6 +329,8 @@ dependencies = [
     { name = "click" },
     { name = "pydantic" },
     { name = "pygithub" },
+    { name = "pyjwt", extra = ["crypto"] },
+    { name = "requests" },
 ]
 
 [package.metadata]
@@ -337,6 +339,8 @@ requires-dist = [
     { name = "click", specifier = ">=8.1,<9" },
     { name = "pydantic", specifier = ">=2.5,<3" },
     { name = "pygithub", specifier = ">=2.0,<3" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8,<3" },
+    { name = "requests", specifier = ">=2.31,<3" },
 ]
 
 [[package]]

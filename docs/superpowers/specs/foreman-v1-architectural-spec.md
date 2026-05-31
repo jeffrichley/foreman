@@ -63,30 +63,44 @@ change), never inside a node ("ping-pong inside a state" rejected).
 
 ### 2.3 Identities & GitHub auth
 
-**4 bot accounts** (one per role) via Gmail plus-aliasing:
+**4 GitHub Apps** (one per role) instead of bot accounts. Each App installs
+on a project repo and produces a distinct `[bot]` identity for commits and
+PRs:
 
-| Bot | Email | GitHub handle |
+| Role | App handle (post-install) |
+|---|---|
+| Planner | `foreman-planner[bot]` |
+| Reviewer | `foreman-reviewer[bot]` |
+| Fixer | `foreman-fixer[bot]` |
+| Worker | `foreman-worker[bot]` |
+
+**Why GitHub Apps over bot accounts + PATs:** the bot-invitation-acceptance
+flow doesn't scale (every new project repo requires manually accepting four
+collaborator invites under four separate Gmail accounts). GitHub Apps
+install once per repo from a single org-level dashboard.
+
+**Per-role credentials** stored in two pieces:
+
+| Piece | Storage | Notes |
 |---|---|---|
-| Planner | `jeffrichley+foreman-planner-bot@gmail.com` | `@foreman-planner-bot` |
-| Reviewer | `jeffrichley+foreman-reviewer-bot@gmail.com` | `@foreman-reviewer-bot` |
-| Fixer | `jeffrichley+foreman-fixer-bot@gmail.com` | `@foreman-fixer-bot` |
-| Worker | `jeffrichley+foreman-worker-bot@gmail.com` | `@foreman-worker-bot` |
+| App id (numeric) | `apps.<role>_app_id` in `~/.foreman/config.toml`, overridable by env var `FOREMAN_<ROLE>_APP_ID` | Not secret on its own |
+| Private key (RSA PEM) | Filesystem path in `apps.<role>_private_key_path`; default `~/.foreman/keys/<role>.pem` (chmod 600) | The actual secret |
 
-**PAT storage** uses a precedence hierarchy:
+At runtime, `foreman.auth.mint_installation_token` signs a 10-minute JWT
+with the App's private key, looks up the App's installation id for the
+target repo, and exchanges the JWT for a 1-hour installation token. The
+`IdentityRegistry` caches that token per role and auto-refreshes when
+within 5 minutes of expiry. The installation-token string is what gets
+injected into the agent subprocess as `GH_TOKEN` so the agent's `gh` CLI
+runs as the App's bot identity.
 
-| Precedence | Source | Use case |
-|---|---|---|
-| 1 (highest) | Env var `FOREMAN_<ROLE>_BOT_TOKEN` | CI / Docker / one-off testing |
-| 2 | Config file `~/.foreman/config.toml` (chmod 600) | Default daily use |
-| 3 (future) | OS keyring | Optional later |
-| 4 (future) | Encrypted KeePass vault | Optional later if security tightens |
-
-Wren's own PAT is NOT used by Foreman. Wren = my identity only; bots = Foreman's
-automation identities. This preserves audit-trail clarity.
+Wren's own PAT is NOT used by Foreman. Wren = my identity only; the Apps =
+Foreman's automation identities. This preserves audit-trail clarity.
 
 A 5th identity is needed for `foreman project add` (admin/setup ops):
-Jeff's own PAT, used only for repo-admin actions (collaborator invitations,
-label creation). Read from `FOREMAN_ADMIN_TOKEN` env var.
+Jeff's own PAT, used only for repo-admin actions (installing the four
+Foreman Apps onto a new repo, label creation). Read from
+`FOREMAN_ADMIN_TOKEN` env var.
 
 ### 2.4 Worktrees
 
@@ -424,8 +438,11 @@ Modules:
     prompt caching from day one
 11. Per-ticket worktree at `~/.foreman/worktrees/<repo>/<ticket>/`, scoped FS
     tools, Planner-entry → pipeline-completion lifecycle
-12. 4 bot accounts (one per role) via Gmail plus-aliasing
-13. PAT storage: env-var → config-file precedence; future OS-keyring + vault
+12. 4 GitHub Apps (one per role); per-repo install replaces bot-account
+    invitation flow
+13. App credential storage: App id via env-var → config-file precedence;
+    private key as PEM file on disk (chmod 600); installation tokens
+    minted on demand and cached with 5-min refresh window
 14. Polling: 30s git, single loop, configurable; webhooks v2
 15. Bus integration deferred to v2; v1 uses SQLite + Foreman MCP
 16. Per-node handoff: B-strict — all persisted, default forward = nothing,
