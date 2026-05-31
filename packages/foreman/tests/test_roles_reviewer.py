@@ -96,14 +96,12 @@ class _FakePR:
         head_ref: str,
         head_sha: str,
         base_ref: str,
-        labels: list[str],
     ) -> None:
         self.number = number
         self.title = title
         self.body = body
         self.head = _FakeRef(head_ref, head_sha)
         self.base = _FakeRef(base_ref, "basesha")
-        self.labels = [_FakeLabel(label) for label in labels]
         self.reviews_posted: list[tuple[str, str]] = []
 
     def create_review(self, body: str, event: str) -> None:
@@ -111,10 +109,13 @@ class _FakePR:
 
 
 class _FakeIssue:
-    def __init__(self, *, number: int, title: str, body: str) -> None:
+    def __init__(
+        self, *, number: int, title: str, body: str, labels: list[str]
+    ) -> None:
         self.number = number
         self.title = title
         self.body = body
+        self.labels = [_FakeLabel(label) for label in labels]
         self.removed: list[str] = []
         self.added: list[str] = []
 
@@ -268,9 +269,10 @@ def _make_fake_repo(
         head_ref=f"foreman/issue-{issue_number}",
         head_sha=head_sha,
         base_ref="main",
-        labels=labels,
     )
-    issue = _FakeIssue(number=issue_number, title="SSML", body="Add SSML support.")
+    issue = _FakeIssue(
+        number=issue_number, title="SSML", body="Add SSML support.", labels=labels
+    )
     repo = _FakeRepo(pr=pr, issue=issue)
     return repo, pr, issue
 
@@ -443,14 +445,14 @@ async def test_run_reviewer_reuses_existing_branch_does_not_create_new(
 async def test_run_reviewer_missing_spec_review_label_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Pre-flight guard: PR without ``foreman:spec-review`` is not
-    advanced — we refuse to act on PRs not queued by the Planner."""
+    """Pre-flight guard: source issue without ``foreman:spec-review`` is
+    not advanced — we refuse to act on issues not queued by the Planner."""
     clone = tmp_path / "clone"
     head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
     monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
 
     cfg = _make_config(clone)
-    # PR has a random unrelated label, NOT foreman:spec-review
+    # Issue has a random unrelated label, NOT foreman:spec-review
     repo, pr, issue = _make_fake_repo(
         issue_number=42, head_sha=head_sha, labels=["random-label"]
     )

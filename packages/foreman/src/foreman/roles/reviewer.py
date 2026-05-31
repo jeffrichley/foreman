@@ -209,8 +209,9 @@ async def run_reviewer(
     Raises:
         ValueError: PR URL malformed, repo mismatch, or PR head branch is
             not a Foreman spec branch.
-        RuntimeError: PR is missing the ``foreman:spec-review`` label —
-            we refuse to advance PRs that were not queued for review.
+        RuntimeError: Source issue is missing the ``foreman:spec-review``
+            label — we refuse to advance PRs whose source issue was not
+            queued for review.
     """
     owner, repo_name, pr_number = parse_pr_url(pr_url)
     project = config.projects[project_name]
@@ -229,20 +230,21 @@ async def run_reviewer(
     repo: Repository = reviewer_client.get_repo(actual_repo_slug)
     pr = repo.get_pull(pr_number)
 
-    pr_labels = {label.name for label in pr.labels}
-    if _LABEL_IN_REVIEW not in pr_labels:
-        raise RuntimeError(
-            f"PR #{pr_number} does not carry the {_LABEL_IN_REVIEW!r} label "
-            "(labels: " + ", ".join(sorted(pr_labels) or ["<none>"]) + "). "
-            "The Reviewer only acts on PRs queued via the Planner."
-        )
-
     head_branch = pr.head.ref
     head_sha = pr.head.sha
     base_branch = pr.base.ref
     issue_number = _issue_number_from_branch(head_branch)
 
     issue = repo.get_issue(issue_number)
+    issue_labels = {label.name for label in issue.labels}
+    if _LABEL_IN_REVIEW not in issue_labels:
+        raise RuntimeError(
+            f"Issue #{issue_number} (source of PR #{pr_number}) does not carry "
+            f"the {_LABEL_IN_REVIEW!r} label (labels: "
+            + ", ".join(sorted(issue_labels) or ["<none>"])
+            + "). The Reviewer only acts on issues queued via the Planner."
+        )
+
     issue_title = issue.title or ""
     issue_body = issue.body or ""
 
