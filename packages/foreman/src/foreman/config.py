@@ -29,9 +29,8 @@ class AdminConfig(BaseModel):
 class AppsConfig(BaseModel):
     """Per-role GitHub App credentials.
 
-    For walking skeleton: only planner is wired. Other roles (reviewer,
-    fixer, worker) will be added during thickening; resolution methods will
-    raise until set.
+    Walking skeleton wires planner + reviewer. Other roles (fixer, worker)
+    will be added during thickening; resolution methods will raise until set.
 
     Each role needs:
       * ``<role>_app_id_env``: env var name holding the App id (stringified int).
@@ -43,6 +42,10 @@ class AppsConfig(BaseModel):
     planner_app_id_env: str = "FOREMAN_PLANNER_APP_ID"
     planner_app_id: int | None = None
     planner_private_key_path: str | None = None
+
+    reviewer_app_id_env: str = "FOREMAN_REVIEWER_APP_ID"
+    reviewer_app_id: int | None = None
+    reviewer_private_key_path: str | None = None
 
     def resolve_planner_app_id(self) -> int:
         env_value = os.environ.get(self.planner_app_id_env)
@@ -59,6 +62,22 @@ class AppsConfig(BaseModel):
         if not self.planner_private_key_path:
             raise RuntimeError("apps.planner_private_key_path not set in config file")
         return Path(self.planner_private_key_path)
+
+    def resolve_reviewer_app_id(self) -> int:
+        env_value = os.environ.get(self.reviewer_app_id_env)
+        if env_value:
+            return int(env_value)
+        if self.reviewer_app_id is not None:
+            return self.reviewer_app_id
+        raise RuntimeError(
+            f"No reviewer app_id: env var {self.reviewer_app_id_env} not set "
+            "and apps.reviewer_app_id not in config file"
+        )
+
+    def resolve_reviewer_private_key_path(self) -> Path:
+        if not self.reviewer_private_key_path:
+            raise RuntimeError("apps.reviewer_private_key_path not set in config file")
+        return Path(self.reviewer_private_key_path)
 
 
 class ProjectConfig(BaseModel):

@@ -10,6 +10,7 @@ from click.testing import CliRunner
 from foreman.cli import cli
 from foreman.git_host import PRRef
 from foreman.schemas.planner import PlannerOutput, PlannerRunResult
+from foreman.schemas.reviewer import Finding, ReviewerOutput
 
 
 def test_cli_plan_invokes_run_planner(tmp_path: Path) -> None:
@@ -72,3 +73,65 @@ def test_cli_help_lists_plan_subcommand() -> None:
     result = runner.invoke(cli, ["--help"])
     assert result.exit_code == 0
     assert "plan" in result.output
+
+
+def test_cli_help_lists_review_subcommand() -> None:
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--help"])
+    assert result.exit_code == 0
+    assert "review" in result.output
+
+
+def test_cli_review_invokes_run_reviewer(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[projects.voice]
+repo = "jeffrichley/voice"
+local_clone_path = "/tmp/voice"
+
+[projects.voice.apps]
+planner_app_id_env = "FOREMAN_PLANNER_APP_ID"
+planner_app_id = 123456
+planner_private_key_path = "/tmp/planner.pem"
+reviewer_app_id_env = "FOREMAN_REVIEWER_APP_ID"
+reviewer_app_id = 654321
+reviewer_private_key_path = "/tmp/reviewer.pem"
+"""
+    )
+
+    fake_result = ReviewerOutput(
+        outcome="needs_fix",
+        review_comment="needs_fix — see findings.",
+        findings=[
+            Finding(
+                severity="important",
+                target="Acceptance criteria bullet 3",
+                issue="Uses 'improve' which is not testable.",
+                needed="Replace with a concrete verb.",
+            )
+        ],
+        confidence="medium",
+    )
+
+    runner = CliRunner()
+    with patch(
+        "foreman.cli.run_reviewer", new=AsyncMock(return_value=fake_result)
+    ) as mock_run:
+        result = runner.invoke(
+            cli,
+            [
+                "review",
+                "https://github.com/jeffrichley/voice/pull/77",
+                "--project",
+                "voice",
+                "--config",
+                str(config_file),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "needs_fix" in result.output
+    assert "1 findings" in result.output
+    assert "confidence=medium" in result.output
+    mock_run.assert_called_once()

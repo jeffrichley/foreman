@@ -129,3 +129,109 @@ planner_private_key_path = "/tmp/planner.pem"
     result = cfg.projects["voice"].apps.resolve_planner_private_key_path()
     assert isinstance(result, Path)
     assert str(result).replace("\\", "/") == "/tmp/planner.pem"
+
+
+# ----------------------------------------------------------------------
+# Reviewer App fields — mirror the planner pair
+# ----------------------------------------------------------------------
+
+
+def test_load_config_reads_reviewer_app_fields(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[projects.voice]
+repo = "jeffrichley/voice"
+local_clone_path = "/tmp/voice"
+
+[projects.voice.apps]
+planner_app_id = 123456
+planner_private_key_path = "/tmp/planner.pem"
+reviewer_app_id_env = "FOREMAN_REVIEWER_APP_ID"
+reviewer_app_id = 654321
+reviewer_private_key_path = "/tmp/reviewer.pem"
+"""
+    )
+    cfg = load_config(config_file)
+    assert cfg.projects["voice"].apps.reviewer_app_id == 654321
+    assert cfg.projects["voice"].apps.reviewer_private_key_path == "/tmp/reviewer.pem"
+
+
+def test_reviewer_app_fields_optional_for_planner_only_configs(tmp_path: Path) -> None:
+    """Existing configs that only define planner fields must still load — the
+    reviewer fields are optional during the thickening transition."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[projects.voice]
+repo = "jeffrichley/voice"
+local_clone_path = "/tmp/voice"
+
+[projects.voice.apps]
+planner_app_id = 123456
+planner_private_key_path = "/tmp/planner.pem"
+"""
+    )
+    cfg = load_config(config_file)
+    assert cfg.projects["voice"].apps.reviewer_app_id is None
+    assert cfg.projects["voice"].apps.reviewer_private_key_path is None
+
+
+def test_env_var_overrides_config_file_reviewer_app_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[projects.voice]
+repo = "jeffrichley/voice"
+local_clone_path = "/tmp/voice"
+
+[projects.voice.apps]
+reviewer_app_id_env = "FOREMAN_REVIEWER_APP_ID"
+reviewer_app_id = 111111
+reviewer_private_key_path = "/tmp/reviewer.pem"
+"""
+    )
+    monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "999999")
+    cfg = load_config(config_file)
+    resolved = cfg.projects["voice"].apps.resolve_reviewer_app_id()
+    assert resolved == 999999
+
+
+def test_missing_reviewer_app_id_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[projects.voice]
+repo = "jeffrichley/voice"
+local_clone_path = "/tmp/voice"
+
+[projects.voice.apps]
+reviewer_app_id_env = "FOREMAN_REVIEWER_APP_ID"
+reviewer_private_key_path = "/tmp/reviewer.pem"
+"""
+    )
+    monkeypatch.delenv("FOREMAN_REVIEWER_APP_ID", raising=False)
+    cfg = load_config(config_file)
+    with pytest.raises(RuntimeError, match="reviewer app_id"):
+        cfg.projects["voice"].apps.resolve_reviewer_app_id()
+
+
+def test_missing_reviewer_private_key_path_raises(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[projects.voice]
+repo = "jeffrichley/voice"
+local_clone_path = "/tmp/voice"
+
+[projects.voice.apps]
+reviewer_app_id = 654321
+"""
+    )
+    cfg = load_config(config_file)
+    with pytest.raises(RuntimeError, match="reviewer_private_key_path"):
+        cfg.projects["voice"].apps.resolve_reviewer_private_key_path()

@@ -70,6 +70,49 @@ class WorktreeManager:
         _maybe_sync_worktree_deps(wt_path)
         return wt_path
 
+    def attach(self, clone_path: Path, repo_slug: str, ticket_id: int) -> Path:
+        """Attach a worktree to an existing ``foreman/issue-<N>`` branch.
+
+        Used by downstream roles (Reviewer / Fixer / Worker) that should NOT
+        create a new branch — the Planner already opened ``foreman/issue-N``
+        and pushed it. Idempotent: if the worktree path already exists, it
+        is returned untouched.
+
+        Falls back to a tracking-branch fetch if the local branch does not
+        yet exist (the Reviewer may run on a clone where the branch only
+        lives on the remote).
+
+        Like :meth:`create`, this best-effort syncs the worktree's ``.venv``
+        afterward so the target repo's pre-push hook can ``uv run --no-sync``
+        without exploding.
+        """
+        wt_path = self.worktrees_root / repo_slug / f"issue-{ticket_id}"
+        if wt_path.exists():
+            return wt_path
+        wt_path.parent.mkdir(parents=True, exist_ok=True)
+        branch = f"foreman/issue-{ticket_id}"
+        if not _local_branch_exists(clone_path, branch):
+            # Branch isn't local yet — fetch the remote ref so worktree add
+            # can resolve it. The Planner pushes the branch, so origin should
+            # have it. We tolerate fetch failure here and let the worktree
+            # add command surface a clearer error.
+            subprocess.run(
+                ["git", "fetch", "origin", branch],
+                cwd=clone_path,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        subprocess.run(
+            ["git", "worktree", "add", str(wt_path), branch],
+            cwd=clone_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        _maybe_sync_worktree_deps(wt_path)
+        return wt_path
+
     def cleanup(self, clone_path: Path, worktree_path: Path) -> None:
         """Remove a worktree. Safe to call on already-removed worktrees."""
         if not worktree_path.exists():
@@ -81,6 +124,18 @@ class WorktreeManager:
             capture_output=True,
             text=True,
         )
+
+
+def _local_branch_exists(clone_path: Path, branch: str) -> bool:
+    """Return True if ``branch`` exists as a local ref in ``clone_path``."""
+    result = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+        cwd=clone_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
 
 
 def _maybe_sync_worktree_deps(worktree_path: Path) -> None:

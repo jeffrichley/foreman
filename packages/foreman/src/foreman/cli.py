@@ -1,7 +1,7 @@
-"""Foreman CLI — `foreman plan <issue-url>` is the walking-skeleton entry point.
+"""Foreman CLI — `foreman plan` + `foreman review` are the walking-skeleton entries.
 
-Thickening will add: `foreman review`, `foreman work`, `foreman daemon ...`,
-`foreman project add`, etc. Walking skeleton has just `plan`.
+Thickening will add: `foreman work`, `foreman daemon ...`, `foreman project
+add`, etc.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import click
 from foreman.config import load_config
 from foreman.providers.anthropic_sdk import AnthropicSDKProvider
 from foreman.roles.planner import run_planner
+from foreman.roles.reviewer import run_reviewer
 
 
 def _default_config_path() -> Path:
@@ -66,6 +67,36 @@ def plan(issue_url: str, project: str, config_path: Path | None) -> None:
         click.echo("Considered alternatives:")
         for alt in llm.considered_alternatives:
             click.echo(f"  - {alt}")
+
+
+@cli.command()
+@click.argument("pr_url", type=str)
+@click.option("--project", required=True, help="Project name as defined in config.toml")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Path to foreman config (default: $FOREMAN_CONFIG or ~/.foreman/config.toml)",
+)
+def review(pr_url: str, project: str, config_path: Path | None) -> None:
+    """Run the Reviewer on a spec PR opened by the Planner."""
+    cfg_path = config_path or _default_config_path()
+    cfg = load_config(cfg_path)
+    provider = AnthropicSDKProvider()
+    result = asyncio.run(
+        run_reviewer(
+            pr_url=pr_url,
+            config=cfg,
+            project_name=project,
+            worktrees_root=_default_worktrees_root(),
+            provider=provider,
+        )
+    )
+    click.echo(
+        f"{result.outcome}: {len(result.findings)} findings, "
+        f"confidence={result.confidence}"
+    )
 
 
 def main() -> None:

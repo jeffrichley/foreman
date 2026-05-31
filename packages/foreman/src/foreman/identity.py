@@ -18,14 +18,15 @@ renamed in GitHub's UI, which is an admin event. The installation token is
 refreshed independently; a fresh :class:`~foreman.git_host.BotIdentity` is
 constructed each time the token rolls over.
 
-For walking skeleton: only the planner role is wired. Reviewer/fixer/worker
-will be added during thickening.
+Walking skeleton wires planner + reviewer. Fixer/worker will be added
+during thickening.
 """
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from github import Auth, Github
 
@@ -73,6 +74,31 @@ class IdentityRegistry:
         """
         return self._get_cached(role).token.token
 
+    # ------------------------------------------------------------------
+    # Per-role convenience accessors
+    # ------------------------------------------------------------------
+    def get_planner_client(self) -> Github:
+        """Return the PyGithub client authenticated as the planner bot."""
+        return self.get_client("planner")
+
+    def get_planner_token(self) -> str:
+        """Return the planner-bot's current installation token string."""
+        return self.get_token("planner")
+
+    def get_reviewer_client(self) -> Github:
+        """Return the PyGithub client authenticated as the reviewer bot.
+
+        The Reviewer reads spec PRs, posts review comments, and advances
+        labels using this client. The same installation token also flows
+        into the agent subprocess via the role dispatcher's ``env=`` kwarg
+        so any ``gh`` calls the LLM makes act as the reviewer bot too.
+        """
+        return self.get_client("reviewer")
+
+    def get_reviewer_token(self) -> str:
+        """Return the reviewer-bot's current installation token string."""
+        return self.get_token("reviewer")
+
     def get_host_provider(self, role: str) -> GitHostProvider:
         """Return a :class:`~foreman.git_host.GitHostProvider` for the role.
 
@@ -104,21 +130,33 @@ class IdentityRegistry:
         cached = self._app_meta_cache.get(role)
         if cached is not None:
             return cached
-        if role == "planner":
-            app_id = self._project.apps.resolve_planner_app_id()
-            key_path = self._project.apps.resolve_planner_private_key_path()
-            meta = fetch_app_metadata(app_id, key_path)
-            self._app_meta_cache[role] = meta
-            return meta
-        raise ValueError(
-            f"Unknown role: {role!r}. Walking skeleton only supports 'planner'."
-        )
+        app_id, key_path = self._resolve_role_credentials(role)
+        meta = fetch_app_metadata(app_id, key_path)
+        self._app_meta_cache[role] = meta
+        return meta
 
     def _mint_token(self, role: str) -> InstallationToken:
+        app_id, key_path = self._resolve_role_credentials(role)
+        return mint_installation_token(app_id, key_path, self._project.repo)
+
+    def _resolve_role_credentials(self, role: str) -> tuple[int, Path]:
+        """Return (app_id, private_key_path) for a known role.
+
+        Adding a role to the walking skeleton means adding a branch here.
+        Keeping the dispatch in one place ensures token-mint + metadata
+        fetch always read the same App credentials per role.
+        """
         if role == "planner":
-            app_id = self._project.apps.resolve_planner_app_id()
-            key_path = self._project.apps.resolve_planner_private_key_path()
-            return mint_installation_token(app_id, key_path, self._project.repo)
+            return (
+                self._project.apps.resolve_planner_app_id(),
+                self._project.apps.resolve_planner_private_key_path(),
+            )
+        if role == "reviewer":
+            return (
+                self._project.apps.resolve_reviewer_app_id(),
+                self._project.apps.resolve_reviewer_private_key_path(),
+            )
         raise ValueError(
-            f"Unknown role: {role!r}. Walking skeleton only supports 'planner'."
+            f"Unknown role: {role!r}. Walking skeleton supports "
+            "'planner' and 'reviewer'."
         )

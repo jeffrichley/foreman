@@ -27,6 +27,9 @@ def _make_project() -> ProjectConfig:
             planner_app_id_env="FOREMAN_PLANNER_APP_ID",
             planner_app_id=123456,
             planner_private_key_path="/tmp/planner.pem",
+            reviewer_app_id_env="FOREMAN_REVIEWER_APP_ID",
+            reviewer_app_id=654321,
+            reviewer_private_key_path="/tmp/reviewer.pem",
         ),
     )
 
@@ -126,7 +129,7 @@ def test_env_var_overrides_config_file_app_id_at_mint_time(
 def test_unknown_role_raises() -> None:
     reg = IdentityRegistry(_make_project())
     with pytest.raises(ValueError, match="Unknown role"):
-        reg.get_client("reviewer")  # Reviewer not implemented in walking skeleton
+        reg.get_client("fixer")  # Fixer not implemented in walking skeleton
 
 
 def test_get_client_caches_github_instance() -> None:
@@ -216,6 +219,73 @@ def test_app_metadata_fetched_with_resolved_credentials() -> None:
 def test_get_host_provider_unknown_role_raises() -> None:
     reg = IdentityRegistry(_make_project())
     with pytest.raises(ValueError, match="Unknown role"):
-        reg.get_host_provider("reviewer")
+        reg.get_host_provider("fixer")
+
+
+# ----------------------------------------------------------------------
+# Reviewer role accessors — mirror the planner pair
+# ----------------------------------------------------------------------
+
+
+def test_get_reviewer_client_returns_github_instance() -> None:
+    fake_token = _fresh_token()
+    with patch("foreman.identity.mint_installation_token", return_value=fake_token):
+        reg = IdentityRegistry(_make_project())
+        client = reg.get_reviewer_client()
+    assert isinstance(client, Github)
+
+
+def test_get_reviewer_token_returns_installation_token_string() -> None:
+    fake_token = _fresh_token(token="ghs_reviewer_installtoken_abc")
+    with patch("foreman.identity.mint_installation_token", return_value=fake_token):
+        reg = IdentityRegistry(_make_project())
+        token = reg.get_reviewer_token()
+    assert token == "ghs_reviewer_installtoken_abc"
+
+
+def test_get_reviewer_mint_invoked_with_reviewer_app_credentials() -> None:
+    """The reviewer accessor must resolve the reviewer-specific App fields,
+    not the planner's — proves the per-role credential dispatch is wired."""
+    fake_token = _fresh_token()
+    with patch(
+        "foreman.identity.mint_installation_token", return_value=fake_token
+    ) as mock_mint:
+        reg = IdentityRegistry(_make_project())
+        reg.get_reviewer_client()
+    call_args = mock_mint.call_args
+    assert call_args.args[0] == 654321
+    assert call_args.args[1] == Path("/tmp/reviewer.pem")
+    assert call_args.args[2] == "jeffrichley/voice"
+
+
+def test_reviewer_env_var_overrides_config_file_app_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Env-var precedence for the reviewer App id mirrors planner's."""
+    monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "999999")
+    fake_token = _fresh_token()
+    with patch(
+        "foreman.identity.mint_installation_token", return_value=fake_token
+    ) as mock_mint:
+        reg = IdentityRegistry(_make_project())
+        reg.get_reviewer_client()
+    assert mock_mint.call_args.args[0] == 999999
+
+
+def test_reviewer_client_and_planner_client_share_no_cache() -> None:
+    """Per-role tokens must NOT cross-contaminate — each role caches its own."""
+    planner_token = _fresh_token(token="ghs_planner")
+    reviewer_token = _fresh_token(token="ghs_reviewer")
+    # mint_installation_token gets called once per role; order depends on
+    # which role is requested first.
+    with patch(
+        "foreman.identity.mint_installation_token",
+        side_effect=[planner_token, reviewer_token],
+    ):
+        reg = IdentityRegistry(_make_project())
+        p_token = reg.get_planner_token()
+        r_token = reg.get_reviewer_token()
+    assert p_token == "ghs_planner"
+    assert r_token == "ghs_reviewer"
 
 
