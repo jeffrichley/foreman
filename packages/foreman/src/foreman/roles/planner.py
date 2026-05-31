@@ -1,15 +1,30 @@
 """Planner role dispatcher.
 
-Walks through:
+The Planner LLM returns a :class:`~foreman.schemas.planner.PlannerOutput`
+(spec content + PR metadata). Foreman core then performs all deterministic
+host-platform operations through the
+:class:`~foreman.git_host.GitHostProvider` abstraction:
+
   1. Parse the issue URL (owner / repo / number)
-  2. Resolve planner identity → PyGithub client
-  3. Fetch issue body + title
-  4. Create per-ticket worktree
-  5. Load planner system prompt
-  6. Dispatch via provider with scoped tools + structured output schema
-  7. Parse PlannerOutput
-  8. Advance label: foreman:plan → foreman:spec-review
-  9. Return PlannerOutput
+  2. Resolve the role's :class:`~foreman.git_host.GitHostProvider`
+     (via :class:`~foreman.identity.IdentityRegistry`)
+  3. Fetch :class:`~foreman.git_host.IssueRef` via ``host.get_issue``
+  4. Create the per-ticket worktree (:class:`~foreman.worktree.WorktreeManager`)
+  5. Configure the worktree git identity (``host.configure_worktree_identity``)
+  6. Build LLM context and dispatch with READ-ONLY tools
+  7. Parse the ``PlannerOutput``
+  8. Commit the spec doc (``host.commit_files_to_worktree``)
+  9. Push the branch (``host.push_branch``)
+  10. Open the spec PR (``host.open_pull_request``)
+  11. Advance the label: ``foreman:plan`` → ``foreman:spec-review``
+       (``host.update_issue_labels``)
+  12. Return :class:`~foreman.schemas.planner.PlannerRunResult`
+
+Decoupling rationale (Foreman issue #8 — the "Looper pattern"):
+the LLM is non-deterministic and host-agnostic; deterministic operations
+that the LLM might get wrong (or that would couple us to GitHub at the
+prompt layer) live in core behind :class:`~foreman.git_host.GitHostProvider`.
+A future GitLab provider drops in without prompt or role-dispatcher changes.
 
 For walking skeleton: cleanup is NOT performed automatically (per spec —
 worktrees persist until pipeline completion, which here is the human merging
@@ -18,23 +33,25 @@ the PR).
 
 from __future__ import annotations
 
-import os
 import re
 from importlib import resources
 from pathlib import Path
 
 from foreman.config import Config
+from foreman.git_host import GitHostProvider, IssueRef
 from foreman.identity import IdentityRegistry
 from foreman.provider import ProviderFacade
-from foreman.schemas.planner import PlannerOutput
+from foreman.schemas.planner import PlannerOutput, PlannerRunResult
 from foreman.worktree import WorktreeManager
 
 _ISSUE_URL_RE = re.compile(
     r"https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/issues/(?P<number>\d+)"
 )
 
-# Tool capabilities matrix for Planner (from architectural spec §4.1)
-PLANNER_ALLOWED_TOOLS = ["Read", "Glob", "Grep", "Edit", "Write", "Bash"]
+# Tool capabilities matrix for Planner (post-refactor — see spec §4.1).
+# Planner LLM is now read-only: spec doc travels back via structured output,
+# core performs the commit/push/PR/label operations through GitHostProvider.
+PLANNER_ALLOWED_TOOLS = ["Read", "Glob", "Grep"]
 
 
 def parse_issue_url(url: str) -> tuple[str, str, int]:
@@ -52,14 +69,18 @@ def _load_planner_prompt() -> str:
     )
 
 
-def _build_user_prompt(*, issue_title: str, issue_body: str, issue_number: int) -> str:
+def _build_user_prompt(*, issue: IssueRef) -> str:
     return (
-        f"You are processing GitHub issue #{issue_number}.\n\n"
-        f"## Title\n{issue_title}\n\n"
-        f"## Body\n{issue_body}\n\n"
-        f"Follow the steps in your system prompt. Return your structured output "
-        f"when done."
+        f"You are processing GitHub issue #{issue.number}.\n\n"
+        f"## Title\n{issue.title}\n\n"
+        f"## Body\n{issue.body}\n\n"
+        f"Follow the steps in your system prompt. Return your structured "
+        f"output when done."
     )
+
+
+def _spec_doc_relpath(issue_number: int) -> str:
+    return f"docs/superpowers/specs/foreman-issue-{issue_number}-spec.md"
 
 
 async def run_planner(
@@ -69,8 +90,24 @@ async def run_planner(
     project_name: str,
     worktrees_root: Path,
     provider: ProviderFacade,
-) -> PlannerOutput:
-    """Run the Planner role end-to-end on one issue."""
+    identity_registry: IdentityRegistry | None = None,
+) -> PlannerRunResult:
+    """Run the Planner role end-to-end on one issue.
+
+    Args:
+        issue_url: Full GitHub issue URL (``https://github.com/owner/repo/issues/N``).
+        config: Loaded foreman config.
+        project_name: Key into ``config.projects``.
+        worktrees_root: Root directory under which per-ticket worktrees live.
+        provider: Agent provider facade (e.g., AnthropicSDKProvider).
+        identity_registry: Optional pre-built registry; defaults to a fresh
+            :class:`~foreman.identity.IdentityRegistry` for the project. Useful
+            for tests that want to inject a fake host provider.
+
+    Returns:
+        :class:`~foreman.schemas.planner.PlannerRunResult` carrying both the
+        LLM output and the opened PR's metadata.
+    """
     owner, repo_name, issue_number = parse_issue_url(issue_url)
     project = config.projects[project_name]
     expected_repo_slug = project.repo  # e.g. "jeffrichley/voice"
@@ -81,18 +118,11 @@ async def run_planner(
             f"{project_name!r} configured repo {expected_repo_slug!r}"
         )
 
-    identity = IdentityRegistry(project)
-    gh = identity.get_client("planner")
-    repo = gh.get_repo(actual_repo_slug)
-    issue = repo.get_issue(issue_number)
+    registry = identity_registry if identity_registry is not None else IdentityRegistry(project)
+    host: GitHostProvider = registry.get_host_provider("planner")
 
-    # Resolve planner-bot token for injection into the agent subprocess so
-    # the agent's `gh` CLI calls (e.g., `gh pr create`) run as the bot,
-    # not as whatever GH_TOKEN the parent foreman process inherited.
-    # Without this, the spec PR would open under Jeff's identity, not
-    # @foreman-planner-bot — violating the bot-attribution success criterion.
-    planner_token = identity.get_token("planner")
-    agent_env = {**os.environ, "GH_TOKEN": planner_token}
+    issue = host.get_issue(actual_repo_slug, issue_number)
+    default_branch = host.get_default_branch(actual_repo_slug)
 
     wt_mgr = WorktreeManager(worktrees_root=worktrees_root)
     wt_path = wt_mgr.create(
@@ -100,13 +130,10 @@ async def run_planner(
         repo_slug=repo_name,
         ticket_id=issue_number,
     )
+    host.configure_worktree_identity(wt_path)
 
     system_prompt = _load_planner_prompt()
-    user_prompt = _build_user_prompt(
-        issue_title=issue.title,
-        issue_body=issue.body or "",
-        issue_number=issue_number,
-    )
+    user_prompt = _build_user_prompt(issue=issue)
 
     raw = await provider.run_agent(
         system_prompt=system_prompt,
@@ -114,12 +141,28 @@ async def run_planner(
         allowed_tools=PLANNER_ALLOWED_TOOLS,
         output_schema=PlannerOutput.model_json_schema(),
         cwd=wt_path,
-        env=agent_env,
     )
-    output = PlannerOutput.model_validate(raw)
+    llm_output = PlannerOutput.model_validate(raw)
 
-    # Advance label: foreman:plan → foreman:spec-review
-    issue.remove_from_labels("foreman:plan")
-    issue.add_to_labels("foreman:spec-review")
+    branch = f"foreman/issue-{issue_number}"
+    host.commit_files_to_worktree(
+        worktree_path=wt_path,
+        files={_spec_doc_relpath(issue_number): llm_output.spec_doc_content},
+        message=llm_output.pr_title,
+    )
+    host.push_branch(worktree_path=wt_path, branch=branch)
+    pr = host.open_pull_request(
+        repo_slug=actual_repo_slug,
+        title=llm_output.pr_title,
+        body=llm_output.pr_body,
+        base=default_branch,
+        head=branch,
+    )
+    host.update_issue_labels(
+        repo_slug=actual_repo_slug,
+        issue_number=issue_number,
+        add=["foreman:spec-review"],
+        remove=["foreman:plan"],
+    )
 
-    return output
+    return PlannerRunResult(llm_output=llm_output, pr=pr)

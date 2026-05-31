@@ -47,7 +47,7 @@ def plan(issue_url: str, project: str, config_path: Path | None) -> None:
     cfg_path = config_path or _default_config_path()
     cfg = load_config(cfg_path)
     provider = AnthropicSDKProvider()
-    output = asyncio.run(
+    result = asyncio.run(
         run_planner(
             issue_url=issue_url,
             config=cfg,
@@ -56,13 +56,15 @@ def plan(issue_url: str, project: str, config_path: Path | None) -> None:
             provider=provider,
         )
     )
-    click.echo(f"Planner complete — PR #{output.pr_number} at {output.pr_url}")
-    click.echo(f"Branch: {output.branch_name}")
-    click.echo(f"Confidence: {output.confidence}")
-    click.echo(f"Summary: {output.summary}")
-    if output.considered_alternatives:
+    pr = result.pr
+    llm = result.llm_output
+    click.echo(f"Planner complete — PR #{pr.number} at {pr.url}")
+    click.echo(f"Branch: {pr.branch}")
+    click.echo(f"Confidence: {llm.confidence}")
+    click.echo(f"Summary: {llm.summary}")
+    if llm.considered_alternatives:
         click.echo("Considered alternatives:")
-        for alt in output.considered_alternatives:
+        for alt in llm.considered_alternatives:
             click.echo(f"  - {alt}")
 
 

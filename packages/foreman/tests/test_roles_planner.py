@@ -1,20 +1,32 @@
-"""Integration test for run_planner with mocked provider + mocked PyGithub.
+"""Integration test for ``run_planner`` with a fake GitHostProvider + fake
+ProviderFacade.
 
 A real-engine integration test (against actual Anthropic API + real GitHub)
-is gated behind the `real_engine` pytest marker and lives separately. This
+is gated behind the ``real_engine`` pytest marker and lives separately. This
 test verifies the orchestration wiring: issue parsing, worktree creation,
-provider invocation, label advancement.
+identity configuration, LLM dispatch, commit/push/PR, label advancement.
 """
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from foreman.config import AppsConfig, Config, ProjectConfig
-from foreman.roles.planner import parse_issue_url, run_planner
+from foreman.git_host import GitHostProvider, IssueRef, PRRef
+from foreman.roles.planner import (
+    PLANNER_ALLOWED_TOOLS,
+    parse_issue_url,
+    run_planner,
+)
+
+# ----------------------------------------------------------------------
+# parse_issue_url
+# ----------------------------------------------------------------------
 
 
 def test_parse_issue_url_extracts_owner_repo_number() -> None:
@@ -29,174 +41,259 @@ def test_parse_issue_url_rejects_non_issue_url() -> None:
         parse_issue_url("https://github.com/jeffrichley/voice/pull/42")
 
 
+# ----------------------------------------------------------------------
+# Planner LLM tool surface
+# ----------------------------------------------------------------------
+
+
+def test_planner_allowed_tools_is_read_only() -> None:
+    """Post-refactor: the Planner LLM never writes files or shells out.
+
+    Foreman core does the writes via :class:`~foreman.git_host.GitHostProvider`.
+    Pinning this list prevents accidental Bash/Write reintroduction.
+    """
+    assert set(PLANNER_ALLOWED_TOOLS) == {"Read", "Glob", "Grep"}
+
+
+# ----------------------------------------------------------------------
+# Test scaffolding
+# ----------------------------------------------------------------------
+
+
+class _FakeHostProvider(GitHostProvider):
+    """In-memory host provider that records every call for assertions."""
+
+    def __init__(self) -> None:
+        self.issue_to_return = IssueRef(
+            number=42,
+            title="SSML",
+            body="Add SSML support to madrigal.",
+            labels=["foreman:plan"],
+            repo_slug="jeffrichley/voice",
+        )
+        self.default_branch = "main"
+        self.committed_files: dict[str, str] | None = None
+        self.commit_message: str | None = None
+        self.pushed_branch: str | None = None
+        self.configure_calls: list[Path] = []
+        self.label_calls: list[tuple[str, int, list[str], list[str]]] = []
+        self.pr_to_return = PRRef(
+            number=99,
+            url="https://github.com/jeffrichley/voice/pull/99",
+            title="spec: SSML",
+            body="body",
+            branch="foreman/issue-42",
+            base_branch="main",
+            repo_slug="jeffrichley/voice",
+        )
+
+    def get_issue(self, repo_slug: str, issue_number: int) -> IssueRef:
+        return self.issue_to_return
+
+    def get_default_branch(self, repo_slug: str) -> str:
+        return self.default_branch
+
+    def configure_worktree_identity(self, worktree_path: Path) -> None:
+        self.configure_calls.append(worktree_path)
+
+    def commit_files_to_worktree(
+        self, worktree_path: Path, files: dict[str, str], message: str
+    ) -> str:
+        self.committed_files = dict(files)
+        self.commit_message = message
+        return "deadbeef" * 5
+
+    def push_branch(self, worktree_path: Path, branch: str) -> None:
+        self.pushed_branch = branch
+
+    def open_pull_request(
+        self, repo_slug: str, title: str, body: str, base: str, head: str
+    ) -> PRRef:
+        return PRRef(
+            number=self.pr_to_return.number,
+            url=self.pr_to_return.url,
+            title=title,
+            body=body,
+            branch=head,
+            base_branch=base,
+            repo_slug=repo_slug,
+        )
+
+    def update_issue_labels(
+        self, repo_slug: str, issue_number: int, add: list[str], remove: list[str]
+    ) -> None:
+        self.label_calls.append((repo_slug, issue_number, list(add), list(remove)))
+
+
+def _seed_clone(clone: Path) -> None:
+    """Init a minimal git repo at ``clone``."""
+    clone.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=clone, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=clone, check=True, capture_output=True
+    )
+    (clone / "README.md").write_text("seed\n")
+    subprocess.run(["git", "add", "."], cwd=clone, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "seed"], cwd=clone, check=True, capture_output=True)
+
+
+def _make_config(clone: Path) -> Config:
+    return Config(
+        projects={
+            "voice": ProjectConfig(
+                repo="jeffrichley/voice",
+                local_clone_path=str(clone),
+                apps=AppsConfig(
+                    planner_app_id_env="FOREMAN_PLANNER_APP_ID",
+                    planner_private_key_path="/tmp/planner.pem",
+                ),
+            )
+        }
+    )
+
+
+def _make_llm_payload(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "spec_doc_content": "# Spec: SSML support (issue #42)\n\n## Goal\nx\n",
+        "pr_title": "spec: add SSML support",
+        "pr_body": "Adds the spec for SSML support. See spec doc.",
+        "summary": "Drafted SSML support spec",
+        "considered_alternatives": ["raw-string approach", "external library"],
+        "confidence": "high",
+    }
+    base.update(overrides)
+    return base
+
+
+# ----------------------------------------------------------------------
+# run_planner end-to-end
+# ----------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
 async def test_run_planner_dispatches_and_advances_label(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Set up config with the tmp_path as the local clone
     clone = tmp_path / "clone"
-    clone.mkdir()
-    # Init a minimal git repo there
-    import subprocess
-
-    subprocess.run(["git", "init", "-b", "main"], cwd=clone, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.email", "test@example.com"],
-        cwd=clone,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Test"], cwd=clone, check=True, capture_output=True
-    )
-    (clone / "README.md").write_text("seed\n")
-    subprocess.run(["git", "add", "."], cwd=clone, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "seed"], cwd=clone, check=True, capture_output=True)
-
+    _seed_clone(clone)
     monkeypatch.setenv("FOREMAN_PLANNER_APP_ID", "123456")
 
-    cfg = Config(
-        projects={
-            "voice": ProjectConfig(
-                repo="jeffrichley/voice",
-                local_clone_path=str(clone),
-                apps=AppsConfig(
-                    planner_app_id_env="FOREMAN_PLANNER_APP_ID",
-                    planner_private_key_path="/tmp/planner.pem",
-                ),
-            )
-        }
-    )
+    cfg = _make_config(clone)
 
-    fake_issue = MagicMock()
-    fake_issue.body = "Add SSML support to madrigal."
-    fake_issue.title = "SSML"
-    fake_issue.labels = []
-    fake_issue.add_to_labels = MagicMock()
-    fake_issue.remove_from_labels = MagicMock()
-
-    fake_repo = MagicMock()
-    fake_repo.get_issue.return_value = fake_issue
-    fake_repo.default_branch = "main"
-
-    fake_gh = MagicMock()
-    fake_gh.get_repo.return_value = fake_repo
+    fake_host = _FakeHostProvider()
+    fake_registry = MagicMock()
+    fake_registry.get_host_provider.return_value = fake_host
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(
-        return_value={
-            "pr_url": "https://github.com/jeffrichley/voice/pull/99",
-            "pr_number": 99,
-            "branch_name": "foreman/issue-42",
-            "summary": "Drafted SSML support spec",
-            "considered_alternatives": [],
-            "confidence": "high",
-        }
+    fake_provider.run_agent = AsyncMock(return_value=_make_llm_payload())
+
+    result = await run_planner(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=fake_registry,
     )
 
-    with patch("foreman.roles.planner.IdentityRegistry") as mock_reg:
-        mock_reg.return_value.get_client.return_value = fake_gh
-        mock_reg.return_value.get_token.return_value = "fake-token"
-        result = await run_planner(
-            issue_url="https://github.com/jeffrichley/voice/issues/42",
-            config=cfg,
-            project_name="voice",
-            worktrees_root=tmp_path / "worktrees",
-            provider=fake_provider,
-        )
-
-    assert result.pr_number == 99
+    # LLM was dispatched once with read-only tools
     fake_provider.run_agent.assert_called_once()
-    fake_issue.add_to_labels.assert_called_with("foreman:spec-review")
-    fake_issue.remove_from_labels.assert_called_with("foreman:plan")
+    call_kwargs = fake_provider.run_agent.call_args.kwargs
+    assert call_kwargs["allowed_tools"] == ["Read", "Glob", "Grep"]
+    # No env injection (decoupled from gh CLI)
+    assert "env" not in call_kwargs or call_kwargs["env"] is None
+
+    # Host operations all happened, in order
+    assert fake_host.configure_calls, "configure_worktree_identity must be called"
+    assert fake_host.committed_files == {
+        "docs/superpowers/specs/foreman-issue-42-spec.md": (
+            "# Spec: SSML support (issue #42)\n\n## Goal\nx\n"
+        )
+    }
+    assert fake_host.commit_message == "spec: add SSML support"
+    assert fake_host.pushed_branch == "foreman/issue-42"
+
+    # Label advanced
+    assert fake_host.label_calls == [
+        ("jeffrichley/voice", 42, ["foreman:spec-review"], ["foreman:plan"])
+    ]
+
+    # PlannerRunResult populated end-to-end
+    assert result.pr.number == 99
+    assert result.pr.url == "https://github.com/jeffrichley/voice/pull/99"
+    assert result.pr.branch == "foreman/issue-42"
+    assert result.llm_output.confidence == "high"
+    assert result.llm_output.summary == "Drafted SSML support spec"
 
 
 @pytest.mark.asyncio
-async def test_run_planner_injects_bot_token_into_agent_env(
+async def test_run_planner_does_not_inject_env_into_provider(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The planner-bot's resolved token must reach the agent subprocess as
-    GH_TOKEN — otherwise the agent's `gh pr create` runs under whatever
-    identity the parent foreman process inherited (often Jeff's PAT), and the
-    spec PR is misattributed. This test pins the wiring.
+    """Post-refactor: the planner-bot token does NOT flow into the agent
+    subprocess. The LLM never calls ``gh``; commits and pushes happen in
+    Foreman core via :class:`~foreman.git_host.GitHostProvider`.
+
+    This test pins the *removal* of the env-injection hack so we don't
+    accidentally reintroduce it.
     """
     clone = tmp_path / "clone"
-    clone.mkdir()
-    import subprocess
-
-    subprocess.run(["git", "init", "-b", "main"], cwd=clone, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.email", "test@example.com"],
-        cwd=clone,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Test"], cwd=clone, check=True, capture_output=True
-    )
-    (clone / "README.md").write_text("seed\n")
-    subprocess.run(["git", "add", "."], cwd=clone, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "seed"], cwd=clone, check=True, capture_output=True)
-
-    # Parent process has a *different* GH_TOKEN — proves we don't just leak it
+    _seed_clone(clone)
     monkeypatch.setenv("GH_TOKEN", "parent-pat-do-not-use")
     monkeypatch.setenv("FOREMAN_PLANNER_APP_ID", "123456")
 
-    cfg = Config(
-        projects={
-            "voice": ProjectConfig(
-                repo="jeffrichley/voice",
-                local_clone_path=str(clone),
-                apps=AppsConfig(
-                    planner_app_id_env="FOREMAN_PLANNER_APP_ID",
-                    planner_private_key_path="/tmp/planner.pem",
-                ),
-            )
-        }
-    )
-
-    fake_issue = MagicMock()
-    fake_issue.body = "x"
-    fake_issue.title = "y"
-    fake_issue.labels = []
-    fake_issue.add_to_labels = MagicMock()
-    fake_issue.remove_from_labels = MagicMock()
-
-    fake_repo = MagicMock()
-    fake_repo.get_issue.return_value = fake_issue
-    fake_repo.default_branch = "main"
-
-    fake_gh = MagicMock()
-    fake_gh.get_repo.return_value = fake_repo
+    cfg = _make_config(clone)
+    fake_host = _FakeHostProvider()
+    fake_registry = MagicMock()
+    fake_registry.get_host_provider.return_value = fake_host
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(
-        return_value={
-            "pr_url": "https://github.com/jeffrichley/voice/pull/99",
-            "pr_number": 99,
-            "branch_name": "foreman/issue-42",
-            "summary": "ok",
-            "considered_alternatives": [],
-            "confidence": "high",
-        }
+    fake_provider.run_agent = AsyncMock(return_value=_make_llm_payload())
+
+    await run_planner(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=fake_registry,
     )
 
-    with patch("foreman.roles.planner.IdentityRegistry") as mock_reg:
-        mock_reg.return_value.get_client.return_value = fake_gh
-        mock_reg.return_value.get_token.return_value = "ghs_planner_install_token"
+    call_kwargs = fake_provider.run_agent.call_args.kwargs
+    # The env kwarg is no longer supplied by run_planner. The provider's
+    # `env` parameter remains supported for future use, but we must not be
+    # passing it here.
+    assert call_kwargs.get("env") is None
+    # And the registry must NOT have been asked for the raw token —
+    # that path only existed for the GH_TOKEN injection.
+    fake_registry.get_token.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_planner_rejects_url_pointing_at_wrong_project(
+    tmp_path: Path,
+) -> None:
+    clone = tmp_path / "clone"
+    _seed_clone(clone)
+    cfg = _make_config(clone)
+    fake_host = _FakeHostProvider()
+    fake_registry = MagicMock()
+    fake_registry.get_host_provider.return_value = fake_host
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_make_llm_payload())
+
+    with pytest.raises(ValueError, match="does not match project"):
         await run_planner(
-            issue_url="https://github.com/jeffrichley/voice/issues/42",
+            issue_url="https://github.com/someone-else/other-repo/issues/1",
             config=cfg,
             project_name="voice",
             worktrees_root=tmp_path / "worktrees",
             provider=fake_provider,
+            identity_registry=fake_registry,
         )
-
-    call_kwargs = fake_provider.run_agent.call_args.kwargs
-    assert "env" in call_kwargs, "run_agent must be called with an `env` kwarg"
-    agent_env = call_kwargs["env"]
-    assert agent_env["GH_TOKEN"] == "ghs_planner_install_token", (
-        "Planner installation token must override the parent GH_TOKEN in the agent env"
-    )
-    # Confirm we asked the registry for the planner role's token specifically
-    mock_reg.return_value.get_token.assert_called_with("planner")
