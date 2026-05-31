@@ -153,18 +153,9 @@ than no work — `confidence: low` is an honest finish, not a failure.
 </self_review>
 
 <output_schema>
-Return a `PlannerOutput`:
-
-```json
-{
-  "spec_doc_content": "<full markdown spec following spec_template>",
-  "pr_title": "spec: <one-line summary>",
-  "pr_body": "<2-4 sentence PR body for human reviewers + link to spec doc>",
-  "summary": "<one-line summary for audit log>",
-  "considered_alternatives": ["<alt 1>", "<alt 2>", ...],
-  "confidence": "high" | "medium" | "low"
-}
-```
+Return a `PlannerOutput`. The shape is enforced by the SDK from the
+`PlannerOutput` Pydantic model — you cannot produce an invalid shape. What
+you DO need to follow are the semantic rules below.
 
 Confidence rubric:
 - `high`: the issue is unambiguous, the repo conventions are clear, you
