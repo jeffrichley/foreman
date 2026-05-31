@@ -126,8 +126,16 @@ class _FakeHostProvider(GitHostProvider):
         self.label_calls.append((repo_slug, issue_number, list(add), list(remove)))
 
 
-def _seed_clone(clone: Path) -> None:
-    """Init a minimal git repo at ``clone``."""
+def _seed_clone(clone: Path, *, origin_path: Path | None = None) -> None:
+    """Init a minimal git repo at ``clone``.
+
+    If ``origin_path`` is provided, also wire a bare upstream at that path
+    as ``origin`` and push ``main`` so ``origin/main`` and
+    ``refs/remotes/origin/HEAD`` are resolvable. ``WorktreeManager.create``
+    bases new branches on ``origin/<default-branch>`` rather than local
+    HEAD, so any test that calls ``create`` (via ``run_planner``) needs
+    an origin set up.
+    """
     clone.mkdir()
     subprocess.run(["git", "init", "-b", "main"], cwd=clone, check=True, capture_output=True)
     subprocess.run(
@@ -142,6 +150,32 @@ def _seed_clone(clone: Path) -> None:
     (clone / "README.md").write_text("seed\n")
     subprocess.run(["git", "add", "."], cwd=clone, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "seed"], cwd=clone, check=True, capture_output=True)
+    if origin_path is not None:
+        origin_path.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["git", "init", "--bare", "-b", "main"],
+            cwd=origin_path,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "remote", "add", "origin", str(origin_path)],
+            cwd=clone,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "push", "origin", "main"],
+            cwd=clone,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "remote", "set-head", "origin", "main"],
+            cwd=clone,
+            check=True,
+            capture_output=True,
+        )
 
 
 def _make_config(clone: Path) -> Config:
@@ -187,7 +221,7 @@ async def test_run_planner_dispatches_and_advances_label(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clone = tmp_path / "clone"
-    _seed_clone(clone)
+    _seed_clone(clone, origin_path=tmp_path / "origin.git")
     monkeypatch.setenv("FOREMAN_PLANNER_APP_ID", "123456")
 
     cfg = _make_config(clone)
@@ -253,7 +287,7 @@ async def test_run_planner_does_not_inject_env_into_provider(
     accidentally reintroduce it.
     """
     clone = tmp_path / "clone"
-    _seed_clone(clone)
+    _seed_clone(clone, origin_path=tmp_path / "origin.git")
     monkeypatch.setenv("GH_TOKEN", "parent-pat-do-not-use")
     monkeypatch.setenv("FOREMAN_PLANNER_APP_ID", "123456")
 

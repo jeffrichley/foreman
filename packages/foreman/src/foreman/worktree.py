@@ -47,6 +47,27 @@ class WorktreeManager:
     def create(self, clone_path: Path, repo_slug: str, ticket_id: int) -> Path:
         """Create a worktree for one ticket. Idempotent on existing worktree.
 
+        The new ``foreman/issue-<N>`` branch is based on
+        ``origin/<default-branch>``, NOT the clone's local HEAD. Branching
+        off local HEAD inherits any drift between the clone's local default
+        branch and ``origin`` — e.g., unpushed local commits or local commits
+        that already shipped under a different SHA via squash-merge — and
+        every spec PR then carries that drift as "extra commits" unrelated
+        to the spec.
+
+        Concrete example: voice's local ``main`` carried ``0200159``
+        (release-pipeline work that had already shipped via PR #7 as a
+        different SHA ``e64df33``). Every Foreman spec PR (#11, #15, #16,
+        #17) inherited that drift. Basing on ``origin/<default-branch>``
+        instead pins the new branch at the freshly-fetched origin tip.
+
+        Before creating the branch we ``git fetch origin <default-branch>``
+        so the local origin ref is current. The fetch is best-effort: a
+        network failure prints a warning but does not abort — the worktree
+        create may still succeed from local origin state, and forcing a
+        hard failure here would block ticket execution on transient
+        connectivity issues.
+
         After the worktree is created, attempt to pre-populate its ``.venv``
         via ``uv sync --all-packages`` so the target repo's pre-push hook
         finds installed deps when it runs ``uv run --no-sync`` later. The
@@ -60,12 +81,23 @@ class WorktreeManager:
             return wt_path
         wt_path.parent.mkdir(parents=True, exist_ok=True)
         branch = f"foreman/issue-{ticket_id}"
+        default_branch = _resolve_default_branch(clone_path)
+        _fetch_origin_branch(clone_path, default_branch)
         subprocess.run(
-            ["git", "worktree", "add", "-b", branch, str(wt_path)],
+            [
+                "git",
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                str(wt_path),
+                f"origin/{default_branch}",
+            ],
             cwd=clone_path,
             check=True,
             capture_output=True,
             text=True,
+            env=filtered_subprocess_env(),
         )
         _maybe_sync_worktree_deps(wt_path)
         return wt_path
@@ -123,6 +155,67 @@ class WorktreeManager:
             check=True,
             capture_output=True,
             text=True,
+        )
+
+
+def _resolve_default_branch(clone_path: Path) -> str:
+    """Return the clone's default branch name (e.g. ``"main"``, ``"master"``).
+
+    Resolves via ``git symbolic-ref --short refs/remotes/origin/HEAD``, which
+    returns e.g. ``origin/main``; we strip the ``origin/`` prefix. ``git
+    clone`` sets this symbolic ref automatically, so in normal use it will
+    be present.
+
+    If ``origin/HEAD`` is missing or the command fails for any reason, we
+    fall back to ``"main"`` rather than raising — better to base the new
+    branch on a likely-correct guess and let a downstream git command
+    produce a clear "unknown revision" error if even that's wrong, than
+    crash worktree creation in a less actionable spot.
+    """
+    result = subprocess.run(
+        ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        cwd=clone_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=filtered_subprocess_env(),
+    )
+    if result.returncode != 0:
+        return "main"
+    ref = result.stdout.strip()
+    prefix = "origin/"
+    if ref.startswith(prefix):
+        ref = ref[len(prefix) :]
+    return ref or "main"
+
+
+def _fetch_origin_branch(clone_path: Path, branch: str) -> None:
+    """Best-effort ``git fetch origin <branch>`` to refresh the local origin ref.
+
+    Without this, ``origin/<branch>`` may be stale and basing the new spec
+    branch on it would re-introduce drift from the other direction (origin
+    moved forward; local origin ref didn't). On network failure we print a
+    warning to stderr and continue — the subsequent worktree-add may still
+    succeed from the cached origin ref, and a hard failure here would block
+    ticket execution on transient connectivity issues.
+
+    Uses the same env filter as the worktree-add and ``uv sync`` calls so
+    we don't leak ``VIRTUAL_ENV`` etc. into git hook invocations.
+    """
+    result = subprocess.run(
+        ["git", "fetch", "--quiet", "origin", branch],
+        cwd=clone_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=filtered_subprocess_env(),
+    )
+    if result.returncode != 0:
+        print(
+            f"[foreman.worktree] warning: git fetch origin {branch} failed in "
+            f"{clone_path} (rc={result.returncode}); proceeding with cached "
+            f"origin ref. stderr:\n{result.stderr.strip()}",
+            file=sys.stderr,
         )
 
 
