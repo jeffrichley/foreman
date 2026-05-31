@@ -11,6 +11,9 @@ dependencies = [
     "click>=8.1,<9",
 ]
 
+[project.scripts]
+foreman = "foreman.cli:main"
+
 [build-system]
 requires = ["hatchling", "uv-dynamic-versioning"]
 build-backend = "hatchling.build"
