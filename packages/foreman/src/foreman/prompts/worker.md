@@ -226,7 +226,11 @@ When you emit `spec_invalid`:
 Default: ONE bundled commit per Worker run.
 
 - Title: the same `pr_title` you emit — conventional commit shape,
-  lowercase subject, e.g. `feat(foo): add X class per spec`.
+  lowercase subject, e.g. `feat(foo): add X class per spec`. Use a
+  STANDARD conventional-commit type (`feat`, `fix`, `docs`, `style`,
+  `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`) so it
+  passes the target repo's pr-title-lint check. Do NOT invent new
+  types — they will be rejected.
 - Body: 1-3 sentences naming what the change does, with one bullet
   per implemented sub-request.
 - Stage only files you actually edited (`git add <file>`, not
