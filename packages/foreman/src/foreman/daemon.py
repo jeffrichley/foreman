@@ -8,10 +8,12 @@ the background tasks and waits for in-flight work to drain.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Protocol
 
 from foreman.config import Config
 from foreman.locks import TicketLockManager
+from foreman.logging_setup import configure_daemon_logging
 from foreman.poller import poll_project
 from foreman.queue import DaemonQueue
 from foreman.storage import Storage
@@ -48,8 +50,16 @@ class Daemon:
 
     async def start(self) -> None:
         """Initialize storage, run reconciliation, then launch tasks."""
+        configure_daemon_logging(
+            log_path=self.config.daemon.log_path,
+            level=self.config.daemon.log_level,
+        )
         self.storage.init()
         self._reconcile_in_flight()
+        logging.getLogger("foreman.daemon").info(
+            "daemon started",
+            extra={"projects": list(self.config.projects.keys())},
+        )
         self._tasks.append(asyncio.create_task(self._poller_loop()))
         self._tasks.append(asyncio.create_task(self._worker_loop()))
 
