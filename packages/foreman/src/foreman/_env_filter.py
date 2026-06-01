@@ -66,8 +66,4 @@ def filtered_subprocess_env() -> dict[str, str]:
         ``uv sync`` we run inside the worktree behave the same as a human
         invocation would.
     """
-    return {
-        k: v
-        for k, v in os.environ.items()
-        if k not in FOREIGN_WORKTREE_BLOCKED_ENV_VARS
-    }
+    return {k: v for k, v in os.environ.items() if k not in FOREIGN_WORKTREE_BLOCKED_ENV_VARS}

@@ -82,6 +82,11 @@ _FOREMAN_LABELS: list[tuple[str, str, str]] = [
     ("foreman:spec-review", "FBCA04", "Foreman: spec PR ready for review"),
     ("foreman:spec-ready", "0E8A16", "Foreman: spec approved, queued for Worker"),
     ("foreman:spec-fix", "D93F0B", "Foreman: spec PR needs fix"),
+    (
+        "foreman:implementing-ready",
+        "0E8A16",
+        "Foreman: spec PR merged, Worker queued (daemon sentinel)",
+    ),
     ("foreman:implementing", "FBCA04", "Foreman: Worker in-flight"),
     ("foreman:impl-review", "FBCA04", "Foreman: impl PR ready for review"),
     ("foreman:impl-fix", "D93F0B", "Foreman: impl PR needs fix"),
@@ -203,9 +208,7 @@ def _validate_clone_path(clone_path: Path, expected_repo: str) -> None:
     if not clone_path.is_dir():
         raise ValueError(f"Clone path is not a directory: {clone_path}")
     if not (clone_path / ".git").exists():
-        raise ValueError(
-            f"Clone path is not a git repository (no .git dir): {clone_path}"
-        )
+        raise ValueError(f"Clone path is not a git repository (no .git dir): {clone_path}")
     result = subprocess.run(
         ["git", "remote", "get-url", "origin"],
         cwd=clone_path,
@@ -337,9 +340,7 @@ def _write_instructions_template(
 # ----------------------------------------------------------------------
 
 
-def _ensure_labels(
-    *, client: Github, repo_slug: str
-) -> tuple[list[str], list[str]]:
+def _ensure_labels(*, client: Github, repo_slug: str) -> tuple[list[str], list[str]]:
     """Create any missing Foreman labels on ``repo_slug``.
 
     Returns ``(newly_created, already_existed)`` — both as label-name
@@ -378,9 +379,7 @@ def _ensure_labels(
 # ----------------------------------------------------------------------
 
 
-def _verify_bot_installation(
-    *, role: str, apps: AppsConfig, repo_slug: str
-) -> BotVerification:
+def _verify_bot_installation(*, role: str, apps: AppsConfig, repo_slug: str) -> BotVerification:
     """Best-effort check that ``role``'s App is installed on ``repo_slug``.
 
     Skipped (with a clear ``detail``) when the role's App ID is not
@@ -392,18 +391,14 @@ def _verify_bot_installation(
         app_id = _resolve_app_id(role, apps)
         key_path = _resolve_key_path(role, apps)
     except RuntimeError as exc:
-        return BotVerification(
-            role=role, ok=False, detail=f"skipped: {exc}"
-        )
+        return BotVerification(role=role, ok=False, detail=f"skipped: {exc}")
     try:
         # Fetch app metadata first — confirms the key + ID match a real
         # App. Then mint a token to confirm the installation exists.
         fetch_app_metadata(app_id, key_path)
         mint_installation_token(app_id, key_path, repo_slug)
     except Exception as exc:
-        return BotVerification(
-            role=role, ok=False, detail=f"{type(exc).__name__}: {exc}"
-        )
+        return BotVerification(role=role, ok=False, detail=f"{type(exc).__name__}: {exc}")
     return BotVerification(role=role, ok=True, detail="OK")
 
 
@@ -428,9 +423,7 @@ def _resolve_key_path(role: str, apps: AppsConfig) -> Path:
 # ----------------------------------------------------------------------
 
 
-def _format_project_block(
-    *, name: str, repo: str, clone_path: Path, check_command: str
-) -> str:
+def _format_project_block(*, name: str, repo: str, clone_path: Path, check_command: str) -> str:
     """Render a ``[projects.<name>]`` TOML block.
 
     ``check_command`` is omitted when it equals the default — the
@@ -466,12 +459,7 @@ def _project_block_re(name: str) -> re.Pattern[str]:
     typically leave a blank line between the main block and the
     ``.apps`` sub-block.
     """
-    pattern = (
-        r"^\[projects\."
-        + re.escape(name)
-        + r"\][^\n]*\n"
-        + r"(?:^[^\[\n].*\n)*"
-    )
+    pattern = r"^\[projects\." + re.escape(name) + r"\][^\n]*\n" + r"(?:^[^\[\n].*\n)*"
     return re.compile(pattern, flags=re.MULTILINE)
 
 
@@ -513,9 +501,7 @@ def _write_project_block_to_config(
     if not force:
         # Defense in depth — the orchestrator already raised before we
         # got here, but never trust the caller blindly with a write.
-        raise FileExistsError(
-            f"Project block [projects.{name}] already exists in {config_path}"
-        )
+        raise FileExistsError(f"Project block [projects.{name}] already exists in {config_path}")
     replaced = block_re.sub(block_text, existing, count=1)
     config_path.write_text(replaced, encoding="utf-8")
 
@@ -554,9 +540,7 @@ def _format_summary(result: InitResult) -> str:
     bots_block = "\n".join(bot_lines) if bot_lines else "      (none verified)"
 
     instructions_note = (
-        "review + customize"
-        if result.instructions_written
-        else "existing file preserved"
+        "review + customize" if result.instructions_written else "existing file preserved"
     )
 
     summary = (

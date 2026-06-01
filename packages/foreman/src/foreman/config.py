@@ -17,13 +17,74 @@ import os
 import tomllib
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class AdminConfig(BaseModel):
     """Admin identity (Jeff's PAT) used for ``foreman project add`` ops."""
 
     github_token_env: str = "FOREMAN_ADMIN_TOKEN"
+
+
+class OrchestratorConfig(BaseModel):
+    """Orchestrator-bot identity used by the daemon for host operations.
+
+    The orchestrator handles label management, PR merging, and polling
+    searches — actions that don't belong to any specific role bot and
+    historically would have used Jeff's PAT. A dedicated bot identity
+    gives every Foreman action a proper audit trail.
+
+    Resolved via JWT-from-private-key at daemon startup, same pattern
+    as the per-role apps.
+    """
+
+    app_id_env: str = "FOREMAN_ORCHESTRATOR_APP_ID"
+    app_id: int | None = None
+    private_key_path: str | None = None
+
+    def resolve_app_id(self) -> int:
+        env_value = os.environ.get(self.app_id_env)
+        if env_value:
+            return int(env_value)
+        if self.app_id is not None:
+            return self.app_id
+        raise RuntimeError(
+            f"No orchestrator app_id: env var {self.app_id_env} not set "
+            "and orchestrator.app_id not in config file"
+        )
+
+    def resolve_private_key_path(self) -> Path:
+        if not self.private_key_path:
+            raise RuntimeError(
+                "orchestrator.private_key_path not set in config file"
+            )
+        return Path(self.private_key_path)
+
+
+class DaemonConfig(BaseModel):
+    """Daemon runtime configuration.
+
+    ``max_concurrent_workers`` is a v1 forward-compat knob — only ``1`` is
+    valid in v1. The lock infrastructure tolerates higher values but the
+    daemon code is not yet audited for multi-worker safety. v2 will lift
+    this validation.
+    """
+
+    poll_interval_seconds: int = Field(default=30, ge=5)
+    max_concurrent_workers: int = Field(default=1)
+    log_path: str = Field(default="~/.foreman/daemon.log")
+    log_level: str = Field(default="INFO")
+    sqlite_path: str = Field(default="~/.foreman/foreman.sqlite")
+
+    @field_validator("max_concurrent_workers")
+    @classmethod
+    def _validate_max_workers(cls, v: int) -> int:
+        if v != 1:
+            raise ValueError(
+                "daemon.max_concurrent_workers must be 1 in v1; "
+                "multi-worker concurrency is deferred"
+            )
+        return v
 
 
 class AppsConfig(BaseModel):
@@ -130,11 +191,6 @@ class ProjectConfig(BaseModel):
     belt-and-suspenders ground-truth check. Defaults to ``"just check"``
     when ``None``; projects that use a different runner (e.g.
     ``"make test"``, ``"npm test"``, ``"pytest -q"``) override it here.
-
-    Reserved (not yet honored): a future ``auto_merge_spec`` knob will
-    let the Worker auto-merge the spec PR before opening the impl PR,
-    breaking the stacked-PR dependency. Pairs with the reserved
-    ``foreman:auto-merge-spec`` label name (also not yet honored).
     """
 
     repo: str = Field(..., description="GitHub repo in 'owner/name' form")
@@ -160,12 +216,28 @@ class ProjectConfig(BaseModel):
             "Foreman will fetch it before branching."
         ),
     )
+    auto_merge_spec: bool = Field(
+        default=False,
+        description=(
+            "When True, daemon auto-merges spec PRs that reach foreman:spec-ready. "
+            "When False (default), ticket parks at spec-ready awaiting human merge."
+        ),
+    )
+    auto_merge_impl: bool = Field(
+        default=False,
+        description=(
+            "When True, daemon auto-merges impl PRs that reach foreman:ready-for-merge. "
+            "When False (default), ticket parks at ready-for-merge awaiting human merge."
+        ),
+    )
 
 
 class Config(BaseModel):
     """Top-level Foreman config."""
 
     admin: AdminConfig = Field(default_factory=AdminConfig)
+    daemon: DaemonConfig = Field(default_factory=DaemonConfig)
+    orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
     projects: dict[str, ProjectConfig] = Field(default_factory=dict)
 
 

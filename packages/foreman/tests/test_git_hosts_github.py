@@ -166,9 +166,7 @@ def _init_worktree(tmp_path: Path) -> Path:
     """Init a bare-bones git repo + checkout for use as a worktree stand-in."""
     repo = tmp_path / "wt"
     repo.mkdir()
-    subprocess.run(
-        ["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True
-    )
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
     # Seed identity so the seed commit succeeds even before configure_worktree_identity.
     subprocess.run(
         ["git", "config", "user.email", "seed@example.com"],
@@ -181,9 +179,7 @@ def _init_worktree(tmp_path: Path) -> Path:
     )
     (repo / "README.md").write_text("seed\n")
     subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "seed"], cwd=repo, check=True, capture_output=True
-    )
+    subprocess.run(["git", "commit", "-m", "seed"], cwd=repo, check=True, capture_output=True)
     return repo
 
 
@@ -285,9 +281,7 @@ def test_push_branch_uses_installation_token_url(tmp_path: Path) -> None:
 # ----------------------------------------------------------------------
 
 
-def _make_called_process_error(
-    cmd: list[str], stderr: str
-) -> subprocess.CalledProcessError:
+def _make_called_process_error(cmd: list[str], stderr: str) -> subprocess.CalledProcessError:
     return subprocess.CalledProcessError(returncode=1, cmd=cmd, output="", stderr=stderr)
 
 
@@ -332,12 +326,7 @@ def test_git_failure_preserves_stderr_attribute_on_configure_identity(
     real_run = subprocess.run
 
     def fake_run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if (
-            isinstance(cmd, list)
-            and len(cmd) > 1
-            and cmd[0] == "git"
-            and cmd[1] == "config"
-        ):
+        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git" and cmd[1] == "config":
             raise _make_called_process_error(cmd, "fatal: not in a git repo")
         return real_run(cmd, *args, **kwargs)
 
@@ -408,20 +397,14 @@ def test_push_branch_failure_redacts_token_from_every_surface(tmp_path: Path) ->
         except Exception:
             continue
         if isinstance(value, str):
-            assert not token_re.search(value), (
-                f"token leaked into exc.{attr_name}"
-            )
+            assert not token_re.search(value), f"token leaked into exc.{attr_name}"
         elif isinstance(value, (list, tuple)):
             for item in value:
                 if isinstance(item, str):
-                    assert not token_re.search(item), (
-                        f"token leaked into exc.{attr_name}"
-                    )
+                    assert not token_re.search(item), f"token leaked into exc.{attr_name}"
 
     # Traceback formatting (this is the surface that hit the chat transcript)
-    formatted_tb = "".join(
-        traceback.format_exception(type(exc), exc, exc.__traceback__)
-    )
+    formatted_tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     assert not token_re.search(formatted_tb), "token leaked into formatted traceback"
 
 
@@ -496,9 +479,7 @@ def _setup_push_worktree(tmp_path: Path) -> Path:
     return wt
 
 
-def test_git_subprocess_drops_virtual_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_git_subprocess_drops_virtual_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Issue #10: VIRTUAL_ENV must not leak into the git subprocess env."""
     monkeypatch.setenv("VIRTUAL_ENV", "sentinel-do-not-leak")
     wt = _setup_push_worktree(tmp_path)
@@ -519,9 +500,7 @@ def test_git_subprocess_drops_virtual_env(
     )
 
 
-def test_git_subprocess_drops_python_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_git_subprocess_drops_python_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Issue #10: PYTHONPATH must not leak (would pull foreman modules into hook)."""
     monkeypatch.setenv("PYTHONPATH", "E:/workspaces/ai/agents/foreman/src")
     wt = _setup_push_worktree(tmp_path)
@@ -625,9 +604,7 @@ def test_git_subprocess_drops_all_blocked_vars(
 
     env = capture["env"]
     assert env is not None, f"subprocess.run for git push must receive env= (var={var})"
-    assert var not in env, (
-        f"{var}=sentinel-do-not-leak leaked into git subprocess env"
-    )
+    assert var not in env, f"{var}=sentinel-do-not-leak leaked into git subprocess env"
 
 
 def test_git_subprocess_preserves_uv_cache_dir(

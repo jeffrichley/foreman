@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -128,9 +129,7 @@ reviewer_private_key_path = "/tmp/reviewer.pem"
     )
 
     runner = CliRunner()
-    with patch(
-        "foreman.cli.run_reviewer", new=AsyncMock(return_value=fake_result)
-    ) as mock_run:
+    with patch("foreman.cli.run_reviewer", new=AsyncMock(return_value=fake_result)) as mock_run:
         result = runner.invoke(
             cli,
             [
@@ -198,9 +197,7 @@ fixer_private_key_path = "/tmp/fixer.pem"
     )
 
     runner = CliRunner()
-    with patch(
-        "foreman.cli.run_fixer", new=AsyncMock(return_value=fake_result)
-    ) as mock_run:
+    with patch("foreman.cli.run_fixer", new=AsyncMock(return_value=fake_result)) as mock_run:
         result = runner.invoke(
             cli,
             [
@@ -273,9 +270,7 @@ worker_private_key_path = "/tmp/worker.pem"
     )
 
     runner = CliRunner()
-    with patch(
-        "foreman.cli.run_worker", new=AsyncMock(return_value=fake_result)
-    ) as mock_run:
+    with patch("foreman.cli.run_worker", new=AsyncMock(return_value=fake_result)) as mock_run:
         result = runner.invoke(
             cli,
             [
@@ -426,3 +421,120 @@ def test_cli_init_defaults_name_from_repo_tail(tmp_path: Path, monkeypatch) -> N
 
     assert result.exit_code == 0, result.output
     assert captured["name"] == "some-new-repo"
+
+
+def test_daemon_status_when_not_running(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text('[admin]\ngithub_token_env = "X"\n')
+    monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+
+    from click.testing import CliRunner
+
+    from foreman.cli import cli
+
+    result = CliRunner().invoke(cli, ["daemon", "status"])
+    assert result.exit_code == 0
+    assert "not running" in result.output.lower()
+
+
+def test_daemon_start_foreground_runs_and_exits_clean(tmp_path: Path, monkeypatch) -> None:
+    """Foreground daemon start respects --max-iterations test mode."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[admin]\ngithub_token_env = "X"\n'
+        f'[daemon]\nsqlite_path = "{(tmp_path / "f.sqlite").as_posix()}"\n'
+        f'log_path = "{(tmp_path / "d.log").as_posix()}"\n'
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+
+    from click.testing import CliRunner
+
+    from foreman.cli import cli
+
+    result = CliRunner().invoke(cli, ["daemon", "start", "--max-iterations", "1"])
+    assert result.exit_code == 0
+
+
+def test_ps_shows_active_tickets(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[admin]\ngithub_token_env = "X"\n'
+        f'[daemon]\nsqlite_path = "{(tmp_path / "f.sqlite").as_posix()}"\n'
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+
+    from datetime import datetime
+
+    from foreman.storage import Storage
+
+    storage = Storage(tmp_path / "f.sqlite")
+    storage.init()
+    storage.upsert_pipeline("voice", 42, "foreman:spec-review", datetime(2026, 6, 1, tzinfo=UTC))
+
+    from click.testing import CliRunner
+
+    from foreman.cli import cli
+
+    result = CliRunner().invoke(cli, ["ps"])
+    assert result.exit_code == 0
+    assert "voice" in result.output
+    assert "42" in result.output
+    assert "spec-review" in result.output
+
+
+def test_pipeline_detail_shows_node_runs(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[admin]\ngithub_token_env = "X"\n'
+        f'[daemon]\nsqlite_path = "{(tmp_path / "f.sqlite").as_posix()}"\n'
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+
+    from datetime import datetime
+
+    from foreman.storage import Storage
+
+    storage = Storage(tmp_path / "f.sqlite")
+    storage.init()
+    now = datetime(2026, 6, 1, tzinfo=UTC)
+    pid = storage.upsert_pipeline("voice", 42, "foreman:plan", now)
+    rid = storage.record_node_run_start(
+        pipeline_id=pid, role="planner", identity="foreman-planner-bot", at=now
+    )
+    storage.record_node_run_finish(
+        run_id=rid, at=now, outcome="success", structured_output={"pr_number": 1}
+    )
+
+    from click.testing import CliRunner
+
+    from foreman.cli import cli
+
+    result = CliRunner().invoke(cli, ["pipeline-detail", "voice", "42"])
+    assert result.exit_code == 0
+    assert "planner" in result.output
+    assert "success" in result.output
+
+
+def test_worktree_clean_removes_directory(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[admin]\ngithub_token_env = "X"\n'
+        f'[daemon]\nsqlite_path = "{(tmp_path / "f.sqlite").as_posix()}"\n'
+        f"[projects.voice]\n"
+        f'repo = "jeffrichley/voice"\n'
+        f'local_clone_path = "{(tmp_path / "voice").as_posix()}"\n'
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+    worktree = tmp_path / "worktrees" / "voice" / "issue-42"
+    worktree.mkdir(parents=True)
+    (worktree / "marker.txt").write_text("present")
+
+    monkeypatch.setenv("FOREMAN_WORKTREES_ROOT", str(tmp_path / "worktrees"))
+
+    from click.testing import CliRunner
+
+    from foreman.cli import cli
+
+    result = CliRunner().invoke(cli, ["worktree", "clean", "voice", "42"])
+    assert result.exit_code == 0
+    assert not worktree.exists()

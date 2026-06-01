@@ -68,9 +68,7 @@ def test_implemented_sub_request_validates_valid_dict() -> None:
 
 def test_implemented_sub_request_files_touched_default_empty() -> None:
     """``files_touched`` defaults to empty — valid for spec-doc-only changes."""
-    sr = ImplementedSubRequest.model_validate(
-        {"spec_reference": "AC 1", "summary": "x"}
-    )
+    sr = ImplementedSubRequest.model_validate({"spec_reference": "AC 1", "summary": "x"})
     assert sr.files_touched == []
     assert sr.tests_added == []
 
@@ -350,9 +348,7 @@ def test_worker_run_result_requires_attempt() -> None:
 def test_worker_run_result_pr_url_defaults_to_none_for_incomplete() -> None:
     """Incomplete/spec_invalid runs don't open a PR — pr_url is None."""
     output = WorkerOutput.model_validate(_minimal_incomplete())
-    result = WorkerRunResult(
-        llm_output=output, attempt=1, final_did_check_pass=False
-    )
+    result = WorkerRunResult(llm_output=output, attempt=1, final_did_check_pass=False)
     assert result.pr_url is None
 
 

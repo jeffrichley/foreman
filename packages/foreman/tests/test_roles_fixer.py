@@ -129,9 +129,9 @@ class _FakePR:
         self.body = body
         self.head = _FakeRef(head_ref, head_sha)
         self.base = _FakeRef(base_ref, "basesha")
-        self._reviews = reviews if reviews is not None else [
-            _FakeReview("needs_fix — see findings.")
-        ]
+        self._reviews = (
+            reviews if reviews is not None else [_FakeReview("needs_fix — see findings.")]
+        )
         self.issue_comments_posted: list[str] = []
         self.reviews_posted: list[tuple[str, str]] = []
 
@@ -148,9 +148,7 @@ class _FakePR:
 
 
 class _FakeIssue:
-    def __init__(
-        self, *, number: int, title: str, body: str, labels: list[str]
-    ) -> None:
+    def __init__(self, *, number: int, title: str, body: str, labels: list[str]) -> None:
         self.number = number
         self.title = title
         self.body = body
@@ -226,18 +224,14 @@ def _seed_clone_with_spec_branch(clone: Path, issue_number: int) -> str:
     )
     subprocess.run(["git", "fetch", "origin"], cwd=clone, check=False, capture_output=True)
     branch = f"foreman/issue-{issue_number}"
-    subprocess.run(
-        ["git", "checkout", "-b", branch], cwd=clone, check=True, capture_output=True
-    )
+    subprocess.run(["git", "checkout", "-b", branch], cwd=clone, check=True, capture_output=True)
     spec_dir = clone / "docs" / "superpowers" / "specs"
     spec_dir.mkdir(parents=True, exist_ok=True)
     (spec_dir / f"foreman-issue-{issue_number}-spec.md").write_text(
         f"# Spec for issue #{issue_number}\n"
     )
     subprocess.run(["git", "add", "."], cwd=clone, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "spec doc"], cwd=clone, check=True, capture_output=True
-    )
+    subprocess.run(["git", "commit", "-m", "spec doc"], cwd=clone, check=True, capture_output=True)
     head_sha = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=clone,
@@ -325,9 +319,7 @@ def _make_fake_repo(
         base_ref="main",
         reviews=reviews,
     )
-    issue = _FakeIssue(
-        number=issue_number, title="SSML", body="Add SSML support.", labels=labels
-    )
+    issue = _FakeIssue(number=issue_number, title="SSML", body="Add SSML support.", labels=labels)
     repo = _FakeRepo(pr=pr, issue=issue)
     return repo, pr, issue
 
@@ -552,9 +544,7 @@ async def test_run_fixer_missing_spec_fix_label_raises(
     monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
 
     cfg = _make_config(clone)
-    repo, pr, issue = _make_fake_repo(
-        issue_number=42, head_sha=head_sha, labels=["random-label"]
-    )
+    repo, pr, issue = _make_fake_repo(issue_number=42, head_sha=head_sha, labels=["random-label"])
     client = _FakeFixerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
@@ -932,9 +922,7 @@ async def test_run_fixer_raises_when_pr_has_no_reviews(
     monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
 
     cfg = _make_config(clone)
-    repo, _pr, _issue = _make_fake_repo(
-        issue_number=42, head_sha=head_sha, reviews=[]
-    )
+    repo, _pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha, reviews=[])
     client = _FakeFixerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
@@ -1019,11 +1007,7 @@ def test_extract_findings_missing_markers_returns_empty_list() -> None:
 
 
 def test_extract_findings_only_begin_marker_returns_empty() -> None:
-    body = (
-        "needs_fix.\n\n"
-        + FINDINGS_BEGIN_MARKER
-        + "\n```json\n[]\n```\n"
-    )
+    body = "needs_fix.\n\n" + FINDINGS_BEGIN_MARKER + "\n```json\n[]\n```\n"
     assert _extract_findings_from_review_comment(body) == []
 
 

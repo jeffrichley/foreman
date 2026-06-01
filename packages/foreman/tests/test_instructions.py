@@ -26,9 +26,7 @@ def test_load_project_instructions_returns_file_content_when_present(
     clone = tmp_path / "clone"
     (clone / ".foreman").mkdir(parents=True)
     content = (
-        "# Foreman instructions for myproj\n\n"
-        "## PR title rules\n\n"
-        "Use `feat(scope): ...` format.\n"
+        "# Foreman instructions for myproj\n\n## PR title rules\n\nUse `feat(scope): ...` format.\n"
     )
     (clone / INSTRUCTIONS_RELPATH).write_text(content, encoding="utf-8")
 

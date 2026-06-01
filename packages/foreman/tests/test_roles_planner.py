@@ -335,8 +335,7 @@ async def test_run_planner_embeds_project_instructions_in_user_prompt(
     foreman_dir = clone / ".foreman"
     foreman_dir.mkdir()
     instructions_text = (
-        "# Foreman instructions for voice\n\n"
-        "## PR title rules\nUse `feat(scope): ...` only.\n"
+        "# Foreman instructions for voice\n\n## PR title rules\nUse `feat(scope): ...` only.\n"
     )
     (foreman_dir / "INSTRUCTIONS.md").write_text(instructions_text, encoding="utf-8")
 

@@ -78,8 +78,7 @@ class ImplementedSubRequest(BaseModel):
     files_touched: list[str] = Field(
         default_factory=list,
         description=(
-            "Repo-relative paths of every file the Worker created or modified "
-            "for this sub-request."
+            "Repo-relative paths of every file the Worker created or modified for this sub-request."
         ),
     )
     tests_added: list[str] = Field(
@@ -291,26 +290,16 @@ class WorkerOutput(BaseModel):
         """
         if self.outcome == "implemented":
             if not self.pr_title:
-                raise ValueError(
-                    "outcome='implemented' requires non-empty pr_title"
-                )
+                raise ValueError("outcome='implemented' requires non-empty pr_title")
             if not self.pr_body:
-                raise ValueError(
-                    "outcome='implemented' requires non-empty pr_body"
-                )
+                raise ValueError("outcome='implemented' requires non-empty pr_body")
             if self.spec_invalid_reason is not None:
-                raise ValueError(
-                    "outcome='implemented' must not set spec_invalid_reason"
-                )
+                raise ValueError("outcome='implemented' must not set spec_invalid_reason")
         elif self.outcome == "spec_invalid":
             if not self.spec_invalid_reason:
-                raise ValueError(
-                    "outcome='spec_invalid' requires non-empty spec_invalid_reason"
-                )
+                raise ValueError("outcome='spec_invalid' requires non-empty spec_invalid_reason")
             if self.pr_title is not None or self.pr_body is not None:
-                raise ValueError(
-                    "outcome='spec_invalid' must not set pr_title or pr_body"
-                )
+                raise ValueError("outcome='spec_invalid' must not set pr_title or pr_body")
         else:  # incomplete
             if (
                 self.pr_title is not None
@@ -318,8 +307,7 @@ class WorkerOutput(BaseModel):
                 or self.spec_invalid_reason is not None
             ):
                 raise ValueError(
-                    "outcome='incomplete' must not set pr_title, pr_body, "
-                    "or spec_invalid_reason"
+                    "outcome='incomplete' must not set pr_title, pr_body, or spec_invalid_reason"
                 )
         return self
 

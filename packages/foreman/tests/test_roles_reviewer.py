@@ -111,9 +111,7 @@ class _FakePR:
 
 
 class _FakeIssue:
-    def __init__(
-        self, *, number: int, title: str, body: str, labels: list[str]
-    ) -> None:
+    def __init__(self, *, number: int, title: str, body: str, labels: list[str]) -> None:
         self.number = number
         self.title = title
         self.body = body
@@ -191,18 +189,14 @@ def _seed_clone_with_spec_branch(clone: Path, issue_number: int) -> str:
     subprocess.run(["git", "fetch", "origin"], cwd=clone, check=False, capture_output=True)
     # Branch + spec doc commit, mirroring what Planner produces.
     branch = f"foreman/issue-{issue_number}"
-    subprocess.run(
-        ["git", "checkout", "-b", branch], cwd=clone, check=True, capture_output=True
-    )
+    subprocess.run(["git", "checkout", "-b", branch], cwd=clone, check=True, capture_output=True)
     spec_dir = clone / "docs" / "superpowers" / "specs"
     spec_dir.mkdir(parents=True, exist_ok=True)
     (spec_dir / f"foreman-issue-{issue_number}-spec.md").write_text(
         f"# Spec for issue #{issue_number}\n"
     )
     subprocess.run(["git", "add", "."], cwd=clone, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "spec doc"], cwd=clone, check=True, capture_output=True
-    )
+    subprocess.run(["git", "commit", "-m", "spec doc"], cwd=clone, check=True, capture_output=True)
     head_sha = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=clone,
@@ -272,9 +266,7 @@ def _make_fake_repo(
         head_sha=head_sha,
         base_ref="main",
     )
-    issue = _FakeIssue(
-        number=issue_number, title="SSML", body="Add SSML support.", labels=labels
-    )
+    issue = _FakeIssue(number=issue_number, title="SSML", body="Add SSML support.", labels=labels)
     repo = _FakeRepo(pr=pr, issue=issue)
     return repo, pr, issue
 
@@ -555,9 +547,7 @@ async def test_run_reviewer_missing_spec_review_label_raises(
 
     cfg = _make_config(clone)
     # Issue has a random unrelated label, NOT foreman:spec-review
-    repo, pr, issue = _make_fake_repo(
-        issue_number=42, head_sha=head_sha, labels=["random-label"]
-    )
+    repo, pr, issue = _make_fake_repo(issue_number=42, head_sha=head_sha, labels=["random-label"])
     client = _FakeReviewerClient(repo=repo)
     registry = _make_registry(client)
 

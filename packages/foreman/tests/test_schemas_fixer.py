@@ -16,7 +16,10 @@ from foreman.schemas.fixer import (
 
 
 def _addressed() -> dict[str, object]:
-    return {"target": "Acceptance criteria bullet 3", "summary": "Replaced 'improve' with 'add unit test for X'."}
+    return {
+        "target": "Acceptance criteria bullet 3",
+        "summary": "Replaced 'improve' with 'add unit test for X'.",
+    }
 
 
 def _unaddressed(reason: str = "needs_info") -> dict[str, object]:

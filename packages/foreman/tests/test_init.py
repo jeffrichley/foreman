@@ -62,12 +62,8 @@ class _FakeRepo:
     def get_labels(self) -> list[_FakeLabel]:
         return list(self._labels)
 
-    def create_label(
-        self, *, name: str, color: str, description: str = ""
-    ) -> _FakeLabel:
-        self.create_label_calls.append(
-            {"name": name, "color": color, "description": description}
-        )
+    def create_label(self, *, name: str, color: str, description: str = "") -> _FakeLabel:
+        self.create_label_calls.append({"name": name, "color": color, "description": description})
         if name in self._raise_on_create:
             raise self._raise_on_create[name]
         label = _FakeLabel(name=name, color=color, description=description)
@@ -179,21 +175,15 @@ def test_validate_clone_path_rejects_mismatched_remote(tmp_path: Path) -> None:
 
 
 def test_remote_matches_repo_accepts_https() -> None:
-    assert _remote_matches_repo(
-        "https://github.com/jeffrichley/foreman", "jeffrichley/foreman"
-    )
+    assert _remote_matches_repo("https://github.com/jeffrichley/foreman", "jeffrichley/foreman")
 
 
 def test_remote_matches_repo_accepts_https_with_dot_git() -> None:
-    assert _remote_matches_repo(
-        "https://github.com/jeffrichley/foreman.git", "jeffrichley/foreman"
-    )
+    assert _remote_matches_repo("https://github.com/jeffrichley/foreman.git", "jeffrichley/foreman")
 
 
 def test_remote_matches_repo_accepts_scp_style_ssh() -> None:
-    assert _remote_matches_repo(
-        "git@github.com:jeffrichley/foreman.git", "jeffrichley/foreman"
-    )
+    assert _remote_matches_repo("git@github.com:jeffrichley/foreman.git", "jeffrichley/foreman")
 
 
 def test_remote_matches_repo_accepts_ssh_url() -> None:
@@ -204,15 +194,11 @@ def test_remote_matches_repo_accepts_ssh_url() -> None:
 
 def test_remote_matches_repo_case_insensitive() -> None:
     """GitHub URLs are case-insensitive — be lenient on matching."""
-    assert _remote_matches_repo(
-        "https://github.com/JeffRichley/Foreman", "jeffrichley/foreman"
-    )
+    assert _remote_matches_repo("https://github.com/JeffRichley/Foreman", "jeffrichley/foreman")
 
 
 def test_remote_matches_repo_rejects_mismatch() -> None:
-    assert not _remote_matches_repo(
-        "https://github.com/other/repo", "jeffrichley/foreman"
-    )
+    assert not _remote_matches_repo("https://github.com/other/repo", "jeffrichley/foreman")
 
 
 def test_remote_matches_repo_rejects_empty() -> None:
@@ -292,22 +278,16 @@ def test_format_project_block_uses_posix_path(tmp_path: Path) -> None:
 
 def test_write_project_block_creates_config_when_absent(tmp_path: Path) -> None:
     cfg = tmp_path / "config.toml"
-    block = "[projects.foreman]\nrepo = \"jeffrichley/foreman\"\n"
-    _write_project_block_to_config(
-        config_path=cfg, block_text=block, name="foreman", force=False
-    )
+    block = '[projects.foreman]\nrepo = "jeffrichley/foreman"\n'
+    _write_project_block_to_config(config_path=cfg, block_text=block, name="foreman", force=False)
     assert cfg.read_text(encoding="utf-8") == block
 
 
 def test_write_project_block_appends_to_existing_config(tmp_path: Path) -> None:
     cfg = tmp_path / "config.toml"
-    cfg.write_text(
-        "[projects.voice]\nrepo = \"jeffrichley/voice\"\n", encoding="utf-8"
-    )
-    block = "[projects.foreman]\nrepo = \"jeffrichley/foreman\"\n"
-    _write_project_block_to_config(
-        config_path=cfg, block_text=block, name="foreman", force=False
-    )
+    cfg.write_text('[projects.voice]\nrepo = "jeffrichley/voice"\n', encoding="utf-8")
+    block = '[projects.foreman]\nrepo = "jeffrichley/foreman"\n'
+    _write_project_block_to_config(config_path=cfg, block_text=block, name="foreman", force=False)
     contents = cfg.read_text(encoding="utf-8")
     # Existing block survives unchanged.
     assert "[projects.voice]" in contents
@@ -322,16 +302,13 @@ def test_write_project_block_replaces_when_force(tmp_path: Path) -> None:
     cfg = tmp_path / "config.toml"
     cfg.write_text(
         (
-            "[projects.voice]\nrepo = \"jeffrichley/voice\"\n\n"
-            "[projects.foreman]\nrepo = \"OLD_VALUE/foreman\"\n"
-            "local_clone_path = \"/tmp/old\"\n"
+            '[projects.voice]\nrepo = "jeffrichley/voice"\n\n'
+            '[projects.foreman]\nrepo = "OLD_VALUE/foreman"\n'
+            'local_clone_path = "/tmp/old"\n'
         ),
         encoding="utf-8",
     )
-    new_block = (
-        "[projects.foreman]\nrepo = \"jeffrichley/foreman\"\n"
-        "local_clone_path = \"/new/path\"\n"
-    )
+    new_block = '[projects.foreman]\nrepo = "jeffrichley/foreman"\nlocal_clone_path = "/new/path"\n'
     _write_project_block_to_config(
         config_path=cfg, block_text=new_block, name="foreman", force=True
     )
@@ -349,18 +326,15 @@ def test_write_project_block_preserves_apps_subblock_on_force(tmp_path: Path) ->
     cfg = tmp_path / "config.toml"
     cfg.write_text(
         (
-            "[projects.foreman]\nrepo = \"OLD/foreman\"\n"
-            "local_clone_path = \"/tmp/old\"\n\n"
+            '[projects.foreman]\nrepo = "OLD/foreman"\n'
+            'local_clone_path = "/tmp/old"\n\n'
             "[projects.foreman.apps]\n"
             "planner_app_id = 123456\n"
-            "planner_private_key_path = \"/keys/planner.pem\"\n"
+            'planner_private_key_path = "/keys/planner.pem"\n'
         ),
         encoding="utf-8",
     )
-    new_block = (
-        "[projects.foreman]\nrepo = \"jeffrichley/foreman\"\n"
-        "local_clone_path = \"/new\"\n"
-    )
+    new_block = '[projects.foreman]\nrepo = "jeffrichley/foreman"\nlocal_clone_path = "/new"\n'
     _write_project_block_to_config(
         config_path=cfg, block_text=new_block, name="foreman", force=True
     )
@@ -375,17 +349,13 @@ def test_write_project_block_preserves_apps_subblock_on_force(tmp_path: Path) ->
 
 def test_project_block_exists_true_after_write(tmp_path: Path) -> None:
     cfg = tmp_path / "config.toml"
-    cfg.write_text(
-        "[projects.foreman]\nrepo = \"jeffrichley/foreman\"\n", encoding="utf-8"
-    )
+    cfg.write_text('[projects.foreman]\nrepo = "jeffrichley/foreman"\n', encoding="utf-8")
     assert _project_block_exists(cfg, "foreman") is True
 
 
 def test_project_block_exists_false_for_other_project(tmp_path: Path) -> None:
     cfg = tmp_path / "config.toml"
-    cfg.write_text(
-        "[projects.voice]\nrepo = \"jeffrichley/voice\"\n", encoding="utf-8"
-    )
+    cfg.write_text('[projects.voice]\nrepo = "jeffrichley/voice"\n', encoding="utf-8")
     assert _project_block_exists(cfg, "foreman") is False
 
 
@@ -469,14 +439,14 @@ def test_run_init_skips_instructions_when_file_exists(tmp_path: Path) -> None:
     assert result.instructions_written is False
 
 
-def test_run_init_creates_all_18_labels_on_empty_repo(tmp_path: Path) -> None:
+def test_run_init_creates_all_19_labels_on_empty_repo(tmp_path: Path) -> None:
     init_config, _clone = _make_init_config(tmp_path=tmp_path)
     fake_repo = _FakeRepo(slug=init_config.repo)
     admin = _FakeAdminClient(repo=fake_repo)
 
     result = run_init(init_config, admin_client=admin)
 
-    assert len(result.labels_created) == 18
+    assert len(result.labels_created) == 19
     assert len(result.labels_existing) == 0
     created_names = [c["name"] for c in fake_repo.create_label_calls]
     # Every documented label was created.
@@ -502,8 +472,8 @@ def test_run_init_skips_existing_labels(tmp_path: Path) -> None:
 
     result = run_init(init_config, admin_client=admin)
 
-    # 18 - 2 already-existed = 16 created
-    assert len(result.labels_created) == 16
+    # 19 - 2 already-existed = 17 created
+    assert len(result.labels_created) == 17
     assert sorted(result.labels_existing) == ["foreman:plan", "foreman:planning"]
     # The pre-existing label's color/description was NOT overwritten.
     plan_label = next(lbl for lbl in fake_repo._labels if lbl.name == "foreman:plan")
@@ -534,7 +504,7 @@ def test_run_init_treats_422_create_as_existing(tmp_path: Path) -> None:
 def test_run_init_refuses_overwrite_without_force(tmp_path: Path) -> None:
     init_config, _clone = _make_init_config(tmp_path=tmp_path)
     init_config.config_path.write_text(
-        "[projects.foreman]\nrepo = \"someone/else\"\n", encoding="utf-8"
+        '[projects.foreman]\nrepo = "someone/else"\n', encoding="utf-8"
     )
     fake_repo = _FakeRepo(slug=init_config.repo)
     admin = _FakeAdminClient(repo=fake_repo)
@@ -549,8 +519,7 @@ def test_run_init_refuses_overwrite_without_force(tmp_path: Path) -> None:
 def test_run_init_overwrites_with_force(tmp_path: Path) -> None:
     init_config, _clone = _make_init_config(tmp_path=tmp_path, force=True)
     init_config.config_path.write_text(
-        "[projects.foreman]\nrepo = \"someone/else\"\n"
-        "local_clone_path = \"/tmp/old\"\n",
+        '[projects.foreman]\nrepo = "someone/else"\nlocal_clone_path = "/tmp/old"\n',
         encoding="utf-8",
     )
     fake_repo = _FakeRepo(slug=init_config.repo)
@@ -630,9 +599,7 @@ def test_run_init_bot_verification_records_failure_without_aborting(
     # Stub _verify_bot_installation to simulate one fail + three skip.
     from foreman import init as init_mod
 
-    def fake_verify(
-        *, role: str, apps: AppsConfig, repo_slug: str
-    ) -> BotVerification:
+    def fake_verify(*, role: str, apps: AppsConfig, repo_slug: str) -> BotVerification:
         if role == "planner":
             return BotVerification(
                 role=role,
@@ -650,7 +617,7 @@ def test_run_init_bot_verification_records_failure_without_aborting(
     assert "installation not found" in planner.detail
     # Config still written + labels still created
     assert init_config.config_path.exists()
-    assert len(result.labels_created) == 18
+    assert len(result.labels_created) == 19
 
 
 def test_run_init_summary_contains_expected_fields(tmp_path: Path) -> None:
@@ -664,7 +631,7 @@ def test_run_init_summary_contains_expected_fields(tmp_path: Path) -> None:
     assert "jeffrichley/foreman" in summary
     assert "[projects.foreman]" in summary
     assert "INSTRUCTIONS.md" in summary
-    assert "18 labels" in summary
+    assert "19 labels" in summary
     assert "Next steps" in summary
     assert "foreman plan https://github.com/jeffrichley/foreman/issues/" in summary
 
@@ -688,9 +655,7 @@ def test_run_init_uses_check_command_override_in_template(
 ) -> None:
     """The rendered instructions template substitutes the
     ``--check-command`` value into the quality-gate section."""
-    init_config, clone = _make_init_config(
-        tmp_path=tmp_path, check_command="make test"
-    )
+    init_config, clone = _make_init_config(tmp_path=tmp_path, check_command="make test")
     fake_repo = _FakeRepo(slug=init_config.repo)
     admin = _FakeAdminClient(repo=fake_repo)
 
@@ -704,9 +669,7 @@ def test_run_init_uses_check_command_override_in_template(
 
 def test_run_init_uses_check_command_override_in_config(tmp_path: Path) -> None:
     """Non-default ``check_command`` lands in the config block too."""
-    init_config, _clone = _make_init_config(
-        tmp_path=tmp_path, check_command="make test"
-    )
+    init_config, _clone = _make_init_config(tmp_path=tmp_path, check_command="make test")
     fake_repo = _FakeRepo(slug=init_config.repo)
     admin = _FakeAdminClient(repo=fake_repo)
 

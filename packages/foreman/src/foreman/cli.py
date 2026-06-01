@@ -11,18 +11,22 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
+import signal
 from pathlib import Path
+from typing import Any
 
 import click
 from github import Auth, Github
 
-from foreman.config import load_config
+from foreman.config import Config, load_config
 from foreman.init import InitConfig, detect_matching_clone, run_init
 from foreman.providers.anthropic_sdk import AnthropicSDKProvider
 from foreman.roles.fixer import run_fixer
 from foreman.roles.planner import run_planner
 from foreman.roles.reviewer import run_reviewer
 from foreman.roles.worker import run_worker
+from foreman.storage import Storage
 
 
 def _default_config_path() -> Path:
@@ -100,10 +104,7 @@ def review(pr_url: str, project: str, config_path: Path | None) -> None:
             provider=provider,
         )
     )
-    click.echo(
-        f"{result.outcome}: {len(result.findings)} findings, "
-        f"confidence={result.confidence}"
-    )
+    click.echo(f"{result.outcome}: {len(result.findings)} findings, confidence={result.confidence}")
 
 
 @cli.command()
@@ -140,8 +141,7 @@ def fix(issue_url: str, project: str, config_path: Path | None) -> None:
     addressed = len(llm.addressed_findings)
     unaddressed = len(llm.unaddressed_findings)
     click.echo(
-        f"{llm.outcome}: {result.attempt}/3 attempt, {addressed} fixed, "
-        f"{unaddressed} unaddressed"
+        f"{llm.outcome}: {result.attempt}/3 attempt, {addressed} fixed, {unaddressed} unaddressed"
     )
 
 
@@ -251,9 +251,7 @@ def init(
     # Default --name from the repo's tail.
     if name is None:
         if "/" not in repo:
-            raise click.ClickException(
-                "REPO must be in 'owner/repo' form to default --name."
-            )
+            raise click.ClickException("REPO must be in 'owner/repo' form to default --name.")
         name = repo.split("/", 1)[1]
 
     # Default --clone-path from cwd when cwd points at the same repo.
@@ -298,6 +296,232 @@ def init(
     except (ValueError, FileExistsError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(result.summary)
+
+
+@cli.group()
+def daemon() -> None:
+    """Daemon lifecycle commands."""
+
+
+@daemon.command("start")
+@click.option(
+    "--max-iterations",
+    type=int,
+    default=None,
+    help="Stop after N worker iterations (testing only).",
+)
+def daemon_start(max_iterations: int | None) -> None:
+    """Start the daemon in foreground."""
+    config = _load_config_from_env()
+    asyncio.run(_daemon_run(config=config, max_iterations=max_iterations))
+
+
+@daemon.command("stop")
+def daemon_stop() -> None:
+    """Signal a running daemon to stop. (v1: send SIGTERM to the pid)."""
+    pid_path = Path("~/.foreman/daemon.pid").expanduser()
+    if not pid_path.exists():
+        click.echo("No daemon pid file found at ~/.foreman/daemon.pid.")
+        return
+    pid = int(pid_path.read_text().strip())
+    try:
+        os.kill(pid, signal.SIGTERM)
+        click.echo(f"Sent SIGTERM to daemon pid {pid}.")
+    except ProcessLookupError:
+        click.echo(f"Pid {pid} not running. Removing stale pid file.")
+        pid_path.unlink()
+
+
+@daemon.command("status")
+def daemon_status() -> None:
+    """Show daemon status — running / stopped."""
+    pid_path = Path("~/.foreman/daemon.pid").expanduser()
+    if not pid_path.exists():
+        click.echo("Daemon: not running.")
+        return
+    pid = int(pid_path.read_text().strip())
+    try:
+        os.kill(pid, 0)
+        click.echo(f"Daemon: running (pid {pid}).")
+    except ProcessLookupError:
+        click.echo(f"Daemon: stale pid file (pid {pid} dead). Run `foreman daemon stop` to clean.")
+
+
+def _load_config_from_env() -> Config:
+    """Load config from FOREMAN_CONFIG env var or default ~/.foreman/config.toml."""
+    path = os.environ.get("FOREMAN_CONFIG", str(Path("~/.foreman/config.toml").expanduser()))
+    return load_config(path)
+
+
+async def _daemon_run(*, config: Config, max_iterations: int | None) -> None:
+    """Run the daemon foreground until SIGTERM or --max-iterations reached."""
+    from foreman.daemon import Daemon
+    from foreman.role_dispatch import RealRoleDispatcher
+
+    host, runners = _resolve_host_and_runners(config)
+    role_dispatcher = RealRoleDispatcher(config=config, runners=runners)
+
+    daemon_instance = Daemon(config=config, host=host, role_dispatcher=role_dispatcher)
+    await daemon_instance.start()
+
+    if max_iterations is not None:
+        # Test mode — drain queue up to N times, then shut down.
+        for _ in range(max_iterations):
+            await asyncio.sleep(0.1)
+        await daemon_instance.shutdown()
+        return
+
+    # Production: wait until SIGTERM.
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    try:
+        loop.add_signal_handler(signal.SIGTERM, stop_event.set)
+    except NotImplementedError:
+        # Windows: asyncio loop does not support add_signal_handler.
+        pass
+    try:
+        loop.add_signal_handler(signal.SIGINT, stop_event.set)
+    except NotImplementedError:
+        pass
+    await stop_event.wait()
+    await daemon_instance.shutdown()
+
+
+def _resolve_host_and_runners(config: Config) -> tuple[Any, Any]:
+    """Build real GitHubDaemonHost + DaemonRunners from config.
+
+    Reads the orchestrator bot's App ID + private key from the loaded
+    config, mints an installation token, and constructs the host and
+    runners adapters.
+
+    Returns (None, None)-shaped stubs only if orchestrator config is
+    absent (e.g., a fresh install without orchestrator-bot configured).
+    The daemon will still start with these stubs but won't do useful
+    work; the CLI prints a warning.
+    """
+    from pathlib import Path as _Path
+
+    from foreman.daemon_host import (
+        GitHubDaemonHost,
+        build_orchestrator_github_client,
+    )
+    from foreman.daemon_runners import DaemonRunners
+
+    # If orchestrator config is missing, fall back to nulls + warn.
+    try:
+        app_id = config.orchestrator.resolve_app_id()
+        key_path = config.orchestrator.resolve_private_key_path()
+    except RuntimeError as exc:
+        click.echo(
+            f"WARNING: orchestrator not configured ({exc}). "
+            "Daemon will run but cannot reach GitHub. Configure "
+            "[orchestrator] in ~/.foreman/config.toml to enable.",
+            err=True,
+        )
+        return _build_null_host_and_runners()
+
+    # Need a repo slug to look up the installation id. Use the first
+    # configured project's repo — the App should be installed on at
+    # least one of the configured repos for the token to be valid.
+    if not config.projects:
+        raise RuntimeError(
+            "No projects configured; daemon needs at least one project "
+            "to look up the orchestrator's installation token."
+        )
+    first_repo = next(iter(config.projects.values())).repo
+
+    gh_client = build_orchestrator_github_client(
+        app_id=app_id,
+        private_key_path=key_path,
+        repo_slug_for_install=first_repo,
+    )
+    host = GitHubDaemonHost(github_client=gh_client)
+
+    worktrees_root = _Path("~/.foreman/worktrees").expanduser()
+    runners = DaemonRunners(host=host, worktrees_root=worktrees_root)
+
+    return host, runners
+
+
+def _build_null_host_and_runners() -> tuple[Any, Any]:
+    """Stub host + runners for when orchestrator config is absent."""
+
+    class _NullHost:
+        def search_foreman_labeled_issues(self, repo: str) -> list[Any]:
+            return []
+
+        def add_issue_label(self, repo: str, issue_number: int, label: str) -> None:
+            pass
+
+        def post_issue_comment(self, repo: str, issue_number: int, body: str) -> None:
+            pass
+
+    class _NullRunners:
+        async def run_planner(self, **kwargs: Any) -> Any:
+            raise NotImplementedError
+
+        async def run_reviewer(self, **kwargs: Any) -> Any:
+            raise NotImplementedError
+
+        async def run_fixer(self, **kwargs: Any) -> Any:
+            raise NotImplementedError
+
+        async def run_worker(self, **kwargs: Any) -> Any:
+            raise NotImplementedError
+
+        async def merge_spec_pr(self, **kwargs: Any) -> Any:
+            raise NotImplementedError
+
+        async def merge_impl_pr(self, **kwargs: Any) -> Any:
+            raise NotImplementedError
+
+    return _NullHost(), _NullRunners()
+
+
+@cli.command("ps")
+def ps_cmd() -> None:
+    """List active pipelines."""
+    from foreman.ps import format_active_pipelines
+
+    config = _load_config_from_env()
+    storage = Storage(config.daemon.sqlite_path)
+    storage.init()
+    click.echo(format_active_pipelines(storage))
+
+
+@cli.command("pipeline-detail")
+@click.argument("project")
+@click.argument("issue_number", type=int)
+def pipeline_detail_cmd(project: str, issue_number: int) -> None:
+    """Show detailed audit trail for one pipeline."""
+    from foreman.ps import format_pipeline_detail
+
+    config = _load_config_from_env()
+    storage = Storage(config.daemon.sqlite_path)
+    storage.init()
+    click.echo(format_pipeline_detail(storage, project, issue_number))
+
+
+@cli.group()
+def worktree() -> None:
+    """Worktree management."""
+
+
+@worktree.command("clean")
+@click.argument("project")
+@click.argument("issue_number", type=int)
+def worktree_clean(project: str, issue_number: int) -> None:
+    """Delete the worktree for a project + issue."""
+    root = os.environ.get(
+        "FOREMAN_WORKTREES_ROOT",
+        str(Path("~/.foreman/worktrees").expanduser()),
+    )
+    target = Path(root) / project / f"issue-{issue_number}"
+    if not target.exists():
+        click.echo(f"No worktree found at {target}.")
+        return
+    shutil.rmtree(target)
+    click.echo(f"Removed {target}.")
 
 
 def main() -> None:

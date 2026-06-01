@@ -65,9 +65,7 @@ def parse_issue_url(url: str) -> tuple[str, str, int]:
 
 def _load_planner_prompt() -> str:
     """Load the planner system prompt from packaged resources."""
-    return (
-        resources.files("foreman.prompts").joinpath("planner.md").read_text(encoding="utf-8")
-    )
+    return resources.files("foreman.prompts").joinpath("planner.md").read_text(encoding="utf-8")
 
 
 def _build_user_prompt(*, issue: IssueRef, instructions: str | None) -> str:
@@ -81,9 +79,7 @@ def _build_user_prompt(*, issue: IssueRef, instructions: str | None) -> str:
     no-op the LLM would have to mentally skip.
     """
     instructions_section = (
-        f"## Project-specific instructions\n\n{instructions}\n\n"
-        if instructions
-        else ""
+        f"## Project-specific instructions\n\n{instructions}\n\n" if instructions else ""
     )
     return (
         f"You are processing GitHub issue #{issue.number}.\n\n"

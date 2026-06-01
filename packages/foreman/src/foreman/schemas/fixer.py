@@ -58,9 +58,7 @@ class UnaddressedFinding(BaseModel):
 
     target: str = Field(
         ...,
-        description=(
-            "The Reviewer finding's target field, copied for audit-log join."
-        ),
+        description=("The Reviewer finding's target field, copied for audit-log join."),
     )
     severity: Literal["critical", "important", "minor"] = Field(
         ...,

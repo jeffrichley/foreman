@@ -43,15 +43,9 @@ def _init_git_repo(
     (path / "README.md").write_text("seed\n")
     subprocess.run(["git", "add", "README.md"], cwd=path, check=True, capture_output=True)
     if with_pyproject:
-        (path / "pyproject.toml").write_text(
-            "[project]\nname = 'fake'\nversion = '0.0.0'\n"
-        )
-        subprocess.run(
-            ["git", "add", "pyproject.toml"], cwd=path, check=True, capture_output=True
-        )
-    subprocess.run(
-        ["git", "commit", "-m", "seed"], cwd=path, check=True, capture_output=True
-    )
+        (path / "pyproject.toml").write_text("[project]\nname = 'fake'\nversion = '0.0.0'\n")
+        subprocess.run(["git", "add", "pyproject.toml"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "seed"], cwd=path, check=True, capture_output=True)
     if origin_path is not None:
         _wire_origin(clone=path, origin=origin_path)
 
@@ -271,9 +265,7 @@ def test_create_skips_uv_sync_if_uv_not_on_path(
         wt_path = mgr.create(clone_path=clone, repo_slug="voice", ticket_id=42)
 
     assert wt_path.exists()
-    assert "cmd" not in capture, (
-        "uv sync must not run when uv is not on PATH"
-    )
+    assert "cmd" not in capture, "uv sync must not run when uv is not on PATH"
 
 
 def test_create_swallows_uv_sync_failure_but_warns(
@@ -320,9 +312,7 @@ def test_create_swallows_uv_sync_failure_but_warns(
     )
 
 
-def test_create_filters_env_for_uv_sync(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_create_filters_env_for_uv_sync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``uv sync`` runs with the same env filter as :class:`GitHubProvider._git`:
     Foreman's ``VIRTUAL_ENV`` etc. must NOT leak into the foreign worktree's
     sync — otherwise we re-introduce the exact bug that issue #10 fixed."""
@@ -437,9 +427,7 @@ def test_create_resolves_default_branch_from_origin_head(tmp_path: Path) -> None
     clone = tmp_path / "clone"
     clone.mkdir()
     # Init on master to prove we don't assume "main".
-    subprocess.run(
-        ["git", "init", "-b", "master"], cwd=clone, check=True, capture_output=True
-    )
+    subprocess.run(["git", "init", "-b", "master"], cwd=clone, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@example.com"],
         cwd=clone,
@@ -454,9 +442,7 @@ def test_create_resolves_default_branch_from_origin_head(tmp_path: Path) -> None
     )
     (clone / "README.md").write_text("seed\n")
     subprocess.run(["git", "add", "README.md"], cwd=clone, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "seed"], cwd=clone, check=True, capture_output=True
-    )
+    subprocess.run(["git", "commit", "-m", "seed"], cwd=clone, check=True, capture_output=True)
     origin = tmp_path / "origin.git"
     origin.mkdir()
     subprocess.run(
@@ -471,9 +457,7 @@ def test_create_resolves_default_branch_from_origin_head(tmp_path: Path) -> None
         check=True,
         capture_output=True,
     )
-    subprocess.run(
-        ["git", "push", "origin", "master"], cwd=clone, check=True, capture_output=True
-    )
+    subprocess.run(["git", "push", "origin", "master"], cwd=clone, check=True, capture_output=True)
     subprocess.run(
         ["git", "remote", "set-head", "origin", "master"],
         cwd=clone,
@@ -501,8 +485,7 @@ def test_create_resolves_default_branch_from_origin_head(tmp_path: Path) -> None
         text=True,
     ).stdout.strip()
     assert branch_tip == origin_tip, (
-        "Default branch must be resolved from origin/HEAD (master here), "
-        "not hardcoded as main."
+        "Default branch must be resolved from origin/HEAD (master here), not hardcoded as main."
     )
 
 
@@ -585,9 +568,7 @@ def test_create_filters_env_on_git_subprocess_calls(
     real_run = subprocess.run
     captured_envs: list[dict[str, str] | None] = []
 
-    def recording_run(
-        cmd: Any, *args: Any, **kwargs: Any
-    ) -> subprocess.CompletedProcess[str]:
+    def recording_run(cmd: Any, *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
         if isinstance(cmd, list) and cmd and cmd[0] == "git":
             captured_envs.append(kwargs.get("env"))
         return real_run(cmd, *args, **kwargs)
@@ -604,9 +585,7 @@ def test_create_filters_env_on_git_subprocess_calls(
             "every git call in create() must pass env=filtered_subprocess_env(); "
             "default env=None would inherit VIRTUAL_ENV and re-introduce issue #10"
         )
-        assert "VIRTUAL_ENV" not in env, (
-            "VIRTUAL_ENV leaked into a git subprocess inside create()"
-        )
+        assert "VIRTUAL_ENV" not in env, "VIRTUAL_ENV leaked into a git subprocess inside create()"
 
 
 # ----------------------------------------------------------------------
@@ -636,13 +615,9 @@ def _seed_clone_with_spec_branch_pushed(clone: Path, *, ticket_id: int) -> str:
     )
     spec_dir = clone / "docs" / "superpowers" / "specs"
     spec_dir.mkdir(parents=True, exist_ok=True)
-    (spec_dir / f"foreman-issue-{ticket_id}-spec.md").write_text(
-        f"# Spec for issue #{ticket_id}\n"
-    )
+    (spec_dir / f"foreman-issue-{ticket_id}-spec.md").write_text(f"# Spec for issue #{ticket_id}\n")
     subprocess.run(["git", "add", "."], cwd=clone, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "spec doc"], cwd=clone, check=True, capture_output=True
-    )
+    subprocess.run(["git", "commit", "-m", "spec doc"], cwd=clone, check=True, capture_output=True)
     subprocess.run(
         ["git", "push", "origin", spec_branch], cwd=clone, check=True, capture_output=True
     )
@@ -689,8 +664,7 @@ def test_create_impl_creates_dir_with_stacked_branch(tmp_path: Path) -> None:
         text=True,
     ).stdout.strip()
     assert impl_tip == spec_head, (
-        f"impl-<N> branch must be based on spec branch tip ({spec_head}); "
-        f"got {impl_tip}"
+        f"impl-<N> branch must be based on spec branch tip ({spec_head}); got {impl_tip}"
     )
 
 
@@ -733,9 +707,7 @@ def test_create_impl_filters_env_on_git_subprocess_calls(
     real_run = subprocess.run
     captured_envs: list[dict[str, str] | None] = []
 
-    def recording_run(
-        cmd: Any, *args: Any, **kwargs: Any
-    ) -> subprocess.CompletedProcess[str]:
+    def recording_run(cmd: Any, *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
         if isinstance(cmd, list) and cmd and cmd[0] == "git":
             captured_envs.append(kwargs.get("env"))
         return real_run(cmd, *args, **kwargs)
@@ -823,9 +795,7 @@ def _seed_clone_with_alt_branch_on_origin(
     ).stdout.strip()
     # Return to main so subsequent operations don't accidentally depend on
     # the alt branch being checked out.
-    subprocess.run(
-        ["git", "checkout", "main"], cwd=clone, check=True, capture_output=True
-    )
+    subprocess.run(["git", "checkout", "main"], cwd=clone, check=True, capture_output=True)
     assert origin_main_tip != origin_alt_tip, "test setup: tips must differ"
     return origin_main_tip, origin_alt_tip
 
@@ -845,9 +815,7 @@ def test_create_with_dev_base_branch_none_uses_default_branch(tmp_path: Path) ->
 
     worktrees_root = tmp_path / "worktrees"
     mgr = WorktreeManager(worktrees_root=worktrees_root)
-    wt_path = mgr.create(
-        clone_path=clone, repo_slug="foreman", ticket_id=16, dev_base_branch=None
-    )
+    wt_path = mgr.create(clone_path=clone, repo_slug="foreman", ticket_id=16, dev_base_branch=None)
 
     branch_tip = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -923,15 +891,8 @@ def test_create_with_dev_base_branch_fetches_alt_branch_not_default(
     real_run = subprocess.run
     fetched_branches: list[str] = []
 
-    def recording_run(
-        cmd: Any, *args: Any, **kwargs: Any
-    ) -> subprocess.CompletedProcess[str]:
-        if (
-            isinstance(cmd, list)
-            and len(cmd) >= 4
-            and cmd[0] == "git"
-            and cmd[1] == "fetch"
-        ):
+    def recording_run(cmd: Any, *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if isinstance(cmd, list) and len(cmd) >= 4 and cmd[0] == "git" and cmd[1] == "fetch":
             # cmd looks like ['git', 'fetch', '--quiet', 'origin', '<branch>']
             fetched_branches.append(cmd[-1])
         return real_run(cmd, *args, **kwargs)

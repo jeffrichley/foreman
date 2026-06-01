@@ -155,14 +155,10 @@ def _extract_findings_from_review_comment(body: str) -> list[Finding]:
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
-        _log.warning(
-            "Failed to parse Reviewer findings JSON block: %s; raw=%r", exc, raw
-        )
+        _log.warning("Failed to parse Reviewer findings JSON block: %s; raw=%r", exc, raw)
         return []
     if not isinstance(payload, list):
-        _log.warning(
-            "Reviewer findings JSON block was not a list: type=%s", type(payload).__name__
-        )
+        _log.warning("Reviewer findings JSON block was not a list: type=%s", type(payload).__name__)
         return []
     findings: list[Finding] = []
     for entry in payload:
@@ -190,9 +186,7 @@ def _render_findings_markdown(findings: list[Finding]) -> str:
         parts.append(f"### {sev.capitalize()}\n")
         for f in bucket:
             parts.append(
-                f"- **target**: {f.target}\n"
-                f"  - **issue**: {f.issue}\n"
-                f"  - **needed**: {f.needed}\n"
+                f"- **target**: {f.target}\n  - **issue**: {f.issue}\n  - **needed**: {f.needed}\n"
             )
         parts.append("")
     return "\n".join(parts)
@@ -240,13 +234,10 @@ def _build_user_prompt(
     When ``None`` the section is omitted entirely.
     """
     instructions_section = (
-        f"## Project-specific instructions\n\n{instructions}\n\n"
-        if instructions
-        else ""
+        f"## Project-specific instructions\n\n{instructions}\n\n" if instructions else ""
     )
     spec_section = (
-        f"## Spec doc (currently committed in this PR)\n"
-        f"```markdown\n{spec_doc_content}\n```\n\n"
+        f"## Spec doc (currently committed in this PR)\n```markdown\n{spec_doc_content}\n```\n\n"
         if spec_doc_content
         else (
             "## Spec doc\nNot inlined — read it from the worktree using "
@@ -282,11 +273,7 @@ def _read_spec_doc(worktree_path: Path, issue_number: int) -> str | None:
     the file is missing — the LLM can still find it via Read.
     """
     spec_path = (
-        worktree_path
-        / "docs"
-        / "superpowers"
-        / "specs"
-        / f"foreman-issue-{issue_number}-spec.md"
+        worktree_path / "docs" / "superpowers" / "specs" / f"foreman-issue-{issue_number}-spec.md"
     )
     if not spec_path.exists():
         return None
@@ -404,7 +391,8 @@ async def run_fixer(
     if _LABEL_SPEC_FIX not in issue_labels:
         raise RuntimeError(
             f"Issue #{issue_number} does not carry the {_LABEL_SPEC_FIX!r} "
-            f"label (labels: " + ", ".join(sorted(issue_labels) or ["<none>"])
+            f"label (labels: "
+            + ", ".join(sorted(issue_labels) or ["<none>"])
             + "). The Fixer only acts on issues queued by the Reviewer."
         )
 
@@ -516,9 +504,7 @@ async def run_fixer(
         pr_number=pr.number,
         attempt=attempt,
         outcome=llm_output.outcome,
-        total_findings=(
-            len(llm_output.addressed_findings) + len(llm_output.unaddressed_findings)
-        ),
+        total_findings=(len(llm_output.addressed_findings) + len(llm_output.unaddressed_findings)),
         addressed_count=len(llm_output.addressed_findings),
         unaddressed_count=len(llm_output.unaddressed_findings),
         unaddressed_by_reason=unaddressed_hist,
