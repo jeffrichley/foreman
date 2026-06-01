@@ -7,6 +7,7 @@ loop for the live daemon (added in Phase 8 — daemon composition).
 
 from __future__ import annotations
 
+import logging
 import traceback
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -17,6 +18,8 @@ from foreman.dispatcher import Action, ActionKind, Ticket, next_action
 from foreman.locks import TicketLockManager
 from foreman.queue import DaemonQueue
 from foreman.storage import Storage
+
+_log = logging.getLogger("foreman.daemon.worker")
 
 
 @dataclass(frozen=True)
@@ -87,7 +90,26 @@ async def run_one_iteration(
 
         action = next_action(ticket, project_cfg)
         if action is None:
+            _log.info(
+                "dequeued ticket parked (no actionable next state)",
+                extra={
+                    "project": ticket.project_name,
+                    "issue": ticket.issue_number,
+                    "labels": sorted(ticket.labels),
+                },
+            )
             return True
+
+        _log.info(
+            "dispatching role",
+            extra={
+                "project": ticket.project_name,
+                "issue": ticket.issue_number,
+                "action": action.kind.value,
+                "role": _ACTION_TO_ROLE_NAME[action.kind],
+                "labels": sorted(ticket.labels),
+            },
+        )
 
         pipeline_id = storage.upsert_pipeline(
             project=ticket.project_name,
@@ -108,6 +130,7 @@ async def run_one_iteration(
             result = await dispatcher.dispatch(ticket=ticket, action=action)
         except Exception as exc:
             finish_at = datetime.now(UTC)
+            duration_ms = int((finish_at - now).total_seconds() * 1000)
             storage.record_node_run_finish(
                 run_id=run_id,
                 at=finish_at,
@@ -120,6 +143,18 @@ async def run_one_iteration(
                 role=role_name,
                 reason=f"{type(exc).__name__}: {exc}",
                 traceback=traceback.format_exc(),
+            )
+            _log.error(
+                "role dispatch failed",
+                extra={
+                    "project": ticket.project_name,
+                    "issue": ticket.issue_number,
+                    "role": role_name,
+                    "duration_ms": duration_ms,
+                    "error_class": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                exc_info=True,
             )
             return True
 
@@ -138,6 +173,20 @@ async def run_one_iteration(
             actor=role_name,
         )
 
+        duration_ms = int((finish_at - now).total_seconds() * 1000)
+        _log.info(
+            "role dispatch completed",
+            extra={
+                "project": ticket.project_name,
+                "issue": ticket.issue_number,
+                "role": role_name,
+                "outcome": result.outcome,
+                "duration_ms": duration_ms,
+                "from_labels": sorted(ticket.labels),
+                "to_labels": sorted(result.new_labels),
+            },
+        )
+
         new_ticket = Ticket(
             project_name=ticket.project_name,
             issue_number=ticket.issue_number,
@@ -146,5 +195,22 @@ async def run_one_iteration(
         )
         if next_action(new_ticket, project_cfg) is not None:
             queue.enqueue(new_ticket)
+            _log.info(
+                "ticket re-enqueued for next stage",
+                extra={
+                    "project": new_ticket.project_name,
+                    "issue": new_ticket.issue_number,
+                    "labels": sorted(new_ticket.labels),
+                },
+            )
+        else:
+            _log.info(
+                "ticket parked after role completion",
+                extra={
+                    "project": new_ticket.project_name,
+                    "issue": new_ticket.issue_number,
+                    "labels": sorted(new_ticket.labels),
+                },
+            )
 
     return True
