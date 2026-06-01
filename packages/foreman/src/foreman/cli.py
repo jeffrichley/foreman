@@ -1,6 +1,9 @@
 """Foreman CLI — `foreman plan` + `foreman review` + `foreman fix` +
 `foreman implement` are the walking-skeleton entries.
 
+`foreman init` is the onboarding entry — runs the one-shot setup pass
+that prepares a new target repo + writes the project's config block.
+
 Thickening will add: `foreman daemon ...`, `foreman project add`, etc.
 """
 
@@ -11,8 +14,10 @@ import os
 from pathlib import Path
 
 import click
+from github import Auth, Github
 
 from foreman.config import load_config
+from foreman.init import InitConfig, detect_matching_clone, run_init
 from foreman.providers.anthropic_sdk import AnthropicSDKProvider
 from foreman.roles.fixer import run_fixer
 from foreman.roles.planner import run_planner
@@ -182,6 +187,117 @@ def implement(issue_url: str, project: str, config_path: Path | None) -> None:
         f"{skipped} skipped, did_check_pass={result.final_did_check_pass}, "
         f"PR={pr_part}"
     )
+
+
+@cli.command()
+@click.argument("repo")
+@click.option(
+    "--name",
+    default=None,
+    help=(
+        "Project name used as the [projects.<name>] config key. "
+        "Defaults to the <repo> portion of <owner/repo>."
+    ),
+)
+@click.option(
+    "--clone-path",
+    "clone_path",
+    default=None,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help=(
+        "Local path to the repo's clone on disk. If omitted, the cwd is "
+        "used when its 'origin' remote matches the target repo."
+    ),
+)
+@click.option(
+    "--check-command",
+    "check_command",
+    default="just check",
+    show_default=True,
+    help="Quality gate command Foreman's Worker runs before claiming done.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Overwrite an existing [projects.<name>] block in the config.",
+)
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Path to foreman config (default: $FOREMAN_CONFIG or ~/.foreman/config.toml)",
+)
+def init(
+    repo: str,
+    name: str | None,
+    clone_path: Path | None,
+    check_command: str,
+    force: bool,
+    config_path: Path | None,
+) -> None:
+    """Onboard a new GitHub repo onto Foreman.
+
+    REPO is the target repo in ``owner/repo`` form.
+
+    Writes the project's config block, creates Foreman's labels on the
+    repo, writes a ``.foreman/INSTRUCTIONS.md`` template (skipping if it
+    already exists), and best-effort verifies that each role's GitHub
+    App is installed on the target repo.
+    """
+    cfg_path = config_path or _default_config_path()
+
+    # Default --name from the repo's tail.
+    if name is None:
+        if "/" not in repo:
+            raise click.ClickException(
+                "REPO must be in 'owner/repo' form to default --name."
+            )
+        name = repo.split("/", 1)[1]
+
+    # Default --clone-path from cwd when cwd points at the same repo.
+    if clone_path is None:
+        detected = detect_matching_clone(Path.cwd(), repo)
+        if detected is None:
+            raise click.ClickException(
+                "--clone-path is required (current directory's 'origin' "
+                f"remote does not match {repo!r}). Re-run with "
+                "--clone-path /path/to/clone."
+            )
+        clone_path = detected
+
+    init_config = InitConfig(
+        repo=repo,
+        name=name,
+        clone_path=clone_path,
+        check_command=check_command,
+        force=force,
+        config_path=cfg_path,
+    )
+
+    # Admin client uses the operator's PAT for label creation. The
+    # token env var name matches AdminConfig's default
+    # (``FOREMAN_ADMIN_TOKEN``); operators can still set ``GH_TOKEN``
+    # / ``GITHUB_TOKEN`` for parity with ``gh``.
+    admin_token = (
+        os.environ.get("FOREMAN_ADMIN_TOKEN")
+        or os.environ.get("GH_TOKEN")
+        or os.environ.get("GITHUB_TOKEN")
+    )
+    if not admin_token:
+        raise click.ClickException(
+            "No admin GitHub token found. Set FOREMAN_ADMIN_TOKEN (or "
+            "GH_TOKEN / GITHUB_TOKEN) to a PAT with write access to "
+            f"{repo!r} so foreman init can create labels."
+        )
+    admin_client = Github(auth=Auth.Token(admin_token))
+
+    try:
+        result = run_init(init_config, admin_client=admin_client)
+    except (ValueError, FileExistsError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(result.summary)
 
 
 def main() -> None:

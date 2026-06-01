@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from click.testing import CliRunner
 
 from foreman.cli import cli
 from foreman.git_host import PRRef
+from foreman.init import BotVerification, InitResult
 from foreman.schemas.fixer import (
     AddressedFinding,
     FixerOutput,
@@ -295,3 +296,133 @@ worker_private_key_path = "/tmp/worker.pem"
     assert "did_check_pass=True" in result.output
     assert "PR=https://github.com/jeffrichley/voice/pull/101" in result.output
     mock_run.assert_called_once()
+
+
+def test_cli_help_lists_init_subcommand() -> None:
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--help"])
+    assert result.exit_code == 0
+    assert "init" in result.output
+
+
+def test_cli_init_invokes_run_init(tmp_path: Path, monkeypatch) -> None:
+    """The ``foreman init`` CLI surface delegates to ``foreman.init.run_init``.
+
+    We mock the underlying orchestrator so the CLI test stays a pure
+    surface check: arg threading + summary echo.
+    """
+    monkeypatch.setenv("FOREMAN_ADMIN_TOKEN", "ghp_fake_admin_token")
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    config_file = tmp_path / "config.toml"
+
+    fake_summary = "OK Foreman initialized for jeffrichley/foreman\n  ..."
+    fake_result = InitResult(
+        repo="jeffrichley/foreman",
+        name="foreman",
+        clone_path=clone,
+        config_path=config_file,
+        instructions_path=clone / ".foreman" / "INSTRUCTIONS.md",
+        instructions_written=True,
+        labels_created=["foreman:plan"],
+        labels_existing=[],
+        bot_verifications=[
+            BotVerification(role="planner", ok=True, detail="OK"),
+        ],
+        summary=fake_summary,
+    )
+
+    runner = CliRunner()
+    with (
+        patch("foreman.cli.run_init", return_value=fake_result) as mock_run,
+        patch("foreman.cli.Github", return_value=MagicMock()),
+    ):
+        result = runner.invoke(
+            cli,
+            [
+                "init",
+                "jeffrichley/foreman",
+                "--name",
+                "foreman",
+                "--clone-path",
+                str(clone),
+                "--config",
+                str(config_file),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "OK Foreman initialized" in result.output
+    mock_run.assert_called_once()
+
+
+def test_cli_init_requires_admin_token(tmp_path: Path, monkeypatch) -> None:
+    """No admin token → ClickException explaining what's needed."""
+    monkeypatch.delenv("FOREMAN_ADMIN_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    clone = tmp_path / "clone"
+    clone.mkdir()
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "init",
+            "jeffrichley/foreman",
+            "--name",
+            "foreman",
+            "--clone-path",
+            str(clone),
+            "--config",
+            str(tmp_path / "config.toml"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "admin GitHub token" in result.output
+
+
+def test_cli_init_defaults_name_from_repo_tail(tmp_path: Path, monkeypatch) -> None:
+    """When ``--name`` is omitted, the repo's tail is used."""
+    monkeypatch.setenv("FOREMAN_ADMIN_TOKEN", "ghp_fake")
+    clone = tmp_path / "clone"
+    clone.mkdir()
+
+    captured: dict[str, str] = {}
+
+    def fake_run_init(init_config, *, admin_client):  # type: ignore[no-untyped-def]
+        captured["name"] = init_config.name
+        return InitResult(
+            repo=init_config.repo,
+            name=init_config.name,
+            clone_path=init_config.clone_path,
+            config_path=init_config.config_path,
+            instructions_path=init_config.clone_path / ".foreman" / "INSTRUCTIONS.md",
+            instructions_written=True,
+            labels_created=[],
+            labels_existing=[],
+            bot_verifications=[],
+            summary="OK",
+        )
+
+    runner = CliRunner()
+    with (
+        patch("foreman.cli.run_init", side_effect=fake_run_init),
+        patch("foreman.cli.Github", return_value=MagicMock()),
+    ):
+        result = runner.invoke(
+            cli,
+            [
+                "init",
+                "jeffrichley/some-new-repo",
+                "--clone-path",
+                str(clone),
+                "--config",
+                str(tmp_path / "config.toml"),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert captured["name"] == "some-new-repo"
