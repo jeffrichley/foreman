@@ -38,6 +38,7 @@ checks.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -47,14 +48,30 @@ from pathlib import Path
 from github import Github
 from github.PullRequest import PullRequest
 from github.Repository import Repository
+from pydantic import ValidationError
 
 from foreman.config import Config
 from foreman.identity import IdentityRegistry
 from foreman.provider import ProviderFacade
+from foreman.roles.reviewer import FINDINGS_BEGIN_MARKER, FINDINGS_END_MARKER
 from foreman.schemas.fixer import FixerOutput, FixerRunResult
 from foreman.schemas.reviewer import Finding
 from foreman.stats import log_fixer_run
 from foreman.worktree import WorktreeManager
+
+_log = logging.getLogger(__name__)
+
+# Match the marker-fenced JSON block embedded by the Reviewer
+# (see ``foreman.roles.reviewer._build_findings_block``). The Reviewer wraps
+# the JSON in a ``<details>`` fold for readability, so the markers may have
+# arbitrary HTML between them and the fenced block — we anchor on the fence
+# itself rather than expecting a fixed layout.
+_FINDINGS_BLOCK_RE = re.compile(
+    re.escape(FINDINGS_BEGIN_MARKER)
+    + r".*?```json\s*\n(?P<json>.*?)\n```.*?"
+    + re.escape(FINDINGS_END_MARKER),
+    flags=re.DOTALL,
+)
 
 _ISSUE_URL_RE = re.compile(
     r"https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/issues/(?P<number>\d+)"
@@ -105,6 +122,55 @@ def _count_fix_attempts(label_names: set[str]) -> int:
 def _load_fixer_prompt() -> str:
     """Load the fixer system prompt from packaged resources."""
     return resources.files("foreman.prompts").joinpath("fixer.md").read_text(encoding="utf-8")
+
+
+def _extract_findings_from_review_comment(body: str) -> list[Finding]:
+    """Recover the Reviewer's structured findings from a posted review body.
+
+    The Reviewer embeds the findings as a marker-fenced JSON block
+    (see :func:`foreman.roles.reviewer._build_findings_block`). This is the
+    only path the structured list takes across the role boundary in v1 —
+    the in-memory ``ReviewerOutput.findings`` list is process-local and
+    does not survive into the Fixer's run.
+
+    Returns ``[]`` on:
+      - missing markers (review body predates this feature, or block
+        stripped by some intermediary)
+      - missing fenced JSON inside markers (malformed block)
+      - JSON that fails to parse
+      - JSON entries that fail :class:`Finding` validation
+
+    A warning is logged in each malformed case so operators can diagnose,
+    but we never raise — the Fixer falls back to its existing
+    "no structured findings" behavior. Empty list is a valid wire shape
+    (Reviewer always emits the block, even on clean outcomes).
+    """
+    if not body:
+        return []
+    m = _FINDINGS_BLOCK_RE.search(body)
+    if m is None:
+        return []
+    raw = m.group("json").strip()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        _log.warning(
+            "Failed to parse Reviewer findings JSON block: %s; raw=%r", exc, raw
+        )
+        return []
+    if not isinstance(payload, list):
+        _log.warning(
+            "Reviewer findings JSON block was not a list: type=%s", type(payload).__name__
+        )
+        return []
+    findings: list[Finding] = []
+    for entry in payload:
+        try:
+            findings.append(Finding.model_validate(entry))
+        except ValidationError as exc:
+            _log.warning("Skipping invalid finding entry %r: %s", entry, exc)
+            continue
+    return findings
 
 
 def _render_findings_markdown(findings: list[Finding]) -> str:
@@ -359,16 +425,17 @@ async def run_fixer(
         ticket_id=issue_number,
     )
 
-    # We pass the Reviewer findings into the LLM as the work list. We
-    # reconstruct them from the Reviewer's posted review body is brittle,
-    # so we expect the caller (typically a daemon) to have access to the
-    # ReviewerOutput. For the v1 CLI path, the Fixer parses what it can
-    # from the review body. The walking-skeleton design hands the
-    # Reviewer's structured findings forward via the Reviewer's PyGithub
-    # client + review prose; richer state-passing is foreman#11.
-    findings: list[Finding] = []  # v1 fallback — LLM reads structured
-    # findings out of the review_comment prose. When the daemon path
-    # lands, this will be filled in from persisted ReviewerOutput.
+    # Recover the Reviewer's structured findings from the marker-fenced
+    # JSON block the Reviewer embeds in its posted review body
+    # (see ``foreman.roles.reviewer._build_findings_block``). This is the
+    # only path the structured list takes across the role boundary in v1 —
+    # the in-memory ``ReviewerOutput.findings`` is process-local. Without
+    # this extraction the Fixer's "every edit must trace to a structured
+    # finding" rule produces zero actions; the contract was broken before.
+    # On malformed/missing block we return ``[]`` (logged warning) and the
+    # LLM falls back to reading the prose ``review_comment`` — same behavior
+    # as before this fix, just no longer the default.
+    findings: list[Finding] = _extract_findings_from_review_comment(review_comment)
 
     spec_doc_content = _read_spec_doc(wt_path, issue_number)
 

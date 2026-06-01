@@ -25,9 +25,11 @@ from foreman.config import AppsConfig, Config, ProjectConfig
 from foreman.roles.fixer import (
     FIXER_ALLOWED_TOOLS,
     _count_fix_attempts,
+    _extract_findings_from_review_comment,
     parse_issue_url,
     run_fixer,
 )
+from foreman.roles.reviewer import FINDINGS_BEGIN_MARKER, FINDINGS_END_MARKER
 from foreman.schemas.fixer import (
     AddressedFinding,
     CommitMade,
@@ -944,3 +946,234 @@ async def test_run_fixer_raises_when_pr_has_no_reviews(
             provider=fake_provider,
             identity_registry=registry,
         )
+
+
+# ----------------------------------------------------------------------
+# _extract_findings_from_review_comment — unit tests
+# ----------------------------------------------------------------------
+
+
+def _build_review_body_with_findings(findings_json: str) -> str:
+    """Compose a review body in the exact shape the Reviewer posts.
+
+    The Reviewer wraps the fenced JSON in a ``<details>`` fold between the
+    begin/end markers. Tests mirror that layout so extraction stays anchored
+    to the real wire format, not a simplified stand-in.
+    """
+    return (
+        "needs_fix — see findings below.\n\n"
+        f"{FINDINGS_BEGIN_MARKER}\n"
+        "<details>\n"
+        "<summary>Structured findings (for Fixer)</summary>\n\n"
+        f"```json\n{findings_json}\n```\n\n"
+        "</details>\n"
+        f"{FINDINGS_END_MARKER}"
+    )
+
+
+def test_extract_findings_happy_path_returns_finding_list() -> None:
+    """Well-formed marker-fenced block → parsed list of ``Finding``."""
+    payload = json.dumps(
+        [
+            {
+                "severity": "critical",
+                "target": "packages/foo/src/foo/missing.py",
+                "issue": "Spec references a file that doesn't exist.",
+                "needed": "Create the file or remove the reference.",
+            },
+            {
+                "severity": "important",
+                "target": "Acceptance criteria bullet 3",
+                "issue": "Says 'improve' without a concrete verb.",
+                "needed": "Replace 'improve' with 'returns within 200ms'.",
+            },
+        ]
+    )
+    body = _build_review_body_with_findings(payload)
+
+    findings = _extract_findings_from_review_comment(body)
+
+    assert len(findings) == 2
+    assert findings[0].severity == "critical"
+    assert findings[0].target == "packages/foo/src/foo/missing.py"
+    assert findings[0].issue.startswith("Spec references")
+    assert findings[0].needed.startswith("Create the file")
+    assert findings[1].severity == "important"
+    assert findings[1].target == "Acceptance criteria bullet 3"
+
+
+def test_extract_findings_empty_list_is_valid() -> None:
+    """Reviewer always emits the block — empty list on clean outcomes →
+    extractor must return ``[]`` (not error)."""
+    body = _build_review_body_with_findings("[]")
+    assert _extract_findings_from_review_comment(body) == []
+
+
+def test_extract_findings_missing_markers_returns_empty_list() -> None:
+    """Old-format review (no markers) must not crash — return ``[]``."""
+    body = "needs_fix — please address these issues.\n\nSome prose only."
+    assert _extract_findings_from_review_comment(body) == []
+
+
+def test_extract_findings_only_begin_marker_returns_empty() -> None:
+    body = (
+        "needs_fix.\n\n"
+        + FINDINGS_BEGIN_MARKER
+        + "\n```json\n[]\n```\n"
+    )
+    assert _extract_findings_from_review_comment(body) == []
+
+
+def test_extract_findings_malformed_json_returns_empty_list() -> None:
+    """Markers present but the inner JSON is broken → ``[]``, never raise."""
+    body = _build_review_body_with_findings("[{not valid json")
+    assert _extract_findings_from_review_comment(body) == []
+
+
+def test_extract_findings_json_object_not_list_returns_empty() -> None:
+    """Wrong shape (object, not array) → ``[]`` with a warning."""
+    body = _build_review_body_with_findings('{"severity": "critical"}')
+    assert _extract_findings_from_review_comment(body) == []
+
+
+def test_extract_findings_skips_invalid_entries_keeps_valid_ones() -> None:
+    """Per-entry validation: bad entries are skipped, good ones survive."""
+    payload = json.dumps(
+        [
+            {
+                "severity": "critical",
+                "target": "valid",
+                "issue": "ok",
+                "needed": "fix",
+            },
+            # Missing required field 'needed'
+            {"severity": "important", "target": "broken", "issue": "missing-needed"},
+            # Invalid severity literal
+            {
+                "severity": "blocker",
+                "target": "bad-severity",
+                "issue": "x",
+                "needed": "y",
+            },
+        ]
+    )
+    body = _build_review_body_with_findings(payload)
+    findings = _extract_findings_from_review_comment(body)
+    assert len(findings) == 1
+    assert findings[0].target == "valid"
+
+
+def test_extract_findings_handles_empty_body() -> None:
+    assert _extract_findings_from_review_comment("") == []
+
+
+# ----------------------------------------------------------------------
+# run_fixer — extracted findings reach the LLM user prompt
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_fixer_passes_extracted_findings_into_user_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end contract: when the Reviewer's posted review body carries
+    the marker-fenced JSON block, the Fixer recovers the findings and feeds
+    them into the user prompt (both the markdown and JSON renders). Without
+    this, the Fixer's "every edit must trace to a structured finding" rule
+    produces zero actions — the bug this fix exists to close.
+    """
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    cfg = _make_config(clone)
+
+    findings_payload = json.dumps(
+        [
+            {
+                "severity": "critical",
+                "target": "packages/foo/src/foo/missing.py",
+                "issue": "Spec references a file that doesn't exist.",
+                "needed": "Create the file or remove the reference.",
+            }
+        ]
+    )
+    enriched_review_body = _build_review_body_with_findings(findings_payload)
+
+    repo, _pr, _issue = _make_fake_repo(
+        issue_number=42,
+        head_sha=head_sha,
+        reviews=[_FakeReview(enriched_review_body)],
+    )
+    client = _FakeFixerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+
+    await run_fixer(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    fake_provider.run_agent.assert_called_once()
+    user_prompt = fake_provider.run_agent.call_args.kwargs["user_prompt"]
+
+    # The finding's distinctive target string must appear in BOTH the
+    # markdown render (reading order) AND the JSON render (authoritative
+    # targeting) sections — confirms the extracted findings flowed through
+    # to the prompt the LLM actually sees.
+    assert "packages/foo/src/foo/missing.py" in user_prompt
+    assert "Spec references a file that doesn't exist." in user_prompt
+    assert "Create the file or remove the reference." in user_prompt
+    # And the "_No findings carried forward._" sentinel from the empty-list
+    # branch of ``_render_findings_markdown`` must NOT be present — that
+    # would prove the old broken-contract behavior.
+    assert "_No findings carried forward._" not in user_prompt
+
+
+@pytest.mark.asyncio
+async def test_run_fixer_uses_empty_findings_when_review_body_lacks_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the Reviewer's review body has no marker-fenced block (older
+    runs, third-party reviews, etc.), the Fixer must not crash — it falls
+    back to an empty findings list and the LLM relies on the prose. Same
+    behavior as before this fix, just no longer the default path.
+    """
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    cfg = _make_config(clone)
+    repo, _pr, _issue = _make_fake_repo(
+        issue_number=42,
+        head_sha=head_sha,
+        reviews=[_FakeReview("needs_fix — prose only, no structured block.")],
+    )
+    client = _FakeFixerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+
+    await run_fixer(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    user_prompt = fake_provider.run_agent.call_args.kwargs["user_prompt"]
+    # The "no findings carried forward" sentinel proves the fallback was
+    # taken (empty list → markdown renderer's empty branch).
+    assert "_No findings carried forward._" in user_prompt
+    # The prose context still flows through so the LLM has something to
+    # read even when structured findings are absent.
+    assert "needs_fix — prose only, no structured block." in user_prompt
