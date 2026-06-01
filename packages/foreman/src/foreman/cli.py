@@ -1,4 +1,5 @@
-"""Foreman CLI — `foreman plan` + `foreman review` are the walking-skeleton entries.
+"""Foreman CLI — `foreman plan` + `foreman review` + `foreman fix` are the
+walking-skeleton entries.
 
 Thickening will add: `foreman work`, `foreman daemon ...`, `foreman project
 add`, etc.
@@ -14,6 +15,7 @@ import click
 
 from foreman.config import load_config
 from foreman.providers.anthropic_sdk import AnthropicSDKProvider
+from foreman.roles.fixer import run_fixer
 from foreman.roles.planner import run_planner
 from foreman.roles.reviewer import run_reviewer
 
@@ -96,6 +98,45 @@ def review(pr_url: str, project: str, config_path: Path | None) -> None:
     click.echo(
         f"{result.outcome}: {len(result.findings)} findings, "
         f"confidence={result.confidence}"
+    )
+
+
+@cli.command()
+@click.argument("issue_url", type=str)
+@click.option("--project", required=True, help="Project name as defined in config.toml")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Path to foreman config (default: $FOREMAN_CONFIG or ~/.foreman/config.toml)",
+)
+def fix(issue_url: str, project: str, config_path: Path | None) -> None:
+    """Run the Fixer on an issue queued by the Reviewer.
+
+    The issue must carry ``foreman:spec-fix``. The Fixer derives the spec
+    PR from the issue's ``foreman/issue-<N>`` branch, applies addressable
+    Reviewer findings to the spec doc, commits + pushes, and advances the
+    label based on outcome.
+    """
+    cfg_path = config_path or _default_config_path()
+    cfg = load_config(cfg_path)
+    provider = AnthropicSDKProvider()
+    result = asyncio.run(
+        run_fixer(
+            issue_url=issue_url,
+            config=cfg,
+            project_name=project,
+            worktrees_root=_default_worktrees_root(),
+            provider=provider,
+        )
+    )
+    llm = result.llm_output
+    addressed = len(llm.addressed_findings)
+    unaddressed = len(llm.unaddressed_findings)
+    click.echo(
+        f"{llm.outcome}: {result.attempt}/3 attempt, {addressed} fixed, "
+        f"{unaddressed} unaddressed"
     )
 
 
