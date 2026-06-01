@@ -20,6 +20,11 @@ from foreman.worker import RoleDispatcher, run_one_iteration
 
 class _HostLike(Protocol):
     def search_foreman_labeled_issues(self, repo: str): ...
+    def add_issue_label(self, repo: str, issue_number: int, label: str) -> None: ...
+    def post_issue_comment(self, repo: str, issue_number: int, body: str) -> None: ...
+
+
+_IN_FLIGHT_LABELS = frozenset({"foreman:planning", "foreman:implementing"})
 
 
 class Daemon:
@@ -42,10 +47,42 @@ class Daemon:
         self._shutdown_event = asyncio.Event()
 
     async def start(self) -> None:
-        """Initialize storage, then launch poller and worker tasks."""
+        """Initialize storage, run reconciliation, then launch tasks."""
         self.storage.init()
+        self._reconcile_in_flight()
         self._tasks.append(asyncio.create_task(self._poller_loop()))
         self._tasks.append(asyncio.create_task(self._worker_loop()))
+
+    def _reconcile_in_flight(self) -> None:
+        """Halt any tickets in in-flight states by adding foreman:failed.
+
+        If a ticket's labels include foreman:planning or foreman:implementing,
+        the daemon crashed mid-role-run (since the live daemon's locks would
+        otherwise prevent us reaching here). We can't safely auto-retry
+        because roles are not yet idempotent. Mark failed; operator decides
+        whether to clear the label and resume.
+        """
+        for project_name, project in self.config.projects.items():
+            try:
+                issues = self.host.search_foreman_labeled_issues(project.repo)
+            except Exception:
+                continue
+            for issue in issues:
+                labels = set(issue.labels)
+                if not (labels & _IN_FLIGHT_LABELS):
+                    continue
+                if "foreman:failed" in labels:
+                    continue
+                self.host.add_issue_label(project.repo, issue.number, "foreman:failed")
+                self.host.post_issue_comment(
+                    project.repo,
+                    issue.number,
+                    "Daemon crashed during a role run (label was in an in-flight "
+                    "state at startup). The ticket has been halted with "
+                    "`foreman:failed` for inspection. Remove the label to resume "
+                    "from current state, or use `foreman replay` to re-run from "
+                    "a prior state.",
+                )
 
     async def shutdown(self) -> None:
         """Signal shutdown, cancel tasks, wait for them to finish."""

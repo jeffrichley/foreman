@@ -95,3 +95,76 @@ async def test_daemon_shutdown_is_idempotent(tmp_path: Path) -> None:
     await daemon.start()
     await daemon.shutdown()
     await daemon.shutdown()
+
+
+@dataclass
+class _MutableHost:
+    """Like _FakeHost but tracks label-add side effects for verification."""
+
+    issues_by_query: dict[str, list[_FakeIssue]] = field(default_factory=dict)
+    added_labels: list[tuple[str, int, str]] = field(default_factory=list)
+    posted_comments: list[tuple[str, int, str]] = field(default_factory=list)
+
+    def search_foreman_labeled_issues(self, repo: str) -> list[_FakeIssue]:
+        return list(self.issues_by_query.get(repo, []))
+
+    def add_issue_label(self, repo: str, issue_number: int, label: str) -> None:
+        self.added_labels.append((repo, issue_number, label))
+
+    def post_issue_comment(self, repo: str, issue_number: int, body: str) -> None:
+        self.posted_comments.append((repo, issue_number, body))
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_halts_planning_state_with_failed_label(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    host = _MutableHost(
+        issues_by_query={
+            "jeffrichley/voice": [
+                _FakeIssue(
+                    number=42,
+                    labels=["foreman:planning"],
+                    updated_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+                )
+            ]
+        }
+    )
+    dispatcher = _FakeRoleDispatcher()
+
+    daemon = Daemon(config=config, host=host, role_dispatcher=dispatcher)
+    await daemon.start()
+    await asyncio.sleep(0.3)
+    await daemon.shutdown()
+
+    assert ("jeffrichley/voice", 42, "foreman:failed") in host.added_labels
+    # Dispatcher must NOT have been called — ticket should park after the
+    # foreman:failed label is added.
+    assert dispatcher.calls == []
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_skips_already_failed_ticket(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    host = _MutableHost(
+        issues_by_query={
+            "jeffrichley/voice": [
+                _FakeIssue(
+                    number=42,
+                    labels=["foreman:planning", "foreman:failed"],
+                    updated_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+                )
+            ]
+        }
+    )
+    dispatcher = _FakeRoleDispatcher()
+
+    daemon = Daemon(config=config, host=host, role_dispatcher=dispatcher)
+    await daemon.start()
+    await asyncio.sleep(0.3)
+    await daemon.shutdown()
+
+    # No duplicate failed-label add; no dispatch.
+    assert ("jeffrichley/voice", 42, "foreman:failed") not in host.added_labels
+    assert dispatcher.calls == []
