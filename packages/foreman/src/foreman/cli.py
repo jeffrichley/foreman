@@ -25,6 +25,7 @@ from foreman.roles.fixer import run_fixer
 from foreman.roles.planner import run_planner
 from foreman.roles.reviewer import run_reviewer
 from foreman.roles.worker import run_worker
+from foreman.storage import Storage
 
 
 def _default_config_path() -> Path:
@@ -429,6 +430,30 @@ def _resolve_host_and_runners(config: Config) -> tuple[Any, Any]:
             raise NotImplementedError
 
     return _NullHost(), _NullRunners()
+
+
+@cli.command("ps")
+def ps_cmd() -> None:
+    """List active pipelines."""
+    from foreman.ps import format_active_pipelines
+
+    config = _load_config_from_env()
+    storage = Storage(config.daemon.sqlite_path)
+    storage.init()
+    click.echo(format_active_pipelines(storage))
+
+
+@cli.command("pipeline-detail")
+@click.argument("project")
+@click.argument("issue_number", type=int)
+def pipeline_detail_cmd(project: str, issue_number: int) -> None:
+    """Show detailed audit trail for one pipeline."""
+    from foreman.ps import format_pipeline_detail
+
+    config = _load_config_from_env()
+    storage = Storage(config.daemon.sqlite_path)
+    storage.init()
+    click.echo(format_pipeline_detail(storage, project, issue_number))
 
 
 def main() -> None:

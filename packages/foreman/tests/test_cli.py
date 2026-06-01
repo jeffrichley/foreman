@@ -458,3 +458,61 @@ def test_daemon_start_foreground_runs_and_exits_clean(tmp_path: Path, monkeypatc
 
     result = CliRunner().invoke(cli, ["daemon", "start", "--max-iterations", "1"])
     assert result.exit_code == 0
+
+
+def test_ps_shows_active_tickets(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f"[admin]\ngithub_token_env = \"X\"\n"
+        f"[daemon]\nsqlite_path = \"{(tmp_path / 'f.sqlite').as_posix()}\"\n"
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+
+    from datetime import datetime, timezone
+    from foreman.storage import Storage
+
+    storage = Storage(tmp_path / "f.sqlite")
+    storage.init()
+    storage.upsert_pipeline(
+        "voice", 42, "foreman:spec-review", datetime(2026, 6, 1, tzinfo=timezone.utc)
+    )
+
+    from click.testing import CliRunner
+    from foreman.cli import cli
+
+    result = CliRunner().invoke(cli, ["ps"])
+    assert result.exit_code == 0
+    assert "voice" in result.output
+    assert "42" in result.output
+    assert "spec-review" in result.output
+
+
+def test_pipeline_detail_shows_node_runs(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f"[admin]\ngithub_token_env = \"X\"\n"
+        f"[daemon]\nsqlite_path = \"{(tmp_path / 'f.sqlite').as_posix()}\"\n"
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+
+    from datetime import datetime, timezone
+    from foreman.storage import Storage
+
+    storage = Storage(tmp_path / "f.sqlite")
+    storage.init()
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    pid = storage.upsert_pipeline("voice", 42, "foreman:plan", now)
+    rid = storage.record_node_run_start(
+        pipeline_id=pid, role="planner", identity="foreman-planner-bot", at=now
+    )
+    storage.record_node_run_finish(
+        run_id=rid, at=now, outcome="success", structured_output={"pr_number": 1}
+    )
+
+    from click.testing import CliRunner
+    from foreman.cli import cli
+
+    result = CliRunner().invoke(cli, ["pipeline-detail", "voice", "42"])
+    assert result.exit_code == 0
+    assert "planner" in result.output
+    assert "success" in result.output
