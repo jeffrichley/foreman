@@ -516,3 +516,27 @@ def test_pipeline_detail_shows_node_runs(tmp_path: Path, monkeypatch) -> None:
     assert result.exit_code == 0
     assert "planner" in result.output
     assert "success" in result.output
+
+
+def test_worktree_clean_removes_directory(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f"[admin]\ngithub_token_env = \"X\"\n"
+        f"[daemon]\nsqlite_path = \"{(tmp_path / 'f.sqlite').as_posix()}\"\n"
+        f"[projects.voice]\n"
+        f"repo = \"jeffrichley/voice\"\n"
+        f"local_clone_path = \"{(tmp_path / 'voice').as_posix()}\"\n"
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+    worktree = tmp_path / "worktrees" / "voice" / "issue-42"
+    worktree.mkdir(parents=True)
+    (worktree / "marker.txt").write_text("present")
+
+    monkeypatch.setenv("FOREMAN_WORKTREES_ROOT", str(tmp_path / "worktrees"))
+
+    from click.testing import CliRunner
+    from foreman.cli import cli
+
+    result = CliRunner().invoke(cli, ["worktree", "clean", "voice", "42"])
+    assert result.exit_code == 0
+    assert not worktree.exists()

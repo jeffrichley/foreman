@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import signal
 from pathlib import Path
 from typing import Any
@@ -454,6 +455,28 @@ def pipeline_detail_cmd(project: str, issue_number: int) -> None:
     storage = Storage(config.daemon.sqlite_path)
     storage.init()
     click.echo(format_pipeline_detail(storage, project, issue_number))
+
+
+@cli.group()
+def worktree() -> None:
+    """Worktree management."""
+
+
+@worktree.command("clean")
+@click.argument("project")
+@click.argument("issue_number", type=int)
+def worktree_clean(project: str, issue_number: int) -> None:
+    """Delete the worktree for a project + issue."""
+    root = os.environ.get(
+        "FOREMAN_WORKTREES_ROOT",
+        str(Path("~/.foreman/worktrees").expanduser()),
+    )
+    target = Path(root) / project / f"issue-{issue_number}"
+    if not target.exists():
+        click.echo(f"No worktree found at {target}.")
+        return
+    shutil.rmtree(target)
+    click.echo(f"Removed {target}.")
 
 
 def main() -> None:
