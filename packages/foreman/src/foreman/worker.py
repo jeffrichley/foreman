@@ -7,6 +7,7 @@ loop for the live daemon (added in Phase 8 — daemon composition).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import traceback
 from dataclasses import dataclass
@@ -66,6 +67,7 @@ async def run_one_iteration(
     dispatcher: RoleDispatcher,
     storage: Storage,
     projects: dict[str, ProjectConfig],
+    timeout_seconds: float | None = None,
 ) -> bool:
     """Run one stage on the next actionable ticket. Returns False if queue empty.
 
@@ -74,11 +76,16 @@ async def run_one_iteration(
     2. Acquire its per-ticket lock
     3. Compute the action (defensive: labels may have changed between enqueue and now)
     4. Persist node_run start
-    5. Dispatch
+    5. Dispatch (optionally bounded by ``timeout_seconds``)
     6. On success: persist node_run finish + transition; self-notify
         re-enqueue if there's more work
     7. On failure: persist failure row; do NOT advance label (operator
         inspects the foreman:failed marker added by reconciliation later)
+
+    When ``timeout_seconds`` is set and the dispatch exceeds it, the call
+    is cancelled and recorded as a failure with reason ``TimeoutError``.
+    A hung role would otherwise stall the daemon's single worker
+    indefinitely; the timeout makes it fail-fast and frees the worker.
     """
     ticket = queue.dequeue(projects)
     if ticket is None:
@@ -127,7 +134,11 @@ async def run_one_iteration(
         )
 
         try:
-            result = await dispatcher.dispatch(ticket=ticket, action=action)
+            dispatch_coro = dispatcher.dispatch(ticket=ticket, action=action)
+            if timeout_seconds is not None:
+                result = await asyncio.wait_for(dispatch_coro, timeout=timeout_seconds)
+            else:
+                result = await dispatch_coro
         except Exception as exc:
             finish_at = datetime.now(UTC)
             duration_ms = int((finish_at - now).total_seconds() * 1000)

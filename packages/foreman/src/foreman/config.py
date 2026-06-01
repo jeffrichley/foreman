@@ -75,6 +75,7 @@ class DaemonConfig(BaseModel):
     log_path: str = Field(default="~/.foreman/daemon.log")
     log_level: str = Field(default="INFO")
     sqlite_path: str = Field(default="~/.foreman/foreman.sqlite")
+    role_dispatch_timeout_seconds: int = Field(default=600, ge=30)
 
     @field_validator("max_concurrent_workers")
     @classmethod

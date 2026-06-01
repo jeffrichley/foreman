@@ -75,11 +75,15 @@ def stage_index(kind: ActionKind) -> int:
 
 # Labels that, when present, halt the daemon from taking new actions on the
 # ticket. ``foreman:hold`` is operator-toggled; ``foreman:failed`` is added
-# by the daemon on crash / role error and only cleared by an operator.
+# by the daemon on crash / role error and only cleared by an operator;
+# ``foreman:needs-help`` is set by a role that gave up and wants human
+# attention before any further automation.
 #
 # Forward-compat (v2): is_blocked() will additionally check for
 # ``foreman:blocked-by:#N`` labels pointing at non-terminal tickets.
-_BLOCKING_LABELS = frozenset({"foreman:hold", "foreman:failed"})
+_BLOCKING_LABELS = frozenset(
+    {"foreman:hold", "foreman:failed", "foreman:needs-help"}
+)
 
 
 def is_blocked(ticket: Ticket) -> bool:

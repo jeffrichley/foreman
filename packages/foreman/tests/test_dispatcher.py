@@ -70,6 +70,13 @@ def test_is_blocked_true_when_failed_label_present() -> None:
     assert is_blocked(_ticket({"foreman:plan", "foreman:failed"})) is True
 
 
+def test_is_blocked_true_when_needs_help_label_present() -> None:
+    """``foreman:needs-help`` is set by a role that gave up — the daemon
+    must stop touching the ticket until a human clears the label, otherwise
+    the role's give-up signal is silently overridden."""
+    assert is_blocked(_ticket({"foreman:spec-review", "foreman:needs-help"})) is True
+
+
 def test_is_blocked_false_when_neither_present() -> None:
     assert is_blocked(_ticket({"foreman:plan"})) is False
 
