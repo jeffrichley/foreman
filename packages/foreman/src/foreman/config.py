@@ -29,8 +29,9 @@ class AdminConfig(BaseModel):
 class AppsConfig(BaseModel):
     """Per-role GitHub App credentials.
 
-    Walking skeleton wires planner + reviewer. Other roles (fixer, worker)
-    will be added during thickening; resolution methods will raise until set.
+    Walking skeleton wires planner + reviewer + fixer + worker. Each new
+    role added during thickening adds a triple here; resolution methods
+    raise a clear RuntimeError when an unconfigured role is requested.
 
     Each role needs:
       * ``<role>_app_id_env``: env var name holding the App id (stringified int).
@@ -50,6 +51,10 @@ class AppsConfig(BaseModel):
     fixer_app_id_env: str = "FOREMAN_FIXER_APP_ID"
     fixer_app_id: int | None = None
     fixer_private_key_path: str | None = None
+
+    worker_app_id_env: str = "FOREMAN_WORKER_APP_ID"
+    worker_app_id: int | None = None
+    worker_private_key_path: str | None = None
 
     def resolve_planner_app_id(self) -> int:
         env_value = os.environ.get(self.planner_app_id_env)
@@ -99,15 +104,52 @@ class AppsConfig(BaseModel):
             raise RuntimeError("apps.fixer_private_key_path not set in config file")
         return Path(self.fixer_private_key_path)
 
+    def resolve_worker_app_id(self) -> int:
+        env_value = os.environ.get(self.worker_app_id_env)
+        if env_value:
+            return int(env_value)
+        if self.worker_app_id is not None:
+            return self.worker_app_id
+        raise RuntimeError(
+            f"No worker app_id: env var {self.worker_app_id_env} not set "
+            "and apps.worker_app_id not in config file"
+        )
+
+    def resolve_worker_private_key_path(self) -> Path:
+        if not self.worker_private_key_path:
+            raise RuntimeError("apps.worker_private_key_path not set in config file")
+        return Path(self.worker_private_key_path)
+
 
 class ProjectConfig(BaseModel):
-    """Per-project configuration."""
+    """Per-project configuration.
+
+    ``check_command`` is the project's verification command — what the
+    Worker is instructed to run before claiming an implementation done,
+    and what the orchestrator re-runs after the Worker returns as a
+    belt-and-suspenders ground-truth check. Defaults to ``"just check"``
+    when ``None``; projects that use a different runner (e.g.
+    ``"make test"``, ``"npm test"``, ``"pytest -q"``) override it here.
+
+    Reserved (not yet honored): a future ``auto_merge_spec`` knob will
+    let the Worker auto-merge the spec PR before opening the impl PR,
+    breaking the stacked-PR dependency. Pairs with the reserved
+    ``foreman:auto-merge-spec`` label name (also not yet honored).
+    """
 
     repo: str = Field(..., description="GitHub repo in 'owner/name' form")
     local_clone_path: str = Field(
         ..., description="Local path to the repo's clone (worktrees branch from here)"
     )
     apps: AppsConfig = Field(default_factory=AppsConfig)
+    check_command: str | None = Field(
+        default=None,
+        description=(
+            "Project's verification command. Worker runs this in its "
+            "worktree before claiming done; orchestrator re-runs it as "
+            "ground-truth. Resolves to 'just check' when None."
+        ),
+    )
 
 
 class Config(BaseModel):

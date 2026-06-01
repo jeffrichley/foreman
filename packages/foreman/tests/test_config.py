@@ -340,3 +340,154 @@ fixer_app_id = 777777
     cfg = load_config(config_file)
     with pytest.raises(RuntimeError, match="fixer_private_key_path"):
         cfg.projects["voice"].apps.resolve_fixer_private_key_path()
+
+
+# ----------------------------------------------------------------------
+# Worker App fields — mirror the planner / reviewer / fixer pair
+# ----------------------------------------------------------------------
+
+
+def test_load_config_reads_worker_app_fields(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[projects.voice]
+repo = "jeffrichley/voice"
+local_clone_path = "/tmp/voice"
+
+[projects.voice.apps]
+planner_app_id = 123456
+planner_private_key_path = "/tmp/planner.pem"
+worker_app_id_env = "FOREMAN_WORKER_APP_ID"
+worker_app_id = 444444
+worker_private_key_path = "/tmp/worker.pem"
+"""
+    )
+    cfg = load_config(config_file)
+    assert cfg.projects["voice"].apps.worker_app_id == 444444
+    assert cfg.projects["voice"].apps.worker_private_key_path == "/tmp/worker.pem"
+
+
+def test_worker_app_fields_optional(tmp_path: Path) -> None:
+    """Configs without worker fields must still load — they're optional
+    during the thickening transition."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[projects.voice]
+repo = "jeffrichley/voice"
+local_clone_path = "/tmp/voice"
+
+[projects.voice.apps]
+planner_app_id = 123456
+planner_private_key_path = "/tmp/planner.pem"
+"""
+    )
+    cfg = load_config(config_file)
+    assert cfg.projects["voice"].apps.worker_app_id is None
+    assert cfg.projects["voice"].apps.worker_private_key_path is None
+
+
+def test_env_var_overrides_config_file_worker_app_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[projects.voice]
+repo = "jeffrichley/voice"
+local_clone_path = "/tmp/voice"
+
+[projects.voice.apps]
+worker_app_id_env = "FOREMAN_WORKER_APP_ID"
+worker_app_id = 111111
+worker_private_key_path = "/tmp/worker.pem"
+"""
+    )
+    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "999999")
+    cfg = load_config(config_file)
+    assert cfg.projects["voice"].apps.resolve_worker_app_id() == 999999
+
+
+def test_missing_worker_app_id_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[projects.voice]
+repo = "jeffrichley/voice"
+local_clone_path = "/tmp/voice"
+
+[projects.voice.apps]
+worker_app_id_env = "FOREMAN_WORKER_APP_ID"
+worker_private_key_path = "/tmp/worker.pem"
+"""
+    )
+    monkeypatch.delenv("FOREMAN_WORKER_APP_ID", raising=False)
+    cfg = load_config(config_file)
+    with pytest.raises(RuntimeError, match="worker app_id"):
+        cfg.projects["voice"].apps.resolve_worker_app_id()
+
+
+def test_missing_worker_private_key_path_raises(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[projects.voice]
+repo = "jeffrichley/voice"
+local_clone_path = "/tmp/voice"
+
+[projects.voice.apps]
+worker_app_id = 444444
+"""
+    )
+    cfg = load_config(config_file)
+    with pytest.raises(RuntimeError, match="worker_private_key_path"):
+        cfg.projects["voice"].apps.resolve_worker_private_key_path()
+
+
+# ----------------------------------------------------------------------
+# ProjectConfig.check_command — configurable, default None
+# ----------------------------------------------------------------------
+
+
+def test_check_command_default_is_none(tmp_path: Path) -> None:
+    """Existing configs that omit ``check_command`` must still load and
+    return ``None`` (the orchestrator resolves None → ``'just check'``).
+    """
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[projects.voice]
+repo = "jeffrichley/voice"
+local_clone_path = "/tmp/voice"
+
+[projects.voice.apps]
+planner_app_id = 123456
+planner_private_key_path = "/tmp/planner.pem"
+"""
+    )
+    cfg = load_config(config_file)
+    assert cfg.projects["voice"].check_command is None
+
+
+def test_check_command_reads_from_config_file(tmp_path: Path) -> None:
+    """When ``check_command`` is set in TOML, it surfaces verbatim through
+    the loaded config.
+    """
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[projects.voice]
+repo = "jeffrichley/voice"
+local_clone_path = "/tmp/voice"
+check_command = "make test"
+
+[projects.voice.apps]
+planner_app_id = 123456
+planner_private_key_path = "/tmp/planner.pem"
+"""
+    )
+    cfg = load_config(config_file)
+    assert cfg.projects["voice"].check_command == "make test"
