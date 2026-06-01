@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-
-import pytest
 
 from foreman.storage import Storage
 
@@ -18,9 +16,9 @@ def test_init_creates_schema_on_fresh_db(tmp_path: Path) -> None:
     storage.init()
 
     with sqlite3.connect(db_path) as conn:
-        tables = {row[0] for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        )}
+        tables = {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
 
     assert "meta" in tables
     assert "pipelines" in tables
@@ -36,9 +34,7 @@ def test_init_records_schema_version(tmp_path: Path) -> None:
     storage.init()
 
     with sqlite3.connect(db_path) as conn:
-        version = conn.execute(
-            "SELECT value FROM meta WHERE key='schema_version'"
-        ).fetchone()[0]
+        version = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
 
     assert version == "1"
 
@@ -50,9 +46,7 @@ def test_init_is_idempotent(tmp_path: Path) -> None:
     storage.init()  # second call should not raise
 
     with sqlite3.connect(db_path) as conn:
-        version = conn.execute(
-            "SELECT value FROM meta WHERE key='schema_version'"
-        ).fetchone()[0]
+        version = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
 
     assert version == "1"
 
@@ -60,7 +54,7 @@ def test_init_is_idempotent(tmp_path: Path) -> None:
 def test_upsert_pipeline_creates_then_updates(tmp_path: Path) -> None:
     storage = Storage(tmp_path / "f.sqlite")
     storage.init()
-    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
 
     pipeline_id = storage.upsert_pipeline(
         project="voice", issue_number=42, current_state="foreman:plan", started_at=now
@@ -86,7 +80,7 @@ def test_get_pipeline_returns_none_when_absent(tmp_path: Path) -> None:
 def test_labels_seen_upsert_and_read(tmp_path: Path) -> None:
     storage = Storage(tmp_path / "f.sqlite")
     storage.init()
-    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
 
     storage.upsert_labels_seen("voice", 42, ["foreman:plan"], now)
     assert storage.get_labels_seen("voice", 42) == ["foreman:plan"]
@@ -104,7 +98,7 @@ def test_labels_seen_returns_none_when_absent(tmp_path: Path) -> None:
 def test_iter_pipelines_in_flight_yields_non_terminal(tmp_path: Path) -> None:
     storage = Storage(tmp_path / "f.sqlite")
     storage.init()
-    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
     storage.upsert_pipeline("voice", 1, "foreman:planning", now)
     storage.upsert_pipeline("voice", 2, "foreman:plan", now)
     storage.mark_pipeline_terminated("voice", 2, now)
@@ -118,13 +112,13 @@ def test_iter_pipelines_in_flight_yields_non_terminal(tmp_path: Path) -> None:
 def test_record_node_run_persists_role_and_outcome(tmp_path: Path) -> None:
     storage = Storage(tmp_path / "f.sqlite")
     storage.init()
-    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
     pipeline_id = storage.upsert_pipeline("voice", 42, "foreman:plan", now)
 
     run_id = storage.record_node_run_start(
         pipeline_id=pipeline_id, role="planner", identity="foreman-planner-bot", at=now
     )
-    later = datetime(2026, 6, 1, 12, 5, 0, tzinfo=timezone.utc)
+    later = datetime(2026, 6, 1, 12, 5, 0, tzinfo=UTC)
     storage.record_node_run_finish(
         run_id=run_id,
         at=later,
@@ -142,7 +136,7 @@ def test_record_node_run_persists_role_and_outcome(tmp_path: Path) -> None:
 def test_record_transition_persists_label_diff(tmp_path: Path) -> None:
     storage = Storage(tmp_path / "f.sqlite")
     storage.init()
-    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
     pipeline_id = storage.upsert_pipeline("voice", 42, "foreman:plan", now)
 
     storage.record_transition(
@@ -165,7 +159,7 @@ def test_record_transition_persists_label_diff(tmp_path: Path) -> None:
 def test_record_failure_persists_reason_and_traceback(tmp_path: Path) -> None:
     storage = Storage(tmp_path / "f.sqlite")
     storage.init()
-    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
     pipeline_id = storage.upsert_pipeline("voice", 42, "foreman:plan", now)
 
     storage.record_failure(

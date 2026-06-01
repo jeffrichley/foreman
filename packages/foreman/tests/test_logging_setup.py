@@ -39,10 +39,7 @@ def test_configure_daemon_logging_respects_level(tmp_path: Path) -> None:
     for handler in logging.getLogger("foreman").handlers:
         handler.flush()
 
-    lines = [
-        json.loads(line)
-        for line in log_path.read_text().strip().splitlines()
-    ]
+    lines = [json.loads(line) for line in log_path.read_text().strip().splitlines()]
     messages = [r["message"] for r in lines]
     assert "info message" not in messages
     assert "warning message" in messages

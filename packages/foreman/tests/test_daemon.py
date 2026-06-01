@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -71,7 +71,7 @@ async def test_daemon_polls_and_dispatches_one_ticket(tmp_path: Path) -> None:
                 _FakeIssue(
                     number=42,
                     labels=["foreman:plan"],
-                    updated_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+                    updated_at=datetime(2026, 6, 1, tzinfo=UTC),
                 )
             ]
         }
@@ -126,7 +126,7 @@ async def test_reconciliation_halts_planning_state_with_failed_label(
                 _FakeIssue(
                     number=42,
                     labels=["foreman:planning"],
-                    updated_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+                    updated_at=datetime(2026, 6, 1, tzinfo=UTC),
                 )
             ]
         }
@@ -153,7 +153,7 @@ async def test_reconciliation_skips_already_failed_ticket(tmp_path: Path) -> Non
                 _FakeIssue(
                     number=42,
                     labels=["foreman:planning", "foreman:failed"],
-                    updated_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+                    updated_at=datetime(2026, 6, 1, tzinfo=UTC),
                 )
             ]
         }

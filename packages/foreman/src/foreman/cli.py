@@ -104,10 +104,7 @@ def review(pr_url: str, project: str, config_path: Path | None) -> None:
             provider=provider,
         )
     )
-    click.echo(
-        f"{result.outcome}: {len(result.findings)} findings, "
-        f"confidence={result.confidence}"
-    )
+    click.echo(f"{result.outcome}: {len(result.findings)} findings, confidence={result.confidence}")
 
 
 @cli.command()
@@ -144,8 +141,7 @@ def fix(issue_url: str, project: str, config_path: Path | None) -> None:
     addressed = len(llm.addressed_findings)
     unaddressed = len(llm.unaddressed_findings)
     click.echo(
-        f"{llm.outcome}: {result.attempt}/3 attempt, {addressed} fixed, "
-        f"{unaddressed} unaddressed"
+        f"{llm.outcome}: {result.attempt}/3 attempt, {addressed} fixed, {unaddressed} unaddressed"
     )
 
 
@@ -255,9 +251,7 @@ def init(
     # Default --name from the repo's tail.
     if name is None:
         if "/" not in repo:
-            raise click.ClickException(
-                "REPO must be in 'owner/repo' form to default --name."
-            )
+            raise click.ClickException("REPO must be in 'owner/repo' form to default --name.")
         name = repo.split("/", 1)[1]
 
     # Default --clone-path from cwd when cwd points at the same repo.

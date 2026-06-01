@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
-import pytest
+from datetime import UTC, datetime, timedelta
 
 from foreman.config import AppsConfig, ProjectConfig
 from foreman.dispatcher import Ticket
@@ -21,7 +19,7 @@ def _ticket(
         project_name=project,
         issue_number=issue,
         labels=frozenset(labels or {"foreman:plan"}),
-        last_transition_at=at or datetime(2026, 6, 1, tzinfo=timezone.utc),
+        last_transition_at=at or datetime(2026, 6, 1, tzinfo=UTC),
     )
 
 
@@ -64,11 +62,9 @@ def test_dequeue_returns_none_when_empty() -> None:
 def test_dequeue_returns_further_along_ticket_over_earlier() -> None:
     # Ticket A is at Planner stage; B is at Reviewer stage. B should win.
     q = DaemonQueue()
-    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 6, 1, tzinfo=UTC)
     q.enqueue(_ticket(project="voice", issue=1, labels={"foreman:plan"}, at=base))
-    q.enqueue(
-        _ticket(project="voice", issue=2, labels={"foreman:spec-review"}, at=base)
-    )
+    q.enqueue(_ticket(project="voice", issue=2, labels={"foreman:spec-review"}, at=base))
 
     project = ProjectConfig(repo="r", local_clone_path="/tmp", apps=AppsConfig())
     next_t = q.dequeue({"voice": project})
@@ -79,10 +75,8 @@ def test_dequeue_returns_further_along_ticket_over_earlier() -> None:
 def test_dequeue_fifo_within_same_stage() -> None:
     # Both at Planner stage; older transition timestamp wins.
     q = DaemonQueue()
-    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
-    q.enqueue(
-        _ticket(project="voice", issue=1, labels={"foreman:plan"}, at=base)
-    )
+    base = datetime(2026, 6, 1, tzinfo=UTC)
+    q.enqueue(_ticket(project="voice", issue=1, labels={"foreman:plan"}, at=base))
     q.enqueue(
         _ticket(
             project="voice",
@@ -118,10 +112,8 @@ def test_dequeue_skips_parked_tickets_returns_none() -> None:
 
 def test_dequeue_skips_parked_and_returns_actionable_next() -> None:
     q = DaemonQueue()
-    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
-    q.enqueue(
-        _ticket(project="voice", issue=1, labels={"foreman:plan", "foreman:hold"}, at=base)
-    )
+    base = datetime(2026, 6, 1, tzinfo=UTC)
+    q.enqueue(_ticket(project="voice", issue=1, labels={"foreman:plan", "foreman:hold"}, at=base))
     q.enqueue(_ticket(project="voice", issue=2, labels={"foreman:plan"}, at=base))
 
     project = ProjectConfig(repo="r", local_clone_path="/tmp", apps=AppsConfig())

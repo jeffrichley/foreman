@@ -94,9 +94,7 @@ _IMPL_ATTEMPT_RE = re.compile(r"^foreman:impl-attempt-(\d+)$")
 # Anchored at line start to keep header noise like
 # ``FAILED tests/test_x.py::test_y`` clean of leading prose. pytest's
 # short-summary lines start with literal ``FAILED `` at column 0.
-_PYTEST_FAILED_RE = re.compile(
-    r"^FAILED\s+(?P<test_id>\S+)", flags=re.MULTILINE
-)
+_PYTEST_FAILED_RE = re.compile(r"^FAILED\s+(?P<test_id>\S+)", flags=re.MULTILINE)
 
 # Tool capabilities matrix for the Worker. Edit + Write so it can write
 # code; Bash so it can run check_command + stage/commit/push from inside
@@ -154,9 +152,7 @@ def _resolve_check_command(project_check_command: str | None) -> str:
     return project_check_command if project_check_command else _DEFAULT_CHECK_COMMAND
 
 
-def _run_check_command(
-    *, check_command: str, cwd: Path
-) -> tuple[int, set[str], str]:
+def _run_check_command(*, check_command: str, cwd: Path) -> tuple[int, set[str], str]:
     """Run ``check_command`` in ``cwd`` and return ``(exit_code, failing_tests, combined_output)``.
 
     Parses ``FAILED tests/...`` lines from the combined stdout+stderr to
@@ -225,9 +221,7 @@ def _read_spec_doc_from_branch(
     spec via its Read / Grep / Glob tools — inlining is a convenience,
     not a contract.
     """
-    spec_relpath = (
-        Path("docs") / "superpowers" / "specs" / f"foreman-issue-{issue_number}-spec.md"
-    )
+    spec_relpath = Path("docs") / "superpowers" / "specs" / f"foreman-issue-{issue_number}-spec.md"
     on_disk = worktree_path / spec_relpath
     if on_disk.exists():
         try:
@@ -296,9 +290,7 @@ def _build_user_prompt(
     entirely.
     """
     instructions_section = (
-        f"## Project-specific instructions\n\n{instructions}\n\n"
-        if instructions
-        else ""
+        f"## Project-specific instructions\n\n{instructions}\n\n" if instructions else ""
     )
     if spec_doc_content is None:
         spec_section = (
@@ -308,8 +300,7 @@ def _build_user_prompt(
         )
     else:
         spec_section = (
-            "## Spec doc (committed on the spec branch)\n"
-            f"```markdown\n{spec_doc_content}\n```\n\n"
+            f"## Spec doc (committed on the spec branch)\n```markdown\n{spec_doc_content}\n```\n\n"
         )
 
     if baseline_failures:
@@ -458,7 +449,8 @@ async def run_worker(
     if _LABEL_SPEC_READY not in issue_labels:
         raise RuntimeError(
             f"Issue #{issue_number} does not carry the {_LABEL_SPEC_READY!r} "
-            f"label (labels: " + ", ".join(sorted(issue_labels) or ["<none>"])
+            f"label (labels: "
+            + ", ".join(sorted(issue_labels) or ["<none>"])
             + "). The Worker only acts on issues queued by the Reviewer."
         )
 
@@ -552,9 +544,7 @@ async def run_worker(
         # exception message lives in work_comment + check_output_summary
         # so a human can diagnose without spelunking logs.
         duration_seconds = time.monotonic() - start_time
-        _log.exception(
-            "Worker provider.run_agent raised; surfacing as outcome=incomplete"
-        )
+        _log.exception("Worker provider.run_agent raised; surfacing as outcome=incomplete")
         llm_output = WorkerOutput(
             outcome="incomplete",
             work_comment=(
@@ -565,9 +555,7 @@ async def run_worker(
             implemented_sub_requests=[],
             skipped_sub_requests=[],
             did_check_pass=False,
-            check_output_summary=(
-                f"provider.run_agent raised {type(exc).__name__}: {exc}"
-            ),
+            check_output_summary=(f"provider.run_agent raised {type(exc).__name__}: {exc}"),
             confidence="low",
         )
         # Post-Worker verification still runs below — but since no LLM
@@ -641,8 +629,7 @@ async def run_worker(
             spec_pr.create_issue_comment(body=llm_output.spec_invalid_reason)
         else:
             _log.warning(
-                "Worker emitted spec_invalid but no open spec PR was found; "
-                "rationale: %s",
+                "Worker emitted spec_invalid but no open spec PR was found; rationale: %s",
                 llm_output.spec_invalid_reason,
             )
         issue.remove_from_labels(_LABEL_IMPLEMENTING)
@@ -687,8 +674,7 @@ async def run_worker(
         attempt=attempt,
         outcome=final_outcome,
         total_sub_requests=(
-            len(llm_output.implemented_sub_requests)
-            + len(llm_output.skipped_sub_requests)
+            len(llm_output.implemented_sub_requests) + len(llm_output.skipped_sub_requests)
         ),
         implemented_count=len(llm_output.implemented_sub_requests),
         skipped_count=len(llm_output.skipped_sub_requests),

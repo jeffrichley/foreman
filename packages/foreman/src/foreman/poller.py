@@ -11,7 +11,7 @@ calls/hour, well under GitHub's 5000/hour limit.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol
 
 from foreman.config import ProjectConfig
@@ -40,7 +40,7 @@ def poll_project(
 
     Side effect: persists the new label snapshot to ``labels_seen``.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     issues = host.search_foreman_labeled_issues(project.repo)
     changed: list[Ticket] = []
 
@@ -48,9 +48,7 @@ def poll_project(
         seen = storage.get_labels_seen(project_name, issue.number)
         current = sorted(issue.labels)
         if seen != current:
-            storage.upsert_labels_seen(
-                project_name, issue.number, current, now
-            )
+            storage.upsert_labels_seen(project_name, issue.number, current, now)
             changed.append(
                 Ticket(
                     project_name=project_name,

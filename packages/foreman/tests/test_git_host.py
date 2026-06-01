@@ -60,9 +60,7 @@ class _FakeProvider(GitHostProvider):
 
     def get_issue(self, repo_slug: str, issue_number: int) -> IssueRef:
         self.calls.append(("get_issue", (repo_slug, issue_number)))
-        return IssueRef(
-            number=issue_number, title="", body="", labels=[], repo_slug=repo_slug
-        )
+        return IssueRef(number=issue_number, title="", body="", labels=[], repo_slug=repo_slug)
 
     def get_default_branch(self, repo_slug: str) -> str:
         self.calls.append(("get_default_branch", (repo_slug,)))

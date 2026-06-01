@@ -72,7 +72,7 @@ class Daemon:
         because roles are not yet idempotent. Mark failed; operator decides
         whether to clear the label and resume.
         """
-        for project_name, project in self.config.projects.items():
+        for project in self.config.projects.values():
             try:
                 issues = self.host.search_foreman_labeled_issues(project.repo)
             except Exception:
@@ -114,7 +114,7 @@ class Daemon:
                         timeout=self.config.daemon.poll_interval_seconds,
                     )
                     return
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
             first = False
 
@@ -142,9 +142,7 @@ class Daemon:
             )
             if not advanced:
                 try:
-                    await asyncio.wait_for(
-                        self._shutdown_event.wait(), timeout=1.0
-                    )
+                    await asyncio.wait_for(self._shutdown_event.wait(), timeout=1.0)
                     return
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass

@@ -127,9 +127,7 @@ def _issue_number_from_branch(branch: str) -> int:
 
 def _load_reviewer_prompt() -> str:
     """Load the reviewer system prompt from packaged resources."""
-    return (
-        resources.files("foreman.prompts").joinpath("reviewer.md").read_text(encoding="utf-8")
-    )
+    return resources.files("foreman.prompts").joinpath("reviewer.md").read_text(encoding="utf-8")
 
 
 def _build_user_prompt(
@@ -156,9 +154,7 @@ def _build_user_prompt(
     ``None`` the section is omitted entirely.
     """
     instructions_section = (
-        f"## Project-specific instructions\n\n{instructions}\n\n"
-        if instructions
-        else ""
+        f"## Project-specific instructions\n\n{instructions}\n\n" if instructions else ""
     )
     spec_section = (
         f"## Spec doc (committed in this PR)\n{spec_doc_content}\n\n"
@@ -219,11 +215,7 @@ def _read_spec_doc(worktree_path: Path, issue_number: int) -> str | None:
     missing — the LLM can still find it via its tools.
     """
     spec_path = (
-        worktree_path
-        / "docs"
-        / "superpowers"
-        / "specs"
-        / f"foreman-issue-{issue_number}-spec.md"
+        worktree_path / "docs" / "superpowers" / "specs" / f"foreman-issue-{issue_number}-spec.md"
     )
     if not spec_path.exists():
         return None

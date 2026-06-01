@@ -162,9 +162,7 @@ class _FakeSpecPR:
 
 
 class _FakeIssue:
-    def __init__(
-        self, *, number: int, title: str, body: str, labels: list[str]
-    ) -> None:
+    def __init__(self, *, number: int, title: str, body: str, labels: list[str]) -> None:
         self.number = number
         self.title = title
         self.body = body
@@ -269,9 +267,7 @@ def _seed_clone_with_spec_branch(clone: Path, issue_number: int) -> str:
         check=True,
         capture_output=True,
     )
-    subprocess.run(
-        ["git", "push", "origin", "main"], cwd=clone, check=True, capture_output=True
-    )
+    subprocess.run(["git", "push", "origin", "main"], cwd=clone, check=True, capture_output=True)
     subprocess.run(
         ["git", "remote", "set-head", "origin", "main"],
         cwd=clone,
@@ -279,22 +275,15 @@ def _seed_clone_with_spec_branch(clone: Path, issue_number: int) -> str:
         capture_output=True,
     )
     branch = f"foreman/issue-{issue_number}"
-    subprocess.run(
-        ["git", "checkout", "-b", branch], cwd=clone, check=True, capture_output=True
-    )
+    subprocess.run(["git", "checkout", "-b", branch], cwd=clone, check=True, capture_output=True)
     spec_dir = clone / "docs" / "superpowers" / "specs"
     spec_dir.mkdir(parents=True, exist_ok=True)
     (spec_dir / f"foreman-issue-{issue_number}-spec.md").write_text(
-        f"# Spec for issue #{issue_number}\n\n"
-        "## Sub-requests\n1. Add X.\n2. Add Y.\n"
+        f"# Spec for issue #{issue_number}\n\n## Sub-requests\n1. Add X.\n2. Add Y.\n"
     )
     subprocess.run(["git", "add", "."], cwd=clone, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "spec doc"], cwd=clone, check=True, capture_output=True
-    )
-    subprocess.run(
-        ["git", "push", "origin", branch], cwd=clone, check=True, capture_output=True
-    )
+    subprocess.run(["git", "commit", "-m", "spec doc"], cwd=clone, check=True, capture_output=True)
+    subprocess.run(["git", "push", "origin", branch], cwd=clone, check=True, capture_output=True)
     head_sha = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=clone,
@@ -429,9 +418,7 @@ def _make_fake_repo(
             head_sha=head_sha,
             base_ref="main",
         )
-    issue = _FakeIssue(
-        number=issue_number, title="SSML", body="Add SSML support.", labels=labels
-    )
+    issue = _FakeIssue(number=issue_number, title="SSML", body="Add SSML support.", labels=labels)
     repo = _FakeRepo(spec_pr=spec_pr, issue=issue)
     return repo, spec_pr, issue
 
@@ -1378,9 +1365,7 @@ async def test_run_worker_sdk_error_surfaces_as_incomplete_not_crash(
     registry = _make_registry(client)
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(
-        side_effect=TimeoutError("provider transport timed out")
-    )
+    fake_provider.run_agent = AsyncMock(side_effect=TimeoutError("provider transport timed out"))
     _make_passing_check_command(monkeypatch)
 
     result = await run_worker(

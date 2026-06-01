@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -17,7 +17,7 @@ def _ticket(labels: set[str]) -> Ticket:
         project_name="voice",
         issue_number=42,
         labels=frozenset(labels),
-        last_transition_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        last_transition_at=datetime(2026, 6, 1, tzinfo=UTC),
     )
 
 
@@ -75,17 +75,13 @@ async def test_dispatch_merge_spec_pr_routes_to_host_merge() -> None:
     config = _config()
     runners = MagicMock()
     runners.merge_spec_pr = AsyncMock(
-        return_value=MagicMock(
-            new_labels=["foreman:implementing-ready"], structured_output=None
-        )
+        return_value=MagicMock(new_labels=["foreman:implementing-ready"], structured_output=None)
     )
 
     dispatcher = RealRoleDispatcher(config=config, runners=runners)
     action = Action(kind=ActionKind.MERGE_SPEC_PR)
 
-    result = await dispatcher.dispatch(
-        ticket=_ticket({"foreman:spec-ready"}), action=action
-    )
+    result = await dispatcher.dispatch(ticket=_ticket({"foreman:spec-ready"}), action=action)
 
     runners.merge_spec_pr.assert_awaited_once()
     assert result.new_labels == frozenset({"foreman:implementing-ready"})

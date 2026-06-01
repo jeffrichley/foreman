@@ -47,16 +47,12 @@ def format_pipeline_detail(storage: Storage, project: str, issue_number: int) ->
         )
 
     for run in node_runs:
-        lines.append(
-            f"  [{run['started_at']}] {run['role']:<10} "
-            f"{run['outcome'] or '(running)'}"
-        )
+        lines.append(f"  [{run['started_at']}] {run['role']:<10} {run['outcome'] or '(running)'}")
     lines.append("")
     lines.append("Transitions:")
     for tr in transitions:
         lines.append(
-            f"  [{tr['at']}] {tr['actor']:<10} "
-            f"{tr['from_labels_json']} -> {tr['to_labels_json']}"
+            f"  [{tr['at']}] {tr['actor']:<10} {tr['from_labels_json']} -> {tr['to_labels_json']}"
         )
 
     return "\n".join(lines)

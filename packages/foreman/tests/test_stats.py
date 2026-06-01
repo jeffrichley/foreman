@@ -129,9 +129,7 @@ def test_log_fixer_run_payload_carries_passed_values(tmp_path: Path) -> None:
     assert payload["confidence"] == "low"
 
 
-def test_log_fixer_run_env_var_override(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_log_fixer_run_env_var_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``FOREMAN_STATS_ROOT`` lets tests / ops point the stats elsewhere."""
     monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "env-root"))
     # Pass stats_root=None to exercise the env-var path.

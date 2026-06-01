@@ -77,10 +77,7 @@ class GitHubProvider(GitHostProvider):
     # ------------------------------------------------------------------
     def configure_worktree_identity(self, worktree_path: Path) -> None:
         user_name = f"{self._identity.slug}[bot]"
-        user_email = (
-            f"{self._identity.user_id}+{self._identity.slug}[bot]"
-            "@users.noreply.github.com"
-        )
+        user_email = f"{self._identity.user_id}+{self._identity.slug}[bot]@users.noreply.github.com"
         self._git(worktree_path, "config", "user.name", user_name)
         self._git(worktree_path, "config", "user.email", user_email)
 
@@ -104,14 +101,9 @@ class GitHubProvider(GitHostProvider):
         # remote URL to embed the installation token. Using -c http.extraheader
         # would leak the token into ~/.git config; the URL approach scopes the
         # secret to one subprocess call.
-        remote_url = self._git(
-            worktree_path, "config", "--get", "remote.origin.url"
-        ).stdout.strip()
+        remote_url = self._git(worktree_path, "config", "--get", "remote.origin.url").stdout.strip()
         repo_slug = _extract_repo_slug(remote_url)
-        push_url = (
-            f"https://x-access-token:{self._identity.token}"
-            f"@github.com/{repo_slug}.git"
-        )
+        push_url = f"https://x-access-token:{self._identity.token}@github.com/{repo_slug}.git"
         self._git(worktree_path, "push", push_url, f"{branch}:{branch}")
 
     # ------------------------------------------------------------------

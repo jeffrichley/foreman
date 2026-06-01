@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +14,7 @@ from foreman.dispatcher import Action, ActionKind, Ticket
 from foreman.locks import TicketLockManager
 from foreman.queue import DaemonQueue
 from foreman.storage import Storage
-from foreman.worker import RoleDispatcher, RoleResult, run_one_iteration
+from foreman.worker import RoleResult, run_one_iteration
 
 
 @dataclass
@@ -39,7 +38,7 @@ def _ticket() -> Ticket:
         project_name="voice",
         issue_number=42,
         labels=frozenset({"foreman:plan"}),
-        last_transition_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        last_transition_at=datetime(2026, 6, 1, tzinfo=UTC),
     )
 
 

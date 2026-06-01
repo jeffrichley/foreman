@@ -21,8 +21,7 @@ def _minimal_clean_output_dict() -> dict[str, object]:
     return {
         "outcome": "clean",
         "review_comment": (
-            "Clean. Traced ACs 1-4 against the spec and verified file paths "
-            "in packages/foo/."
+            "Clean. Traced ACs 1-4 against the spec and verified file paths in packages/foo/."
         ),
         "findings": [],
         "confidence": "high",

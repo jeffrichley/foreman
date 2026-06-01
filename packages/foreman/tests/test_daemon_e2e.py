@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -109,12 +109,12 @@ async def test_two_tickets_first_finishes_before_second_starts_implementing(
             1: _FakeIssue(
                 number=1,
                 labels=["foreman:plan"],
-                updated_at=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
             ),
             2: _FakeIssue(
                 number=2,
                 labels=["foreman:plan"],
-                updated_at=datetime(2026, 6, 1, 12, 1, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 6, 1, 12, 1, tzinfo=UTC),
             ),
         }
     )

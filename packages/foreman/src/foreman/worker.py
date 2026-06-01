@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import traceback
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol
 
 from foreman.config import ProjectConfig
@@ -83,7 +83,7 @@ async def run_one_iteration(
 
     project_cfg = projects[ticket.project_name]
     async with locks.lock(ticket.project_name, ticket.issue_number):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         action = next_action(ticket, project_cfg)
         if action is None:
@@ -106,8 +106,8 @@ async def run_one_iteration(
 
         try:
             result = await dispatcher.dispatch(ticket=ticket, action=action)
-        except Exception as exc:  # noqa: BLE001
-            finish_at = datetime.now(timezone.utc)
+        except Exception as exc:
+            finish_at = datetime.now(UTC)
             storage.record_node_run_finish(
                 run_id=run_id,
                 at=finish_at,
@@ -123,7 +123,7 @@ async def run_one_iteration(
             )
             return True
 
-        finish_at = datetime.now(timezone.utc)
+        finish_at = datetime.now(UTC)
         storage.record_node_run_finish(
             run_id=run_id,
             at=finish_at,

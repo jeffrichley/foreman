@@ -27,12 +27,8 @@ class _RoleRun(Protocol):
 
 class _RunnersProtocol(Protocol):
     async def run_planner(self, *, ticket: Ticket, config: Config) -> _RoleRun: ...
-    async def run_reviewer(
-        self, *, ticket: Ticket, config: Config, target: str
-    ) -> _RoleRun: ...
-    async def run_fixer(
-        self, *, ticket: Ticket, config: Config, target: str
-    ) -> _RoleRun: ...
+    async def run_reviewer(self, *, ticket: Ticket, config: Config, target: str) -> _RoleRun: ...
+    async def run_fixer(self, *, ticket: Ticket, config: Config, target: str) -> _RoleRun: ...
     async def run_worker(self, *, ticket: Ticket, config: Config) -> _RoleRun: ...
     async def merge_spec_pr(self, *, ticket: Ticket, config: Config) -> _RoleRun: ...
     async def merge_impl_pr(self, *, ticket: Ticket, config: Config) -> _RoleRun: ...
@@ -65,13 +61,9 @@ class RealRoleDispatcher:
                 ticket=ticket, config=self.config, target="impl_pr"
             )
         if action.kind == ActionKind.RUN_FIXER_SPEC:
-            return await self.runners.run_fixer(
-                ticket=ticket, config=self.config, target="spec_pr"
-            )
+            return await self.runners.run_fixer(ticket=ticket, config=self.config, target="spec_pr")
         if action.kind == ActionKind.RUN_FIXER_IMPL:
-            return await self.runners.run_fixer(
-                ticket=ticket, config=self.config, target="impl_pr"
-            )
+            return await self.runners.run_fixer(ticket=ticket, config=self.config, target="impl_pr")
         if action.kind == ActionKind.RUN_WORKER:
             return await self.runners.run_worker(ticket=ticket, config=self.config)
         if action.kind == ActionKind.MERGE_SPEC_PR:

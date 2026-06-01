@@ -63,9 +63,7 @@ def _make_result(
     )
 
 
-def _patch_query(
-    monkeypatch: pytest.MonkeyPatch, messages: list[Any]
-) -> list[dict[str, Any]]:
+def _patch_query(monkeypatch: pytest.MonkeyPatch, messages: list[Any]) -> list[dict[str, Any]]:
     """Replace ``query`` with an async iterator yielding ``messages``.
 
     Returns a list that the stub appends each call's kwargs to, so tests

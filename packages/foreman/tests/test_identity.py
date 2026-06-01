@@ -75,9 +75,7 @@ def test_minted_token_is_passed_to_github_auth() -> None:
 def test_mint_called_once_when_token_fresh() -> None:
     """Repeated lookups within token TTL should NOT re-mint."""
     fake_token = _fresh_token()
-    with patch(
-        "foreman.identity.mint_installation_token", return_value=fake_token
-    ) as mock_mint:
+    with patch("foreman.identity.mint_installation_token", return_value=fake_token) as mock_mint:
         reg = IdentityRegistry(_make_project())
         reg.get_client("planner")
         reg.get_client("planner")
@@ -106,9 +104,7 @@ def test_mint_invoked_with_resolved_app_credentials() -> None:
     """IdentityRegistry must hand the App id, key path, and repo slug to the
     minting function — proves the config plumbing is wired."""
     fake_token = _fresh_token()
-    with patch(
-        "foreman.identity.mint_installation_token", return_value=fake_token
-    ) as mock_mint:
+    with patch("foreman.identity.mint_installation_token", return_value=fake_token) as mock_mint:
         reg = IdentityRegistry(_make_project())
         reg.get_client("planner")
     call_args = mock_mint.call_args
@@ -124,9 +120,7 @@ def test_env_var_overrides_config_file_app_id_at_mint_time(
     """Env-var precedence still works through the IdentityRegistry layer."""
     monkeypatch.setenv("FOREMAN_PLANNER_APP_ID", "888888")
     fake_token = _fresh_token()
-    with patch(
-        "foreman.identity.mint_installation_token", return_value=fake_token
-    ) as mock_mint:
+    with patch("foreman.identity.mint_installation_token", return_value=fake_token) as mock_mint:
         reg = IdentityRegistry(_make_project())
         reg.get_client("planner")
     assert mock_mint.call_args.args[0] == 888888
@@ -153,9 +147,7 @@ def test_get_client_caches_github_instance() -> None:
 # ----------------------------------------------------------------------
 
 
-def _fake_app_metadata(
-    *, app_id: int = 123456, slug: str = "foreman-planner"
-) -> AppMetadata:
+def _fake_app_metadata(*, app_id: int = 123456, slug: str = "foreman-planner") -> AppMetadata:
     return AppMetadata(app_id=app_id, slug=slug, name="Foreman Planner")
 
 
@@ -163,9 +155,7 @@ def test_get_host_provider_returns_github_provider() -> None:
     fake_token = _fresh_token(token="ghs_installtoken_abc")
     with (
         patch("foreman.identity.mint_installation_token", return_value=fake_token),
-        patch(
-            "foreman.identity.fetch_app_metadata", return_value=_fake_app_metadata()
-        ),
+        patch("foreman.identity.fetch_app_metadata", return_value=_fake_app_metadata()),
     ):
         reg = IdentityRegistry(_make_project())
         host = reg.get_host_provider("planner")
@@ -195,9 +185,7 @@ def test_app_metadata_fetched_once_per_role_across_calls() -> None:
     fake_meta = _fake_app_metadata()
     with (
         patch("foreman.identity.mint_installation_token", return_value=fake_token),
-        patch(
-            "foreman.identity.fetch_app_metadata", return_value=fake_meta
-        ) as mock_fetch,
+        patch("foreman.identity.fetch_app_metadata", return_value=fake_meta) as mock_fetch,
     ):
         reg = IdentityRegistry(_make_project())
         reg.get_host_provider("planner")
@@ -211,9 +199,7 @@ def test_app_metadata_fetched_with_resolved_credentials() -> None:
     fake_meta = _fake_app_metadata()
     with (
         patch("foreman.identity.mint_installation_token", return_value=fake_token),
-        patch(
-            "foreman.identity.fetch_app_metadata", return_value=fake_meta
-        ) as mock_fetch,
+        patch("foreman.identity.fetch_app_metadata", return_value=fake_meta) as mock_fetch,
     ):
         reg = IdentityRegistry(_make_project())
         reg.get_host_provider("planner")
@@ -253,9 +239,7 @@ def test_get_reviewer_mint_invoked_with_reviewer_app_credentials() -> None:
     """The reviewer accessor must resolve the reviewer-specific App fields,
     not the planner's — proves the per-role credential dispatch is wired."""
     fake_token = _fresh_token()
-    with patch(
-        "foreman.identity.mint_installation_token", return_value=fake_token
-    ) as mock_mint:
+    with patch("foreman.identity.mint_installation_token", return_value=fake_token) as mock_mint:
         reg = IdentityRegistry(_make_project())
         reg.get_reviewer_client()
     call_args = mock_mint.call_args
@@ -270,9 +254,7 @@ def test_reviewer_env_var_overrides_config_file_app_id(
     """Env-var precedence for the reviewer App id mirrors planner's."""
     monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "999999")
     fake_token = _fresh_token()
-    with patch(
-        "foreman.identity.mint_installation_token", return_value=fake_token
-    ) as mock_mint:
+    with patch("foreman.identity.mint_installation_token", return_value=fake_token) as mock_mint:
         reg = IdentityRegistry(_make_project())
         reg.get_reviewer_client()
     assert mock_mint.call_args.args[0] == 999999
@@ -320,9 +302,7 @@ def test_get_fixer_mint_invoked_with_fixer_app_credentials() -> None:
     """The fixer accessor must resolve the fixer-specific App fields,
     not the planner's or reviewer's — proves per-role credential dispatch."""
     fake_token = _fresh_token()
-    with patch(
-        "foreman.identity.mint_installation_token", return_value=fake_token
-    ) as mock_mint:
+    with patch("foreman.identity.mint_installation_token", return_value=fake_token) as mock_mint:
         reg = IdentityRegistry(_make_project())
         reg.get_fixer_client()
     call_args = mock_mint.call_args
@@ -336,9 +316,7 @@ def test_fixer_env_var_overrides_config_file_app_id(
 ) -> None:
     monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "888888")
     fake_token = _fresh_token()
-    with patch(
-        "foreman.identity.mint_installation_token", return_value=fake_token
-    ) as mock_mint:
+    with patch("foreman.identity.mint_installation_token", return_value=fake_token) as mock_mint:
         reg = IdentityRegistry(_make_project())
         reg.get_fixer_client()
     assert mock_mint.call_args.args[0] == 888888
@@ -384,9 +362,7 @@ def test_get_worker_mint_invoked_with_worker_app_credentials() -> None:
     """The worker accessor must resolve the worker-specific App fields,
     not any other role's — proves per-role credential dispatch."""
     fake_token = _fresh_token()
-    with patch(
-        "foreman.identity.mint_installation_token", return_value=fake_token
-    ) as mock_mint:
+    with patch("foreman.identity.mint_installation_token", return_value=fake_token) as mock_mint:
         reg = IdentityRegistry(_make_project())
         reg.get_worker_client()
     call_args = mock_mint.call_args
@@ -400,9 +376,7 @@ def test_worker_env_var_overrides_config_file_app_id(
 ) -> None:
     monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "555555")
     fake_token = _fresh_token()
-    with patch(
-        "foreman.identity.mint_installation_token", return_value=fake_token
-    ) as mock_mint:
+    with patch("foreman.identity.mint_installation_token", return_value=fake_token) as mock_mint:
         reg = IdentityRegistry(_make_project())
         reg.get_worker_client()
     assert mock_mint.call_args.args[0] == 555555

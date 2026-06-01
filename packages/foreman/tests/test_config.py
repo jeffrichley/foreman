@@ -200,9 +200,7 @@ reviewer_private_key_path = "/tmp/reviewer.pem"
     assert resolved == 999999
 
 
-def test_missing_reviewer_app_id_raises(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_missing_reviewer_app_id_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config_file = tmp_path / "config.toml"
     config_file.write_text(
         """
@@ -305,9 +303,7 @@ fixer_private_key_path = "/tmp/fixer.pem"
     assert cfg.projects["voice"].apps.resolve_fixer_app_id() == 999999
 
 
-def test_missing_fixer_app_id_raises(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_missing_fixer_app_id_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config_file = tmp_path / "config.toml"
     config_file.write_text(
         """
@@ -410,9 +406,7 @@ worker_private_key_path = "/tmp/worker.pem"
     assert cfg.projects["voice"].apps.resolve_worker_app_id() == 999999
 
 
-def test_missing_worker_app_id_raises(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_missing_worker_app_id_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config_file = tmp_path / "config.toml"
     config_file.write_text(
         """
@@ -528,9 +522,7 @@ planner_private_key_path = "/tmp/planner.pem"
 
 def test_daemon_config_has_sane_defaults(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        "[admin]\ngithub_token_env = \"FOREMAN_ADMIN_TOKEN\"\n"
-    )
+    config_path.write_text('[admin]\ngithub_token_env = "FOREMAN_ADMIN_TOKEN"\n')
     cfg = load_config(config_path)
     assert cfg.daemon.poll_interval_seconds == 30
     assert cfg.daemon.max_concurrent_workers == 1
@@ -542,8 +534,7 @@ def test_daemon_config_has_sane_defaults(tmp_path: Path) -> None:
 def test_daemon_config_rejects_max_workers_above_one(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        "[admin]\ngithub_token_env = \"FOREMAN_ADMIN_TOKEN\"\n"
-        "[daemon]\nmax_concurrent_workers = 4\n"
+        '[admin]\ngithub_token_env = "FOREMAN_ADMIN_TOKEN"\n[daemon]\nmax_concurrent_workers = 4\n'
     )
     with pytest.raises(ValidationError, match="max_concurrent_workers"):
         load_config(config_path)
@@ -552,10 +543,10 @@ def test_daemon_config_rejects_max_workers_above_one(tmp_path: Path) -> None:
 def test_project_config_auto_merge_defaults_to_false(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        "[admin]\ngithub_token_env = \"FOREMAN_ADMIN_TOKEN\"\n"
+        '[admin]\ngithub_token_env = "FOREMAN_ADMIN_TOKEN"\n'
         "[projects.voice]\n"
-        "repo = \"jeffrichley/voice\"\n"
-        "local_clone_path = \"/tmp/voice\"\n"
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
     )
     cfg = load_config(config_path)
     project = cfg.projects["voice"]
@@ -566,10 +557,10 @@ def test_project_config_auto_merge_defaults_to_false(tmp_path: Path) -> None:
 def test_project_config_auto_merge_reads_true_from_toml(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        "[admin]\ngithub_token_env = \"FOREMAN_ADMIN_TOKEN\"\n"
+        '[admin]\ngithub_token_env = "FOREMAN_ADMIN_TOKEN"\n'
         "[projects.voice]\n"
-        "repo = \"jeffrichley/voice\"\n"
-        "local_clone_path = \"/tmp/voice\"\n"
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
         "auto_merge_spec = true\n"
         "auto_merge_impl = true\n"
     )

@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
-from typing import Iterator
 
 _SCHEMA_V1 = [
     """
@@ -142,22 +142,16 @@ class Storage:
                 (project, issue_number),
             ).fetchone()
 
-    def mark_pipeline_terminated(
-        self, project: str, issue_number: int, at: datetime
-    ) -> None:
+    def mark_pipeline_terminated(self, project: str, issue_number: int, at: datetime) -> None:
         with self.connect() as conn:
             conn.execute(
-                "UPDATE pipelines SET terminated_at = ? "
-                "WHERE project = ? AND issue_number = ?",
+                "UPDATE pipelines SET terminated_at = ? WHERE project = ? AND issue_number = ?",
                 (at.isoformat(), project, issue_number),
             )
 
     def iter_pipelines_in_flight(self) -> Iterator[sqlite3.Row]:
         with self.connect() as conn:
-            for row in conn.execute(
-                "SELECT * FROM pipelines WHERE terminated_at IS NULL"
-            ):
-                yield row
+            yield from conn.execute("SELECT * FROM pipelines WHERE terminated_at IS NULL")
 
     def upsert_labels_seen(
         self,
@@ -179,8 +173,7 @@ class Storage:
     def get_labels_seen(self, project: str, issue_number: int) -> list[str] | None:
         with self.connect() as conn:
             row = conn.execute(
-                "SELECT labels_json FROM labels_seen "
-                "WHERE project = ? AND issue_number = ?",
+                "SELECT labels_json FROM labels_seen WHERE project = ? AND issue_number = ?",
                 (project, issue_number),
             ).fetchone()
         if row is None:
