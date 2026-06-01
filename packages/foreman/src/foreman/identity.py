@@ -99,6 +99,21 @@ class IdentityRegistry:
         """Return the reviewer-bot's current installation token string."""
         return self.get_token("reviewer")
 
+    def get_fixer_client(self) -> Github:
+        """Return the PyGithub client authenticated as the fixer bot.
+
+        The Fixer applies Reviewer findings to the spec doc, commits +
+        pushes to the spec branch, and posts a PR comment summarizing what
+        was fixed. The installation token also flows into the agent
+        subprocess via the role dispatcher's ``env=`` kwarg so any ``gh``
+        / ``git push`` calls the LLM makes act as the fixer bot too.
+        """
+        return self.get_client("fixer")
+
+    def get_fixer_token(self) -> str:
+        """Return the fixer-bot's current installation token string."""
+        return self.get_token("fixer")
+
     def get_host_provider(self, role: str) -> GitHostProvider:
         """Return a :class:`~foreman.git_host.GitHostProvider` for the role.
 
@@ -156,7 +171,12 @@ class IdentityRegistry:
                 self._project.apps.resolve_reviewer_app_id(),
                 self._project.apps.resolve_reviewer_private_key_path(),
             )
+        if role == "fixer":
+            return (
+                self._project.apps.resolve_fixer_app_id(),
+                self._project.apps.resolve_fixer_private_key_path(),
+            )
         raise ValueError(
             f"Unknown role: {role!r}. Walking skeleton supports "
-            "'planner' and 'reviewer'."
+            "'planner', 'reviewer', and 'fixer'."
         )

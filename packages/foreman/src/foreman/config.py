@@ -47,6 +47,10 @@ class AppsConfig(BaseModel):
     reviewer_app_id: int | None = None
     reviewer_private_key_path: str | None = None
 
+    fixer_app_id_env: str = "FOREMAN_FIXER_APP_ID"
+    fixer_app_id: int | None = None
+    fixer_private_key_path: str | None = None
+
     def resolve_planner_app_id(self) -> int:
         env_value = os.environ.get(self.planner_app_id_env)
         if env_value:
@@ -78,6 +82,22 @@ class AppsConfig(BaseModel):
         if not self.reviewer_private_key_path:
             raise RuntimeError("apps.reviewer_private_key_path not set in config file")
         return Path(self.reviewer_private_key_path)
+
+    def resolve_fixer_app_id(self) -> int:
+        env_value = os.environ.get(self.fixer_app_id_env)
+        if env_value:
+            return int(env_value)
+        if self.fixer_app_id is not None:
+            return self.fixer_app_id
+        raise RuntimeError(
+            f"No fixer app_id: env var {self.fixer_app_id_env} not set "
+            "and apps.fixer_app_id not in config file"
+        )
+
+    def resolve_fixer_private_key_path(self) -> Path:
+        if not self.fixer_private_key_path:
+            raise RuntimeError("apps.fixer_private_key_path not set in config file")
+        return Path(self.fixer_private_key_path)
 
 
 class ProjectConfig(BaseModel):
