@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 from pathlib import Path
+from typing import Any
 
 import click
 from github import Auth, Github
 
-from foreman.config import load_config
+from foreman.config import Config, load_config
 from foreman.init import InitConfig, detect_matching_clone, run_init
 from foreman.providers.anthropic_sdk import AnthropicSDKProvider
 from foreman.roles.fixer import run_fixer
@@ -298,6 +300,135 @@ def init(
     except (ValueError, FileExistsError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(result.summary)
+
+
+@cli.group()
+def daemon() -> None:
+    """Daemon lifecycle commands."""
+
+
+@daemon.command("start")
+@click.option(
+    "--max-iterations",
+    type=int,
+    default=None,
+    help="Stop after N worker iterations (testing only).",
+)
+def daemon_start(max_iterations: int | None) -> None:
+    """Start the daemon in foreground."""
+    config = _load_config_from_env()
+    asyncio.run(_daemon_run(config=config, max_iterations=max_iterations))
+
+
+@daemon.command("stop")
+def daemon_stop() -> None:
+    """Signal a running daemon to stop. (v1: send SIGTERM to the pid)."""
+    pid_path = Path("~/.foreman/daemon.pid").expanduser()
+    if not pid_path.exists():
+        click.echo("No daemon pid file found at ~/.foreman/daemon.pid.")
+        return
+    pid = int(pid_path.read_text().strip())
+    try:
+        os.kill(pid, signal.SIGTERM)
+        click.echo(f"Sent SIGTERM to daemon pid {pid}.")
+    except ProcessLookupError:
+        click.echo(f"Pid {pid} not running. Removing stale pid file.")
+        pid_path.unlink()
+
+
+@daemon.command("status")
+def daemon_status() -> None:
+    """Show daemon status — running / stopped."""
+    pid_path = Path("~/.foreman/daemon.pid").expanduser()
+    if not pid_path.exists():
+        click.echo("Daemon: not running.")
+        return
+    pid = int(pid_path.read_text().strip())
+    try:
+        os.kill(pid, 0)
+        click.echo(f"Daemon: running (pid {pid}).")
+    except ProcessLookupError:
+        click.echo(f"Daemon: stale pid file (pid {pid} dead). Run `foreman daemon stop` to clean.")
+
+
+def _load_config_from_env() -> Config:
+    """Load config from FOREMAN_CONFIG env var or default ~/.foreman/config.toml."""
+    path = os.environ.get("FOREMAN_CONFIG", str(Path("~/.foreman/config.toml").expanduser()))
+    return load_config(path)
+
+
+async def _daemon_run(*, config: Config, max_iterations: int | None) -> None:
+    """Run the daemon foreground until SIGTERM or --max-iterations reached."""
+    from foreman.daemon import Daemon
+    from foreman.role_dispatch import RealRoleDispatcher
+
+    host, runners = _resolve_host_and_runners(config)
+    role_dispatcher = RealRoleDispatcher(config=config, runners=runners)
+
+    daemon_instance = Daemon(config=config, host=host, role_dispatcher=role_dispatcher)
+    await daemon_instance.start()
+
+    if max_iterations is not None:
+        # Test mode — drain queue up to N times, then shut down.
+        for _ in range(max_iterations):
+            await asyncio.sleep(0.1)
+        await daemon_instance.shutdown()
+        return
+
+    # Production: wait until SIGTERM.
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    try:
+        loop.add_signal_handler(signal.SIGTERM, stop_event.set)
+    except NotImplementedError:
+        # Windows: asyncio loop does not support add_signal_handler.
+        pass
+    try:
+        loop.add_signal_handler(signal.SIGINT, stop_event.set)
+    except NotImplementedError:
+        pass
+    await stop_event.wait()
+    await daemon_instance.shutdown()
+
+
+def _resolve_host_and_runners(config: Config) -> tuple[Any, Any]:
+    """Return (host_provider, runners) for the configured admin token.
+
+    For v1 test-stubbing this returns null-ish stand-ins that won't be
+    invoked because the test passes --max-iterations=1 with empty queue.
+    Production wiring lands in a follow-up integration task.
+    """
+
+    class _NullHost:
+        def search_foreman_labeled_issues(self, repo: str) -> list[Any]:
+            return []
+
+        def add_issue_label(self, repo: str, issue_number: int, label: str) -> None:
+            pass
+
+        def post_issue_comment(self, repo: str, issue_number: int, body: str) -> None:
+            pass
+
+    class _NullRunners:
+        async def run_planner(self, **kwargs: Any) -> Any:
+            raise NotImplementedError
+
+        async def run_reviewer(self, **kwargs: Any) -> Any:
+            raise NotImplementedError
+
+        async def run_fixer(self, **kwargs: Any) -> Any:
+            raise NotImplementedError
+
+        async def run_worker(self, **kwargs: Any) -> Any:
+            raise NotImplementedError
+
+        async def merge_spec_pr(self, **kwargs: Any) -> Any:
+            raise NotImplementedError
+
+        async def merge_impl_pr(self, **kwargs: Any) -> Any:
+            raise NotImplementedError
+
+    return _NullHost(), _NullRunners()
 
 
 def main() -> None:

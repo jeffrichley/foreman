@@ -426,3 +426,35 @@ def test_cli_init_defaults_name_from_repo_tail(tmp_path: Path, monkeypatch) -> N
 
     assert result.exit_code == 0, result.output
     assert captured["name"] == "some-new-repo"
+
+
+def test_daemon_status_when_not_running(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[admin]\ngithub_token_env = \"X\"\n"
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+
+    from click.testing import CliRunner
+    from foreman.cli import cli
+
+    result = CliRunner().invoke(cli, ["daemon", "status"])
+    assert result.exit_code == 0
+    assert "not running" in result.output.lower()
+
+
+def test_daemon_start_foreground_runs_and_exits_clean(tmp_path: Path, monkeypatch) -> None:
+    """Foreground daemon start respects --max-iterations test mode."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f"[admin]\ngithub_token_env = \"X\"\n"
+        f"[daemon]\nsqlite_path = \"{(tmp_path / 'f.sqlite').as_posix()}\"\n"
+        f"log_path = \"{(tmp_path / 'd.log').as_posix()}\"\n"
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+
+    from click.testing import CliRunner
+    from foreman.cli import cli
+
+    result = CliRunner().invoke(cli, ["daemon", "start", "--max-iterations", "1"])
+    assert result.exit_code == 0
