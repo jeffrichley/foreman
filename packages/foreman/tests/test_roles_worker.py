@@ -880,7 +880,10 @@ async def test_run_worker_missing_spec_ready_label_raises(
     fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
     _make_passing_check_command(monkeypatch)
 
-    with pytest.raises(RuntimeError, match="foreman:spec-ready"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"foreman:spec-ready.*foreman:implementing-ready",
+    ):
         await run_worker(
             issue_url="https://github.com/jeffrichley/voice/issues/42",
             config=cfg,
@@ -895,6 +898,50 @@ async def test_run_worker_missing_spec_ready_label_raises(
     assert repo.create_pull_calls == []
     assert issue.added == []
     assert issue.removed == []
+
+
+@pytest.mark.asyncio
+async def test_run_worker_accepts_implementing_ready_entry_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``foreman:implementing-ready`` is the daemon's post-spec-merge sentinel.
+    When the orchestrator merges a spec PR via auto_merge_spec, it removes
+    foreman:spec-ready and applies foreman:implementing-ready — so the
+    Worker MUST accept implementing-ready as a valid entry condition,
+    otherwise every daemon-driven impl attempt fails the pre-flight check
+    (caught 2026-06-01 on foreman#30 dogfood)."""
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    cfg = _make_config(clone)
+    repo, _spec_pr, issue = _make_fake_repo(
+        issue_number=42,
+        head_sha=head_sha,
+        labels=["foreman:implementing-ready"],
+    )
+    client = _FakeWorkerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    _make_passing_check_command(monkeypatch)
+
+    await run_worker(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    # LLM dispatched, attempt label stamped, in-flight label flipped on.
+    fake_provider.run_agent.assert_called_once()
+    assert "foreman:impl-attempt-1" in issue.added
+    assert "foreman:implementing" in issue.added
+    # Both possible entry labels are removed — idempotent on the absent one.
+    assert "foreman:implementing-ready" in issue.removed
 
 
 @pytest.mark.asyncio

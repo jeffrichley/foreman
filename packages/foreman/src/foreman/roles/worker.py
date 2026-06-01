@@ -103,7 +103,9 @@ WORKER_ALLOWED_TOOLS = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]
 
 # Labels the Worker touches on the originating issue.
 _LABEL_SPEC_READY = "foreman:spec-ready"
+_LABEL_IMPLEMENTING_READY = "foreman:implementing-ready"
 _LABEL_IMPLEMENTING = "foreman:implementing"
+_WORKER_ENTRY_LABELS = frozenset({_LABEL_SPEC_READY, _LABEL_IMPLEMENTING_READY})
 _LABEL_IMPL_REVIEW = "foreman:impl-review"
 _LABEL_SPEC_FIX = "foreman:spec-fix"
 _LABEL_NEEDS_HELP = "foreman:needs-help"
@@ -445,13 +447,20 @@ async def run_worker(
     issue = repo.get_issue(issue_number)
     issue_labels = {label.name for label in issue.labels}
 
-    # Pre-flight: refuse to run without the entry-condition label.
-    if _LABEL_SPEC_READY not in issue_labels:
+    # Pre-flight: refuse to run without one of the Worker entry-condition
+    # labels. ``foreman:spec-ready`` is the historical entry condition for
+    # manual CLI runs (``foreman implement``); ``foreman:implementing-ready``
+    # is the daemon-set sentinel that the orchestrator places after merging
+    # the spec PR (since the spec PR's merge already cleared spec-ready).
+    # Accepting either keeps both invocation paths working.
+    if not (issue_labels & _WORKER_ENTRY_LABELS):
         raise RuntimeError(
-            f"Issue #{issue_number} does not carry the {_LABEL_SPEC_READY!r} "
-            f"label (labels: "
+            f"Issue #{issue_number} does not carry a Worker entry label "
+            f"({_LABEL_SPEC_READY!r} or {_LABEL_IMPLEMENTING_READY!r}); "
+            f"labels: "
             + ", ".join(sorted(issue_labels) or ["<none>"])
-            + "). The Worker only acts on issues queued by the Reviewer."
+            + ". The Worker only acts on issues queued by the Reviewer "
+            "(spec-ready) or the daemon's spec-merge step (implementing-ready)."
         )
 
     # Pre-flight: max-3-attempts gate. If 3 impl-attempt labels already
@@ -505,10 +514,16 @@ async def run_worker(
         check_command=check_command, cwd=wt_path
     )
 
-    # Advance label: spec-ready → implementing (clear spec-ready so
-    # observers see in-flight state; an observer that scans for the
-    # next ready issue won't double-pick this one).
-    issue.remove_from_labels(_LABEL_SPEC_READY)
+    # Advance label: entry → implementing (clear whichever entry label
+    # was present so observers see in-flight state; an observer that
+    # scans for the next ready issue won't double-pick this one). We
+    # remove BOTH possible entry labels — one will exist, the other is
+    # a no-op via the swallowed not-found error.
+    for _entry_label in _WORKER_ENTRY_LABELS:
+        try:
+            issue.remove_from_labels(_entry_label)
+        except Exception:
+            pass
     issue.add_to_labels(_LABEL_IMPLEMENTING)
 
     instructions = load_project_instructions(Path(project.local_clone_path))
@@ -633,11 +648,14 @@ async def run_worker(
                 llm_output.spec_invalid_reason,
             )
         issue.remove_from_labels(_LABEL_IMPLEMENTING)
-        # spec-ready was removed at dispatch time; idempotent re-remove.
-        try:
-            issue.remove_from_labels(_LABEL_SPEC_READY)
-        except Exception:
-            pass
+        # Entry labels were removed at dispatch time; idempotent re-remove
+        # of BOTH so the ticket cleanly enters spec-fix regardless of which
+        # entry path the Worker came in through (manual CLI vs daemon).
+        for _entry_label in _WORKER_ENTRY_LABELS:
+            try:
+                issue.remove_from_labels(_entry_label)
+            except Exception:
+                pass
         issue.add_to_labels(_LABEL_SPEC_FIX)
         issue.add_to_labels(_LABEL_NEEDS_HELP)
     else:
