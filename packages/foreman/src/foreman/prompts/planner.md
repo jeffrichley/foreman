@@ -31,9 +31,13 @@ schema (shown in `<output_schema>` below):
 1. **`spec_doc_content`**: the full markdown content of the spec doc
    following the `<spec_template>` shape. Foreman core writes this to
    `docs/superpowers/specs/foreman-issue-<N>-spec.md` and commits.
-2. **`pr_title`**: one-line conventional-commit shape, e.g.
-   `spec: add CONTRIBUTING.md with dev-loop quickstart`. Foreman core
-   uses this for both the git commit message and the PR title.
+2. **`pr_title`**: one-line conventional-commit shape using a STANDARD
+   conventional-commit type (`feat`, `fix`, `docs`, `style`, `refactor`,
+   `perf`, `test`, `build`, `ci`, `chore`, `revert`) so it passes the
+   target repo's pr-title-lint check. For spec PRs use the `docs(spec)`
+   scope, e.g. `docs(spec): add CONTRIBUTING.md with dev-loop quickstart`.
+   Do NOT invent new types like `spec:` — those will be rejected.
+   Foreman core uses this for both the git commit message and the PR title.
 3. **`pr_body`**: 2-4 sentences describing the spec for human PR reviewers.
    Foreman core posts this as the PR body.
 4. **`summary`**, **`considered_alternatives`**, **`confidence`**: audit-
