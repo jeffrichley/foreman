@@ -69,3 +69,21 @@ def stage_index(kind: ActionKind) -> int:
     behavior (see spec §2).
     """
     return _STAGE_ORDER[kind]
+
+
+# Labels that, when present, halt the daemon from taking new actions on the
+# ticket. ``foreman:hold`` is operator-toggled; ``foreman:failed`` is added
+# by the daemon on crash / role error and only cleared by an operator.
+#
+# Forward-compat (v2): is_blocked() will additionally check for
+# ``foreman:blocked-by:#N`` labels pointing at non-terminal tickets.
+_BLOCKING_LABELS = frozenset({"foreman:hold", "foreman:failed"})
+
+
+def is_blocked(ticket: Ticket) -> bool:
+    """Return True if the ticket should be skipped by the worker.
+
+    A blocked ticket stays in the queue but ``next_action`` returns None,
+    so the worker moves on to the next item without dispatching anything.
+    """
+    return bool(ticket.labels & _BLOCKING_LABELS)

@@ -48,3 +48,31 @@ def test_stage_index_orders_pipeline_progress() -> None:
     assert stage_index(ActionKind.RUN_WORKER) < stage_index(ActionKind.RUN_REVIEWER_IMPL)
     assert stage_index(ActionKind.RUN_REVIEWER_IMPL) < stage_index(ActionKind.RUN_FIXER_IMPL)
     assert stage_index(ActionKind.RUN_FIXER_IMPL) < stage_index(ActionKind.MERGE_IMPL_PR)
+
+
+from foreman.dispatcher import is_blocked
+
+
+def _ticket(labels: set[str]) -> Ticket:
+    return Ticket(
+        project_name="voice",
+        issue_number=42,
+        labels=frozenset(labels),
+        last_transition_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+
+
+def test_is_blocked_true_when_hold_label_present() -> None:
+    assert is_blocked(_ticket({"foreman:plan", "foreman:hold"})) is True
+
+
+def test_is_blocked_true_when_failed_label_present() -> None:
+    assert is_blocked(_ticket({"foreman:plan", "foreman:failed"})) is True
+
+
+def test_is_blocked_false_when_neither_present() -> None:
+    assert is_blocked(_ticket({"foreman:plan"})) is False
+
+
+def test_is_blocked_false_when_only_workflow_labels_present() -> None:
+    assert is_blocked(_ticket({"foreman:spec-review"})) is False
