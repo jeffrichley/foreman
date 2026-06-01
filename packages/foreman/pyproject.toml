@@ -11,6 +11,7 @@ dependencies = [
     "pydantic>=2.5,<3",
     "click>=8.1,<9",
     "requests>=2.31,<3",
+    "rich>=13,<15",
 ]
 
 [project.scripts]

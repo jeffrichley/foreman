@@ -11,7 +11,7 @@ from foreman.logging_setup import configure_daemon_logging
 
 def test_configure_daemon_logging_writes_json_lines(tmp_path: Path) -> None:
     log_path = tmp_path / "daemon.log"
-    configure_daemon_logging(log_path=log_path, level="INFO")
+    configure_daemon_logging(log_path=log_path, level="INFO", console=False)
 
     logger = logging.getLogger("foreman.daemon.test")
     logger.info("hello", extra={"ticket": 42, "project": "voice"})
@@ -30,7 +30,7 @@ def test_configure_daemon_logging_writes_json_lines(tmp_path: Path) -> None:
 
 def test_configure_daemon_logging_respects_level(tmp_path: Path) -> None:
     log_path = tmp_path / "daemon.log"
-    configure_daemon_logging(log_path=log_path, level="WARNING")
+    configure_daemon_logging(log_path=log_path, level="WARNING", console=False)
 
     logger = logging.getLogger("foreman.daemon.test_level")
     logger.info("info message")

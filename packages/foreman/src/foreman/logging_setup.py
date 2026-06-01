@@ -57,11 +57,24 @@ class _JsonLinesFormatter(logging.Formatter):
         return json.dumps(payload, default=str)
 
 
-def configure_daemon_logging(*, log_path: Path | str, level: str) -> None:
-    """Configure the 'foreman' logger to emit JSON lines to ``log_path``.
+def configure_daemon_logging(
+    *,
+    log_path: Path | str,
+    level: str,
+    console: bool = True,
+) -> None:
+    """Configure the 'foreman' logger.
 
-    Idempotent — re-calling replaces existing handlers on the 'foreman'
-    logger.
+    Two handlers attached:
+    - **FileHandler** writing JSON lines to ``log_path`` — machine-readable
+      audit log, includes every ``extra={...}`` field at the top level.
+    - **RichHandler** writing pretty colored output to stderr — for humans
+      watching the foreground daemon. Suppressed when ``console=False``
+      (e.g., in tests that import this function but don't want terminal
+      output).
+
+    Idempotent — re-calling replaces all existing handlers on the
+    'foreman' logger.
     """
     log_path = Path(log_path).expanduser()
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -69,8 +82,25 @@ def configure_daemon_logging(*, log_path: Path | str, level: str) -> None:
     foreman_logger = logging.getLogger("foreman")
     foreman_logger.handlers.clear()
 
-    handler = logging.FileHandler(log_path, encoding="utf-8")
-    handler.setFormatter(_JsonLinesFormatter())
-    foreman_logger.addHandler(handler)
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setFormatter(_JsonLinesFormatter())
+    foreman_logger.addHandler(file_handler)
+
+    if console:
+        # Imported lazily so tests that don't exercise this branch don't
+        # need rich installed at import time.
+        from rich.console import Console
+        from rich.logging import RichHandler
+
+        rich_handler = RichHandler(
+            console=Console(stderr=True),
+            show_time=True,
+            show_path=False,
+            rich_tracebacks=True,
+            markup=False,
+        )
+        rich_handler.setFormatter(logging.Formatter("%(message)s"))
+        foreman_logger.addHandler(rich_handler)
+
     foreman_logger.setLevel(level.upper())
     foreman_logger.propagate = False
