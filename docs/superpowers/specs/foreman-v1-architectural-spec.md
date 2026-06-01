@@ -63,30 +63,44 @@ change), never inside a node ("ping-pong inside a state" rejected).
 
 ### 2.3 Identities & GitHub auth
 
-**4 bot accounts** (one per role) via Gmail plus-aliasing:
+**4 GitHub Apps** (one per role) instead of bot accounts. Each App installs
+on a project repo and produces a distinct `[bot]` identity for commits and
+PRs:
 
-| Bot | Email | GitHub handle |
+| Role | App handle (post-install) |
+|---|---|
+| Planner | `foreman-planner[bot]` |
+| Reviewer | `foreman-reviewer[bot]` |
+| Fixer | `foreman-fixer[bot]` |
+| Worker | `foreman-worker[bot]` |
+
+**Why GitHub Apps over bot accounts + PATs:** the bot-invitation-acceptance
+flow doesn't scale (every new project repo requires manually accepting four
+collaborator invites under four separate Gmail accounts). GitHub Apps
+install once per repo from a single org-level dashboard.
+
+**Per-role credentials** stored in two pieces:
+
+| Piece | Storage | Notes |
 |---|---|---|
-| Planner | `jeffrichley+foreman-planner-bot@gmail.com` | `@foreman-planner-bot` |
-| Reviewer | `jeffrichley+foreman-reviewer-bot@gmail.com` | `@foreman-reviewer-bot` |
-| Fixer | `jeffrichley+foreman-fixer-bot@gmail.com` | `@foreman-fixer-bot` |
-| Worker | `jeffrichley+foreman-worker-bot@gmail.com` | `@foreman-worker-bot` |
+| App id (numeric) | `apps.<role>_app_id` in `~/.foreman/config.toml`, overridable by env var `FOREMAN_<ROLE>_APP_ID` | Not secret on its own |
+| Private key (RSA PEM) | Filesystem path in `apps.<role>_private_key_path`; default `~/.foreman/keys/<role>.pem` (chmod 600) | The actual secret |
 
-**PAT storage** uses a precedence hierarchy:
+At runtime, `foreman.auth.mint_installation_token` signs a 10-minute JWT
+with the App's private key, looks up the App's installation id for the
+target repo, and exchanges the JWT for a 1-hour installation token. The
+`IdentityRegistry` caches that token per role and auto-refreshes when
+within 5 minutes of expiry. The installation-token string is what gets
+injected into the agent subprocess as `GH_TOKEN` so the agent's `gh` CLI
+runs as the App's bot identity.
 
-| Precedence | Source | Use case |
-|---|---|---|
-| 1 (highest) | Env var `FOREMAN_<ROLE>_BOT_TOKEN` | CI / Docker / one-off testing |
-| 2 | Config file `~/.foreman/config.toml` (chmod 600) | Default daily use |
-| 3 (future) | OS keyring | Optional later |
-| 4 (future) | Encrypted KeePass vault | Optional later if security tightens |
-
-Wren's own PAT is NOT used by Foreman. Wren = my identity only; bots = Foreman's
-automation identities. This preserves audit-trail clarity.
+Wren's own PAT is NOT used by Foreman. Wren = my identity only; the Apps =
+Foreman's automation identities. This preserves audit-trail clarity.
 
 A 5th identity is needed for `foreman project add` (admin/setup ops):
-Jeff's own PAT, used only for repo-admin actions (collaborator invitations,
-label creation). Read from `FOREMAN_ADMIN_TOKEN` env var.
+Jeff's own PAT, used only for repo-admin actions (installing the four
+Foreman Apps onto a new repo, label creation). Read from
+`FOREMAN_ADMIN_TOKEN` env var.
 
 ### 2.4 Worktrees
 
@@ -100,28 +114,84 @@ on Planner entry, destroyed on pipeline completion.
 - On `foreman:failed`: worktree left in place for human inspection; operator
   runs `foreman worktree clean <ticket>` after diagnosis
 
-### 2.5 Provider facade & Anthropic Agent SDK
+### 2.5 Two facades: Provider + GitHostProvider
 
-**Provider facade is the first abstraction.** Single interface that all role
-modules dispatch through; first concrete implementation is the
-**Anthropic Agent SDK** (`claude-agent-sdk` Python package).
+Foreman core sits behind **two abstractions**, each isolating a different
+axis of swap-ability.
 
-Per-role agent dispatch:
+#### Provider facade (LLM vendor seam)
+
+Single interface that all role modules dispatch through; first concrete
+implementation is the **Anthropic Agent SDK** (`claude-agent-sdk` Python
+package).
+
+Per-role agent dispatch (**Pydantic-first**, per the official
+claude-agent-sdk structured-output pattern — see
+<https://code.claude.com/docs/en/agent-sdk/structured-outputs>):
 
 ```python
-result = provider.run_agent(
+result: PlannerOutput = await provider.run_agent(
     system_prompt=role_prompt,
     user_prompt=ticket_context,
-    tools=role_tool_set,         # see §4.1
-    output_schema=role_output_schema,
-    working_dir=worktree_path,
+    allowed_tools=role_tool_set,    # see §4.1
+    output_model=PlannerOutput,     # Pydantic model class, not a dict
+    cwd=worktree_path,
 )
 ```
+
+Callers pass a `type[BaseModel]` and receive a validated instance of that
+model. The provider hoists the JSON-schema marshalling the SDK requires
+(`model.model_json_schema()` going in, `model.model_validate()` coming
+out) so role-runners don't repeat that boilerplate.
+
+The provider also surfaces SDK-recognised failure modes as specific
+exceptions:
+- `StructuredOutputRetryError` — `ResultMessage.subtype ==
+  "error_max_structured_output_retries"` (the SDK gave up trying to
+  satisfy the schema).
+- `StructuredOutputMissingError` — the agent loop terminated without ever
+  producing a successful `ResultMessage` carrying `structured_output`.
 
 Prompt caching wired from day one (system prompt + repo context).
 
 Vendor swappable in theory (`opencode`, `codex`, etc. via thin adapters), but
 YAGNI for v1.
+
+#### GitHostProvider facade (git-host seam)
+
+`GitHostProvider` is the abstraction over the **git hosting platform**
+(GitHub today; GitLab / Bitbucket later). It owns every deterministic
+host-platform operation that any role needs:
+
+| Method | Used by |
+|---|---|
+| `get_issue(repo, n) -> IssueRef` | Planner |
+| `get_default_branch(repo) -> str` | Planner / Worker / Fixer |
+| `configure_worktree_identity(wt)` | Planner / Worker / Fixer |
+| `commit_files_to_worktree(wt, files, msg) -> sha` | Planner / Worker / Fixer |
+| `push_branch(wt, branch)` | Planner / Worker / Fixer |
+| `open_pull_request(repo, title, body, base, head) -> PRRef` | Planner |
+| `update_issue_labels(repo, n, add, remove)` | All roles |
+
+The LLM never sees this surface. Per the "Looper pattern" (Foreman issue
+#8): the LLM returns spec content + metadata; **core** dispatches the
+side-effecting host operations. This pattern is why the Planner LLM can
+drop down to a Read/Glob/Grep-only tool surface (see §4.1) — it has no
+need for `Bash` or `Edit/Write`.
+
+Each `GitHostProvider` instance is bound to one role's `BotIdentity`
+(slug + numeric App id + installation token). Token refresh stays inside
+`IdentityRegistry`; the provider just consumes whatever fresh identity it
+was constructed with.
+
+The GitHub implementation combines PyGithub (API operations) with
+subprocess git (worktree operations). Push auth uses the GitHub-Apps
+HTTPS-URL convention `https://x-access-token:<token>@github.com/...` and
+commit attribution uses `<slug>[bot]` + the noreply email pattern, both
+verified in the App-auth spike script.
+
+A future `GitLabProvider` is a clean drop-in — same method surface, different
+implementation. Role dispatchers and LLM prompts stay untouched.
 
 ## 3. Operations
 
@@ -184,14 +254,24 @@ state), but load-bearing for observability and debugging.
 ### 4.1 Tool capabilities matrix
 
 Each role gets a scoped tool set via the Anthropic Agent SDK. All file ops
-scope to the worktree path.
+scope to the worktree path. **Host-platform side effects (commit, push, PR,
+labels) are performed by Foreman core via `GitHostProvider` (see §2.5), not
+by the LLM** — so columns for `Edit/Write`, `Bash`, and `gh` reflect what
+the LLM is permitted to do directly, with `—` meaning core handles it.
 
-| Role | Read | Glob/Grep | Edit/Write | Bash | gh (read) | gh (write) |
-|---|---|---|---|---|---|---|
-| **Planner** | ✓ | ✓ | ✓ (spec + notes) | ✓ (worktree) | ✓ | ✓ (create PR, set label) |
-| **Reviewer** | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ (review, label) |
-| **Fixer** | ✓ | ✓ | ✓ | ✓ (worktree) | ✓ | ✓ (commit+push, label) |
-| **Worker** | ✓ | ✓ | ✓ | ✓ (worktree) | ✓ | ✓ (commit+push, label) |
+| Role | Read | Glob/Grep | Edit/Write | Bash | host ops |
+|---|---|---|---|---|---|
+| **Planner** | ✓ | ✓ | ✗ (spec content returned via structured output) | ✗ | — core via `GitHostProvider` |
+| **Reviewer** | ✓ | ✓ | ✗ | ✗ | — core via `GitHostProvider` |
+| **Fixer** | ✓ | ✓ | ✓ | ✓ (worktree, read-only git allowlist outside it) | — core via `GitHostProvider` |
+| **Worker** | ✓ | ✓ | ✓ | ✓ (worktree, read-only git allowlist outside it) | — core via `GitHostProvider` |
+
+**Planner is now read-only on the filesystem.** Post-refactor (Foreman
+issue #8 — the "Looper pattern"), the Planner LLM returns spec doc content
+as part of its structured output and Foreman core writes/commits/pushes/
+opens-the-PR. This trims the Planner's tool surface from
+`Read/Glob/Grep/Edit/Write/Bash` down to `Read/Glob/Grep` and removes the
+need to inject a per-role `GH_TOKEN` into the agent subprocess.
 
 **Critical constraint:** Reviewer is read-only on files + bash. Reviewer can
 flag findings, post review comments, change labels — but cannot modify files.
@@ -201,16 +281,25 @@ they don't like. If Reviewer needs git-log-style history search later, we add a
 push/commit/checkout/reset), NOT full Bash.
 
 **Hard blocklists for all roles:**
-- `gh repo delete` — never
+- `gh repo delete` — never (and `gh` is no longer in any role's allowed tool
+  set; PR/label ops route through `GitHostProvider`)
 - `git push --force` — never; if Fixer/Worker need to rewrite history, they
   fail back to human
 
-**Bash scoping:** All Bash ops constrained to the worktree's working directory.
+**Bash scoping:** Where Bash is granted (Fixer / Worker), it is constrained
+to the worktree's working directory.
 
 ### 4.2 Structured handoff (B-strict)
 
 Each role returns a structured JSON output (validated against a role-specific
 Pydantic schema). All outputs persist to SQLite for audit + replay.
+
+Per role, the LLM output is the *spec contract content*; the
+side-effect-completed `RunResult` (LLM output + host-side `PRRef`,
+commit SHA, etc.) is what `run_<role>` returns to the daemon. This
+separation keeps the LLM decoupled from any specific git hosting platform
+— a future GitLab provider drops in via §2.5's `GitHostProvider`
+abstraction without touching role prompts.
 
 **Default forwarding to next node: nothing.** Each next role starts fresh from
 GitHub state alone. The artifact (spec PR, review comments) IS the contract.
@@ -424,8 +513,11 @@ Modules:
     prompt caching from day one
 11. Per-ticket worktree at `~/.foreman/worktrees/<repo>/<ticket>/`, scoped FS
     tools, Planner-entry → pipeline-completion lifecycle
-12. 4 bot accounts (one per role) via Gmail plus-aliasing
-13. PAT storage: env-var → config-file precedence; future OS-keyring + vault
+12. 4 GitHub Apps (one per role); per-repo install replaces bot-account
+    invitation flow
+13. App credential storage: App id via env-var → config-file precedence;
+    private key as PEM file on disk (chmod 600); installation tokens
+    minted on demand and cached with 5-min refresh window
 14. Polling: 30s git, single loop, configurable; webhooks v2
 15. Bus integration deferred to v2; v1 uses SQLite + Foreman MCP
 16. Per-node handoff: B-strict — all persisted, default forward = nothing,

@@ -1,0 +1,734 @@
+"""Tests for ``foreman.init.run_init`` — the orchestrator behind
+``foreman init``.
+
+Verifies: arg validation, clone-path checking, refuses-without-force on
+existing config, idempotent label creation, skips existing instructions
+file, best-effort bot verification, correct config block writing,
+summary content. Uses a fake admin GitHub client + fake AppsConfig so
+the tests don't hit the network.
+"""
+
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+import pytest
+from github import GithubException
+
+from foreman.config import AppsConfig
+from foreman.init import (
+    _FOREMAN_LABELS,
+    BotVerification,
+    InitConfig,
+    InitResult,
+    _format_project_block,
+    _project_block_exists,
+    _remote_matches_repo,
+    _validate_clone_path,
+    _validate_repo_slug,
+    _write_project_block_to_config,
+    detect_matching_clone,
+    run_init,
+)
+
+# ----------------------------------------------------------------------
+# Fake PyGithub admin surface
+# ----------------------------------------------------------------------
+
+
+class _FakeLabel:
+    def __init__(self, name: str, color: str = "ffffff", description: str = "") -> None:
+        self.name = name
+        self.color = color
+        self.description = description
+
+
+class _FakeRepo:
+    """In-memory stand-in for PyGithub's ``Repository`` (label surface only)."""
+
+    def __init__(
+        self,
+        *,
+        slug: str,
+        existing_labels: list[_FakeLabel] | None = None,
+        raise_on_create: dict[str, GithubException] | None = None,
+    ) -> None:
+        self.full_name = slug
+        self._labels: list[_FakeLabel] = list(existing_labels or [])
+        self._raise_on_create = raise_on_create or {}
+        self.create_label_calls: list[dict[str, str]] = []
+
+    def get_labels(self) -> list[_FakeLabel]:
+        return list(self._labels)
+
+    def create_label(
+        self, *, name: str, color: str, description: str = ""
+    ) -> _FakeLabel:
+        self.create_label_calls.append(
+            {"name": name, "color": color, "description": description}
+        )
+        if name in self._raise_on_create:
+            raise self._raise_on_create[name]
+        label = _FakeLabel(name=name, color=color, description=description)
+        self._labels.append(label)
+        return label
+
+
+class _FakeAdminClient:
+    def __init__(self, *, repo: _FakeRepo) -> None:
+        self._repo = repo
+        self.get_repo_calls: list[str] = []
+
+    def get_repo(self, slug: str) -> _FakeRepo:
+        self.get_repo_calls.append(slug)
+        return self._repo
+
+
+# ----------------------------------------------------------------------
+# Helpers — seed a clone with an origin remote pointing at owner/repo
+# ----------------------------------------------------------------------
+
+
+def _seed_clone_with_origin(clone: Path, *, repo_slug: str) -> None:
+    """Init a minimal git repo at ``clone`` with a fake origin pointing
+    at ``https://github.com/<repo_slug>``.
+
+    The remote URL doesn't need to be reachable — the init validator
+    only does a string check. Tests pass a synthetic URL here so they
+    never touch the network.
+    """
+    clone.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=clone, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=clone, check=True, capture_output=True
+    )
+    (clone / "README.md").write_text("seed\n")
+    subprocess.run(["git", "add", "."], cwd=clone, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "seed"], cwd=clone, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", f"https://github.com/{repo_slug}.git"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+
+
+# ----------------------------------------------------------------------
+# Arg validation
+# ----------------------------------------------------------------------
+
+
+def test_validate_repo_slug_extracts_owner_and_name() -> None:
+    owner, repo = _validate_repo_slug("jeffrichley/foreman")
+    assert owner == "jeffrichley"
+    assert repo == "foreman"
+
+
+def test_validate_repo_slug_rejects_missing_slash() -> None:
+    with pytest.raises(ValueError, match="owner/repo"):
+        _validate_repo_slug("foreman")
+
+
+def test_validate_repo_slug_rejects_extra_segments() -> None:
+    with pytest.raises(ValueError, match="owner/repo"):
+        _validate_repo_slug("jeffrichley/foreman/extra")
+
+
+def test_validate_repo_slug_rejects_leading_dot() -> None:
+    """GitHub repo names can't start with a dot — pattern requires
+    alphanumeric leading char."""
+    with pytest.raises(ValueError, match="owner/repo"):
+        _validate_repo_slug(".hidden/foreman")
+
+
+def test_validate_clone_path_accepts_matching_origin(tmp_path: Path) -> None:
+    clone = tmp_path / "clone"
+    _seed_clone_with_origin(clone, repo_slug="jeffrichley/foreman")
+    _validate_clone_path(clone, "jeffrichley/foreman")  # no raise
+
+
+def test_validate_clone_path_rejects_missing(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="does not exist"):
+        _validate_clone_path(tmp_path / "does-not-exist", "jeffrichley/foreman")
+
+
+def test_validate_clone_path_rejects_non_git(tmp_path: Path) -> None:
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    with pytest.raises(ValueError, match="not a git repository"):
+        _validate_clone_path(clone, "jeffrichley/foreman")
+
+
+def test_validate_clone_path_rejects_mismatched_remote(tmp_path: Path) -> None:
+    clone = tmp_path / "clone"
+    _seed_clone_with_origin(clone, repo_slug="someone-else/other-repo")
+    with pytest.raises(ValueError, match="does not match the target repo"):
+        _validate_clone_path(clone, "jeffrichley/foreman")
+
+
+# ----------------------------------------------------------------------
+# Remote URL matcher — accept both HTTPS and SSH shapes
+# ----------------------------------------------------------------------
+
+
+def test_remote_matches_repo_accepts_https() -> None:
+    assert _remote_matches_repo(
+        "https://github.com/jeffrichley/foreman", "jeffrichley/foreman"
+    )
+
+
+def test_remote_matches_repo_accepts_https_with_dot_git() -> None:
+    assert _remote_matches_repo(
+        "https://github.com/jeffrichley/foreman.git", "jeffrichley/foreman"
+    )
+
+
+def test_remote_matches_repo_accepts_scp_style_ssh() -> None:
+    assert _remote_matches_repo(
+        "git@github.com:jeffrichley/foreman.git", "jeffrichley/foreman"
+    )
+
+
+def test_remote_matches_repo_accepts_ssh_url() -> None:
+    assert _remote_matches_repo(
+        "ssh://git@github.com/jeffrichley/foreman.git", "jeffrichley/foreman"
+    )
+
+
+def test_remote_matches_repo_case_insensitive() -> None:
+    """GitHub URLs are case-insensitive — be lenient on matching."""
+    assert _remote_matches_repo(
+        "https://github.com/JeffRichley/Foreman", "jeffrichley/foreman"
+    )
+
+
+def test_remote_matches_repo_rejects_mismatch() -> None:
+    assert not _remote_matches_repo(
+        "https://github.com/other/repo", "jeffrichley/foreman"
+    )
+
+
+def test_remote_matches_repo_rejects_empty() -> None:
+    assert not _remote_matches_repo("", "jeffrichley/foreman")
+
+
+# ----------------------------------------------------------------------
+# detect_matching_clone — used by CLI to default --clone-path
+# ----------------------------------------------------------------------
+
+
+def test_detect_matching_clone_returns_cwd_when_remote_matches(
+    tmp_path: Path,
+) -> None:
+    clone = tmp_path / "clone"
+    _seed_clone_with_origin(clone, repo_slug="jeffrichley/foreman")
+    assert detect_matching_clone(clone, "jeffrichley/foreman") == clone
+
+
+def test_detect_matching_clone_returns_none_when_remote_mismatches(
+    tmp_path: Path,
+) -> None:
+    clone = tmp_path / "clone"
+    _seed_clone_with_origin(clone, repo_slug="other/repo")
+    assert detect_matching_clone(clone, "jeffrichley/foreman") is None
+
+
+def test_detect_matching_clone_returns_none_for_non_repo(tmp_path: Path) -> None:
+    not_a_repo = tmp_path / "plain-dir"
+    not_a_repo.mkdir()
+    assert detect_matching_clone(not_a_repo, "jeffrichley/foreman") is None
+
+
+# ----------------------------------------------------------------------
+# Project block formatting + config writing
+# ----------------------------------------------------------------------
+
+
+def test_format_project_block_default_check_command_omitted(tmp_path: Path) -> None:
+    """When ``check_command`` is the default (``just check``), it is NOT
+    emitted in the block — Worker resolves None to that default."""
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    block = _format_project_block(
+        name="foreman",
+        repo="jeffrichley/foreman",
+        clone_path=clone,
+        check_command="just check",
+    )
+    assert "[projects.foreman]" in block
+    assert 'repo = "jeffrichley/foreman"' in block
+    assert "check_command" not in block  # default → omitted
+
+
+def test_format_project_block_non_default_check_command_emitted(tmp_path: Path) -> None:
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    block = _format_project_block(
+        name="myproj",
+        repo="me/myproj",
+        clone_path=clone,
+        check_command="make test",
+    )
+    assert 'check_command = "make test"' in block
+
+
+def test_format_project_block_uses_posix_path(tmp_path: Path) -> None:
+    """Backslashes must be normalized to forward slashes so the TOML is
+    portable across Windows + Unix."""
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    block = _format_project_block(
+        name="x", repo="a/x", clone_path=clone, check_command="just check"
+    )
+    assert "\\" not in block  # no Windows-style separators
+
+
+def test_write_project_block_creates_config_when_absent(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.toml"
+    block = "[projects.foreman]\nrepo = \"jeffrichley/foreman\"\n"
+    _write_project_block_to_config(
+        config_path=cfg, block_text=block, name="foreman", force=False
+    )
+    assert cfg.read_text(encoding="utf-8") == block
+
+
+def test_write_project_block_appends_to_existing_config(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[projects.voice]\nrepo = \"jeffrichley/voice\"\n", encoding="utf-8"
+    )
+    block = "[projects.foreman]\nrepo = \"jeffrichley/foreman\"\n"
+    _write_project_block_to_config(
+        config_path=cfg, block_text=block, name="foreman", force=False
+    )
+    contents = cfg.read_text(encoding="utf-8")
+    # Existing block survives unchanged.
+    assert "[projects.voice]" in contents
+    assert 'repo = "jeffrichley/voice"' in contents
+    # New block appended.
+    assert "[projects.foreman]" in contents
+    assert 'repo = "jeffrichley/foreman"' in contents
+
+
+def test_write_project_block_replaces_when_force(tmp_path: Path) -> None:
+    """Force overwrite: the named block is replaced; siblings stay put."""
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        (
+            "[projects.voice]\nrepo = \"jeffrichley/voice\"\n\n"
+            "[projects.foreman]\nrepo = \"OLD_VALUE/foreman\"\n"
+            "local_clone_path = \"/tmp/old\"\n"
+        ),
+        encoding="utf-8",
+    )
+    new_block = (
+        "[projects.foreman]\nrepo = \"jeffrichley/foreman\"\n"
+        "local_clone_path = \"/new/path\"\n"
+    )
+    _write_project_block_to_config(
+        config_path=cfg, block_text=new_block, name="foreman", force=True
+    )
+    contents = cfg.read_text(encoding="utf-8")
+    assert "OLD_VALUE" not in contents
+    assert "/tmp/old" not in contents
+    assert "/new/path" in contents
+    # Sibling project block untouched.
+    assert 'repo = "jeffrichley/voice"' in contents
+
+
+def test_write_project_block_preserves_apps_subblock_on_force(tmp_path: Path) -> None:
+    """The ``[projects.<name>.apps]`` sub-block is operator-managed; a
+    --force overwrite of the main block MUST leave it intact."""
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        (
+            "[projects.foreman]\nrepo = \"OLD/foreman\"\n"
+            "local_clone_path = \"/tmp/old\"\n\n"
+            "[projects.foreman.apps]\n"
+            "planner_app_id = 123456\n"
+            "planner_private_key_path = \"/keys/planner.pem\"\n"
+        ),
+        encoding="utf-8",
+    )
+    new_block = (
+        "[projects.foreman]\nrepo = \"jeffrichley/foreman\"\n"
+        "local_clone_path = \"/new\"\n"
+    )
+    _write_project_block_to_config(
+        config_path=cfg, block_text=new_block, name="foreman", force=True
+    )
+    contents = cfg.read_text(encoding="utf-8")
+    # Apps block survives.
+    assert "[projects.foreman.apps]" in contents
+    assert "planner_app_id = 123456" in contents
+    # Main block was updated.
+    assert 'repo = "jeffrichley/foreman"' in contents
+    assert "OLD/foreman" not in contents
+
+
+def test_project_block_exists_true_after_write(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[projects.foreman]\nrepo = \"jeffrichley/foreman\"\n", encoding="utf-8"
+    )
+    assert _project_block_exists(cfg, "foreman") is True
+
+
+def test_project_block_exists_false_for_other_project(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[projects.voice]\nrepo = \"jeffrichley/voice\"\n", encoding="utf-8"
+    )
+    assert _project_block_exists(cfg, "foreman") is False
+
+
+def test_project_block_exists_false_when_config_missing(tmp_path: Path) -> None:
+    assert _project_block_exists(tmp_path / "no-config.toml", "foreman") is False
+
+
+# ----------------------------------------------------------------------
+# run_init — orchestrator end-to-end
+# ----------------------------------------------------------------------
+
+
+def _make_init_config(
+    *,
+    tmp_path: Path,
+    repo: str = "jeffrichley/foreman",
+    name: str = "foreman",
+    check_command: str = "just check",
+    force: bool = False,
+) -> tuple[InitConfig, Path]:
+    """Build a fully-validated InitConfig + return the seeded clone Path."""
+    clone = tmp_path / "clone"
+    _seed_clone_with_origin(clone, repo_slug=repo)
+    cfg_path = tmp_path / "config.toml"
+    init_config = InitConfig(
+        repo=repo,
+        name=name,
+        clone_path=clone,
+        check_command=check_command,
+        force=force,
+        config_path=cfg_path,
+    )
+    return init_config, clone
+
+
+def test_run_init_writes_config_block(tmp_path: Path) -> None:
+    init_config, _clone = _make_init_config(tmp_path=tmp_path)
+    fake_repo = _FakeRepo(slug=init_config.repo)
+    admin = _FakeAdminClient(repo=fake_repo)
+
+    result = run_init(init_config, admin_client=admin)
+
+    contents = init_config.config_path.read_text(encoding="utf-8")
+    assert "[projects.foreman]" in contents
+    assert 'repo = "jeffrichley/foreman"' in contents
+    assert result.config_path == init_config.config_path
+
+
+def test_run_init_writes_instructions_template(tmp_path: Path) -> None:
+    init_config, clone = _make_init_config(tmp_path=tmp_path)
+    fake_repo = _FakeRepo(slug=init_config.repo)
+    admin = _FakeAdminClient(repo=fake_repo)
+
+    result = run_init(init_config, admin_client=admin)
+
+    inst = clone / ".foreman" / "INSTRUCTIONS.md"
+    assert inst.exists()
+    assert result.instructions_written is True
+    body = inst.read_text(encoding="utf-8")
+    # The repo name + check_command substitutions landed.
+    assert "Foreman instructions for foreman" in body
+    assert "just check" in body
+
+
+def test_run_init_skips_instructions_when_file_exists(tmp_path: Path) -> None:
+    """Existing instructions are operator-curated; init must not
+    overwrite them even with --force."""
+    init_config, clone = _make_init_config(tmp_path=tmp_path, force=True)
+    foreman_dir = clone / ".foreman"
+    foreman_dir.mkdir()
+    custom = "# operator-customized — do not overwrite\n"
+    (foreman_dir / "INSTRUCTIONS.md").write_text(custom, encoding="utf-8")
+
+    fake_repo = _FakeRepo(slug=init_config.repo)
+    admin = _FakeAdminClient(repo=fake_repo)
+
+    result = run_init(init_config, admin_client=admin)
+
+    body = (clone / ".foreman" / "INSTRUCTIONS.md").read_text(encoding="utf-8")
+    assert body == custom
+    assert result.instructions_written is False
+
+
+def test_run_init_creates_all_18_labels_on_empty_repo(tmp_path: Path) -> None:
+    init_config, _clone = _make_init_config(tmp_path=tmp_path)
+    fake_repo = _FakeRepo(slug=init_config.repo)
+    admin = _FakeAdminClient(repo=fake_repo)
+
+    result = run_init(init_config, admin_client=admin)
+
+    assert len(result.labels_created) == 18
+    assert len(result.labels_existing) == 0
+    created_names = [c["name"] for c in fake_repo.create_label_calls]
+    # Every documented label was created.
+    expected_names = [name for name, _color, _desc in _FOREMAN_LABELS]
+    assert sorted(created_names) == sorted(expected_names)
+
+
+def test_run_init_skips_existing_labels(tmp_path: Path) -> None:
+    """Existing labels are left untouched — no update to color/description."""
+    init_config, _clone = _make_init_config(tmp_path=tmp_path)
+    fake_repo = _FakeRepo(
+        slug=init_config.repo,
+        existing_labels=[
+            _FakeLabel(
+                name="foreman:plan",
+                color="CCCCCC",
+                description="Custom operator description",
+            ),
+            _FakeLabel(name="foreman:planning"),
+        ],
+    )
+    admin = _FakeAdminClient(repo=fake_repo)
+
+    result = run_init(init_config, admin_client=admin)
+
+    # 18 - 2 already-existed = 16 created
+    assert len(result.labels_created) == 16
+    assert sorted(result.labels_existing) == ["foreman:plan", "foreman:planning"]
+    # The pre-existing label's color/description was NOT overwritten.
+    plan_label = next(lbl for lbl in fake_repo._labels if lbl.name == "foreman:plan")
+    assert plan_label.color == "CCCCCC"
+    assert plan_label.description == "Custom operator description"
+
+
+def test_run_init_treats_422_create_as_existing(tmp_path: Path) -> None:
+    """422 on create_label means race-with-create — treat as already
+    existed rather than failing the run."""
+    init_config, _clone = _make_init_config(tmp_path=tmp_path)
+    fake_repo = _FakeRepo(
+        slug=init_config.repo,
+        raise_on_create={
+            "foreman:hold": GithubException(
+                status=422, data={"message": "Validation Failed"}, headers=None
+            )
+        },
+    )
+    admin = _FakeAdminClient(repo=fake_repo)
+
+    result = run_init(init_config, admin_client=admin)
+
+    assert "foreman:hold" in result.labels_existing
+    assert "foreman:hold" not in result.labels_created
+
+
+def test_run_init_refuses_overwrite_without_force(tmp_path: Path) -> None:
+    init_config, _clone = _make_init_config(tmp_path=tmp_path)
+    init_config.config_path.write_text(
+        "[projects.foreman]\nrepo = \"someone/else\"\n", encoding="utf-8"
+    )
+    fake_repo = _FakeRepo(slug=init_config.repo)
+    admin = _FakeAdminClient(repo=fake_repo)
+
+    with pytest.raises(FileExistsError, match="already configured"):
+        run_init(init_config, admin_client=admin)
+
+    # No labels created — refusal happens before any side effects.
+    assert fake_repo.create_label_calls == []
+
+
+def test_run_init_overwrites_with_force(tmp_path: Path) -> None:
+    init_config, _clone = _make_init_config(tmp_path=tmp_path, force=True)
+    init_config.config_path.write_text(
+        "[projects.foreman]\nrepo = \"someone/else\"\n"
+        "local_clone_path = \"/tmp/old\"\n",
+        encoding="utf-8",
+    )
+    fake_repo = _FakeRepo(slug=init_config.repo)
+    admin = _FakeAdminClient(repo=fake_repo)
+
+    run_init(init_config, admin_client=admin)
+
+    contents = init_config.config_path.read_text(encoding="utf-8")
+    assert 'repo = "jeffrichley/foreman"' in contents
+    assert "someone/else" not in contents
+
+
+def test_run_init_rejects_invalid_repo_slug(tmp_path: Path) -> None:
+    clone = tmp_path / "clone"
+    _seed_clone_with_origin(clone, repo_slug="jeffrichley/foreman")
+    init_config = InitConfig(
+        repo="not-a-slug",
+        name="x",
+        clone_path=clone,
+        check_command="just check",
+        force=False,
+        config_path=tmp_path / "config.toml",
+    )
+    fake_repo = _FakeRepo(slug="not-a-slug")
+    admin = _FakeAdminClient(repo=fake_repo)
+
+    with pytest.raises(ValueError, match="owner/repo"):
+        run_init(init_config, admin_client=admin)
+
+
+def test_run_init_rejects_mismatched_clone_remote(tmp_path: Path) -> None:
+    clone = tmp_path / "clone"
+    _seed_clone_with_origin(clone, repo_slug="other/repo")
+    init_config = InitConfig(
+        repo="jeffrichley/foreman",
+        name="foreman",
+        clone_path=clone,
+        check_command="just check",
+        force=False,
+        config_path=tmp_path / "config.toml",
+    )
+    fake_repo = _FakeRepo(slug="jeffrichley/foreman")
+    admin = _FakeAdminClient(repo=fake_repo)
+
+    with pytest.raises(ValueError, match="does not match"):
+        run_init(init_config, admin_client=admin)
+
+
+def test_run_init_bot_verification_skips_when_apps_unconfigured(
+    tmp_path: Path,
+) -> None:
+    """No app IDs in config → each role's verification is 'skipped'
+    rather than 'failed' — operator may set up apps later."""
+    init_config, _clone = _make_init_config(tmp_path=tmp_path)
+    fake_repo = _FakeRepo(slug=init_config.repo)
+    admin = _FakeAdminClient(repo=fake_repo)
+
+    result = run_init(init_config, admin_client=admin)
+
+    assert len(result.bot_verifications) == 4
+    roles_seen = {v.role for v in result.bot_verifications}
+    assert roles_seen == {"planner", "reviewer", "fixer", "worker"}
+    for v in result.bot_verifications:
+        assert v.ok is False
+        assert v.detail.startswith("skipped: ")
+
+
+def test_run_init_bot_verification_records_failure_without_aborting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Best-effort: a failed verification records the error but init
+    still completes (labels created, config written)."""
+    init_config, _clone = _make_init_config(tmp_path=tmp_path)
+    fake_repo = _FakeRepo(slug=init_config.repo)
+    admin = _FakeAdminClient(repo=fake_repo)
+
+    # Stub _verify_bot_installation to simulate one fail + three skip.
+    from foreman import init as init_mod
+
+    def fake_verify(
+        *, role: str, apps: AppsConfig, repo_slug: str
+    ) -> BotVerification:
+        if role == "planner":
+            return BotVerification(
+                role=role,
+                ok=False,
+                detail="RuntimeError: installation not found",
+            )
+        return BotVerification(role=role, ok=False, detail="skipped: no app id")
+
+    monkeypatch.setattr(init_mod, "_verify_bot_installation", fake_verify)
+
+    result = run_init(init_config, admin_client=admin)
+
+    planner = next(v for v in result.bot_verifications if v.role == "planner")
+    assert planner.ok is False
+    assert "installation not found" in planner.detail
+    # Config still written + labels still created
+    assert init_config.config_path.exists()
+    assert len(result.labels_created) == 18
+
+
+def test_run_init_summary_contains_expected_fields(tmp_path: Path) -> None:
+    init_config, _clone = _make_init_config(tmp_path=tmp_path)
+    fake_repo = _FakeRepo(slug=init_config.repo)
+    admin = _FakeAdminClient(repo=fake_repo)
+
+    result = run_init(init_config, admin_client=admin)
+
+    summary = result.summary
+    assert "jeffrichley/foreman" in summary
+    assert "[projects.foreman]" in summary
+    assert "INSTRUCTIONS.md" in summary
+    assert "18 labels" in summary
+    assert "Next steps" in summary
+    assert "foreman plan https://github.com/jeffrichley/foreman/issues/" in summary
+
+
+def test_run_init_summary_notes_existing_instructions(tmp_path: Path) -> None:
+    """When the instructions file already existed, the summary calls it
+    out so the operator knows their content wasn't overwritten."""
+    init_config, clone = _make_init_config(tmp_path=tmp_path)
+    (clone / ".foreman").mkdir()
+    (clone / ".foreman" / "INSTRUCTIONS.md").write_text("custom\n")
+    fake_repo = _FakeRepo(slug=init_config.repo)
+    admin = _FakeAdminClient(repo=fake_repo)
+
+    result = run_init(init_config, admin_client=admin)
+
+    assert "existing file preserved" in result.summary
+
+
+def test_run_init_uses_check_command_override_in_template(
+    tmp_path: Path,
+) -> None:
+    """The rendered instructions template substitutes the
+    ``--check-command`` value into the quality-gate section."""
+    init_config, clone = _make_init_config(
+        tmp_path=tmp_path, check_command="make test"
+    )
+    fake_repo = _FakeRepo(slug=init_config.repo)
+    admin = _FakeAdminClient(repo=fake_repo)
+
+    run_init(init_config, admin_client=admin)
+
+    body = (clone / ".foreman" / "INSTRUCTIONS.md").read_text(encoding="utf-8")
+    assert "make test" in body
+    # And the placeholder was substituted, not left in place.
+    assert "<configured_check_command>" not in body
+
+
+def test_run_init_uses_check_command_override_in_config(tmp_path: Path) -> None:
+    """Non-default ``check_command`` lands in the config block too."""
+    init_config, _clone = _make_init_config(
+        tmp_path=tmp_path, check_command="make test"
+    )
+    fake_repo = _FakeRepo(slug=init_config.repo)
+    admin = _FakeAdminClient(repo=fake_repo)
+
+    run_init(init_config, admin_client=admin)
+
+    contents = init_config.config_path.read_text(encoding="utf-8")
+    assert 'check_command = "make test"' in contents
+
+
+def test_run_init_returns_init_result_with_typed_fields(tmp_path: Path) -> None:
+    """The orchestrator returns a structured result — CLI prints
+    ``summary``; tests assert against the typed fields."""
+    init_config, clone = _make_init_config(tmp_path=tmp_path)
+    fake_repo = _FakeRepo(slug=init_config.repo)
+    admin = _FakeAdminClient(repo=fake_repo)
+
+    result = run_init(init_config, admin_client=admin)
+
+    assert isinstance(result, InitResult)
+    assert result.repo == "jeffrichley/foreman"
+    assert result.name == "foreman"
+    assert result.clone_path == clone
+    assert result.instructions_path == clone / ".foreman" / "INSTRUCTIONS.md"
+    assert isinstance(result.bot_verifications, list)
+    assert len(result.bot_verifications) == 4
