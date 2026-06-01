@@ -28,6 +28,7 @@ deterministic" split.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -40,7 +41,7 @@ from github.Repository import Repository
 from foreman.config import Config
 from foreman.identity import IdentityRegistry
 from foreman.provider import ProviderFacade
-from foreman.schemas.reviewer import ReviewerOutput
+from foreman.schemas.reviewer import Finding, ReviewerOutput
 from foreman.worktree import WorktreeManager
 
 _PR_URL_RE = re.compile(
@@ -57,6 +58,45 @@ REVIEWER_ALLOWED_TOOLS = ["Read", "Grep", "Glob", "Bash"]
 _LABEL_IN_REVIEW = "foreman:spec-review"
 _LABEL_SPEC_READY = "foreman:spec-ready"
 _LABEL_SPEC_FIX = "foreman:spec-fix"
+
+# Machine-parseable markers embedded in the posted review body so the Fixer
+# can recover the Reviewer's structured findings from what GitHub stores.
+# GitHub renders Markdown but preserves HTML comments verbatim in the source,
+# so the markers are invisible to humans (when the review is rendered) yet
+# deterministically locatable when the Fixer fetches the raw body. The
+# ``<details>`` wrapper keeps the JSON visually folded for humans who DO
+# expand the source. Both Reviewer (writer) and Fixer (reader) must agree on
+# these strings — they are the wire format between the roles.
+FINDINGS_BEGIN_MARKER = "<!-- foreman:findings:begin -->"
+FINDINGS_END_MARKER = "<!-- foreman:findings:end -->"
+
+
+def _build_findings_block(findings: list[Finding]) -> str:
+    """Build the HTML-comment-fenced findings block appended to the review body.
+
+    Always emits the markers + a JSON list (``[]`` when ``findings`` is empty)
+    so the Fixer's extractor has a single, predictable shape to look for. The
+    ``<details>`` fold keeps the prose readable on GitHub; the markers make
+    parsing deterministic.
+    """
+    payload = [
+        {
+            "severity": f.severity,
+            "target": f.target,
+            "issue": f.issue,
+            "needed": f.needed,
+        }
+        for f in findings
+    ]
+    json_text = json.dumps(payload, indent=2)
+    return (
+        f"{FINDINGS_BEGIN_MARKER}\n"
+        "<details>\n"
+        "<summary>Structured findings (for Fixer)</summary>\n\n"
+        f"```json\n{json_text}\n```\n\n"
+        "</details>\n"
+        f"{FINDINGS_END_MARKER}"
+    )
 
 
 def parse_pr_url(url: str) -> tuple[str, str, int]:
@@ -280,7 +320,18 @@ async def run_reviewer(
     # Post the review comment as the reviewer bot. ``event="COMMENT"``
     # (not ``"APPROVE"``) — the bot doesn't have write access on the head
     # branch and approval is a human decision in v1 anyway.
-    pr.create_review(body=llm_output.review_comment, event="COMMENT")
+    #
+    # We append a marker-fenced JSON block carrying the structured findings
+    # to the review body so the Fixer can recover them by parsing what
+    # GitHub actually stored. Without this, the Fixer's "every edit must
+    # trace to a structured finding" rule produces 0 actions: the structured
+    # ``findings`` list lives only in this in-memory ``ReviewerOutput``, and
+    # by the time the Fixer runs (in a separate process / later) all it has
+    # is the posted review prose. ``llm_output`` is treated as immutable —
+    # we build a fresh ``enriched_body`` string instead of mutating it.
+    findings_block = _build_findings_block(llm_output.findings)
+    enriched_body = f"{llm_output.review_comment}\n\n{findings_block}"
+    pr.create_review(body=enriched_body, event="COMMENT")
 
     # Advance the originating ISSUE's label (not the PR's) — same pattern
     # the Planner uses.

@@ -20,6 +20,8 @@ import pytest
 
 from foreman.config import AppsConfig, Config, ProjectConfig
 from foreman.roles.reviewer import (
+    FINDINGS_BEGIN_MARKER,
+    FINDINGS_END_MARKER,
     REVIEWER_ALLOWED_TOOLS,
     _issue_number_from_branch,
     parse_pr_url,
@@ -332,8 +334,16 @@ async def test_run_reviewer_clean_outcome_advances_to_spec_ready(
     assert env["GH_TOKEN"] == "ghs_reviewer_token"
     assert "PATH" in env or len(env) > 1  # parent env merged in
 
-    # PR review posted, NOT approved
-    assert pr.reviews_posted == [("Clean — traced ACs 1-4 against the spec.", "COMMENT")]
+    # PR review posted, NOT approved. The Reviewer's prose is preserved
+    # verbatim at the start, then enriched with the marker-fenced findings
+    # block (always emitted, even for clean outcomes — the empty-list shape
+    # is part of the contract).
+    assert len(pr.reviews_posted) == 1
+    body, event = pr.reviews_posted[0]
+    assert event == "COMMENT"
+    assert body.startswith("Clean — traced ACs 1-4 against the spec.")
+    assert FINDINGS_BEGIN_MARKER in body
+    assert FINDINGS_END_MARKER in body
 
     # Issue label advanced: spec-review → spec-ready
     assert issue.removed == ["foreman:spec-review"]
@@ -347,6 +357,98 @@ async def test_run_reviewer_clean_outcome_advances_to_spec_ready(
     assert isinstance(result, ReviewerOutput)
     assert result.outcome == "clean"
     assert result.confidence == "high"
+
+
+@pytest.mark.asyncio
+async def test_run_reviewer_embeds_structured_findings_json_in_review_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The posted review body must carry the structured findings as a
+    marker-fenced JSON block so the Fixer can recover them from what GitHub
+    stored. Without this, the Fixer's "every edit traces to a structured
+    finding" rule produces zero actions (the in-memory ``findings`` list
+    never crosses the role boundary). Round-trip the JSON to confirm
+    severity/target/issue/needed survive verbatim.
+    """
+    import json
+    import re
+
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
+
+    cfg = _make_config(clone)
+    repo, pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeReviewerClient(repo=repo)
+    registry = _make_registry(client)
+
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_make_needs_fix_output())
+
+    await run_reviewer(
+        pr_url="https://github.com/jeffrichley/voice/pull/77",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    body, _event = pr.reviews_posted[0]
+    assert FINDINGS_BEGIN_MARKER in body
+    assert FINDINGS_END_MARKER in body
+
+    # Pull the fenced JSON out of the marker-delimited region.
+    between = body.split(FINDINGS_BEGIN_MARKER, 1)[1].split(FINDINGS_END_MARKER, 1)[0]
+    m = re.search(r"```json\n(.*?)\n```", between, flags=re.DOTALL)
+    assert m is not None, f"no fenced JSON block found between markers: {between!r}"
+    parsed = json.loads(m.group(1))
+
+    expected = _make_needs_fix_output().findings
+    assert len(parsed) == len(expected)
+    for got, want in zip(parsed, expected, strict=True):
+        assert got["severity"] == want.severity
+        assert got["target"] == want.target
+        assert got["issue"] == want.issue
+        assert got["needed"] == want.needed
+
+
+@pytest.mark.asyncio
+async def test_run_reviewer_embeds_empty_findings_list_when_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The block is always emitted — empty list (``[]``) on clean outcomes —
+    so the Fixer's extractor sees a single predictable shape. Pinning this
+    keeps the wire format unconditional.
+    """
+    import json
+    import re
+
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
+
+    cfg = _make_config(clone)
+    repo, pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeReviewerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_make_clean_output())
+
+    await run_reviewer(
+        pr_url="https://github.com/jeffrichley/voice/pull/77",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    body, _event = pr.reviews_posted[0]
+    between = body.split(FINDINGS_BEGIN_MARKER, 1)[1].split(FINDINGS_END_MARKER, 1)[0]
+    m = re.search(r"```json\n(.*?)\n```", between, flags=re.DOTALL)
+    assert m is not None
+    assert json.loads(m.group(1)) == []
 
 
 @pytest.mark.asyncio
