@@ -184,3 +184,80 @@ async def test_run_one_iteration_records_failure_and_marks_failed(tmp_path: Path
         failures = list(conn.execute("SELECT * FROM failures"))
     assert len(failures) == 1
     assert "simulated role crash" in failures[0]["reason"]
+
+
+@dataclass
+class _HangingDispatcher:
+    """Dispatch coroutine that never completes — simulates a wedged role."""
+
+    calls: int = 0
+
+    async def dispatch(self, *, ticket: Ticket, action: Action) -> RoleResult:
+        self.calls += 1
+        import asyncio as _asyncio
+
+        await _asyncio.sleep(60)
+        raise AssertionError("unreachable")
+
+
+@pytest.mark.asyncio
+async def test_run_one_iteration_times_out_hung_dispatch(tmp_path: Path) -> None:
+    """A hanging role dispatch must be cancelled at ``timeout_seconds`` and
+    recorded as a TimeoutError failure — otherwise the single worker stalls
+    forever and the daemon stops making progress.
+    """
+    storage = Storage(tmp_path / "f.sqlite")
+    storage.init()
+    queue = DaemonQueue()
+    locks = TicketLockManager()
+    dispatcher = _HangingDispatcher()
+    projects = _project_configs()
+
+    queue.enqueue(_ticket())
+    advanced = await run_one_iteration(
+        queue=queue,
+        locks=locks,
+        dispatcher=dispatcher,
+        storage=storage,
+        projects=projects,
+        timeout_seconds=0.05,
+    )
+
+    assert advanced is True
+    assert dispatcher.calls == 1
+    with storage.connect() as conn:
+        failures = list(conn.execute("SELECT * FROM failures"))
+        node_runs = list(conn.execute("SELECT * FROM node_runs"))
+    assert len(failures) == 1
+    assert "TimeoutError" in failures[0]["reason"]
+    assert len(node_runs) == 1
+    assert node_runs[0]["outcome"] == "failure"
+
+
+@pytest.mark.asyncio
+async def test_run_one_iteration_without_timeout_does_not_wrap(tmp_path: Path) -> None:
+    """When ``timeout_seconds=None`` (the default), dispatch runs unbounded —
+    pin the contract so a future bug doesn't silently introduce a default
+    timeout that breaks long-running roles like the Worker.
+    """
+    storage = Storage(tmp_path / "f.sqlite")
+    storage.init()
+    queue = DaemonQueue()
+    locks = TicketLockManager()
+    dispatcher = _FakeRoleDispatcher()
+    projects = _project_configs()
+
+    queue.enqueue(_ticket())
+    advanced = await run_one_iteration(
+        queue=queue,
+        locks=locks,
+        dispatcher=dispatcher,
+        storage=storage,
+        projects=projects,
+    )
+
+    assert advanced is True
+    assert len(dispatcher.calls) == 1
+    with storage.connect() as conn:
+        failures = list(conn.execute("SELECT * FROM failures"))
+    assert failures == []

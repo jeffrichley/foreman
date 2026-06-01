@@ -154,6 +154,7 @@ class Daemon:
                 dispatcher=self.role_dispatcher,
                 storage=self.storage,
                 projects=self.config.projects,
+                timeout_seconds=self.config.daemon.role_dispatch_timeout_seconds,
             )
             if not advanced:
                 try:
