@@ -606,6 +606,77 @@ async def test_run_reviewer_rejects_url_pointing_at_wrong_project(
 
 
 @pytest.mark.asyncio
+async def test_run_reviewer_embeds_project_instructions_in_user_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ``.foreman/INSTRUCTIONS.md`` exists in the clone, the
+    Reviewer's LLM sees the instructions content (verbatim) under a
+    project-specific instructions section header so it can use the
+    project's conventions while reviewing."""
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
+
+    foreman_dir = clone / ".foreman"
+    foreman_dir.mkdir()
+    instructions_text = (
+        "# Foreman instructions for voice\n\n"
+        "## PR title rules\nUse `docs(spec): ...` for spec PRs.\n"
+    )
+    (foreman_dir / "INSTRUCTIONS.md").write_text(instructions_text, encoding="utf-8")
+
+    cfg = _make_config(clone)
+    repo, _pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeReviewerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_make_clean_output())
+
+    await run_reviewer(
+        pr_url="https://github.com/jeffrichley/voice/pull/77",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    user_prompt = fake_provider.run_agent.call_args.kwargs["user_prompt"]
+    assert "## Project-specific instructions" in user_prompt
+    assert "Use `docs(spec): ...` for spec PRs." in user_prompt
+    assert "# Foreman instructions for voice" in user_prompt
+
+
+@pytest.mark.asyncio
+async def test_run_reviewer_omits_instructions_section_when_file_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No instructions file → no project instructions section header."""
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
+
+    cfg = _make_config(clone)
+    repo, _pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeReviewerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_make_clean_output())
+
+    await run_reviewer(
+        pr_url="https://github.com/jeffrichley/voice/pull/77",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    user_prompt = fake_provider.run_agent.call_args.kwargs["user_prompt"]
+    assert "## Project-specific instructions" not in user_prompt
+
+
+@pytest.mark.asyncio
 async def test_run_reviewer_passes_env_with_reviewer_token_and_parent_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

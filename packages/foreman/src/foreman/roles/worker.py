@@ -79,6 +79,7 @@ from github.Repository import Repository
 
 from foreman.config import Config
 from foreman.identity import IdentityRegistry
+from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade
 from foreman.schemas.worker import WorkerOutput, WorkerRunResult
 from foreman.stats import log_worker_run
@@ -277,6 +278,7 @@ def _build_user_prompt(
     baseline_failures: set[str],
     check_command: str,
     attempt: int,
+    instructions: str | None,
 ) -> str:
     """Compose the per-run user prompt.
 
@@ -285,7 +287,19 @@ def _build_user_prompt(
     check_command name (so it can run + reference it in the PR body),
     the issue number + spec PR number (for the PR body template), and
     the attempt counter (so it can size its retry budget mentally).
+
+    ``instructions`` is the verbatim contents of the project's
+    ``.foreman/INSTRUCTIONS.md`` (or ``None`` when absent). When present
+    the section is emitted near the top so project-specific conventions
+    (PR title rules, branch conventions, code-style preferences, etc.)
+    frame the implementation. When ``None`` the section is omitted
+    entirely.
     """
+    instructions_section = (
+        f"## Project-specific instructions\n\n{instructions}\n\n"
+        if instructions
+        else ""
+    )
     if spec_doc_content is None:
         spec_section = (
             "## Spec doc\nNot inlined — read it from the worktree using "
@@ -324,6 +338,7 @@ def _build_user_prompt(
     return (
         f"You are implementing the spec for issue #{issue_number}. This is "
         f"impl attempt #{attempt} of a maximum of {_MAX_IMPL_ATTEMPTS}.\n\n"
+        f"{instructions_section}"
         f"## Originating issue\nTitle: {issue_title}\n\n{issue_body}\n\n"
         f"{spec_section}"
         f"{baseline_section}"
@@ -504,6 +519,8 @@ async def run_worker(
     issue.remove_from_labels(_LABEL_SPEC_READY)
     issue.add_to_labels(_LABEL_IMPLEMENTING)
 
+    instructions = load_project_instructions(Path(project.local_clone_path))
+
     system_prompt = _load_worker_prompt()
     user_prompt = _build_user_prompt(
         issue_title=issue.title or "",
@@ -514,6 +531,7 @@ async def run_worker(
         baseline_failures=baseline_failures,
         check_command=check_command,
         attempt=attempt,
+        instructions=instructions,
     )
 
     start_time = time.monotonic()

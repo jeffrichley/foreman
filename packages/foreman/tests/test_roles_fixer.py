@@ -1140,6 +1140,78 @@ async def test_run_fixer_passes_extracted_findings_into_user_prompt(
 
 
 @pytest.mark.asyncio
+async def test_run_fixer_embeds_project_instructions_in_user_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ``.foreman/INSTRUCTIONS.md`` exists in the clone, the Fixer's
+    LLM sees the instructions content (verbatim) under a project-specific
+    instructions section header so project conventions reach the fix."""
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    foreman_dir = clone / ".foreman"
+    foreman_dir.mkdir()
+    instructions_text = (
+        "# Foreman instructions for voice\n\n"
+        "## Branch naming\nKeep `foreman/issue-<N>` unchanged.\n"
+    )
+    (foreman_dir / "INSTRUCTIONS.md").write_text(instructions_text, encoding="utf-8")
+
+    cfg = _make_config(clone)
+    repo, _pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeFixerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+
+    await run_fixer(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    user_prompt = fake_provider.run_agent.call_args.kwargs["user_prompt"]
+    assert "## Project-specific instructions" in user_prompt
+    assert "Keep `foreman/issue-<N>` unchanged." in user_prompt
+    assert "# Foreman instructions for voice" in user_prompt
+
+
+@pytest.mark.asyncio
+async def test_run_fixer_omits_instructions_section_when_file_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No instructions file → no project instructions section header."""
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    cfg = _make_config(clone)
+    repo, _pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeFixerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+
+    await run_fixer(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    user_prompt = fake_provider.run_agent.call_args.kwargs["user_prompt"]
+    assert "## Project-specific instructions" not in user_prompt
+
+
+@pytest.mark.asyncio
 async def test_run_fixer_uses_empty_findings_when_review_body_lacks_block(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

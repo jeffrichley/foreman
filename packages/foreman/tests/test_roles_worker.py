@@ -1284,6 +1284,81 @@ async def test_run_worker_stats_logs_overridden_outcome_not_worker_claim(
 
 
 @pytest.mark.asyncio
+async def test_run_worker_embeds_project_instructions_in_user_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ``.foreman/INSTRUCTIONS.md`` exists in the clone, the Worker's
+    LLM sees the instructions content (verbatim) under a project-specific
+    instructions section header so project conventions (PR title rules,
+    code style, etc.) reach the implementation."""
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    foreman_dir = clone / ".foreman"
+    foreman_dir.mkdir()
+    instructions_text = (
+        "# Foreman instructions for voice\n\n"
+        "## PR title rules\nImpl PRs use `<type>(<scope>): ...`.\n"
+    )
+    (foreman_dir / "INSTRUCTIONS.md").write_text(instructions_text, encoding="utf-8")
+
+    cfg = _make_config(clone)
+    repo, _spec_pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeWorkerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    _make_passing_check_command(monkeypatch)
+
+    await run_worker(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    user_prompt = fake_provider.run_agent.call_args.kwargs["user_prompt"]
+    assert "## Project-specific instructions" in user_prompt
+    assert "Impl PRs use `<type>(<scope>): ...`." in user_prompt
+    assert "# Foreman instructions for voice" in user_prompt
+
+
+@pytest.mark.asyncio
+async def test_run_worker_omits_instructions_section_when_file_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No instructions file → no project instructions section header."""
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    cfg = _make_config(clone)
+    repo, _spec_pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeWorkerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    _make_passing_check_command(monkeypatch)
+
+    await run_worker(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    user_prompt = fake_provider.run_agent.call_args.kwargs["user_prompt"]
+    assert "## Project-specific instructions" not in user_prompt
+
+
+@pytest.mark.asyncio
 async def test_run_worker_sdk_error_surfaces_as_incomplete_not_crash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

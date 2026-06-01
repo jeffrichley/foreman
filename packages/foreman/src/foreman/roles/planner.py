@@ -40,6 +40,7 @@ from pathlib import Path
 from foreman.config import Config
 from foreman.git_host import GitHostProvider, IssueRef
 from foreman.identity import IdentityRegistry
+from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade
 from foreman.schemas.planner import PlannerOutput, PlannerRunResult
 from foreman.worktree import WorktreeManager
@@ -69,9 +70,24 @@ def _load_planner_prompt() -> str:
     )
 
 
-def _build_user_prompt(*, issue: IssueRef) -> str:
+def _build_user_prompt(*, issue: IssueRef, instructions: str | None) -> str:
+    """Compose the per-run user prompt.
+
+    ``instructions`` carries the verbatim contents of the project's
+    ``.foreman/INSTRUCTIONS.md`` when present; the section is emitted
+    near the top so project-specific conventions (PR title rules, branch
+    conventions, etc.) frame everything that follows. When ``None`` the
+    section is omitted entirely — empty headers would be a distracting
+    no-op the LLM would have to mentally skip.
+    """
+    instructions_section = (
+        f"## Project-specific instructions\n\n{instructions}\n\n"
+        if instructions
+        else ""
+    )
     return (
         f"You are processing GitHub issue #{issue.number}.\n\n"
+        f"{instructions_section}"
         f"## Title\n{issue.title}\n\n"
         f"## Body\n{issue.body}\n\n"
         f"Follow the steps in your system prompt. Return your structured "
@@ -132,8 +148,10 @@ async def run_planner(
     )
     host.configure_worktree_identity(wt_path)
 
+    instructions = load_project_instructions(Path(project.local_clone_path))
+
     system_prompt = _load_planner_prompt()
-    user_prompt = _build_user_prompt(issue=issue)
+    user_prompt = _build_user_prompt(issue=issue, instructions=instructions)
 
     llm_output = await provider.run_agent(
         system_prompt=system_prompt,

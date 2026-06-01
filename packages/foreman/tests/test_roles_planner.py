@@ -319,6 +319,86 @@ async def test_run_planner_does_not_inject_env_into_provider(
 
 
 @pytest.mark.asyncio
+async def test_run_planner_embeds_project_instructions_in_user_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ``.foreman/INSTRUCTIONS.md`` exists in the clone, its content
+    is embedded verbatim in the LLM's user_prompt under a project-specific
+    instructions section header. This is how project conventions (PR
+    title rules, branch conventions) reach the Planner."""
+    clone = tmp_path / "clone"
+    _seed_clone(clone, origin_path=tmp_path / "origin.git")
+    monkeypatch.setenv("FOREMAN_PLANNER_APP_ID", "123456")
+
+    # Drop the instructions file into the clone — same path the
+    # ``foreman init`` command would write it.
+    foreman_dir = clone / ".foreman"
+    foreman_dir.mkdir()
+    instructions_text = (
+        "# Foreman instructions for voice\n\n"
+        "## PR title rules\nUse `feat(scope): ...` only.\n"
+    )
+    (foreman_dir / "INSTRUCTIONS.md").write_text(instructions_text, encoding="utf-8")
+
+    cfg = _make_config(clone)
+    fake_host = _FakeHostProvider()
+    fake_registry = MagicMock()
+    fake_registry.get_host_provider.return_value = fake_host
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
+
+    await run_planner(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=fake_registry,
+    )
+
+    user_prompt = fake_provider.run_agent.call_args.kwargs["user_prompt"]
+    # Section header + content both present.
+    assert "## Project-specific instructions" in user_prompt
+    assert "Use `feat(scope): ...` only." in user_prompt
+    # And the distinctive instructions title survived verbatim.
+    assert "# Foreman instructions for voice" in user_prompt
+
+
+@pytest.mark.asyncio
+async def test_run_planner_omits_instructions_section_when_file_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ``.foreman/INSTRUCTIONS.md`` is absent, the project-specific
+    instructions section header MUST NOT appear in the user_prompt —
+    empty headers would be a distracting no-op the LLM would have to
+    mentally skip."""
+    clone = tmp_path / "clone"
+    _seed_clone(clone, origin_path=tmp_path / "origin.git")
+    monkeypatch.setenv("FOREMAN_PLANNER_APP_ID", "123456")
+
+    # Note: no `.foreman/INSTRUCTIONS.md` written.
+
+    cfg = _make_config(clone)
+    fake_host = _FakeHostProvider()
+    fake_registry = MagicMock()
+    fake_registry.get_host_provider.return_value = fake_host
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
+
+    await run_planner(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=fake_registry,
+    )
+
+    user_prompt = fake_provider.run_agent.call_args.kwargs["user_prompt"]
+    assert "## Project-specific instructions" not in user_prompt
+
+
+@pytest.mark.asyncio
 async def test_run_planner_rejects_url_pointing_at_wrong_project(
     tmp_path: Path,
 ) -> None:

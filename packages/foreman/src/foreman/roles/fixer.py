@@ -52,6 +52,7 @@ from pydantic import ValidationError
 
 from foreman.config import Config
 from foreman.identity import IdentityRegistry
+from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade
 from foreman.roles.reviewer import FINDINGS_BEGIN_MARKER, FINDINGS_END_MARKER
 from foreman.schemas.fixer import FixerOutput, FixerRunResult
@@ -221,6 +222,7 @@ def _build_user_prompt(
     review_comment: str,
     findings: list[Finding],
     attempt: int,
+    instructions: str | None,
 ) -> str:
     """Compose the per-run user prompt.
 
@@ -230,7 +232,18 @@ def _build_user_prompt(
     as markdown (for reading order) AND as JSON (for unambiguous
     targeting) — the LLM uses the JSON when emitting the structured
     output, the markdown when reading.
+
+    ``instructions`` is the verbatim contents of the project's
+    ``.foreman/INSTRUCTIONS.md`` (or ``None`` when absent). When present
+    the section is emitted near the top so project-specific conventions
+    (commit-message rules, branch conventions, etc.) frame the fix.
+    When ``None`` the section is omitted entirely.
     """
+    instructions_section = (
+        f"## Project-specific instructions\n\n{instructions}\n\n"
+        if instructions
+        else ""
+    )
     spec_section = (
         f"## Spec doc (currently committed in this PR)\n"
         f"```markdown\n{spec_doc_content}\n```\n\n"
@@ -243,6 +256,7 @@ def _build_user_prompt(
     return (
         f"You are fixing Reviewer findings on spec PR. This is fix attempt "
         f"#{attempt} of a maximum of {_MAX_FIX_ATTEMPTS}.\n\n"
+        f"{instructions_section}"
         f"## Originating issue\nTitle: {issue_title}\n\n{issue_body}\n\n"
         f"## PR title\n{pr_title}\n\n"
         f"## PR body\n{pr_body}\n\n"
@@ -438,6 +452,7 @@ async def run_fixer(
     findings: list[Finding] = _extract_findings_from_review_comment(review_comment)
 
     spec_doc_content = _read_spec_doc(wt_path, issue_number)
+    instructions = load_project_instructions(Path(project.local_clone_path))
 
     system_prompt = _load_fixer_prompt()
     user_prompt = _build_user_prompt(
@@ -449,6 +464,7 @@ async def run_fixer(
         review_comment=review_comment,
         findings=findings,
         attempt=attempt,
+        instructions=instructions,
     )
 
     start_time = time.monotonic()

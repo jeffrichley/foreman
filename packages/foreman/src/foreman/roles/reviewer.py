@@ -40,6 +40,7 @@ from github.Repository import Repository
 
 from foreman.config import Config
 from foreman.identity import IdentityRegistry
+from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade
 from foreman.schemas.reviewer import Finding, ReviewerOutput
 from foreman.worktree import WorktreeManager
@@ -139,6 +140,7 @@ def _build_user_prompt(
     pr_body: str,
     spec_doc_content: str | None,
     pr_diff: str,
+    instructions: str | None,
 ) -> str:
     """Compose the per-run user prompt.
 
@@ -146,7 +148,18 @@ def _build_user_prompt(
     (the spec doc + PR body) plus the actual diff so it can verify file-level
     claims. The spec doc may be embedded directly when available; otherwise
     the Reviewer reads it from the worktree via its Read tool.
+
+    ``instructions`` is the verbatim contents of the project's
+    ``.foreman/INSTRUCTIONS.md`` (or ``None`` when absent). When present
+    the section is emitted near the top so project-specific conventions
+    (PR title rules, branch conventions, etc.) frame the review. When
+    ``None`` the section is omitted entirely.
     """
+    instructions_section = (
+        f"## Project-specific instructions\n\n{instructions}\n\n"
+        if instructions
+        else ""
+    )
     spec_section = (
         f"## Spec doc (committed in this PR)\n{spec_doc_content}\n\n"
         if spec_doc_content
@@ -157,6 +170,7 @@ def _build_user_prompt(
     )
     return (
         "You are reviewing an open spec PR produced by the Planner.\n\n"
+        f"{instructions_section}"
         f"## Originating issue\nTitle: {issue_title}\n\n{issue_body}\n\n"
         f"## PR title\n{pr_title}\n\n"
         f"## PR body\n{pr_body}\n\n"
@@ -297,6 +311,7 @@ async def run_reviewer(
 
     pr_diff = _get_pr_diff(wt_path, base_branch=base_branch, head_sha=head_sha)
     spec_doc_content = _read_spec_doc(wt_path, issue_number)
+    instructions = load_project_instructions(Path(project.local_clone_path))
 
     system_prompt = _load_reviewer_prompt()
     user_prompt = _build_user_prompt(
@@ -306,6 +321,7 @@ async def run_reviewer(
         pr_body=pr.body or "",
         spec_doc_content=spec_doc_content,
         pr_diff=pr_diff,
+        instructions=instructions,
     )
 
     llm_output = await provider.run_agent(
