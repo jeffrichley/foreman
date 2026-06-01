@@ -388,12 +388,63 @@ async def _daemon_run(*, config: Config, max_iterations: int | None) -> None:
 
 
 def _resolve_host_and_runners(config: Config) -> tuple[Any, Any]:
-    """Return (host_provider, runners) for the configured admin token.
+    """Build real GitHubDaemonHost + DaemonRunners from config.
 
-    For v1 test-stubbing this returns null-ish stand-ins that won't be
-    invoked because the test passes --max-iterations=1 with empty queue.
-    Production wiring lands in a follow-up integration task.
+    Reads the orchestrator bot's App ID + private key from the loaded
+    config, mints an installation token, and constructs the host and
+    runners adapters.
+
+    Returns (None, None)-shaped stubs only if orchestrator config is
+    absent (e.g., a fresh install without orchestrator-bot configured).
+    The daemon will still start with these stubs but won't do useful
+    work; the CLI prints a warning.
     """
+    from pathlib import Path as _Path
+
+    from foreman.daemon_host import (
+        GitHubDaemonHost,
+        build_orchestrator_github_client,
+    )
+    from foreman.daemon_runners import DaemonRunners
+
+    # If orchestrator config is missing, fall back to nulls + warn.
+    try:
+        app_id = config.orchestrator.resolve_app_id()
+        key_path = config.orchestrator.resolve_private_key_path()
+    except RuntimeError as exc:
+        click.echo(
+            f"WARNING: orchestrator not configured ({exc}). "
+            "Daemon will run but cannot reach GitHub. Configure "
+            "[orchestrator] in ~/.foreman/config.toml to enable.",
+            err=True,
+        )
+        return _build_null_host_and_runners()
+
+    # Need a repo slug to look up the installation id. Use the first
+    # configured project's repo — the App should be installed on at
+    # least one of the configured repos for the token to be valid.
+    if not config.projects:
+        raise RuntimeError(
+            "No projects configured; daemon needs at least one project "
+            "to look up the orchestrator's installation token."
+        )
+    first_repo = next(iter(config.projects.values())).repo
+
+    gh_client = build_orchestrator_github_client(
+        app_id=app_id,
+        private_key_path=key_path,
+        repo_slug_for_install=first_repo,
+    )
+    host = GitHubDaemonHost(github_client=gh_client)
+
+    worktrees_root = _Path("~/.foreman/worktrees").expanduser()
+    runners = DaemonRunners(host=host, worktrees_root=worktrees_root)
+
+    return host, runners
+
+
+def _build_null_host_and_runners() -> tuple[Any, Any]:
+    """Stub host + runners for when orchestrator config is absent."""
 
     class _NullHost:
         def search_foreman_labeled_issues(self, repo: str) -> list[Any]:
