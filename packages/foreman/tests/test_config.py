@@ -491,3 +491,78 @@ planner_private_key_path = "/tmp/planner.pem"
     )
     cfg = load_config(config_file)
     assert cfg.projects["voice"].check_command == "make test"
+
+
+# ----------------------------------------------------------------------
+# ProjectConfig.dev_base_branch — alternate base branch for spec worktrees
+# (Foreman issue #16)
+#
+# When a project's active development line lives on a feature branch (e.g.
+# a walking-skeleton phase) rather than on ``main``, the Planner needs to
+# branch new spec worktrees from ``origin/<that-branch>`` instead of
+# ``origin/<default>``. ``dev_base_branch`` is the operator-explicit opt-in;
+# auto-detection is deliberately out of scope for v1.
+# ----------------------------------------------------------------------
+
+
+def test_dev_base_branch_default_is_none(tmp_path: Path) -> None:
+    """Existing configs that omit ``dev_base_branch`` must still load and
+    return ``None`` (the orchestrator falls back to origin/<default>).
+    """
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[projects.voice]
+repo = "jeffrichley/voice"
+local_clone_path = "/tmp/voice"
+
+[projects.voice.apps]
+planner_app_id = 123456
+planner_private_key_path = "/tmp/planner.pem"
+"""
+    )
+    cfg = load_config(config_file)
+    assert cfg.projects["voice"].dev_base_branch is None
+
+
+def test_dev_base_branch_reads_from_config_file(tmp_path: Path) -> None:
+    """When ``dev_base_branch`` is set in TOML, it surfaces verbatim through
+    the loaded config so the Planner can pass it to ``WorktreeManager.create``.
+    """
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[projects.foreman]
+repo = "jeffrichley/foreman"
+local_clone_path = "/tmp/foreman"
+dev_base_branch = "feat/walking-skeleton"
+
+[projects.foreman.apps]
+planner_app_id = 123456
+planner_private_key_path = "/tmp/planner.pem"
+"""
+    )
+    cfg = load_config(config_file)
+    assert cfg.projects["foreman"].dev_base_branch == "feat/walking-skeleton"
+
+
+def test_dev_base_branch_explicit_none_round_trips(tmp_path: Path) -> None:
+    """Omitting ``dev_base_branch`` in TOML round-trips to ``None`` —
+    same as the field not appearing at all. We pin this so a future
+    refactor doesn't accidentally coerce missing keys to empty strings.
+    """
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[projects.voice]
+repo = "jeffrichley/voice"
+local_clone_path = "/tmp/voice"
+check_command = "just check"
+
+[projects.voice.apps]
+planner_app_id = 123456
+planner_private_key_path = "/tmp/planner.pem"
+"""
+    )
+    cfg = load_config(config_file)
+    assert cfg.projects["voice"].dev_base_branch is None

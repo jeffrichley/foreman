@@ -150,6 +150,16 @@ class ProjectConfig(BaseModel):
             "ground-truth. Resolves to 'just check' when None."
         ),
     )
+    dev_base_branch: str | None = Field(
+        default=None,
+        description=(
+            "Optional alternate branch to use as the base when creating spec/impl "
+            "worktrees, instead of origin/<default_branch>. Set this when the project's "
+            "active development line lives on a feature branch (e.g., during a walking-"
+            "skeleton phase) rather than on main. The branch must exist on origin; "
+            "Foreman will fetch it before branching."
+        ),
+    )
 
 
 class Config(BaseModel):
