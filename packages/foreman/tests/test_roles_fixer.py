@@ -393,7 +393,10 @@ async def test_run_fixer_fixed_outcome_advances_back_to_spec_review(
     # First-attempt label stamped at entry; outcome advanced to spec-review
     assert "foreman:fix-attempt-1" in issue.added
     assert "foreman:spec-review" in issue.added
-    assert issue.removed == ["foreman:spec-fix"]
+    # Per-episode counter reset: on outcome=fixed, the fix-attempt-N label
+    # is also dropped so the next fix-episode (if any) gets a fresh budget.
+    assert "foreman:spec-fix" in issue.removed
+    assert "foreman:fix-attempt-1" in issue.removed
 
     # Return type
     assert result.attempt == 1

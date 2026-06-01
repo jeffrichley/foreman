@@ -468,10 +468,21 @@ async def run_fixer(
 
     # Advance the issue's label deterministically.
     if llm_output.outcome == "fixed":
-        # Back to the Reviewer for a second pass. Keep the
-        # fix-attempt-N label intact — audit trail.
+        # Back to the Reviewer for a second pass. Per-episode counter
+        # reset: clear all fix-attempt-N labels (and needs-help if
+        # present) since this fix-episode closed cleanly. Each new
+        # spec-fix → spec-review cycle gets a fresh 3-attempt budget.
+        # Lifecycle stats JSONL preserves the cumulative audit trail;
+        # labels reflect current-cycle state only.
         issue.remove_from_labels(_LABEL_SPEC_FIX)
         issue.add_to_labels(_LABEL_SPEC_REVIEW)
+        all_known_labels = issue_labels | {attempt_label}
+        for label_name in all_known_labels:
+            if label_name.startswith("foreman:fix-attempt-") or label_name == _LABEL_NEEDS_HELP:
+                try:
+                    issue.remove_from_labels(label_name)
+                except Exception:
+                    pass  # label may already be absent on the GitHub side
     else:
         # incomplete: keep spec-fix so the human (or a later daemon
         # pass) can re-trigger; flag for help; if last attempt, also
