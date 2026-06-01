@@ -102,6 +102,62 @@ class WorktreeManager:
         _maybe_sync_worktree_deps(wt_path)
         return wt_path
 
+    def create_impl(self, clone_path: Path, repo_slug: str, ticket_id: int) -> Path:
+        """Create a fresh worktree for the Worker's impl branch, stacked on
+        the spec branch.
+
+        Path: ``<worktrees_root>/<repo_slug>/impl-<N>/`` — deliberately a
+        sibling of ``issue-<N>/`` (the spec-side worktree the Planner /
+        Reviewer / Fixer share). Keeping the two worktrees separate lets
+        the Worker's branch evolve independently of any in-flight Fixer
+        edits to the spec doc — and lets a future ticket's Worker still
+        find a clean tree even if a Fixer left the spec worktree mid-edit.
+        Sharing one worktree would force the Worker to git stash / reset
+        every time it inherited a Fixer's WIP state.
+
+        Branch: ``foreman/impl-<N>``. Base: ``foreman/issue-<N>`` (the
+        spec branch). Stacking is required: the impl PR is opened with
+        base=spec-branch (D1 in the brief) so the spec PR is reviewable
+        and mergeable independently. A future ticket retargets the impl
+        PR's base to the repo default when the spec PR merges (out of
+        scope here).
+
+        Idempotent: if ``impl-<N>/`` already exists we return it
+        untouched. Same fetch + uv-sync best-effort discipline as
+        :meth:`create`. The fetch targets ``foreman/issue-<N>`` so the
+        local origin ref is current — without this the worktree would
+        attach to a stale origin ref and the Worker would build atop a
+        spec older than the Planner's last push.
+        """
+        wt_path = self.worktrees_root / repo_slug / f"impl-{ticket_id}"
+        if wt_path.exists():
+            return wt_path
+        wt_path.parent.mkdir(parents=True, exist_ok=True)
+        impl_branch = f"foreman/impl-{ticket_id}"
+        spec_branch = f"foreman/issue-{ticket_id}"
+        # Refresh the spec branch from origin so we stack on the Planner's
+        # latest push, not a stale local ref. Best-effort — same rationale
+        # as ``create``'s default-branch fetch.
+        _fetch_origin_branch(clone_path, spec_branch)
+        subprocess.run(
+            [
+                "git",
+                "worktree",
+                "add",
+                "-b",
+                impl_branch,
+                str(wt_path),
+                f"origin/{spec_branch}",
+            ],
+            cwd=clone_path,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=filtered_subprocess_env(),
+        )
+        _maybe_sync_worktree_deps(wt_path)
+        return wt_path
+
     def attach(self, clone_path: Path, repo_slug: str, ticket_id: int) -> Path:
         """Attach a worktree to an existing ``foreman/issue-<N>`` branch.
 

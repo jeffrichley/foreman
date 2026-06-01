@@ -607,3 +607,149 @@ def test_create_filters_env_on_git_subprocess_calls(
         assert "VIRTUAL_ENV" not in env, (
             "VIRTUAL_ENV leaked into a git subprocess inside create()"
         )
+
+
+# ----------------------------------------------------------------------
+# create_impl — Worker's stacked impl branch
+#
+# create_impl mirrors ``create`` but the new branch is ``foreman/impl-<N>``
+# based on ``origin/foreman/issue-<N>`` (the spec branch the Planner /
+# Reviewer / Fixer iterate on). The Worker's PR is opened with
+# base=spec-branch so the spec PR stays independently reviewable; the
+# orchestrator retargets the impl PR to the repo default when the spec
+# PR merges (out of scope here).
+# ----------------------------------------------------------------------
+
+
+def _seed_clone_with_spec_branch_pushed(clone: Path, *, ticket_id: int) -> str:
+    """Like the fixer test fixture, but pushes ``foreman/issue-<N>`` to a
+    bare upstream so ``create_impl`` can resolve ``origin/foreman/issue-<N>``.
+
+    Returns the spec-branch head SHA so callers can verify the new impl
+    branch is based on it.
+    """
+    clone.mkdir()
+    _init_git_repo(clone, origin_path=clone.parent / "origin.git")
+    spec_branch = f"foreman/issue-{ticket_id}"
+    subprocess.run(
+        ["git", "checkout", "-b", spec_branch], cwd=clone, check=True, capture_output=True
+    )
+    spec_dir = clone / "docs" / "superpowers" / "specs"
+    spec_dir.mkdir(parents=True, exist_ok=True)
+    (spec_dir / f"foreman-issue-{ticket_id}-spec.md").write_text(
+        f"# Spec for issue #{ticket_id}\n"
+    )
+    subprocess.run(["git", "add", "."], cwd=clone, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "spec doc"], cwd=clone, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "push", "origin", spec_branch], cwd=clone, check=True, capture_output=True
+    )
+    head_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "checkout", "main"], cwd=clone, check=True, capture_output=True)
+    return head_sha
+
+
+def test_create_impl_creates_dir_with_stacked_branch(tmp_path: Path) -> None:
+    """``create_impl`` builds ``foreman/impl-<N>`` based on the spec branch,
+    in a sibling worktree directory ``impl-<N>``."""
+    clone = tmp_path / "clone"
+    spec_head = _seed_clone_with_spec_branch_pushed(clone, ticket_id=42)
+
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+    wt_path = mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    assert wt_path.exists()
+    assert wt_path == worktrees_root / "voice" / "impl-42"
+
+    branch_check = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert branch_check.stdout.strip() == "foreman/impl-42"
+
+    # The new impl branch must be based on the spec branch's tip — that's
+    # the stacked-PR invariant the Worker relies on.
+    impl_tip = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert impl_tip == spec_head, (
+        f"impl-<N> branch must be based on spec branch tip ({spec_head}); "
+        f"got {impl_tip}"
+    )
+
+
+def test_create_impl_is_idempotent_on_existing_path(tmp_path: Path) -> None:
+    clone = tmp_path / "clone"
+    _seed_clone_with_spec_branch_pushed(clone, ticket_id=42)
+
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+    wt1 = mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
+    wt2 = mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
+    assert wt1 == wt2
+
+
+def test_create_impl_separate_from_spec_worktree(tmp_path: Path) -> None:
+    """``impl-<N>`` and ``issue-<N>`` are sibling worktrees, NEVER the same
+    dir — the Worker must not inherit a Fixer's WIP spec edits."""
+    clone = tmp_path / "clone"
+    _seed_clone_with_spec_branch_pushed(clone, ticket_id=42)
+
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+    impl_wt = mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
+    spec_wt = mgr.attach(clone_path=clone, repo_slug="voice", ticket_id=42)
+    assert impl_wt != spec_wt
+    assert impl_wt.name == "impl-42"
+    assert spec_wt.name == "issue-42"
+
+
+def test_create_impl_filters_env_on_git_subprocess_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every git subprocess inside ``create_impl`` must use the env filter —
+    same VIRTUAL_ENV leak protection as ``create``."""
+    clone = tmp_path / "clone"
+    _seed_clone_with_spec_branch_pushed(clone, ticket_id=42)
+
+    monkeypatch.setenv("VIRTUAL_ENV", "sentinel-do-not-leak")
+
+    real_run = subprocess.run
+    captured_envs: list[dict[str, str] | None] = []
+
+    def recording_run(
+        cmd: Any, *args: Any, **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        if isinstance(cmd, list) and cmd and cmd[0] == "git":
+            captured_envs.append(kwargs.get("env"))
+        return real_run(cmd, *args, **kwargs)
+
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+
+    with patch("foreman.worktree.subprocess.run", side_effect=recording_run):
+        mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    assert captured_envs, "expected at least one git subprocess call from create_impl"
+    for env in captured_envs:
+        assert env is not None, (
+            "every git call in create_impl must pass env=filtered_subprocess_env(); "
+            "default env=None would inherit VIRTUAL_ENV and re-leak the fix"
+        )
+        assert "VIRTUAL_ENV" not in env
