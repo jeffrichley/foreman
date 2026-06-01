@@ -44,7 +44,14 @@ class WorktreeManager:
     def __init__(self, worktrees_root: Path) -> None:
         self.worktrees_root = worktrees_root
 
-    def create(self, clone_path: Path, repo_slug: str, ticket_id: int) -> Path:
+    def create(
+        self,
+        clone_path: Path,
+        repo_slug: str,
+        ticket_id: int,
+        *,
+        dev_base_branch: str | None = None,
+    ) -> Path:
         """Create a worktree for one ticket. Idempotent on existing worktree.
 
         The new ``foreman/issue-<N>`` branch is based on
@@ -61,7 +68,19 @@ class WorktreeManager:
         #17) inherited that drift. Basing on ``origin/<default-branch>``
         instead pins the new branch at the freshly-fetched origin tip.
 
-        Before creating the branch we ``git fetch origin <default-branch>``
+        ``dev_base_branch`` (Foreman issue #16) lets operators override the
+        default-branch resolution when the project's active development line
+        lives on a feature branch rather than on ``main``. Concrete case:
+        foreman itself during its walking-skeleton phase — ``origin/main``
+        had only the initial scaffold commit, while all real work was on
+        ``feat/walking-skeleton``. Without this knob the Planner would
+        branch from origin/main and read a scaffold-only worktree, producing
+        a spec saying "the prerequisite modules don't exist yet" — true for
+        origin/main, wrong for the active dev line. When set to a non-None
+        value the override is treated as authoritative; we do not second-
+        guess it with auto-detection (explicit operator config only in v1).
+
+        Before creating the branch we ``git fetch origin <base-branch>``
         so the local origin ref is current. The fetch is best-effort: a
         network failure prints a warning but does not abort — the worktree
         create may still succeed from local origin state, and forcing a
@@ -81,8 +100,8 @@ class WorktreeManager:
             return wt_path
         wt_path.parent.mkdir(parents=True, exist_ok=True)
         branch = f"foreman/issue-{ticket_id}"
-        default_branch = _resolve_default_branch(clone_path)
-        _fetch_origin_branch(clone_path, default_branch)
+        base_branch = dev_base_branch or _resolve_default_branch(clone_path)
+        _fetch_origin_branch(clone_path, base_branch)
         subprocess.run(
             [
                 "git",
@@ -91,7 +110,7 @@ class WorktreeManager:
                 "-b",
                 branch,
                 str(wt_path),
-                f"origin/{default_branch}",
+                f"origin/{base_branch}",
             ],
             cwd=clone_path,
             check=True,

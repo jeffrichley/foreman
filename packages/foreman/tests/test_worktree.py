@@ -753,3 +753,261 @@ def test_create_impl_filters_env_on_git_subprocess_calls(
             "default env=None would inherit VIRTUAL_ENV and re-leak the fix"
         )
         assert "VIRTUAL_ENV" not in env
+
+
+# ----------------------------------------------------------------------
+# dev_base_branch override — Foreman issue #16
+#
+# When the project's active dev line lives on a feature branch (e.g. during
+# walking-skeleton phase), the Planner must branch new spec worktrees from
+# ``origin/<feature-branch>`` instead of ``origin/<default>``. Concrete
+# case: foreman itself — ``origin/main`` was scaffold-only while all real
+# work was on ``feat/walking-skeleton``. ``WorktreeManager.create`` accepts
+# a ``dev_base_branch`` kwarg; when set it overrides the default-branch
+# resolution. When None (the default), behavior is unchanged from before
+# the override existed.
+# ----------------------------------------------------------------------
+
+
+def _seed_clone_with_alt_branch_on_origin(
+    clone: Path, *, origin_path: Path, alt_branch: str
+) -> tuple[str, str]:
+    """Init a clone whose ``main`` is the initial scaffold commit, plus
+    an ``alt_branch`` on origin that carries an extra commit. Mirrors
+    foreman's real walking-skeleton shape.
+
+    Returns ``(origin_main_tip, origin_alt_tip)`` so callers can verify
+    which tip the new spec branch is based on.
+    """
+    _init_git_repo(clone, origin_path=origin_path)
+    origin_main_tip = subprocess.run(
+        ["git", "rev-parse", "origin/main"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    # Create the alt branch with an extra commit and push it.
+    subprocess.run(
+        ["git", "checkout", "-b", alt_branch],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    (clone / "walking-skeleton-work.txt").write_text("active dev line\n")
+    subprocess.run(
+        ["git", "add", "walking-skeleton-work.txt"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "feat: walking skeleton"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "push", "origin", alt_branch],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    origin_alt_tip = subprocess.run(
+        ["git", "rev-parse", f"origin/{alt_branch}"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    # Return to main so subsequent operations don't accidentally depend on
+    # the alt branch being checked out.
+    subprocess.run(
+        ["git", "checkout", "main"], cwd=clone, check=True, capture_output=True
+    )
+    assert origin_main_tip != origin_alt_tip, "test setup: tips must differ"
+    return origin_main_tip, origin_alt_tip
+
+
+def test_create_with_dev_base_branch_none_uses_default_branch(tmp_path: Path) -> None:
+    """When ``dev_base_branch=None`` (the default), ``create`` resolves
+    the base via ``_resolve_default_branch`` exactly as before — same
+    contract as every existing call site, guaranteeing the new kwarg is
+    additive and doesn't shift behavior for projects that omit it."""
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    origin_main_tip, _ = _seed_clone_with_alt_branch_on_origin(
+        clone,
+        origin_path=tmp_path / "origin.git",
+        alt_branch="feat/walking-skeleton",
+    )
+
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+    wt_path = mgr.create(
+        clone_path=clone, repo_slug="foreman", ticket_id=16, dev_base_branch=None
+    )
+
+    branch_tip = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert branch_tip == origin_main_tip, (
+        "dev_base_branch=None must fall back to origin/<default>; "
+        f"expected origin/main tip ({origin_main_tip}), got {branch_tip}"
+    )
+
+
+def test_create_with_dev_base_branch_uses_alt_branch(tmp_path: Path) -> None:
+    """When ``dev_base_branch="feat/walking-skeleton"``, the new spec
+    branch must be based on ``origin/feat/walking-skeleton`` — NOT
+    ``origin/main``. This is the whole point of the knob: support
+    projects mid-walking-skeleton where main is stale and the real
+    development line is on a feature branch.
+    """
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    origin_main_tip, origin_alt_tip = _seed_clone_with_alt_branch_on_origin(
+        clone,
+        origin_path=tmp_path / "origin.git",
+        alt_branch="feat/walking-skeleton",
+    )
+
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+    wt_path = mgr.create(
+        clone_path=clone,
+        repo_slug="foreman",
+        ticket_id=16,
+        dev_base_branch="feat/walking-skeleton",
+    )
+
+    branch_tip = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert branch_tip == origin_alt_tip, (
+        "dev_base_branch override must base the new branch on the alt "
+        f"branch's origin tip ({origin_alt_tip}); got {branch_tip}"
+    )
+    assert branch_tip != origin_main_tip, (
+        "Sanity: branch tip must NOT equal origin/main — that would mean "
+        "the override silently fell back to the default branch"
+    )
+
+
+def test_create_with_dev_base_branch_fetches_alt_branch_not_default(
+    tmp_path: Path,
+) -> None:
+    """When ``dev_base_branch`` is set, the ``git fetch origin <branch>``
+    that runs before ``worktree add`` must target the alt branch, not the
+    default branch. Otherwise we'd refresh main and base on a stale alt
+    origin ref — the same drift bug the fetch was added to prevent, just
+    in the other direction.
+    """
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    _seed_clone_with_alt_branch_on_origin(
+        clone,
+        origin_path=tmp_path / "origin.git",
+        alt_branch="feat/walking-skeleton",
+    )
+
+    real_run = subprocess.run
+    fetched_branches: list[str] = []
+
+    def recording_run(
+        cmd: Any, *args: Any, **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        if (
+            isinstance(cmd, list)
+            and len(cmd) >= 4
+            and cmd[0] == "git"
+            and cmd[1] == "fetch"
+        ):
+            # cmd looks like ['git', 'fetch', '--quiet', 'origin', '<branch>']
+            fetched_branches.append(cmd[-1])
+        return real_run(cmd, *args, **kwargs)
+
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+
+    with patch("foreman.worktree.subprocess.run", side_effect=recording_run):
+        mgr.create(
+            clone_path=clone,
+            repo_slug="foreman",
+            ticket_id=16,
+            dev_base_branch="feat/walking-skeleton",
+        )
+
+    assert "feat/walking-skeleton" in fetched_branches, (
+        "Expected the alt branch to be fetched from origin before worktree "
+        f"add; only fetched {fetched_branches!r}"
+    )
+    assert "main" not in fetched_branches, (
+        "When dev_base_branch is set we must NOT fetch the default branch — "
+        "that would suggest the override is being silently ignored or doubled"
+    )
+
+
+def test_create_with_dev_base_branch_continues_when_fetch_fails(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """If ``git fetch origin <dev_base_branch>`` fails (e.g. offline), the
+    create must still proceed using the cached origin ref — matching the
+    existing fetch-failure tolerance for the default-branch path. Forcing
+    a hard failure here would block ticket execution on transient
+    connectivity issues.
+    """
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    _, origin_alt_tip = _seed_clone_with_alt_branch_on_origin(
+        clone,
+        origin_path=tmp_path / "origin.git",
+        alt_branch="feat/walking-skeleton",
+    )
+
+    # Break the origin URL so fetch fails — but the cached
+    # ``refs/remotes/origin/feat/walking-skeleton`` ref still exists from
+    # the seed push, so worktree add can resolve it.
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", str(tmp_path / "does-not-exist.git")],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+    wt_path = mgr.create(
+        clone_path=clone,
+        repo_slug="foreman",
+        ticket_id=16,
+        dev_base_branch="feat/walking-skeleton",
+    )
+
+    assert wt_path.exists(), (
+        "worktree must still be created when fetch fails with dev_base_branch set"
+    )
+    branch_tip = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert branch_tip == origin_alt_tip, (
+        "When fetch fails, must fall back to the cached alt-branch ref"
+    )
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "git fetch" in combined and "warn" in combined.lower(), (
+        "Expected a stderr warning about git fetch failure for the alt branch"
+    )
