@@ -11,12 +11,15 @@ calls/hour, well under GitHub's 5000/hour limit.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from typing import Protocol
 
 from foreman.config import ProjectConfig
 from foreman.dispatcher import Ticket
 from foreman.storage import Storage
+
+_log = logging.getLogger("foreman.daemon.poller")
 
 
 class _IssueLike(Protocol):
@@ -49,6 +52,15 @@ def poll_project(
         current = sorted(issue.labels)
         if seen != current:
             storage.upsert_labels_seen(project_name, issue.number, current, now)
+            _log.info(
+                "ticket labels changed",
+                extra={
+                    "project": project_name,
+                    "issue": issue.number,
+                    "previous_labels": seen or [],
+                    "current_labels": current,
+                },
+            )
             changed.append(
                 Ticket(
                     project_name=project_name,
@@ -57,5 +69,14 @@ def poll_project(
                     last_transition_at=issue.updated_at,
                 )
             )
+
+    _log.info(
+        "polled project",
+        extra={
+            "project": project_name,
+            "issues_seen": len(issues),
+            "changed": len(changed),
+        },
+    )
 
     return changed

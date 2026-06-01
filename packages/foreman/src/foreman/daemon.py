@@ -27,6 +27,7 @@ class _HostLike(Protocol):
 
 
 _IN_FLIGHT_LABELS = frozenset({"foreman:planning", "foreman:implementing"})
+_log = logging.getLogger("foreman.daemon")
 
 
 class Daemon:
@@ -93,16 +94,26 @@ class Daemon:
                     "from current state, or use `foreman replay` to re-run from "
                     "a prior state.",
                 )
+                _log.warning(
+                    "reconciliation halted in-flight ticket",
+                    extra={
+                        "project": project.repo,
+                        "issue": issue.number,
+                        "labels": sorted(labels),
+                    },
+                )
 
     async def shutdown(self) -> None:
         """Signal shutdown, cancel tasks, wait for them to finish."""
         if self._shutdown_event.is_set():
             return
+        _log.info("daemon shutdown requested")
         self._shutdown_event.set()
         for task in self._tasks:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
+        _log.info("daemon shutdown complete")
 
     async def _poller_loop(self) -> None:
         first = True
@@ -127,6 +138,10 @@ class Daemon:
                         storage=self.storage,
                     )
                 except Exception:
+                    _log.exception(
+                        "poll_project failed",
+                        extra={"project": project_name},
+                    )
                     continue
                 for ticket in changed:
                     self.queue.enqueue(ticket)
