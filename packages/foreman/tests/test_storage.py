@@ -113,3 +113,72 @@ def test_iter_pipelines_in_flight_yields_non_terminal(tmp_path: Path) -> None:
     states = [(row["project"], row["issue_number"]) for row in in_flight]
     assert ("voice", 1) in states
     assert ("voice", 2) not in states
+
+
+def test_record_node_run_persists_role_and_outcome(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "f.sqlite")
+    storage.init()
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+    pipeline_id = storage.upsert_pipeline("voice", 42, "foreman:plan", now)
+
+    run_id = storage.record_node_run_start(
+        pipeline_id=pipeline_id, role="planner", identity="foreman-planner-bot", at=now
+    )
+    later = datetime(2026, 6, 1, 12, 5, 0, tzinfo=timezone.utc)
+    storage.record_node_run_finish(
+        run_id=run_id,
+        at=later,
+        outcome="success",
+        structured_output={"pr_number": 18},
+    )
+
+    with storage.connect() as conn:
+        row = conn.execute("SELECT * FROM node_runs WHERE id = ?", (run_id,)).fetchone()
+    assert row["role"] == "planner"
+    assert row["outcome"] == "success"
+    assert json.loads(row["structured_output_json"]) == {"pr_number": 18}
+
+
+def test_record_transition_persists_label_diff(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "f.sqlite")
+    storage.init()
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+    pipeline_id = storage.upsert_pipeline("voice", 42, "foreman:plan", now)
+
+    storage.record_transition(
+        pipeline_id=pipeline_id,
+        at=now,
+        from_labels=["foreman:plan"],
+        to_labels=["foreman:spec-review"],
+        actor="planner",
+    )
+
+    with storage.connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM transitions WHERE pipeline_id = ?", (pipeline_id,)
+        ).fetchone()
+    assert row["actor"] == "planner"
+    assert json.loads(row["from_labels_json"]) == ["foreman:plan"]
+    assert json.loads(row["to_labels_json"]) == ["foreman:spec-review"]
+
+
+def test_record_failure_persists_reason_and_traceback(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "f.sqlite")
+    storage.init()
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+    pipeline_id = storage.upsert_pipeline("voice", 42, "foreman:plan", now)
+
+    storage.record_failure(
+        pipeline_id=pipeline_id,
+        at=now,
+        role="planner",
+        reason="RuntimeError: missing token",
+        traceback="Traceback (most recent call last):\n  ...\n",
+    )
+
+    with storage.connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM failures WHERE pipeline_id = ?", (pipeline_id,)
+        ).fetchone()
+    assert row["reason"].startswith("RuntimeError")
+    assert "Traceback" in row["traceback"]

@@ -132,6 +132,7 @@ class Storage:
                 "VALUES (?, ?, ?, ?)",
                 (project, issue_number, current_state, started_at.isoformat()),
             )
+            assert cursor.lastrowid is not None  # INSERT always populates lastrowid
             return int(cursor.lastrowid)
 
     def get_pipeline(self, project: str, issue_number: int) -> sqlite3.Row | None:
@@ -185,3 +186,74 @@ class Storage:
         if row is None:
             return None
         return list(json.loads(row["labels_json"]))
+
+    def record_node_run_start(
+        self,
+        *,
+        pipeline_id: int,
+        role: str,
+        identity: str,
+        at: datetime,
+    ) -> int:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                "INSERT INTO node_runs(pipeline_id, role, identity, started_at) "
+                "VALUES (?, ?, ?, ?)",
+                (pipeline_id, role, identity, at.isoformat()),
+            )
+            assert cursor.lastrowid is not None  # INSERT always populates lastrowid
+            return int(cursor.lastrowid)
+
+    def record_node_run_finish(
+        self,
+        *,
+        run_id: int,
+        at: datetime,
+        outcome: str,
+        structured_output: dict | None,
+    ) -> None:
+        output_json = json.dumps(structured_output) if structured_output is not None else None
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE node_runs SET finished_at = ?, outcome = ?, structured_output_json = ? "
+                "WHERE id = ?",
+                (at.isoformat(), outcome, output_json, run_id),
+            )
+
+    def record_transition(
+        self,
+        *,
+        pipeline_id: int,
+        at: datetime,
+        from_labels: list[str],
+        to_labels: list[str],
+        actor: str,
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO transitions(pipeline_id, at, from_labels_json, to_labels_json, actor) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    pipeline_id,
+                    at.isoformat(),
+                    json.dumps(sorted(from_labels)),
+                    json.dumps(sorted(to_labels)),
+                    actor,
+                ),
+            )
+
+    def record_failure(
+        self,
+        *,
+        pipeline_id: int,
+        at: datetime,
+        role: str,
+        reason: str,
+        traceback: str | None,
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO failures(pipeline_id, at, role, reason, traceback) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (pipeline_id, at.isoformat(), role, reason, traceback),
+            )
