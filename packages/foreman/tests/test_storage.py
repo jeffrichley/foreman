@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -53,3 +55,61 @@ def test_init_is_idempotent(tmp_path: Path) -> None:
         ).fetchone()[0]
 
     assert version == "1"
+
+
+def test_upsert_pipeline_creates_then_updates(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "f.sqlite")
+    storage.init()
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    pipeline_id = storage.upsert_pipeline(
+        project="voice", issue_number=42, current_state="foreman:plan", started_at=now
+    )
+    assert pipeline_id > 0
+
+    same_id = storage.upsert_pipeline(
+        project="voice", issue_number=42, current_state="foreman:spec-review", started_at=now
+    )
+    assert same_id == pipeline_id
+
+    row = storage.get_pipeline("voice", 42)
+    assert row is not None
+    assert row["current_state"] == "foreman:spec-review"
+
+
+def test_get_pipeline_returns_none_when_absent(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "f.sqlite")
+    storage.init()
+    assert storage.get_pipeline("voice", 999) is None
+
+
+def test_labels_seen_upsert_and_read(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "f.sqlite")
+    storage.init()
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    storage.upsert_labels_seen("voice", 42, ["foreman:plan"], now)
+    assert storage.get_labels_seen("voice", 42) == ["foreman:plan"]
+
+    storage.upsert_labels_seen("voice", 42, ["foreman:spec-review"], now)
+    assert storage.get_labels_seen("voice", 42) == ["foreman:spec-review"]
+
+
+def test_labels_seen_returns_none_when_absent(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "f.sqlite")
+    storage.init()
+    assert storage.get_labels_seen("voice", 42) is None
+
+
+def test_iter_pipelines_in_flight_yields_non_terminal(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "f.sqlite")
+    storage.init()
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+    storage.upsert_pipeline("voice", 1, "foreman:planning", now)
+    storage.upsert_pipeline("voice", 2, "foreman:plan", now)
+    storage.mark_pipeline_terminated("voice", 2, now)
+
+    in_flight = list(storage.iter_pipelines_in_flight())
+    states = [(row["project"], row["issue_number"]) for row in in_flight]
+    assert ("voice", 1) in states
+    assert ("voice", 2) not in states

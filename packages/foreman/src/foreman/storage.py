@@ -8,8 +8,11 @@ audit trail, and crash-recovery reconciliation.
 
 from __future__ import annotations
 
+import json
 import sqlite3
+from datetime import datetime
 from pathlib import Path
+from typing import Iterator
 
 _SCHEMA_V1 = [
     """
@@ -104,3 +107,81 @@ class Storage:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         return conn
+
+    def upsert_pipeline(
+        self,
+        project: str,
+        issue_number: int,
+        current_state: str,
+        started_at: datetime,
+    ) -> int:
+        """Insert pipeline if absent; update current_state if present. Returns id."""
+        with self.connect() as conn:
+            existing = conn.execute(
+                "SELECT id FROM pipelines WHERE project = ? AND issue_number = ?",
+                (project, issue_number),
+            ).fetchone()
+            if existing is not None:
+                conn.execute(
+                    "UPDATE pipelines SET current_state = ? WHERE id = ?",
+                    (current_state, existing["id"]),
+                )
+                return int(existing["id"])
+            cursor = conn.execute(
+                "INSERT INTO pipelines(project, issue_number, current_state, started_at) "
+                "VALUES (?, ?, ?, ?)",
+                (project, issue_number, current_state, started_at.isoformat()),
+            )
+            return int(cursor.lastrowid)
+
+    def get_pipeline(self, project: str, issue_number: int) -> sqlite3.Row | None:
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT * FROM pipelines WHERE project = ? AND issue_number = ?",
+                (project, issue_number),
+            ).fetchone()
+
+    def mark_pipeline_terminated(
+        self, project: str, issue_number: int, at: datetime
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE pipelines SET terminated_at = ? "
+                "WHERE project = ? AND issue_number = ?",
+                (at.isoformat(), project, issue_number),
+            )
+
+    def iter_pipelines_in_flight(self) -> Iterator[sqlite3.Row]:
+        with self.connect() as conn:
+            for row in conn.execute(
+                "SELECT * FROM pipelines WHERE terminated_at IS NULL"
+            ):
+                yield row
+
+    def upsert_labels_seen(
+        self,
+        project: str,
+        issue_number: int,
+        labels: list[str],
+        seen_at: datetime,
+    ) -> None:
+        sorted_json = json.dumps(sorted(labels))
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO labels_seen(project, issue_number, labels_json, seen_at) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(project, issue_number) DO UPDATE SET "
+                "labels_json = excluded.labels_json, seen_at = excluded.seen_at",
+                (project, issue_number, sorted_json, seen_at.isoformat()),
+            )
+
+    def get_labels_seen(self, project: str, issue_number: int) -> list[str] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT labels_json FROM labels_seen "
+                "WHERE project = ? AND issue_number = ?",
+                (project, issue_number),
+            ).fetchone()
+        if row is None:
+            return None
+        return list(json.loads(row["labels_json"]))
