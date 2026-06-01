@@ -76,3 +76,101 @@ def test_is_blocked_false_when_neither_present() -> None:
 
 def test_is_blocked_false_when_only_workflow_labels_present() -> None:
     assert is_blocked(_ticket({"foreman:spec-review"})) is False
+
+
+from foreman.config import AppsConfig, ProjectConfig
+from foreman.dispatcher import next_action
+
+
+def _project(
+    *, auto_merge_spec: bool = False, auto_merge_impl: bool = False
+) -> ProjectConfig:
+    return ProjectConfig(
+        repo="jeffrichley/voice",
+        local_clone_path="/tmp/voice",
+        apps=AppsConfig(),
+        auto_merge_spec=auto_merge_spec,
+        auto_merge_impl=auto_merge_impl,
+    )
+
+
+def test_next_action_plan_label_runs_planner() -> None:
+    action = next_action(_ticket({"foreman:plan"}), _project())
+    assert action == Action(kind=ActionKind.RUN_PLANNER)
+
+
+def test_next_action_planning_label_returns_none() -> None:
+    assert next_action(_ticket({"foreman:planning"}), _project()) is None
+
+
+def test_next_action_spec_review_runs_reviewer_spec() -> None:
+    action = next_action(_ticket({"foreman:spec-review"}), _project())
+    assert action == Action(kind=ActionKind.RUN_REVIEWER_SPEC)
+
+
+def test_next_action_spec_fix_runs_fixer_spec() -> None:
+    action = next_action(_ticket({"foreman:spec-fix"}), _project())
+    assert action == Action(kind=ActionKind.RUN_FIXER_SPEC)
+
+
+def test_next_action_spec_ready_no_auto_merge_returns_none() -> None:
+    assert next_action(
+        _ticket({"foreman:spec-ready"}), _project(auto_merge_spec=False)
+    ) is None
+
+
+def test_next_action_spec_ready_with_auto_merge_merges_spec_pr() -> None:
+    action = next_action(
+        _ticket({"foreman:spec-ready"}), _project(auto_merge_spec=True)
+    )
+    assert action == Action(kind=ActionKind.MERGE_SPEC_PR)
+
+
+def test_next_action_implementing_label_returns_none() -> None:
+    assert next_action(_ticket({"foreman:implementing"}), _project()) is None
+
+
+def test_next_action_impl_review_runs_reviewer_impl() -> None:
+    action = next_action(_ticket({"foreman:impl-review"}), _project())
+    assert action == Action(kind=ActionKind.RUN_REVIEWER_IMPL)
+
+
+def test_next_action_impl_fix_runs_fixer_impl() -> None:
+    action = next_action(_ticket({"foreman:impl-fix"}), _project())
+    assert action == Action(kind=ActionKind.RUN_FIXER_IMPL)
+
+
+def test_next_action_ready_for_merge_no_auto_merge_returns_none() -> None:
+    assert next_action(
+        _ticket({"foreman:ready-for-merge"}), _project(auto_merge_impl=False)
+    ) is None
+
+
+def test_next_action_ready_for_merge_with_auto_merge_merges_impl_pr() -> None:
+    action = next_action(
+        _ticket({"foreman:ready-for-merge"}), _project(auto_merge_impl=True)
+    )
+    assert action == Action(kind=ActionKind.MERGE_IMPL_PR)
+
+
+def test_next_action_implementing_ready_label_runs_worker() -> None:
+    action = next_action(
+        _ticket({"foreman:implementing-ready"}), _project()
+    )
+    assert action == Action(kind=ActionKind.RUN_WORKER)
+
+
+def test_next_action_hold_label_returns_none_despite_plan() -> None:
+    assert next_action(
+        _ticket({"foreman:plan", "foreman:hold"}), _project()
+    ) is None
+
+
+def test_next_action_failed_label_returns_none_despite_spec_review() -> None:
+    assert next_action(
+        _ticket({"foreman:spec-review", "foreman:failed"}), _project()
+    ) is None
+
+
+def test_next_action_no_foreman_labels_returns_none() -> None:
+    assert next_action(_ticket({"bug", "enhancement"}), _project()) is None

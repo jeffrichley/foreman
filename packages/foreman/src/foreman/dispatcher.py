@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
+from foreman.config import ProjectConfig
+
 
 class ActionKind(Enum):
     """One of the eight things the daemon can do to a ticket."""
@@ -87,3 +89,58 @@ def is_blocked(ticket: Ticket) -> bool:
     so the worker moves on to the next item without dispatching anything.
     """
     return bool(ticket.labels & _BLOCKING_LABELS)
+
+
+_LABEL_TO_ACTION: dict[str, ActionKind] = {
+    "foreman:plan": ActionKind.RUN_PLANNER,
+    "foreman:spec-review": ActionKind.RUN_REVIEWER_SPEC,
+    "foreman:spec-fix": ActionKind.RUN_FIXER_SPEC,
+    "foreman:implementing-ready": ActionKind.RUN_WORKER,
+    "foreman:impl-review": ActionKind.RUN_REVIEWER_IMPL,
+    "foreman:impl-fix": ActionKind.RUN_FIXER_IMPL,
+}
+
+# In-flight labels are placed on the issue while a role is running.
+# next_action returns None for these because the worker that placed the
+# label is the only thing that should advance it. If we see one on a fresh
+# poll (i.e., a daemon crashed mid-run), reconciliation halts the ticket
+# with foreman:failed — that converts is_blocked to True and returns None.
+_IN_FLIGHT_LABELS = frozenset({"foreman:planning", "foreman:implementing"})
+
+
+def next_action(ticket: Ticket, project: ProjectConfig) -> Action | None:
+    """Return the next action the daemon should take, or None if parked.
+
+    Pure function — depends only on the ticket's label set and the
+    project's auto-merge config. No I/O, no time dependence.
+
+    Parking conditions:
+    - ticket is blocked (foreman:hold or foreman:failed)
+    - ticket is in flight (foreman:planning, foreman:implementing) and
+      no one has reconciled it yet
+    - ticket is awaiting human merge (foreman:spec-ready with
+      auto_merge_spec=False, or foreman:ready-for-merge with
+      auto_merge_impl=False)
+    - ticket has no actionable foreman label at all
+    """
+    if is_blocked(ticket):
+        return None
+
+    if ticket.labels & _IN_FLIGHT_LABELS:
+        return None
+
+    if "foreman:spec-ready" in ticket.labels:
+        if project.auto_merge_spec:
+            return Action(kind=ActionKind.MERGE_SPEC_PR)
+        return None
+
+    if "foreman:ready-for-merge" in ticket.labels:
+        if project.auto_merge_impl:
+            return Action(kind=ActionKind.MERGE_IMPL_PR)
+        return None
+
+    for label in ticket.labels:
+        if label in _LABEL_TO_ACTION:
+            return Action(kind=_LABEL_TO_ACTION[label])
+
+    return None
