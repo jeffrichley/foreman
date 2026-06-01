@@ -31,6 +31,26 @@ an implementation is done. This project uses: `<configured_check_command>`
 Includes lint + typecheck + tests; should exit zero on success and
 non-zero on any failure.
 
+## Active development branch
+
+If this project's active development line lives on a feature branch
+(e.g., during a walking-skeleton phase) rather than on the default
+branch, set `dev_base_branch` in your project's config block:
+
+```toml
+[projects.<name>]
+dev_base_branch = "feat/walking-skeleton"
+```
+
+Foreman's Planner will branch new spec worktrees from `origin/<that-branch>`
+instead of `origin/<default>`. Useful when:
+
+- The default branch hasn't been updated with current development state
+- Multiple feature branches are in flight and one is canonical
+- You want spec PRs stacked on a working branch, not on stale main
+
+Leave unset for projects where `main` reflects current state.
+
 ## Project-specific notes
 
 <!-- Add anything project-specific Foreman should know:

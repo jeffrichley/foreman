@@ -23,8 +23,8 @@ def test_instructions_template_loads_from_packaged_resources() -> None:
 
 
 def test_instructions_template_contains_expected_sections() -> None:
-    """All four section headers must be present so the rendered file
-    actually carries the guidance the role bots expect to find."""
+    """All section headers must be present so the rendered file actually
+    carries the guidance the role bots expect to find."""
     template = (
         resources.files("foreman.templates")
         .joinpath("instructions.md.template")
@@ -34,10 +34,32 @@ def test_instructions_template_contains_expected_sections() -> None:
         "## PR title rules",
         "## Branch naming",
         "## Quality gate",
+        "## Active development branch",
         "## Project-specific notes",
     ]
     for section in expected_sections:
         assert section in template, f"template missing section: {section!r}"
+
+
+def test_instructions_template_documents_dev_base_branch() -> None:
+    """The ``## Active development branch`` section must explain the
+    ``dev_base_branch`` knob (Foreman issue #16) and show the TOML shape
+    the operator needs to drop into their config. Without this, operators
+    facing the stale-main scenario have no in-template hint that the knob
+    exists — they'd just see broken specs and not know what to do.
+    """
+    template = (
+        resources.files("foreman.templates")
+        .joinpath("instructions.md.template")
+        .read_text(encoding="utf-8")
+    )
+    assert "## Active development branch" in template
+    # Names the knob.
+    assert "dev_base_branch" in template
+    # Shows the TOML shape — the operator needs both the section header
+    # and the assignment so they can copy-paste it into their config.
+    assert "[projects.<name>]" in template
+    assert 'dev_base_branch = "feat/walking-skeleton"' in template
 
 
 def test_instructions_template_carries_substitution_markers() -> None:
