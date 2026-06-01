@@ -145,6 +145,7 @@ async def run_planner(
         clone_path=Path(project.local_clone_path),
         repo_slug=repo_name,
         ticket_id=issue_number,
+        dev_base_branch=project.dev_base_branch,
     )
     host.configure_worktree_identity(wt_path)
 

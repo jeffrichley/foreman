@@ -420,3 +420,126 @@ async def test_run_planner_rejects_url_pointing_at_wrong_project(
             provider=fake_provider,
             identity_registry=fake_registry,
         )
+
+
+# ----------------------------------------------------------------------
+# dev_base_branch wiring (Foreman issue #16)
+#
+# When ``ProjectConfig.dev_base_branch`` is set, ``run_planner`` must
+# thread that value to ``WorktreeManager.create``. When unset, it must
+# pass ``None`` so behavior matches the pre-#16 contract.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_planner_threads_dev_base_branch_when_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ``ProjectConfig.dev_base_branch`` is set, the value reaches
+    ``WorktreeManager.create`` as the ``dev_base_branch`` kwarg.
+
+    We stub ``WorktreeManager.create`` because the wiring is what's under
+    test here — the real branch-creation path is covered by
+    ``test_create_with_dev_base_branch_uses_alt_branch`` in test_worktree.py.
+    """
+    clone = tmp_path / "clone"
+    _seed_clone(clone, origin_path=tmp_path / "origin.git")
+    monkeypatch.setenv("FOREMAN_PLANNER_APP_ID", "123456")
+
+    cfg = Config(
+        projects={
+            "voice": ProjectConfig(
+                repo="jeffrichley/voice",
+                local_clone_path=str(clone),
+                dev_base_branch="feat/walking-skeleton",
+                apps=AppsConfig(
+                    planner_app_id_env="FOREMAN_PLANNER_APP_ID",
+                    planner_private_key_path="/tmp/planner.pem",
+                ),
+            )
+        }
+    )
+
+    fake_host = _FakeHostProvider()
+    fake_registry = MagicMock()
+    fake_registry.get_host_provider.return_value = fake_host
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
+
+    # Stub create — pre-make the worktree dir so identity-config + later
+    # commit/push ops can still run against a real path. We're testing
+    # the wiring, not the git operation.
+    captured: dict[str, Any] = {}
+    wt_path = tmp_path / "worktrees" / "voice" / "issue-42"
+    wt_path.mkdir(parents=True, exist_ok=True)
+
+    def stub_create(self: Any, **kwargs: Any) -> Path:
+        captured.update(kwargs)
+        return wt_path
+
+    monkeypatch.setattr("foreman.worktree.WorktreeManager.create", stub_create)
+
+    await run_planner(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=fake_registry,
+    )
+
+    assert captured.get("dev_base_branch") == "feat/walking-skeleton", (
+        "run_planner must forward project.dev_base_branch to "
+        f"WorktreeManager.create; got {captured.get('dev_base_branch')!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_planner_passes_none_when_dev_base_branch_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ``ProjectConfig.dev_base_branch`` is None (the default), the
+    Planner passes ``None`` through so ``WorktreeManager.create`` falls
+    back to its existing default-branch resolution.
+    """
+    clone = tmp_path / "clone"
+    _seed_clone(clone, origin_path=tmp_path / "origin.git")
+    monkeypatch.setenv("FOREMAN_PLANNER_APP_ID", "123456")
+
+    cfg = _make_config(clone)  # _make_config omits dev_base_branch → None
+    assert cfg.projects["voice"].dev_base_branch is None, (
+        "test fixture assumption: _make_config produces dev_base_branch=None"
+    )
+
+    fake_host = _FakeHostProvider()
+    fake_registry = MagicMock()
+    fake_registry.get_host_provider.return_value = fake_host
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
+
+    captured: dict[str, Any] = {}
+    wt_path = tmp_path / "worktrees" / "voice" / "issue-42"
+    wt_path.mkdir(parents=True, exist_ok=True)
+
+    def stub_create(self: Any, **kwargs: Any) -> Path:
+        captured.update(kwargs)
+        return wt_path
+
+    monkeypatch.setattr("foreman.worktree.WorktreeManager.create", stub_create)
+
+    await run_planner(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=fake_registry,
+    )
+
+    # Must be passed explicitly (key present) and equal to None — not just
+    # omitted. Omission would still default to None today but would silently
+    # break a future refactor that makes the kwarg required.
+    assert "dev_base_branch" in captured, (
+        "run_planner must pass dev_base_branch as a kwarg even when None"
+    )
+    assert captured["dev_base_branch"] is None
