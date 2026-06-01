@@ -1,8 +1,7 @@
-"""Foreman CLI — `foreman plan` + `foreman review` + `foreman fix` are the
-walking-skeleton entries.
+"""Foreman CLI — `foreman plan` + `foreman review` + `foreman fix` +
+`foreman implement` are the walking-skeleton entries.
 
-Thickening will add: `foreman work`, `foreman daemon ...`, `foreman project
-add`, etc.
+Thickening will add: `foreman daemon ...`, `foreman project add`, etc.
 """
 
 from __future__ import annotations
@@ -18,6 +17,7 @@ from foreman.providers.anthropic_sdk import AnthropicSDKProvider
 from foreman.roles.fixer import run_fixer
 from foreman.roles.planner import run_planner
 from foreman.roles.reviewer import run_reviewer
+from foreman.roles.worker import run_worker
 
 
 def _default_config_path() -> Path:
@@ -137,6 +137,50 @@ def fix(issue_url: str, project: str, config_path: Path | None) -> None:
     click.echo(
         f"{llm.outcome}: {result.attempt}/3 attempt, {addressed} fixed, "
         f"{unaddressed} unaddressed"
+    )
+
+
+@cli.command()
+@click.argument("issue_url", type=str)
+@click.option("--project", required=True, help="Project name as defined in config.toml")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Path to foreman config (default: $FOREMAN_CONFIG or ~/.foreman/config.toml)",
+)
+def implement(issue_url: str, project: str, config_path: Path | None) -> None:
+    """Run the Worker on an issue queued by the Reviewer.
+
+    The issue must carry ``foreman:spec-ready``. The Worker derives the
+    spec PR from the issue's ``foreman/issue-<N>`` branch, implements
+    the code per the spec doc on a stacked impl branch
+    (``foreman/impl-<N>``), runs ``check_command`` to verify, commits +
+    pushes, and opens the impl PR via Foreman core. The orchestrator
+    re-runs ``check_command`` independently as ground truth and
+    overrides the Worker's claim if they disagree.
+    """
+    cfg_path = config_path or _default_config_path()
+    cfg = load_config(cfg_path)
+    provider = AnthropicSDKProvider()
+    result = asyncio.run(
+        run_worker(
+            issue_url=issue_url,
+            config=cfg,
+            project_name=project,
+            worktrees_root=_default_worktrees_root(),
+            provider=provider,
+        )
+    )
+    llm = result.llm_output
+    implemented = len(llm.implemented_sub_requests)
+    skipped = len(llm.skipped_sub_requests)
+    pr_part = result.pr_url if result.pr_url else "none"
+    click.echo(
+        f"{llm.outcome}: {result.attempt}/3 attempt, {implemented} implemented, "
+        f"{skipped} skipped, did_check_pass={result.final_did_check_pass}, "
+        f"PR={pr_part}"
     )
 
 

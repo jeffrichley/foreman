@@ -17,6 +17,12 @@ from foreman.schemas.fixer import (
 )
 from foreman.schemas.planner import PlannerOutput, PlannerRunResult
 from foreman.schemas.reviewer import Finding, ReviewerOutput
+from foreman.schemas.worker import (
+    ImplementedSubRequest,
+    SkippedSubRequest,
+    WorkerOutput,
+    WorkerRunResult,
+)
 
 
 def test_cli_plan_invokes_run_planner(tmp_path: Path) -> None:
@@ -211,4 +217,81 @@ fixer_private_key_path = "/tmp/fixer.pem"
     assert "2/3 attempt" in result.output
     assert "2 fixed" in result.output
     assert "1 unaddressed" in result.output
+    mock_run.assert_called_once()
+
+
+def test_cli_help_lists_implement_subcommand() -> None:
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--help"])
+    assert result.exit_code == 0
+    assert "implement" in result.output
+
+
+def test_cli_implement_invokes_run_worker(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[projects.voice]
+repo = "jeffrichley/voice"
+local_clone_path = "/tmp/voice"
+
+[projects.voice.apps]
+planner_app_id_env = "FOREMAN_PLANNER_APP_ID"
+planner_app_id = 123456
+planner_private_key_path = "/tmp/planner.pem"
+worker_app_id_env = "FOREMAN_WORKER_APP_ID"
+worker_app_id = 444444
+worker_private_key_path = "/tmp/worker.pem"
+"""
+    )
+
+    fake_result = WorkerRunResult(
+        llm_output=WorkerOutput(
+            outcome="implemented",
+            work_comment="implemented all sub-requests.",
+            pr_title="feat(foo): add X",
+            pr_body="Implements #42.",
+            commits_made=[],
+            implemented_sub_requests=[
+                ImplementedSubRequest(spec_reference="Sub-request 1", summary="x"),
+                ImplementedSubRequest(spec_reference="Sub-request 2", summary="y"),
+            ],
+            skipped_sub_requests=[
+                SkippedSubRequest(
+                    spec_reference="Sub-request 3",
+                    reason="out_of_scope",
+                    rationale="issue did not request this",
+                ),
+            ],
+            did_check_pass=True,
+            confidence="high",
+        ),
+        attempt=1,
+        pr_url="https://github.com/jeffrichley/voice/pull/101",
+        final_did_check_pass=True,
+    )
+
+    runner = CliRunner()
+    with patch(
+        "foreman.cli.run_worker", new=AsyncMock(return_value=fake_result)
+    ) as mock_run:
+        result = runner.invoke(
+            cli,
+            [
+                "implement",
+                "https://github.com/jeffrichley/voice/issues/42",
+                "--project",
+                "voice",
+                "--config",
+                str(config_file),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "implemented" in result.output
+    assert "1/3 attempt" in result.output
+    assert "2 implemented" in result.output
+    assert "1 skipped" in result.output
+    assert "did_check_pass=True" in result.output
+    assert "PR=https://github.com/jeffrichley/voice/pull/101" in result.output
     mock_run.assert_called_once()
