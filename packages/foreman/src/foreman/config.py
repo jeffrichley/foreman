@@ -36,7 +36,7 @@ class DaemonConfig(BaseModel):
     """
 
     poll_interval_seconds: int = Field(default=30, ge=5)
-    max_concurrent_workers: int = Field(default=1, ge=1)
+    max_concurrent_workers: int = Field(default=1)
     log_path: str = Field(default="~/.foreman/daemon.log")
     log_level: str = Field(default="INFO")
     sqlite_path: str = Field(default="~/.foreman/foreman.sqlite")
@@ -156,11 +156,6 @@ class ProjectConfig(BaseModel):
     belt-and-suspenders ground-truth check. Defaults to ``"just check"``
     when ``None``; projects that use a different runner (e.g.
     ``"make test"``, ``"npm test"``, ``"pytest -q"``) override it here.
-
-    Reserved (not yet honored): a future ``auto_merge_spec`` knob will
-    let the Worker auto-merge the spec PR before opening the impl PR,
-    breaking the stacked-PR dependency. Pairs with the reserved
-    ``foreman:auto-merge-spec`` label name (also not yet honored).
     """
 
     repo: str = Field(..., description="GitHub repo in 'owner/name' form")

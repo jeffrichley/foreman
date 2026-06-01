@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from foreman.config import Config, load_config
 
@@ -534,8 +535,8 @@ def test_daemon_config_has_sane_defaults(tmp_path: Path) -> None:
     assert cfg.daemon.poll_interval_seconds == 30
     assert cfg.daemon.max_concurrent_workers == 1
     assert cfg.daemon.log_level == "INFO"
-    assert cfg.daemon.log_path.endswith("daemon.log")
-    assert cfg.daemon.sqlite_path.endswith("foreman.sqlite")
+    assert cfg.daemon.log_path == "~/.foreman/daemon.log"
+    assert cfg.daemon.sqlite_path == "~/.foreman/foreman.sqlite"
 
 
 def test_daemon_config_rejects_max_workers_above_one(tmp_path: Path) -> None:
@@ -544,7 +545,7 @@ def test_daemon_config_rejects_max_workers_above_one(tmp_path: Path) -> None:
         "[admin]\ngithub_token_env = \"FOREMAN_ADMIN_TOKEN\"\n"
         "[daemon]\nmax_concurrent_workers = 4\n"
     )
-    with pytest.raises(ValueError, match="max_concurrent_workers"):
+    with pytest.raises(ValidationError, match="max_concurrent_workers"):
         load_config(config_path)
 
 
@@ -560,6 +561,22 @@ def test_project_config_auto_merge_defaults_to_false(tmp_path: Path) -> None:
     project = cfg.projects["voice"]
     assert project.auto_merge_spec is False
     assert project.auto_merge_impl is False
+
+
+def test_project_config_auto_merge_reads_true_from_toml(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[admin]\ngithub_token_env = \"FOREMAN_ADMIN_TOKEN\"\n"
+        "[projects.voice]\n"
+        "repo = \"jeffrichley/voice\"\n"
+        "local_clone_path = \"/tmp/voice\"\n"
+        "auto_merge_spec = true\n"
+        "auto_merge_impl = true\n"
+    )
+    cfg = load_config(config_path)
+    project = cfg.projects["voice"]
+    assert project.auto_merge_spec is True
+    assert project.auto_merge_impl is True
 
 
 def test_dev_base_branch_reads_from_config_file(tmp_path: Path) -> None:
