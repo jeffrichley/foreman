@@ -611,3 +611,67 @@ planner_private_key_path = "/tmp/planner.pem"
     )
     cfg = load_config(config_file)
     assert cfg.projects["voice"].dev_base_branch is None
+
+
+def test_orchestrator_config_defaults_when_block_absent(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text('[admin]\ngithub_token_env = "FOREMAN_ADMIN_TOKEN"\n')
+    cfg = load_config(config_file)
+    assert cfg.orchestrator.app_id is None
+    assert cfg.orchestrator.private_key_path is None
+    assert cfg.orchestrator.app_id_env == "FOREMAN_ORCHESTRATOR_APP_ID"
+
+
+def test_orchestrator_config_reads_from_toml(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        '[admin]\ngithub_token_env = "FOREMAN_ADMIN_TOKEN"\n'
+        "[orchestrator]\n"
+        "app_id = 3934489\n"
+        'private_key_path = "/tmp/orchestrator.pem"\n'
+    )
+    cfg = load_config(config_file)
+    assert cfg.orchestrator.app_id == 3934489
+    assert cfg.orchestrator.private_key_path == "/tmp/orchestrator.pem"
+
+
+def test_orchestrator_resolve_app_id_prefers_env(tmp_path: Path, monkeypatch) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        '[admin]\ngithub_token_env = "FOREMAN_ADMIN_TOKEN"\n'
+        "[orchestrator]\napp_id = 100\n"
+    )
+    cfg = load_config(config_file)
+    monkeypatch.setenv("FOREMAN_ORCHESTRATOR_APP_ID", "200")
+    assert cfg.orchestrator.resolve_app_id() == 200
+
+
+def test_orchestrator_resolve_app_id_raises_when_unset(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text('[admin]\ngithub_token_env = "X"\n')
+    cfg = load_config(config_file)
+    monkeypatch.delenv("FOREMAN_ORCHESTRATOR_APP_ID", raising=False)
+    with pytest.raises(RuntimeError, match="orchestrator app_id"):
+        cfg.orchestrator.resolve_app_id()
+
+
+def test_orchestrator_resolve_private_key_path_returns_path(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        '[admin]\ngithub_token_env = "X"\n'
+        "[orchestrator]\n"
+        "app_id = 999\n"
+        'private_key_path = "/tmp/orch.pem"\n'
+    )
+    cfg = load_config(config_file)
+    assert cfg.orchestrator.resolve_private_key_path() == Path("/tmp/orch.pem")
+
+
+def test_orchestrator_resolve_private_key_path_raises_when_unset(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text('[admin]\ngithub_token_env = "X"\n')
+    cfg = load_config(config_file)
+    with pytest.raises(RuntimeError, match="orchestrator.private_key_path"):
+        cfg.orchestrator.resolve_private_key_path()

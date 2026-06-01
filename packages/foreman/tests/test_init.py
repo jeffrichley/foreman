@@ -439,14 +439,14 @@ def test_run_init_skips_instructions_when_file_exists(tmp_path: Path) -> None:
     assert result.instructions_written is False
 
 
-def test_run_init_creates_all_18_labels_on_empty_repo(tmp_path: Path) -> None:
+def test_run_init_creates_all_19_labels_on_empty_repo(tmp_path: Path) -> None:
     init_config, _clone = _make_init_config(tmp_path=tmp_path)
     fake_repo = _FakeRepo(slug=init_config.repo)
     admin = _FakeAdminClient(repo=fake_repo)
 
     result = run_init(init_config, admin_client=admin)
 
-    assert len(result.labels_created) == 18
+    assert len(result.labels_created) == 19
     assert len(result.labels_existing) == 0
     created_names = [c["name"] for c in fake_repo.create_label_calls]
     # Every documented label was created.
@@ -472,8 +472,8 @@ def test_run_init_skips_existing_labels(tmp_path: Path) -> None:
 
     result = run_init(init_config, admin_client=admin)
 
-    # 18 - 2 already-existed = 16 created
-    assert len(result.labels_created) == 16
+    # 19 - 2 already-existed = 17 created
+    assert len(result.labels_created) == 17
     assert sorted(result.labels_existing) == ["foreman:plan", "foreman:planning"]
     # The pre-existing label's color/description was NOT overwritten.
     plan_label = next(lbl for lbl in fake_repo._labels if lbl.name == "foreman:plan")
@@ -617,7 +617,7 @@ def test_run_init_bot_verification_records_failure_without_aborting(
     assert "installation not found" in planner.detail
     # Config still written + labels still created
     assert init_config.config_path.exists()
-    assert len(result.labels_created) == 18
+    assert len(result.labels_created) == 19
 
 
 def test_run_init_summary_contains_expected_fields(tmp_path: Path) -> None:
@@ -631,7 +631,7 @@ def test_run_init_summary_contains_expected_fields(tmp_path: Path) -> None:
     assert "jeffrichley/foreman" in summary
     assert "[projects.foreman]" in summary
     assert "INSTRUCTIONS.md" in summary
-    assert "18 labels" in summary
+    assert "19 labels" in summary
     assert "Next steps" in summary
     assert "foreman plan https://github.com/jeffrichley/foreman/issues/" in summary
 

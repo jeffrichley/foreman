@@ -82,6 +82,11 @@ _FOREMAN_LABELS: list[tuple[str, str, str]] = [
     ("foreman:spec-review", "FBCA04", "Foreman: spec PR ready for review"),
     ("foreman:spec-ready", "0E8A16", "Foreman: spec approved, queued for Worker"),
     ("foreman:spec-fix", "D93F0B", "Foreman: spec PR needs fix"),
+    (
+        "foreman:implementing-ready",
+        "0E8A16",
+        "Foreman: spec PR merged, Worker queued (daemon sentinel)",
+    ),
     ("foreman:implementing", "FBCA04", "Foreman: Worker in-flight"),
     ("foreman:impl-review", "FBCA04", "Foreman: impl PR ready for review"),
     ("foreman:impl-fix", "D93F0B", "Foreman: impl PR needs fix"),

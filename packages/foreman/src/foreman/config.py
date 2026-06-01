@@ -26,6 +26,41 @@ class AdminConfig(BaseModel):
     github_token_env: str = "FOREMAN_ADMIN_TOKEN"
 
 
+class OrchestratorConfig(BaseModel):
+    """Orchestrator-bot identity used by the daemon for host operations.
+
+    The orchestrator handles label management, PR merging, and polling
+    searches — actions that don't belong to any specific role bot and
+    historically would have used Jeff's PAT. A dedicated bot identity
+    gives every Foreman action a proper audit trail.
+
+    Resolved via JWT-from-private-key at daemon startup, same pattern
+    as the per-role apps.
+    """
+
+    app_id_env: str = "FOREMAN_ORCHESTRATOR_APP_ID"
+    app_id: int | None = None
+    private_key_path: str | None = None
+
+    def resolve_app_id(self) -> int:
+        env_value = os.environ.get(self.app_id_env)
+        if env_value:
+            return int(env_value)
+        if self.app_id is not None:
+            return self.app_id
+        raise RuntimeError(
+            f"No orchestrator app_id: env var {self.app_id_env} not set "
+            "and orchestrator.app_id not in config file"
+        )
+
+    def resolve_private_key_path(self) -> Path:
+        if not self.private_key_path:
+            raise RuntimeError(
+                "orchestrator.private_key_path not set in config file"
+            )
+        return Path(self.private_key_path)
+
+
 class DaemonConfig(BaseModel):
     """Daemon runtime configuration.
 
@@ -202,6 +237,7 @@ class Config(BaseModel):
 
     admin: AdminConfig = Field(default_factory=AdminConfig)
     daemon: DaemonConfig = Field(default_factory=DaemonConfig)
+    orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
     projects: dict[str, ProjectConfig] = Field(default_factory=dict)
 
 
