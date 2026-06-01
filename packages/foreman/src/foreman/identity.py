@@ -114,6 +114,21 @@ class IdentityRegistry:
         """Return the fixer-bot's current installation token string."""
         return self.get_token("fixer")
 
+    def get_worker_client(self) -> Github:
+        """Return the PyGithub client authenticated as the worker bot.
+
+        The Worker implements the spec in code, commits + pushes to an
+        impl branch stacked on the spec branch, and opens the impl PR.
+        The installation token also flows into the agent subprocess via
+        the role dispatcher's ``env=`` kwarg so any ``gh`` / ``git push``
+        calls the LLM makes act as the worker bot too.
+        """
+        return self.get_client("worker")
+
+    def get_worker_token(self) -> str:
+        """Return the worker-bot's current installation token string."""
+        return self.get_token("worker")
+
     def get_host_provider(self, role: str) -> GitHostProvider:
         """Return a :class:`~foreman.git_host.GitHostProvider` for the role.
 
@@ -176,7 +191,12 @@ class IdentityRegistry:
                 self._project.apps.resolve_fixer_app_id(),
                 self._project.apps.resolve_fixer_private_key_path(),
             )
+        if role == "worker":
+            return (
+                self._project.apps.resolve_worker_app_id(),
+                self._project.apps.resolve_worker_private_key_path(),
+            )
         raise ValueError(
             f"Unknown role: {role!r}. Walking skeleton supports "
-            "'planner', 'reviewer', and 'fixer'."
+            "'planner', 'reviewer', 'fixer', and 'worker'."
         )

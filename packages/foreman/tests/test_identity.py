@@ -33,6 +33,9 @@ def _make_project() -> ProjectConfig:
             fixer_app_id_env="FOREMAN_FIXER_APP_ID",
             fixer_app_id=777777,
             fixer_private_key_path="/tmp/fixer.pem",
+            worker_app_id_env="FOREMAN_WORKER_APP_ID",
+            worker_app_id=444444,
+            worker_private_key_path="/tmp/worker.pem",
         ),
     )
 
@@ -132,7 +135,7 @@ def test_env_var_overrides_config_file_app_id_at_mint_time(
 def test_unknown_role_raises() -> None:
     reg = IdentityRegistry(_make_project())
     with pytest.raises(ValueError, match="Unknown role"):
-        reg.get_client("worker")  # Worker not implemented in walking skeleton
+        reg.get_client("janitor")  # Not a known role in the walking skeleton
 
 
 def test_get_client_caches_github_instance() -> None:
@@ -222,7 +225,7 @@ def test_app_metadata_fetched_with_resolved_credentials() -> None:
 def test_get_host_provider_unknown_role_raises() -> None:
     reg = IdentityRegistry(_make_project())
     with pytest.raises(ValueError, match="Unknown role"):
-        reg.get_host_provider("worker")
+        reg.get_host_provider("janitor")
 
 
 # ----------------------------------------------------------------------
@@ -356,3 +359,65 @@ def test_fixer_client_and_planner_client_share_no_cache() -> None:
     assert f_token == "ghs_fixer_fxr"
 
 
+# ----------------------------------------------------------------------
+# Worker role accessors — mirror the planner / reviewer / fixer pair
+# ----------------------------------------------------------------------
+
+
+def test_get_worker_client_returns_github_instance() -> None:
+    fake_token = _fresh_token()
+    with patch("foreman.identity.mint_installation_token", return_value=fake_token):
+        reg = IdentityRegistry(_make_project())
+        client = reg.get_worker_client()
+    assert isinstance(client, Github)
+
+
+def test_get_worker_token_returns_installation_token_string() -> None:
+    fake_token = _fresh_token(token="ghs_worker_installtoken_abc")
+    with patch("foreman.identity.mint_installation_token", return_value=fake_token):
+        reg = IdentityRegistry(_make_project())
+        token = reg.get_worker_token()
+    assert token == "ghs_worker_installtoken_abc"
+
+
+def test_get_worker_mint_invoked_with_worker_app_credentials() -> None:
+    """The worker accessor must resolve the worker-specific App fields,
+    not any other role's — proves per-role credential dispatch."""
+    fake_token = _fresh_token()
+    with patch(
+        "foreman.identity.mint_installation_token", return_value=fake_token
+    ) as mock_mint:
+        reg = IdentityRegistry(_make_project())
+        reg.get_worker_client()
+    call_args = mock_mint.call_args
+    assert call_args.args[0] == 444444
+    assert call_args.args[1] == Path("/tmp/worker.pem")
+    assert call_args.args[2] == "jeffrichley/voice"
+
+
+def test_worker_env_var_overrides_config_file_app_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "555555")
+    fake_token = _fresh_token()
+    with patch(
+        "foreman.identity.mint_installation_token", return_value=fake_token
+    ) as mock_mint:
+        reg = IdentityRegistry(_make_project())
+        reg.get_worker_client()
+    assert mock_mint.call_args.args[0] == 555555
+
+
+def test_worker_client_and_planner_client_share_no_cache() -> None:
+    """Per-role tokens must NOT cross-contaminate — each role caches its own."""
+    planner_token = _fresh_token(token="ghs_planner_wrk")
+    worker_token = _fresh_token(token="ghs_worker_wrk")
+    with patch(
+        "foreman.identity.mint_installation_token",
+        side_effect=[planner_token, worker_token],
+    ):
+        reg = IdentityRegistry(_make_project())
+        p_token = reg.get_planner_token()
+        w_token = reg.get_worker_token()
+    assert p_token == "ghs_planner_wrk"
+    assert w_token == "ghs_worker_wrk"
