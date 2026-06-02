@@ -93,6 +93,66 @@ def test_each_role_prompt_loads(role: str) -> None:
     assert content.strip(), f"{role}.md must not be empty"
 
 
+def test_compose_role_prompt_includes_adapter_preamble_first() -> None:
+    """The vendored SKILL.md files were written for interactive Claude
+    Code (Skill tool, ``docs/superpowers/plans/`` defaults, etc.). Without
+    the adapter preamble explaining the SDK environment, lines like
+    ``REQUIRED SUB-SKILL: Use superpowers:executing-plans`` would either
+    stall the role LLM or point it at paths the Foreman role contract
+    does not own. The preamble MUST appear first so the LLM reads the
+    interpretation rules before the discipline that needs interpreting.
+    """
+    composed = compose_role_prompt(
+        role="planner", superpowers=["writing-plans"]
+    )
+    skill = load_superpowers_skill("writing-plans")
+    preamble_idx = composed.index("Foreman role adapter")
+    skill_idx = composed.index(skill)
+    assert preamble_idx < skill_idx, "adapter preamble must precede vendored skills"
+    # Pin the load-bearing assertions of the preamble. If a future edit
+    # accidentally weakens these, the test surfaces it for review — the
+    # SDK environment's missing affordances are the whole reason this
+    # adapter exists.
+    for required in (
+        "Do NOT try to call a\n  Skill tool",
+        "the role contract wins",
+        "No `Skill` tool",
+    ):
+        assert required in composed, (
+            f"adapter preamble lost required clause: {required!r}"
+        )
+
+
+def test_each_vendored_skill_gets_inline_header() -> None:
+    """Each loaded SKILL.md is wrapped with a header that names it as the
+    superpowers skill. The dangling ``Use superpowers:X`` references the
+    upstream content contains can then resolve to the named block instead
+    of stalling waiting for a Skill tool that doesn't exist in the SDK.
+    Pin the load-bearing wording so a future "tidy up the header" edit
+    doesn't accidentally remove the resolution hint.
+    """
+    composed = compose_role_prompt(
+        role="worker",
+        superpowers=[
+            "test-driven-development",
+            "executing-plans",
+            "verification-before-completion",
+            "finishing-a-development-branch",
+        ],
+    )
+    for skill in (
+        "test-driven-development",
+        "executing-plans",
+        "verification-before-completion",
+        "finishing-a-development-branch",
+    ):
+        assert f"## superpowers:{skill} (inlined)" in composed
+        assert (
+            f"When any\nother section says ``Use superpowers:{skill}``"
+            in composed
+        ), f"{skill}: lost the cross-reference resolution clause"
+
+
 def test_compose_role_prompt_orders_superpowers_before_role() -> None:
     """The composition puts vendored discipline FIRST (frames the
     Foreman-specific contract), then the role prompt. Inverting this
