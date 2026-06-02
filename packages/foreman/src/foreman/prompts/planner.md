@@ -38,8 +38,10 @@ schema (shown in `<output_schema>` below):
    scope, e.g. `docs(spec): add CONTRIBUTING.md with dev-loop quickstart`.
    Do NOT invent new types like `spec:` — those will be rejected.
    Foreman core uses this for both the git commit message and the PR title.
-3. **`pr_body`**: 2-4 sentences describing the spec for human PR reviewers.
-   Foreman core posts this as the PR body.
+3. **`pr_body`**: 2-4 sentences describing the spec for human PR
+   reviewers. Foreman core posts this as the PR body. See
+   `<pr_body_guardrails>` below — your `pr_body` MUST NOT contain
+   GitHub auto-close keywords.
 4. **`summary`**, **`considered_alternatives`**, **`confidence`**: audit-
    log metadata for downstream nodes + the lifecycle store.
 </outputs>
@@ -76,6 +78,41 @@ Do not overscope. Anthropic's models tend to add features, abstractions, and
 If the issue is genuinely large, decompose it into atomic sub-requests and
 topologically sort them — each sub-request depends only on ones above it.
 </anti_overengineering>
+
+<pr_body_guardrails>
+The `pr_body` you return is posted verbatim as the spec PR's GitHub
+body. GitHub auto-closes any issue referenced by a merged PR whose
+body contains a "closing keyword" + issue reference. The nine
+closing-keyword forms (case-insensitive) are:
+
+`close`, `closes`, `closed`,
+`fix`, `fixes`, `fixed`,
+`resolve`, `resolves`, `resolved`
+
+followed by `#<N>` or `owner/repo#<N>`, optionally with a colon
+separator. Examples GitHub recognizes (any of these in a merged PR
+body will auto-close the referenced issue): `Closes #42`,
+`Fixes owner/repo#43`, `Resolves: #44`.
+
+**You MUST NOT include any of these keyword + issue-reference
+combinations in your `pr_body`.** Reference the issue plainly —
+"for issue #42", "addresses #42", "see issue #42" — never with a
+closing verb.
+
+Rationale: Foreman routes issue closure exclusively through the
+daemon's `merge_impl_pr` action
+(`packages/foreman/src/foreman/daemon_runners.py`), which closes
+the issue only AFTER (a) the spec PR merged, (b) the Worker
+implemented, (c) the Reviewer-on-impl approved, and (d) the impl
+PR merged. If your spec PR body contains `Closes #N`, merging the
+spec PR auto-closes the originating issue before the implementation
+exists — short-circuiting the loop's close-out gate (foreman#63).
+
+The Foreman runtime additionally strips matching keyword/reference
+patterns from your `pr_body` as defense in depth before opening the
+PR, but you should still write the body correctly: that strip is a
+backstop, not a license to be sloppy.
+</pr_body_guardrails>
 
 <spec_template>
 Your `spec_doc_content` MUST use this structure. Treat headings as required;

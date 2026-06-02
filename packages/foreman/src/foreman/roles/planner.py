@@ -105,6 +105,36 @@ def _spec_doc_relpath(issue_number: int) -> str:
     return f"docs/superpowers/specs/foreman-issue-{issue_number}-spec.md"
 
 
+# foreman#63: GitHub auto-closes the originating issue at merge time when
+# a merged PR's body contains one of the nine "closing keywords" + a
+# ``#N`` or ``owner/repo#N`` reference. The Planner produces spec PR
+# bodies; issue closure must route through ``daemon_runners.merge_impl_pr``
+# instead (which fires only after the Reviewer-on-impl approves). This
+# regex matches the verb + optional ``:`` separator + whitespace, with a
+# lookahead that preserves the bare issue reference so the body still
+# reads cleanly after substitution.
+_AUTO_CLOSE_KEYWORDS_RE = re.compile(
+    r"(?i)\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\b\s*:?\s+"
+    r"(?=(?:[\w.-]+/[\w.-]+)?#\d+)"
+)
+
+
+def _strip_auto_close_keywords(body: str) -> str:
+    """Remove GitHub auto-close keyword+separator prefixes from ``body``.
+
+    GitHub auto-closes the originating issue when a merged PR's body
+    contains any of nine "closing keywords" (close/closes/closed,
+    fix/fixes/fixed, resolve/resolves/resolved) followed by a ``#N`` or
+    ``owner/repo#N`` reference. The Planner produces spec PR bodies;
+    issue closure must route through ``daemon_runners.merge_impl_pr``
+    (foreman#63). This helper strips the verb+separator while
+    preserving the bare ``#N`` reference so the body still reads
+    cleanly. The helper is idempotent and a no-op on bodies that
+    contain no auto-close keywords.
+    """
+    return _AUTO_CLOSE_KEYWORDS_RE.sub("", body)
+
+
 async def run_planner(
     *,
     issue_url: str,
@@ -175,10 +205,16 @@ async def run_planner(
         message=llm_output.pr_title,
     )
     host.push_branch(worktree_path=wt_path, branch=branch)
+    # foreman#63: strip GitHub auto-close keywords (Closes / Fixes /
+    # Resolves + #N) from the PR body before opening. Issue closure
+    # routes through daemon_runners.merge_impl_pr; an auto-close in the
+    # spec PR's body would short-circuit that gate. Defense in depth —
+    # the Planner prompt also forbids these keywords. The original
+    # ``llm_output.pr_body`` is preserved on the audit-log copy.
     pr = host.open_pull_request(
         repo_slug=actual_repo_slug,
         title=llm_output.pr_title,
-        body=llm_output.pr_body,
+        body=_strip_auto_close_keywords(llm_output.pr_body),
         base=default_branch,
         head=branch,
     )
