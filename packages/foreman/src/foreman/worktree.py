@@ -36,6 +36,7 @@ import sys
 from pathlib import Path
 
 from foreman._env_filter import filtered_subprocess_env
+from foreman.branches import impl_branch, spec_branch
 
 
 class WorktreeManager:
@@ -99,7 +100,7 @@ class WorktreeManager:
         if wt_path.exists():
             return wt_path
         wt_path.parent.mkdir(parents=True, exist_ok=True)
-        branch = f"foreman/issue-{ticket_id}"
+        branch = spec_branch(ticket_id)
         base_branch = dev_base_branch or _resolve_default_branch(clone_path)
         _fetch_origin_branch(clone_path, base_branch)
         subprocess.run(
@@ -152,21 +153,21 @@ class WorktreeManager:
         if wt_path.exists():
             return wt_path
         wt_path.parent.mkdir(parents=True, exist_ok=True)
-        impl_branch = f"foreman/impl-{ticket_id}"
-        spec_branch = f"foreman/issue-{ticket_id}"
+        impl_branch_name = impl_branch(ticket_id)
+        spec_branch_name = spec_branch(ticket_id)
         # Refresh the spec branch from origin so we stack on the Planner's
         # latest push, not a stale local ref. Best-effort — same rationale
         # as ``create``'s default-branch fetch.
-        _fetch_origin_branch(clone_path, spec_branch)
+        _fetch_origin_branch(clone_path, spec_branch_name)
         subprocess.run(
             [
                 "git",
                 "worktree",
                 "add",
                 "-b",
-                impl_branch,
+                impl_branch_name,
                 str(wt_path),
-                f"origin/{spec_branch}",
+                f"origin/{spec_branch_name}",
             ],
             cwd=clone_path,
             check=True,
@@ -197,7 +198,7 @@ class WorktreeManager:
         if wt_path.exists():
             return wt_path
         wt_path.parent.mkdir(parents=True, exist_ok=True)
-        branch = f"foreman/issue-{ticket_id}"
+        branch = spec_branch(ticket_id)
         if not _local_branch_exists(clone_path, branch):
             # Branch isn't local yet — fetch the remote ref so worktree add
             # can resolve it. The Planner pushes the branch, so origin should
