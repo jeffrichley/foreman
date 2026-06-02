@@ -9,6 +9,7 @@ identity configuration, LLM dispatch, commit/push/PR, label advancement.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -18,12 +19,58 @@ import pytest
 
 from foreman.config import AppsConfig, Config, ProjectConfig
 from foreman.git_host import GitHostProvider, IssueRef, PRRef
+from foreman.prompts import load_role_prompt
 from foreman.roles.planner import (
     PLANNER_ALLOWED_TOOLS,
+    _strip_auto_close_keywords,
     parse_issue_url,
     run_planner,
 )
 from foreman.schemas.planner import PlannerOutput
+
+# ----------------------------------------------------------------------
+# _strip_auto_close_keywords
+#
+# foreman#63: the Planner must not produce spec PR bodies that auto-close
+# the originating issue at spec-merge time. This helper is the runtime
+# defense-in-depth (the prompt teaches the LLM; this strips noncompliant
+# output before it reaches GitHub). The table below pins all nine
+# GitHub closing-keyword forms, their casing variants, the colon
+# separator, the ``owner/repo#N`` cross-repo form, multi-issue lines,
+# and negative cases (bare ``#N`` references, substring-of-other-word).
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        # All nine keyword forms with default casing
+        ("Closes #42", "#42"),
+        ("closes #42", "#42"),
+        ("CLOSED #42", "#42"),
+        ("Fixes #42", "#42"),
+        ("fix #42", "#42"),
+        ("FIXED #42", "#42"),
+        ("Resolves #42", "#42"),
+        ("resolve #42", "#42"),
+        ("RESOLVED #42", "#42"),
+        # Colon separator
+        ("Closes: #42", "#42"),
+        # Cross-repo owner/repo#N form
+        ("Closes jeffrichley/foreman#42", "jeffrichley/foreman#42"),
+        # Multi-issue line — both keywords stripped, both refs preserved
+        ("closes #42, fixes #43", "#42, #43"),
+        # Negative: bare reference survives untouched
+        ("See #42 for context.", "See #42 for context."),
+        # Negative: substring-of-other-word survives (word boundary)
+        ("foreclosed by #42", "foreclosed by #42"),
+        # Negative: empty body is a no-op
+        ("", ""),
+    ],
+)
+def test_strip_auto_close_keywords_table(body: str, expected: str) -> None:
+    assert _strip_auto_close_keywords(body) == expected
+
 
 # ----------------------------------------------------------------------
 # parse_issue_url
@@ -56,6 +103,23 @@ def test_planner_allowed_tools_is_read_only() -> None:
     assert set(PLANNER_ALLOWED_TOOLS) == {"Read", "Glob", "Grep"}
 
 
+def test_planner_prompt_forbids_auto_close_keywords() -> None:
+    """The Planner system prompt MUST explicitly forbid GitHub
+    auto-close keywords in pr_body. Without this guardrail the LLM
+    writes ``Closes #N``, which auto-closes the originating issue at
+    spec-merge time — short-circuiting the loop's close-out gate
+    that lives in ``daemon_runners.merge_impl_pr`` (foreman#63).
+    """
+    prompt = load_role_prompt("planner")
+    assert "pr_body_guardrails" in prompt
+    # All three keyword families named, so the LLM can generalize:
+    assert "Closes" in prompt
+    assert "Fixes" in prompt
+    assert "Resolves" in prompt
+    # Rationale cites the daemon's authoritative close path:
+    assert "merge_impl_pr" in prompt
+
+
 # ----------------------------------------------------------------------
 # Test scaffolding
 # ----------------------------------------------------------------------
@@ -78,6 +142,10 @@ class _FakeHostProvider(GitHostProvider):
         self.pushed_branch: str | None = None
         self.configure_calls: list[Path] = []
         self.label_calls: list[tuple[str, int, list[str], list[str]]] = []
+        # foreman#63: capture the body kwarg that arrives at
+        # ``open_pull_request`` so the auto-close-strip integration test
+        # can assert what GitHub would have seen.
+        self.last_open_pr_body: str | None = None
         self.pr_to_return = PRRef(
             number=99,
             url="https://github.com/jeffrichley/voice/pull/99",
@@ -110,6 +178,7 @@ class _FakeHostProvider(GitHostProvider):
     def open_pull_request(
         self, repo_slug: str, title: str, body: str, base: str, head: str
     ) -> PRRef:
+        self.last_open_pr_body = body
         return PRRef(
             number=self.pr_to_return.number,
             url=self.pr_to_return.url,
@@ -273,6 +342,62 @@ async def test_run_planner_dispatches_and_advances_label(
     assert result.pr.branch == "foreman/issue-42"
     assert result.llm_output.confidence == "high"
     assert result.llm_output.summary == "Drafted SSML support spec"
+
+
+@pytest.mark.asyncio
+async def test_run_planner_strips_auto_close_keywords_from_pr_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """foreman#63: ``run_planner`` must strip GitHub auto-close keywords
+    (``Closes`` / ``Fixes`` / ``Resolves`` + ``#N``) from the LLM's
+    ``pr_body`` before passing it to ``host.open_pull_request``.
+
+    Issue closure routes exclusively through
+    ``daemon_runners.merge_impl_pr`` → ``close_issue``; a spec PR body
+    containing ``Closes #N`` would let GitHub close the originating issue
+    at spec-merge time, short-circuiting the loop's close-out gate.
+
+    Audit-log preservation: ``PlannerRunResult.llm_output.pr_body`` must
+    still carry the LLM's original text — the scrub is per-call, not a
+    mutation on the model.
+    """
+    clone = tmp_path / "clone"
+    _seed_clone(clone, origin_path=tmp_path / "origin.git")
+    monkeypatch.setenv("FOREMAN_PLANNER_APP_ID", "123456")
+
+    cfg = _make_config(clone)
+    fake_host = _FakeHostProvider()
+    fake_registry = MagicMock()
+    fake_registry.get_host_provider.return_value = fake_host
+
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(
+        return_value=_make_llm_output(
+            pr_body="Drafted SSML support spec. Closes #42. See spec doc."
+        )
+    )
+
+    result = await run_planner(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=fake_registry,
+    )
+
+    # The body that reached open_pull_request must NOT contain any of the
+    # nine auto-close keywords followed by an issue reference.
+    assert fake_host.last_open_pr_body is not None
+    assert not re.search(
+        r"(?i)\b(close[sd]?|fix(?:es|ed)?|resolve[sd]?)\b\s*:?\s+"
+        r"(?:[\w.-]+/[\w.-]+)?#\d+",
+        fake_host.last_open_pr_body,
+    ), f"Auto-close keyword leaked into PR body: {fake_host.last_open_pr_body!r}"
+    # The bare issue reference must survive — humans still want to see it.
+    assert "#42" in fake_host.last_open_pr_body
+    # The audit-log copy preserves what the LLM actually produced.
+    assert "Closes #42" in result.llm_output.pr_body
 
 
 @pytest.mark.asyncio
