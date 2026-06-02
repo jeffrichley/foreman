@@ -142,6 +142,31 @@ async def test_run_reviewer_raises_when_no_pr_for_branch(
 
 
 @pytest.mark.asyncio
+async def test_run_fixer_forwards_target_to_role_function(
+    tmp_path: Path, host: MagicMock
+) -> None:
+    """foreman#79: ``DaemonRunners.run_fixer`` must forward ``target``
+    to the role function. Without this, the role defaults to
+    ``target='spec_pr'``, the precondition gate rejects
+    ``foreman:impl-fix``-labeled issues, and the autonomous
+    Fixer-on-impl flow stalls forever."""
+    config = _config(tmp_path)
+    mock_role = AsyncMock(return_value=MagicMock(model_dump=lambda: {}))
+
+    runners = DaemonRunners(
+        host=host,
+        worktrees_root=tmp_path / "worktrees",
+        _fixer=mock_role,
+    )
+
+    await runners.run_fixer(ticket=_ticket(), config=config, target="impl_pr")
+
+    kwargs = mock_role.await_args.kwargs
+    assert kwargs["target"] == "impl_pr"
+    assert kwargs["issue_url"] == "https://github.com/jeffrichley/voice/issues/42"
+
+
+@pytest.mark.asyncio
 async def test_merge_spec_pr_merges_and_sets_implementing_ready(
     tmp_path: Path, host: MagicMock
 ) -> None:

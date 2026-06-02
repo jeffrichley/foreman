@@ -103,8 +103,28 @@ def load_superpowers_skill(name: str) -> str:
     )
 
 
-def load_role_prompt(role: str) -> str:
-    """Read the Foreman-specific role prompt by role name."""
+def load_role_prompt(role: str, *, target: str | None = None) -> str:
+    """Read the Foreman-specific role prompt by role name.
+
+    When ``target == "impl_pr"`` AND a target-specific prompt file
+    exists at ``<role>_impl.md``, return that. Otherwise fall back
+    to the canonical ``<role>.md``.
+
+    The mapping from ``(role, target)`` to filename is a fact about
+    the prompt directory layout — it lives in this loader, not in
+    each role's call site. Roles that don't have a target-specific
+    variant (Planner, Worker today) automatically fall back; no
+    branching at the role layer.
+
+    Unrecognized target values (including the documented ``"spec_pr"``)
+    fall back to ``<role>.md`` without raising. Wrong-target errors are
+    the role's precondition gate to surface, not the loader's — the
+    loader's job is to resolve a path, full stop.
+    """
+    if target == "impl_pr":
+        impl_path = resources.files(_PROMPTS_ROOT).joinpath(f"{role}_impl.md")
+        if impl_path.is_file():
+            return impl_path.read_text(encoding="utf-8")
     return (
         resources.files(_PROMPTS_ROOT)
         .joinpath(f"{role}.md")
@@ -143,7 +163,12 @@ def _wrap_skill(name: str) -> str:
     return f"{header}\n{load_superpowers_skill(name)}"
 
 
-def compose_role_prompt(*, role: str, superpowers: list[str]) -> str:
+def compose_role_prompt(
+    *,
+    role: str,
+    superpowers: list[str],
+    target: str | None = None,
+) -> str:
     """Compose a role's full system prompt with three layers:
 
     1. **Adapter preamble** (:data:`_ADAPTER_PREAMBLE`) — read first,
@@ -154,7 +179,10 @@ def compose_role_prompt(*, role: str, superpowers: list[str]) -> str:
        skill so downstream references resolve to the in-prompt content
        instead of stalling on a missing Skill tool.
     3. **Foreman role contract** — the role's labels, branch
-       conventions, structured output schema.
+       conventions, structured output schema. ``target`` is forwarded
+       to :func:`load_role_prompt` so target-specific role prompts
+       (e.g. ``reviewer_impl.md``) are loaded for the impl-side
+       variants — see foreman#78 / foreman#79.
 
     ``superpowers`` is the ordered list of vendored skill names to inline
     between the preamble and the role contract. Order matters — the role
@@ -166,5 +194,5 @@ def compose_role_prompt(*, role: str, superpowers: list[str]) -> str:
     """
     parts: list[str] = [_ADAPTER_PREAMBLE]
     parts.extend(_wrap_skill(name) for name in superpowers)
-    parts.append(load_role_prompt(role))
+    parts.append(load_role_prompt(role, target=target))
     return "\n\n---\n\n".join(parts)

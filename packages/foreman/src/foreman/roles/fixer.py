@@ -95,6 +95,31 @@ _LABEL_SPEC_REVIEW = "foreman:spec-review"
 _LABEL_NEEDS_HELP = "foreman:needs-help"
 _LABEL_FAILED = "foreman:failed"
 
+# foreman#79: per-target routing for the Fixer. The role accepts a
+# ``target`` kwarg (added by foreman#41 via DaemonRunners) that
+# distinguishes spec-PR fixes from impl-PR fixes. Each target gets
+# its own entry-label precondition and its own prompt composition.
+_LABEL_IMPL_FIX = "foreman:impl-fix"
+
+_FIXER_ENTRY_LABEL_BY_TARGET: dict[str, str] = {
+    "spec_pr": _LABEL_SPEC_FIX,
+    "impl_pr": _LABEL_IMPL_FIX,
+}
+
+_FIXER_SUPERPOWERS_BY_TARGET: dict[str, list[str]] = {
+    # Spec-side: today's discipline — receiving review feedback.
+    "spec_pr": ["receiving-code-review"],
+    # Impl-side: same feedback-reception discipline PLUS the Worker's
+    # what-counts-as-done (verification-before-completion) and TDD
+    # discipline (test-driven-development). Impl fixes change code, so
+    # the test-first + verify-before-commit patterns apply.
+    "impl_pr": [
+        "receiving-code-review",
+        "verification-before-completion",
+        "test-driven-development",
+    ],
+}
+
 
 def parse_issue_url(url: str) -> tuple[str, str, int]:
     """Extract ``(owner, repo, issue_number)`` from a GitHub issue URL.
@@ -122,20 +147,30 @@ def _count_fix_attempts(label_names: set[str]) -> int:
     return max(attempts) if attempts else 0
 
 
-def _load_fixer_prompt() -> str:
-    """Load the Fixer system prompt: vendored ``receiving-code-review``
-    followed by the Foreman-specific Fixer contract.
+def _load_fixer_prompt(target: str = "spec_pr") -> str:
+    """Load the Fixer system prompt for the given ``target``.
 
-    The Fixer's whole job is reading a Reviewer's findings and addressing
-    each one. Superpowers' ``receiving-code-review`` is the canonical
-    discipline for that move (track each finding, address explicitly,
-    explain disagreement rather than ignoring) and dropping it in front
-    of the Foreman Fixer contract gives every fix-cycle the same shape.
+    ``target="spec_pr"`` (default for back-compat) loads ``fixer.md``
+    composed with ``receiving-code-review``. ``target="impl_pr"``
+    loads ``fixer_impl.md`` composed with the impl-side superpowers
+    list (adds ``verification-before-completion`` +
+    ``test-driven-development``). See ``_FIXER_SUPERPOWERS_BY_TARGET``
+    for the exact composition.
+
+    Unknown target values fall back to the spec composition — the
+    role's precondition gate is the right place to surface
+    wrong-target errors, not this loader.
     """
     from foreman.prompts import compose_role_prompt
 
+    superpowers = _FIXER_SUPERPOWERS_BY_TARGET.get(
+        target, _FIXER_SUPERPOWERS_BY_TARGET["spec_pr"]
+    )
+    safe_target = target if target in _FIXER_SUPERPOWERS_BY_TARGET else "spec_pr"
     return compose_role_prompt(
-        role="fixer", superpowers=["receiving-code-review"]
+        role="fixer",
+        superpowers=superpowers,
+        target=safe_target,
     )
 
 
@@ -353,6 +388,7 @@ async def run_fixer(
     worktrees_root: Path,
     provider: ProviderFacade,
     identity_registry: IdentityRegistry | None = None,
+    target: str = "spec_pr",
 ) -> FixerRunResult:
     """Run the Fixer role end-to-end on one issue.
 
@@ -403,12 +439,14 @@ async def run_fixer(
     issue_labels = {label.name for label in issue.labels}
 
     # Pre-flight: refuse to run without the entry-condition label.
-    if _LABEL_SPEC_FIX not in issue_labels:
+    expected_label = _FIXER_ENTRY_LABEL_BY_TARGET[target]
+    if expected_label not in issue_labels:
         raise RuntimeError(
-            f"Issue #{issue_number} does not carry the {_LABEL_SPEC_FIX!r} "
+            f"Issue #{issue_number} does not carry the {expected_label!r} "
             f"label (labels: "
             + ", ".join(sorted(issue_labels) or ["<none>"])
-            + "). The Fixer only acts on issues queued by the Reviewer."
+            + f"). The Fixer only acts on issues queued by the Reviewer "
+            f"for target={target!r}."
         )
 
     # Pre-flight: max-attempts gate. If max fix-attempt labels already
@@ -460,7 +498,7 @@ async def run_fixer(
     spec_doc_content = _read_spec_doc(wt_path, issue_number)
     instructions = load_project_instructions(Path(project.local_clone_path))
 
-    system_prompt = _load_fixer_prompt()
+    system_prompt = _load_fixer_prompt(target=target)
     user_prompt = _build_user_prompt(
         issue_title=issue.title or "",
         issue_body=issue.body or "",
@@ -497,8 +535,12 @@ async def run_fixer(
         # spec-fix → spec-review cycle gets a fresh 3-attempt budget.
         # Lifecycle stats JSONL preserves the cumulative audit trail;
         # labels reflect current-cycle state only.
-        issue.remove_from_labels(_LABEL_SPEC_FIX)
-        issue.add_to_labels(_LABEL_SPEC_REVIEW)
+        if target == "impl_pr":
+            issue.remove_from_labels(_LABEL_IMPL_FIX)
+            issue.add_to_labels("foreman:impl-review")
+        else:
+            issue.remove_from_labels(_LABEL_SPEC_FIX)
+            issue.add_to_labels(_LABEL_SPEC_REVIEW)
         all_known_labels = issue_labels | {attempt_label}
         for label_name in all_known_labels:
             if label_name.startswith("foreman:fix-attempt-") or label_name == _LABEL_NEEDS_HELP:

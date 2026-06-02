@@ -166,6 +166,7 @@ class DaemonRunners:
             project_name=ticket.project_name,
             worktrees_root=self._worktrees_root,
             provider=self._provider,
+            target=target,
         )
         return RoleRunResult(
             new_labels=self._read_labels(ticket, config),
