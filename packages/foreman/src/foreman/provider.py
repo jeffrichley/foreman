@@ -58,7 +58,7 @@ class ProviderFacade(ABC):
         allowed_tools: list[str],
         output_model: type[T],
         cwd: Path,
-        max_turns: int = 40,
+        max_turns: int = 1000,
         env: dict[str, str] | None = None,
     ) -> T:
         """Run an agent and return a validated instance of ``output_model``.
@@ -72,7 +72,12 @@ class ProviderFacade(ABC):
                 from this class, passes it to the SDK, and validates the
                 returned structured output back into an instance.
             cwd: Working directory for file ops (the per-ticket worktree).
-            max_turns: Safety cap on agent loop iterations.
+            max_turns: Hard ceiling on agent loop iterations. Set absurdly
+                high (1000) so the cap doesn't itself silently become the
+                bug — see foreman#46 walk follow-up where the previous
+                40-turn cap killed the Worker mid-spec with a vacuous
+                ``did_check_pass=True``. Real budgets need real metrics
+                first.
             env: Environment variables for the agent subprocess. When ``None``,
                 the subprocess inherits the parent's full environment. When
                 provided, callers are responsible for including parent vars
