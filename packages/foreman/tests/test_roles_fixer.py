@@ -1280,3 +1280,78 @@ async def test_run_fixer_uses_empty_findings_when_review_body_lacks_block(
     # The prose context still flows through so the LLM has something to
     # read even when structured findings are absent.
     assert "needs_fix — prose only, no structured block." in user_prompt
+
+
+# ----------------------------------------------------------------------
+# Per-target prompt + precondition routing — foreman#79
+#
+# The Fixer's ``target`` kwarg now drives both the entry-label
+# precondition and the prompt loaded. Today's bug (foreman#79) was
+# that ``target="impl_pr"`` got plumbed through DaemonRunners but
+# the role function rejected the issue because ``foreman:impl-fix``
+# was not in its hardcoded acceptance set (only ``foreman:spec-fix``).
+# These tests pin both halves of the routing.
+# ----------------------------------------------------------------------
+
+
+def test_fixer_entry_label_by_target_mapping_is_complete() -> None:
+    """The mapping covers the two valid targets and nothing else."""
+    from foreman.roles.fixer import _FIXER_ENTRY_LABEL_BY_TARGET
+
+    assert _FIXER_ENTRY_LABEL_BY_TARGET == {
+        "spec_pr": "foreman:spec-fix",
+        "impl_pr": "foreman:impl-fix",
+    }
+
+
+def test_fixer_superpowers_by_target_mapping_is_complete() -> None:
+    """Each target gets its own superpowers composition list. The
+    impl variant adds verification-before-completion and
+    test-driven-development."""
+    from foreman.roles.fixer import _FIXER_SUPERPOWERS_BY_TARGET
+
+    assert _FIXER_SUPERPOWERS_BY_TARGET == {
+        "spec_pr": ["receiving-code-review"],
+        "impl_pr": [
+            "receiving-code-review",
+            "verification-before-completion",
+            "test-driven-development",
+        ],
+    }
+
+
+def test_load_fixer_prompt_default_uses_spec_composition() -> None:
+    """Zero-arg call returns the spec composition — back-compat for
+    existing call sites and tests."""
+    from foreman.roles.fixer import _load_fixer_prompt
+    from foreman.prompts import compose_role_prompt
+
+    actual = _load_fixer_prompt()
+    expected = compose_role_prompt(
+        role="fixer",
+        superpowers=["receiving-code-review"],
+        target="spec_pr",
+    )
+    assert actual == expected
+
+
+def test_load_fixer_prompt_impl_target_loads_impl_composition() -> None:
+    """``target="impl_pr"`` loads ``fixer_impl.md`` with the impl
+    superpowers list. Without this, the Fixer reads spec-fix content
+    while trying to fix impl-PR code."""
+    from foreman.roles.fixer import _load_fixer_prompt
+    from foreman.prompts import compose_role_prompt
+
+    actual = _load_fixer_prompt(target="impl_pr")
+    expected = compose_role_prompt(
+        role="fixer",
+        superpowers=[
+            "receiving-code-review",
+            "verification-before-completion",
+            "test-driven-development",
+        ],
+        target="impl_pr",
+    )
+    assert actual == expected
+    # Sanity: ensure the impl composition contains impl-file content.
+    assert "implementation pull request" in actual.lower() or "impl-pr variant" in actual.lower()
