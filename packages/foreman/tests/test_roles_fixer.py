@@ -611,6 +611,50 @@ async def test_run_fixer_max_attempts_gate_raises_before_llm(
 
 
 @pytest.mark.asyncio
+async def test_run_fixer_honors_project_max_fix_attempts_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ``ProjectConfig.max_fix_attempts`` overrides the default, the
+    gate fires at the overridden value, not at the historical 3. Pinning
+    this empirically because otherwise the configurable feature could
+    silently regress to ``hardcoded 3`` and the default-only tests would
+    never notice (the symptom this whole ticket exists to prevent).
+    """
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    cfg = _make_config(clone)
+    # Tighten the cap to 1 — first attempt is allowed; second must raise.
+    cfg.projects["voice"] = cfg.projects["voice"].model_copy(
+        update={"max_fix_attempts": 1}
+    )
+    repo, pr, issue = _make_fake_repo(
+        issue_number=42,
+        head_sha=head_sha,
+        labels=["foreman:spec-fix", "foreman:fix-attempt-1"],
+    )
+    client = _FakeFixerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+
+    with pytest.raises(RuntimeError, match="max 1 fix-attempts"):
+        await run_fixer(
+            issue_url="https://github.com/jeffrichley/voice/issues/42",
+            config=cfg,
+            project_name="voice",
+            worktrees_root=tmp_path / "worktrees",
+            provider=fake_provider,
+            identity_registry=registry,
+        )
+
+    fake_provider.run_agent.assert_not_called()
+    assert "foreman:fix-attempt-2" not in issue.added
+
+
+@pytest.mark.asyncio
 async def test_run_fixer_rejects_url_pointing_at_wrong_project(
     tmp_path: Path,
 ) -> None:

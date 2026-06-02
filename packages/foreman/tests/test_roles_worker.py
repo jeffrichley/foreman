@@ -988,6 +988,50 @@ async def test_run_worker_max_attempts_gate_raises_before_llm(
 
 
 @pytest.mark.asyncio
+async def test_run_worker_honors_project_max_impl_attempts_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ``ProjectConfig.max_impl_attempts`` overrides the default, the
+    gate fires at the overridden value, not at the historical 3. Pinning
+    this empirically because otherwise the configurable feature could
+    silently regress to ``hardcoded 3`` and the default-only tests would
+    never notice."""
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    cfg = _make_config(clone)
+    cfg.projects["voice"] = cfg.projects["voice"].model_copy(
+        update={"max_impl_attempts": 1}
+    )
+    repo, _spec_pr, issue = _make_fake_repo(
+        issue_number=42,
+        head_sha=head_sha,
+        labels=["foreman:spec-ready", "foreman:impl-attempt-1"],
+    )
+    client = _FakeWorkerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    _make_passing_check_command(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="max 1 impl-attempts"):
+        await run_worker(
+            issue_url="https://github.com/jeffrichley/voice/issues/42",
+            config=cfg,
+            project_name="voice",
+            worktrees_root=tmp_path / "worktrees",
+            provider=fake_provider,
+            identity_registry=registry,
+        )
+
+    fake_provider.run_agent.assert_not_called()
+    assert "foreman:impl-attempt-2" not in issue.added
+    assert repo.create_pull_calls == []
+
+
+@pytest.mark.asyncio
 async def test_run_worker_rejects_url_pointing_at_wrong_project(
     tmp_path: Path,
 ) -> None:

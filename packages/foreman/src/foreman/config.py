@@ -238,6 +238,30 @@ class ProjectConfig(BaseModel):
             "When False (default), ticket parks at ready-for-merge awaiting human merge."
         ),
     )
+    max_fix_attempts: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Retry budget for the Fixer's spec-fix cycle. The Nth+1 "
+            "dispatch raises before any LLM run. Read at role-runtime by "
+            "``foreman.roles.fixer``. ``foreman init`` still creates the "
+            "default set of three ``foreman:fix-attempt-N`` labels; "
+            "operators using a higher value should create additional "
+            "labels manually (init-aware label creation is a follow-up)."
+        ),
+    )
+    max_impl_attempts: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Retry budget for the Worker's impl cycle. The Nth+1 dispatch "
+            "raises before any LLM run. Read at role-runtime by "
+            "``foreman.roles.worker``. ``foreman init`` still creates the "
+            "default set of three ``foreman:impl-attempt-N`` labels; "
+            "operators using a higher value should create additional "
+            "labels manually (init-aware label creation is a follow-up)."
+        ),
+    )
 
 
 class Config(BaseModel):

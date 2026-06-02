@@ -19,7 +19,9 @@ addressable edits to the spec doc, commits + pushes, and returns a
 
 The fix-attempt counter is tracked via the issue's
 ``foreman:fix-attempt-N`` labels (set on entry, never removed for
-audit). Max 3 attempts; the 4th raises before any LLM dispatch.
+audit). Max N attempts (per-project configurable via
+``ProjectConfig.max_fix_attempts``, default 3); the N+1 dispatch
+raises before any LLM dispatch.
 
 The Fixer's tool surface includes Edit + Write (it edits the spec
 doc) plus Read / Grep / Glob / Bash. Bash is needed so the LLM can
@@ -29,10 +31,11 @@ the LLM's hands inside the worktree, because the LLM is the one deciding
 which edits to bundle into which commit per the prompt's discipline.
 
 Pre-flight guards: if the issue is missing ``foreman:spec-fix`` we
-refuse to run; if the issue already has 3 ``foreman:fix-attempt-*``
-labels, we refuse to run with a clear "needs human intervention"
-RuntimeError. Both raise before any LLM dispatch — cheap deterministic
-checks.
+refuse to run; if the issue already has max ``foreman:fix-attempt-*``
+labels (per-project configurable via
+``ProjectConfig.max_fix_attempts``, default 3), we refuse to run with
+a clear "needs human intervention" RuntimeError. Both raise before any
+LLM dispatch — cheap deterministic checks.
 """
 
 from __future__ import annotations
@@ -91,7 +94,6 @@ _LABEL_SPEC_FIX = "foreman:spec-fix"
 _LABEL_SPEC_REVIEW = "foreman:spec-review"
 _LABEL_NEEDS_HELP = "foreman:needs-help"
 _LABEL_FAILED = "foreman:failed"
-_MAX_FIX_ATTEMPTS = 3
 
 
 def parse_issue_url(url: str) -> tuple[str, str, int]:
@@ -216,6 +218,7 @@ def _build_user_prompt(
     review_comment: str,
     findings: list[Finding],
     attempt: int,
+    max_fix_attempts: int,
     instructions: str | None,
 ) -> str:
     """Compose the per-run user prompt.
@@ -246,7 +249,7 @@ def _build_user_prompt(
     )
     return (
         f"You are fixing Reviewer findings on spec PR. This is fix attempt "
-        f"#{attempt} of a maximum of {_MAX_FIX_ATTEMPTS}.\n\n"
+        f"#{attempt} of a maximum of {max_fix_attempts}.\n\n"
         f"{instructions_section}"
         f"## Originating issue\nTitle: {issue_title}\n\n{issue_body}\n\n"
         f"## PR title\n{pr_title}\n\n"
@@ -366,8 +369,8 @@ async def run_fixer(
     Raises:
         ValueError: Issue URL malformed or repo mismatch.
         RuntimeError: Issue missing ``foreman:spec-fix``, or max
-            attempts (3) already reached, or no open spec PR / no
-            Reviewer review found.
+            attempts (``project.max_fix_attempts``) already reached, or
+            no open spec PR / no Reviewer review found.
     """
     owner, repo_name, issue_number = parse_issue_url(issue_url)
     project = config.projects[project_name]
@@ -396,14 +399,17 @@ async def run_fixer(
             + "). The Fixer only acts on issues queued by the Reviewer."
         )
 
-    # Pre-flight: max-3-attempts gate. If 3 fix-attempt labels already
+    # Pre-flight: max-attempts gate. If max fix-attempt labels already
     # exist, refuse to run — this prevents infinite-loop drain and
     # forces human intervention via the foreman:failed escalation.
+    # The cap is read from ``ProjectConfig.max_fix_attempts`` so each
+    # project can size it to their own appetite (default 3).
+    max_fix_attempts = project.max_fix_attempts
     previous_attempts = _count_fix_attempts(issue_labels)
     attempt = previous_attempts + 1
-    if attempt > _MAX_FIX_ATTEMPTS:
+    if attempt > max_fix_attempts:
         raise RuntimeError(
-            f"Issue #{issue_number} has hit the max {_MAX_FIX_ATTEMPTS} "
+            f"Issue #{issue_number} has hit the max {max_fix_attempts} "
             "fix-attempts; needs human intervention via foreman:failed. "
             f"Existing attempts: {previous_attempts}."
         )
@@ -452,6 +458,7 @@ async def run_fixer(
         review_comment=review_comment,
         findings=findings,
         attempt=attempt,
+        max_fix_attempts=max_fix_attempts,
         instructions=instructions,
     )
 
@@ -492,7 +499,7 @@ async def run_fixer(
         # pass) can re-trigger; flag for help; if last attempt, also
         # add the failed escalation.
         issue.add_to_labels(_LABEL_NEEDS_HELP)
-        if attempt == _MAX_FIX_ATTEMPTS:
+        if attempt == max_fix_attempts:
             issue.add_to_labels(_LABEL_FAILED)
 
     # JSONL stats — write regardless of outcome.
