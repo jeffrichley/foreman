@@ -76,6 +76,7 @@ from github import Github
 from github.PullRequest import PullRequest
 from github.Repository import Repository
 
+from foreman.branches import impl_branch, spec_branch
 from foreman.config import Config
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
@@ -506,9 +507,9 @@ async def run_worker(
 
     # Resolve the spec branch + spec PR (PR may be None — implementation
     # proceeds either way; the impl PR body's spec-PR reference adapts).
-    spec_branch = f"foreman/issue-{issue_number}"
-    impl_branch = f"foreman/impl-{issue_number}"
-    spec_pr = _find_spec_pr(repo, owner=owner, branch=spec_branch)
+    spec_branch_name = spec_branch(issue_number)
+    impl_branch_name = impl_branch(issue_number)
+    spec_pr = _find_spec_pr(repo, owner=owner, branch=spec_branch_name)
     spec_pr_number = spec_pr.number if spec_pr is not None else None
 
     # Resolve check_command per D2: project override or default.
@@ -527,7 +528,7 @@ async def run_worker(
     # Read the spec doc — on-disk first (it's checked out on this
     # branch), git-show fallback to authoritative spec-branch content.
     spec_doc_content = _read_spec_doc_from_branch(
-        worktree_path=wt_path, spec_branch=spec_branch, issue_number=issue_number
+        worktree_path=wt_path, spec_branch=spec_branch_name, issue_number=issue_number
     )
 
     # Baseline preflight (D4): capture the failing-tests set BEFORE the
@@ -647,8 +648,8 @@ async def run_worker(
         impl_pr = repo.create_pull(
             title=llm_output.pr_title,
             body=llm_output.pr_body,
-            base=spec_branch,
-            head=impl_branch,
+            base=spec_branch_name,
+            head=impl_branch_name,
         )
         pr_url = impl_pr.html_url
 
