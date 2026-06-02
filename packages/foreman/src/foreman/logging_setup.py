@@ -54,6 +54,15 @@ class _JsonLinesFormatter(logging.Formatter):
             if key in _STANDARD_RECORD_FIELDS or key.startswith("_"):
                 continue
             payload[key] = value
+        if record.exc_info:
+            exc_type, exc_value, _exc_tb = record.exc_info
+            payload["exception"] = {
+                "type": exc_type.__name__ if exc_type is not None else None,
+                "message": str(exc_value) if exc_value is not None else None,
+                "traceback": self.formatException(record.exc_info),
+            }
+        if record.stack_info:
+            payload["stack_info"] = self.formatStack(record.stack_info)
         return json.dumps(payload, default=str)
 
 
