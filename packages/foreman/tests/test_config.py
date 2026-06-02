@@ -529,7 +529,7 @@ def test_daemon_config_has_sane_defaults(tmp_path: Path) -> None:
     assert cfg.daemon.log_level == "INFO"
     assert cfg.daemon.log_path == "~/.foreman/daemon.log"
     assert cfg.daemon.sqlite_path == "~/.foreman/foreman.sqlite"
-    assert cfg.daemon.role_dispatch_timeout_seconds == 600
+    assert cfg.daemon.role_dispatch_timeout_seconds is None
 
 
 def test_daemon_config_rejects_max_workers_above_one(tmp_path: Path) -> None:
@@ -542,9 +542,10 @@ def test_daemon_config_rejects_max_workers_above_one(tmp_path: Path) -> None:
 
 
 def test_daemon_config_rejects_timeout_below_floor(tmp_path: Path) -> None:
-    """Reject role_dispatch_timeout_seconds below 30s — a value smaller than
-    the average role startup wedges all roles immediately, which is a worse
-    failure mode than a hung role."""
+    """When an operator opts into a role timeout, reject values below 30s —
+    a cap smaller than the average role startup wedges all roles immediately,
+    which is a worse failure mode than the hang we're guarding against. The
+    default remains None (no cap)."""
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         '[admin]\ngithub_token_env = "FOREMAN_ADMIN_TOKEN"\n'
@@ -552,6 +553,19 @@ def test_daemon_config_rejects_timeout_below_floor(tmp_path: Path) -> None:
     )
     with pytest.raises(ValidationError, match="role_dispatch_timeout_seconds"):
         load_config(config_path)
+
+
+def test_daemon_config_accepts_explicit_timeout(tmp_path: Path) -> None:
+    """Operators opt into a wall-clock cap by setting a positive value. Pin
+    the round-trip so we can see at a glance that the field still flows
+    through TOML loading after switching its default to None."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[admin]\ngithub_token_env = "FOREMAN_ADMIN_TOKEN"\n'
+        "[daemon]\nrole_dispatch_timeout_seconds = 1800\n"
+    )
+    cfg = load_config(config_path)
+    assert cfg.daemon.role_dispatch_timeout_seconds == 1800
 
 
 def test_project_config_auto_merge_defaults_to_false(tmp_path: Path) -> None:

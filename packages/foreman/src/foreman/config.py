@@ -75,7 +75,14 @@ class DaemonConfig(BaseModel):
     log_path: str = Field(default="~/.foreman/daemon.log")
     log_level: str = Field(default="INFO")
     sqlite_path: str = Field(default="~/.foreman/foreman.sqlite")
-    role_dispatch_timeout_seconds: int = Field(default=600, ge=30)
+    # Wall-clock cap on a single role dispatch. ``None`` (the default)
+    # disables the cap entirely — the daemon trusts the role to finish.
+    # Set this only after empirical stats from ``node_runs.duration_ms``
+    # show a defensible distribution per role; a cap chosen without data
+    # cancels legitimate-but-slow LLM iterations and hurts more than it
+    # helps. Surfaced 2026-06-01 when a 600s default cut a Worker mid-
+    # impl on foreman#30.
+    role_dispatch_timeout_seconds: int | None = Field(default=None, ge=30)
 
     @field_validator("max_concurrent_workers")
     @classmethod
