@@ -110,7 +110,6 @@ _LABEL_IMPL_REVIEW = "foreman:impl-review"
 _LABEL_SPEC_FIX = "foreman:spec-fix"
 _LABEL_NEEDS_HELP = "foreman:needs-help"
 _LABEL_FAILED = "foreman:failed"
-_MAX_IMPL_ATTEMPTS = 3
 
 # Default verification command when ``ProjectConfig.check_command`` is None.
 # Voice + agent-core + other reference projects all use ``just check`` as
@@ -274,6 +273,7 @@ def _build_user_prompt(
     baseline_failures: set[str],
     check_command: str,
     attempt: int,
+    max_impl_attempts: int,
     instructions: str | None,
 ) -> str:
     """Compose the per-run user prompt.
@@ -330,7 +330,7 @@ def _build_user_prompt(
 
     return (
         f"You are implementing the spec for issue #{issue_number}. This is "
-        f"impl attempt #{attempt} of a maximum of {_MAX_IMPL_ATTEMPTS}.\n\n"
+        f"impl attempt #{attempt} of a maximum of {max_impl_attempts}.\n\n"
         f"{instructions_section}"
         f"## Originating issue\nTitle: {issue_title}\n\n{issue_body}\n\n"
         f"{spec_section}"
@@ -463,14 +463,17 @@ async def run_worker(
             "(spec-ready) or the daemon's spec-merge step (implementing-ready)."
         )
 
-    # Pre-flight: max-3-attempts gate. If 3 impl-attempt labels already
+    # Pre-flight: max-attempts gate. If max impl-attempt labels already
     # exist, refuse to run — this prevents infinite-loop drain and
     # forces human intervention via the foreman:failed escalation.
+    # The cap is read from ``ProjectConfig.max_impl_attempts`` so each
+    # project can size it to their own appetite (default 3).
+    max_impl_attempts = project.max_impl_attempts
     previous_attempts = _count_impl_attempts(issue_labels)
     attempt = previous_attempts + 1
-    if attempt > _MAX_IMPL_ATTEMPTS:
+    if attempt > max_impl_attempts:
         raise RuntimeError(
-            f"Issue #{issue_number} has hit the max {_MAX_IMPL_ATTEMPTS} "
+            f"Issue #{issue_number} has hit the max {max_impl_attempts} "
             "impl-attempts; needs human intervention via foreman:failed. "
             f"Existing attempts: {previous_attempts}."
         )
@@ -538,6 +541,7 @@ async def run_worker(
         baseline_failures=baseline_failures,
         check_command=check_command,
         attempt=attempt,
+        max_impl_attempts=max_impl_attempts,
         instructions=instructions,
     )
 
@@ -664,7 +668,7 @@ async def run_worker(
         # the third attempt, also stamp foreman:failed so the queue
         # surfaces it for human triage.
         issue.add_to_labels(_LABEL_NEEDS_HELP)
-        if attempt == _MAX_IMPL_ATTEMPTS:
+        if attempt == max_impl_attempts:
             issue.add_to_labels(_LABEL_FAILED)
 
     # Stats logging — write regardless of outcome. The orchestrator's

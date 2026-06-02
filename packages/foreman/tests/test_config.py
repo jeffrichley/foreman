@@ -619,6 +619,70 @@ planner_private_key_path = "/tmp/planner.pem"
     assert cfg.projects["foreman"].dev_base_branch == "feat/walking-skeleton"
 
 
+# ----------------------------------------------------------------------
+# ProjectConfig.max_fix_attempts / max_impl_attempts — configurable
+# retry budgets (Foreman issue #14)
+# ----------------------------------------------------------------------
+
+
+def test_max_attempts_default_to_three(tmp_path: Path) -> None:
+    """An omitted block reads ``3`` for both fields — the Field default
+    is the single source of truth for the legacy hardcoded behavior."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[projects.voice]
+repo = "jeffrichley/voice"
+local_clone_path = "/tmp/voice"
+
+[projects.voice.apps]
+planner_app_id = 123456
+planner_private_key_path = "/tmp/planner.pem"
+"""
+    )
+    cfg = load_config(config_file)
+    project = cfg.projects["voice"]
+    assert project.max_fix_attempts == 3
+    assert project.max_impl_attempts == 3
+
+
+def test_max_attempts_read_from_config_file(tmp_path: Path) -> None:
+    """When set in TOML, both values flow through verbatim."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[projects.voice]
+repo = "jeffrichley/voice"
+local_clone_path = "/tmp/voice"
+max_fix_attempts = 5
+max_impl_attempts = 4
+
+[projects.voice.apps]
+planner_app_id = 123456
+planner_private_key_path = "/tmp/planner.pem"
+"""
+    )
+    cfg = load_config(config_file)
+    project = cfg.projects["voice"]
+    assert project.max_fix_attempts == 5
+    assert project.max_impl_attempts == 4
+
+
+def test_max_attempts_reject_zero(tmp_path: Path) -> None:
+    """``max_fix_attempts = 0`` raises — ``ge=1`` enforces a positive budget."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[projects.voice]
+repo = "jeffrichley/voice"
+local_clone_path = "/tmp/voice"
+max_fix_attempts = 0
+"""
+    )
+    with pytest.raises(ValidationError, match="max_fix_attempts"):
+        load_config(config_file)
+
+
 def test_dev_base_branch_explicit_none_round_trips(tmp_path: Path) -> None:
     """Omitting ``dev_base_branch`` in TOML round-trips to ``None`` —
     same as the field not appearing at all. We pin this so a future
