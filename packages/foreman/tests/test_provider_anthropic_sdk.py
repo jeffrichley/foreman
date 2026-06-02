@@ -205,3 +205,103 @@ async def test_run_agent_raises_missing_error_when_success_has_no_structured_out
             output_model=_DemoOutput,
             cwd=tmp_path,
         )
+
+
+# ----------------------------------------------------------------------
+# System-prompt-via-file (Windows command-line workaround)
+#
+# The SDK's subprocess transport passes ``--system-prompt <text>`` as a
+# command-line argument. Windows' ``CreateProcess`` caps the command line
+# at 8191 chars; the Worker role's vendored-superpowers prompt sails past
+# that. The provider routes through ``--system-prompt-file <path>`` by
+# passing ``system_prompt={"type": "file", "path": ...}``. Foreman owns
+# the file lifecycle: write before query, delete in finally. See
+# foreman#50.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_agent_routes_system_prompt_through_file_and_cleans_up(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The system prompt is materialised to a file, passed by path, and
+    the file is deleted once the call returns. This is what dodges the
+    Windows 8191-char command-line cap."""
+    prompt_text = "huge system prompt — " * 1000  # ~20KB
+
+    captured: dict[str, Any] = {}
+
+    def fake_query(*, prompt: str, options: Any) -> AsyncIterator[Any]:
+        # The SDK gets a dict with a path, not the prompt text.
+        sp = options.system_prompt
+        assert isinstance(sp, dict)
+        assert sp["type"] == "file"
+        path = Path(sp["path"])
+        # While we're inside the with-block, the file MUST exist and
+        # contain the full prompt verbatim — that's what claude.exe will
+        # read.
+        captured["path"] = path
+        captured["existed_during_call"] = path.exists()
+        captured["content"] = path.read_text(encoding="utf-8")
+
+        async def gen() -> AsyncIterator[Any]:
+            yield _make_result(subtype="success", structured_output={"name": "ok", "count": 1})
+
+        return gen()
+
+    monkeypatch.setattr(anthropic_sdk_module, "query", fake_query)
+
+    provider = AnthropicSDKProvider()
+    result = await provider.run_agent(
+        system_prompt=prompt_text,
+        user_prompt="usr",
+        allowed_tools=["Read"],
+        output_model=_DemoOutput,
+        cwd=tmp_path,
+    )
+
+    assert isinstance(result, _DemoOutput)
+    assert captured["existed_during_call"] is True
+    assert captured["content"] == prompt_text
+    # Cleanup ran: the file is gone now that run_agent returned.
+    assert not captured["path"].exists()
+
+
+@pytest.mark.asyncio
+async def test_run_agent_cleans_up_prompt_file_when_query_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Cleanup MUST happen on the exception path too — otherwise every
+    crash leaks a prompt file under ``~/.foreman/prompts/``. The
+    try/finally inside the contextmanager is what guarantees this; this
+    test pins it down so a future refactor (e.g. switching to a manual
+    try/except) can't silently regress."""
+    captured_path: list[Path] = []
+
+    def fake_query_raises(*, prompt: str, options: Any) -> AsyncIterator[Any]:
+        sp = options.system_prompt
+        assert isinstance(sp, dict)
+        captured_path.append(Path(sp["path"]))
+
+        async def gen() -> AsyncIterator[Any]:
+            raise RuntimeError("simulated SDK transport failure")
+            yield  # pragma: no cover — unreachable, present so this is an async generator
+
+        return gen()
+
+    monkeypatch.setattr(anthropic_sdk_module, "query", fake_query_raises)
+
+    provider = AnthropicSDKProvider()
+    with pytest.raises(RuntimeError, match="simulated SDK transport failure"):
+        await provider.run_agent(
+            system_prompt="anything",
+            user_prompt="usr",
+            allowed_tools=["Read"],
+            output_model=_DemoOutput,
+            cwd=tmp_path,
+        )
+
+    assert captured_path, "fake_query never ran — wiring is broken, not just cleanup"
+    assert not captured_path[0].exists(), (
+        "prompt file leaked after SDK transport raised — try/finally regressed"
+    )
