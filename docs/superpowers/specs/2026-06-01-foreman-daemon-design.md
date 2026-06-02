@@ -447,3 +447,15 @@ The walking-skeleton-equivalent for the daemon is:
 8. SIGKILL leaves the next startup in a recoverable state (no data corruption, no double-dispatch).
 
 These are the bar to call the daemon "done."
+
+---
+
+## 15. Orchestrator token management
+
+The daemon's orchestrator-bot is a GitHub App identity, same shape as the four role bots (planner, reviewer, fixer, worker). All five mint installation tokens against the same GitHub App protocol — JWT-signed-from-private-key, 1-hour TTL, refresh-on-expiry. The architectural rule is "all GitHub App identities go through `IdentityRegistry`, period." The registry is the canonical token-management seam.
+
+The original walking-skeleton wiring split the orchestrator off into its own one-shot token-mint path in `daemon_host.py` while the role bots routed through `IdentityRegistry`. That split — two parallel token code paths for the same kind of credential — was an accident of how the code grew. It surfaced as the 1-hour-daemon-death bug caught 2026-06-02: a daemon left running overnight became silently inert by morning because the orchestrator's installation token had expired with no refresh path. The role bots inherited the existing 5-minute-pre-expiry refresh logic; the orchestrator did not.
+
+The fix joins the orchestrator role to `_resolve_role_credentials` alongside the four role bots. `IdentityRegistry.__init__` gains a keyword-only `orchestrator: OrchestratorConfig | None = None` parameter; when set, the registry can serve the `"orchestrator"` role. Two convenience accessors — `get_orchestrator_client()` and `get_orchestrator_token()` — mirror the per-role pair. The orchestrator is *global* to one App installation (one set of credentials shared across every repo in the installation), in contrast to the role bots which are per-project; the registry uses the project's repo slug only as the installation-id lookup, and the resulting token spans every repo the App is installed on.
+
+The daemon's `GitHubDaemonHost` takes an `IdentityRegistry` reference at construction time and asks it for a fresh orchestrator client on every API call — `add_issue_label`, `merge_pull_request`, `close_issue`, etc. all open with `gh = self._registry.get_orchestrator_client()`. The registry's cache + refresh sit underneath, so the host never holds stale state and token rollover transparently propagates to the very next API call. This matches how the per-role dispatchers already use the registry (each role run calls `registry.get_<role>_client()` afresh); the same invariant now covers the daemon's host-operation surface too.
