@@ -240,3 +240,117 @@ def test_worker_loader_includes_all_four_superpowers() -> None:
             f"Worker prompt lost vendored skill {skill}"
         )
     assert load_role_prompt("worker")[:200] in prompt
+
+
+# ----------------------------------------------------------------------
+# Target-aware routing — foreman#78 + #79
+#
+# The loader gains an optional ``target`` kwarg that picks
+# ``<role>_impl.md`` for ``target="impl_pr"`` when that file exists,
+# and falls back to ``<role>.md`` otherwise. Roles without an impl
+# variant (Planner, Worker) keep working unchanged.
+# ----------------------------------------------------------------------
+
+
+def test_load_role_prompt_default_target_loads_canonical_file() -> None:
+    """``target=None`` MUST keep today's behavior — the canonical
+    ``<role>.md`` is loaded with no fallback consulted. This is the
+    back-compat surface every existing call site relies on."""
+    content = load_role_prompt("reviewer")
+    assert content.strip(), "reviewer.md should load with default target"
+
+
+def test_load_role_prompt_spec_target_loads_canonical_file() -> None:
+    """``target="spec_pr"`` is equivalent to ``target=None`` — the
+    canonical ``<role>.md`` is the spec-side prompt. The kwarg is
+    informational at the call site, the loader treats spec as the
+    default file name."""
+    default_content = load_role_prompt("reviewer")
+    spec_content = load_role_prompt("reviewer", target="spec_pr")
+    assert spec_content == default_content
+
+
+def test_load_role_prompt_impl_target_loads_impl_file_when_present() -> None:
+    """``target="impl_pr"`` MUST load ``<role>_impl.md`` when that
+    file exists. This is the routing the bug fix hinges on — without
+    it, the Reviewer-on-impl reads the spec prompt."""
+    impl_content = load_role_prompt("reviewer", target="impl_pr")
+    assert impl_content.strip(), "reviewer_impl.md should load for impl_pr target"
+    # Sanity: impl content differs from spec content (otherwise the
+    # routing is a no-op and the bug is unfixed).
+    spec_content = load_role_prompt("reviewer", target="spec_pr")
+    assert impl_content != spec_content, (
+        "reviewer_impl.md must differ from reviewer.md, or the routing "
+        "isn't actually doing anything for the bug fix"
+    )
+
+
+def test_load_role_prompt_impl_target_falls_back_to_canonical_when_no_impl_file() -> None:
+    """``target="impl_pr"`` MUST fall back gracefully to ``<role>.md``
+    when ``<role>_impl.md`` doesn't exist. Roles without impl variants
+    (Planner today) MUST keep working when callers pass target."""
+    # Planner has no planner_impl.md; impl target should fall back.
+    impl_content = load_role_prompt("planner", target="impl_pr")
+    default_content = load_role_prompt("planner")
+    assert impl_content == default_content
+
+
+def test_load_role_prompt_unknown_target_falls_back_to_canonical() -> None:
+    """An unrecognized target string (typo, future addition) MUST NOT
+    raise — it falls back to the canonical role file. This keeps the
+    routing forgiving at call sites that pass dynamic strings; the
+    role-side precondition gate is where wrong-target errors should
+    surface, not in the prompt loader."""
+    content = load_role_prompt("reviewer", target="unknown_target")
+    default_content = load_role_prompt("reviewer")
+    assert content == default_content
+
+
+def test_compose_role_prompt_forwards_target_to_loader() -> None:
+    """``compose_role_prompt(target=...)`` MUST forward target to
+    ``load_role_prompt``. Without this, the role's contract layer
+    silently falls back to the spec prompt even when the caller asked
+    for impl. This is the seam that bug-fixed roles consume.
+
+    Compares the composed prompt against both targets directly. When
+    Tasks 2/3 land the impl files, ``composed_impl`` and
+    ``composed_spec`` will differ — proving the forwarding works.
+    Until then, the tail assertion (composed_impl ends with the impl-
+    loaded role content) catches forwarding regressions even while
+    the two compose outputs are byte-identical.
+    """
+    composed_impl = compose_role_prompt(
+        role="reviewer", target="impl_pr", superpowers=[]
+    )
+    composed_spec = compose_role_prompt(
+        role="reviewer", target="spec_pr", superpowers=[]
+    )
+    # The composed prompt must end with whatever load_role_prompt
+    # returned for this target. If compose silently dropped target,
+    # composed_impl would end with the spec content even when the
+    # impl file exists (after Task 2/3 land). This assertion catches
+    # the forwarding regression directly.
+    assert composed_impl.endswith(
+        load_role_prompt("reviewer", target="impl_pr")
+    )
+    assert composed_spec.endswith(
+        load_role_prompt("reviewer", target="spec_pr")
+    )
+
+
+@pytest.mark.parametrize("impl_role", ["reviewer", "fixer"])
+def test_impl_prompt_file_exists_for_target_roles(impl_role: str) -> None:
+    """Both Reviewer and Fixer MUST have an impl-variant prompt file.
+    This is the resource-packaging guard: forgetting either file means
+    the daemon's RUN_REVIEWER_IMPL / RUN_FIXER_IMPL silently falls
+    back to the spec prompt — same bug, different symptom."""
+    impl_path = (
+        resources.files("foreman.prompts")
+        .joinpath(f"{impl_role}_impl.md")
+    )
+    assert impl_path.is_file(), (
+        f"{impl_role}_impl.md must exist in packages/foreman/src/foreman/"
+        "prompts/ — the impl-target loader resolves to that path"
+    )
+    content = impl_path.read_text(encoding="utf-8")
+    assert content.strip(), f"{impl_role}_impl.md must not be empty"
