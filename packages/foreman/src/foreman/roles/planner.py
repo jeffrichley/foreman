@@ -34,7 +34,6 @@ the PR).
 from __future__ import annotations
 
 import re
-from importlib import resources
 from pathlib import Path
 
 from foreman.config import Config
@@ -64,8 +63,18 @@ def parse_issue_url(url: str) -> tuple[str, str, int]:
 
 
 def _load_planner_prompt() -> str:
-    """Load the planner system prompt from packaged resources."""
-    return resources.files("foreman.prompts").joinpath("planner.md").read_text(encoding="utf-8")
+    """Load the Planner system prompt: vendored ``writing-plans`` followed
+    by the Foreman-specific Planner contract.
+
+    The discipline that makes superpowers' interactive Claude Code write
+    rigorous, bite-sized plans is inlined here so the SDK-driven Planner
+    role sees the same instructions. See
+    :func:`foreman.prompts.compose_role_prompt` for the composition
+    details.
+    """
+    from foreman.prompts import compose_role_prompt
+
+    return compose_role_prompt(role="planner", superpowers=["writing-plans"])
 
 
 def _build_user_prompt(*, issue: IssueRef, instructions: str | None) -> str:
