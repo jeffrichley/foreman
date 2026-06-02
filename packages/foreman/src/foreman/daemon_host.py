@@ -119,3 +119,44 @@ class GitHubDaemonHost:
         repo_obj = self._gh.get_repo(repo)
         pr = repo_obj.get_pull(pr_number)
         pr.merge(merge_method=merge_method)
+
+    def get_pr_base_ref(self, repo: str, pr_number: int) -> str:
+        """Return the PR's current ``base.ref`` (the branch it merges into)."""
+        repo_obj = self._gh.get_repo(repo)
+        pr = repo_obj.get_pull(pr_number)
+        return pr.base.ref
+
+    def is_pr_merged_for_branch(self, repo: str, branch: str) -> bool:
+        """Return True iff a closed, merged PR exists whose head branch == ``branch``.
+
+        Used by the daemon's impl-PR retarget step to decide whether the
+        spec PR has already landed (see ``daemon_runners.merge_impl_pr``
+        and issue #62 for the ghost-merge failure mode this guards
+        against). GitHub deletes the head branch on merge when
+        auto-delete-branch is on, but the closed PR's metadata persists,
+        so ``repo.get_pulls(state="closed", head=...)`` still finds it.
+        """
+        repo_obj = self._gh.get_repo(repo)
+        owner = repo.split("/")[0]
+        for pr in repo_obj.get_pulls(state="closed", head=f"{owner}:{branch}"):
+            if pr.head.ref == branch and pr.merged:
+                return True
+        return False
+
+    def retarget_pr_base(self, repo: str, pr_number: int, new_base: str) -> None:
+        """Retarget an open PR's base branch via the GitHub API.
+
+        Wraps PyGithub's ``pr.edit(base=new_base)`` — corresponds to
+        ``PATCH /repos/{owner}/{repo}/pulls/{N}`` with
+        ``{"base": new_base}``. Used by ``daemon_runners.merge_impl_pr``
+        to point an impl PR at the default branch before merge so the
+        squash commit lands on a reachable ref (issue #62).
+        """
+        repo_obj = self._gh.get_repo(repo)
+        pr = repo_obj.get_pull(pr_number)
+        pr.edit(base=new_base)
+
+    def get_default_branch(self, repo: str) -> str:
+        """Return the repo's default branch name (typically ``main``)."""
+        repo_obj = self._gh.get_repo(repo)
+        return repo_obj.default_branch
