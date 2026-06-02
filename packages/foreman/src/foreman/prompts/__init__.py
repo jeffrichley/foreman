@@ -21,6 +21,7 @@ instructions; the role file finishes with the operational contract.
 from __future__ import annotations
 
 from importlib import resources
+from typing import Literal
 
 _PROMPTS_ROOT = "foreman.prompts"
 _SUPERPOWERS_ROOT = "foreman.prompts.superpowers"
@@ -103,7 +104,7 @@ def load_superpowers_skill(name: str) -> str:
     )
 
 
-def load_role_prompt(role: str, *, target: str | None = None) -> str:
+def load_role_prompt(role: str, *, target: Literal["spec_pr", "impl_pr"] | None = None) -> str:
     """Read the Foreman-specific role prompt by role name.
 
     When ``target == "impl_pr"`` AND a target-specific prompt file
@@ -167,7 +168,7 @@ def compose_role_prompt(
     *,
     role: str,
     superpowers: list[str],
-    target: str | None = None,
+    target: Literal["spec_pr", "impl_pr"] | None = None,
 ) -> str:
     """Compose a role's full system prompt with three layers:
 

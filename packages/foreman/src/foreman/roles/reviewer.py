@@ -169,7 +169,7 @@ def _parse_review_branch(branch: str) -> tuple[int, Literal["spec_pr", "impl_pr"
     )
 
 
-def _load_reviewer_prompt(target: str = "spec_pr") -> str:
+def _load_reviewer_prompt(target: Literal["spec_pr", "impl_pr"] = "spec_pr") -> str:
     """Load the Reviewer system prompt for the given ``target``.
 
     ``target="spec_pr"`` (default for back-compat with existing call
