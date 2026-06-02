@@ -18,7 +18,7 @@ adapter.
 
 Branch naming convention:
 - spec PR head branch: ``foreman/issue-N``
-- impl PR head branch: ``foreman/issue-N-impl``
+- impl PR head branch: ``foreman/impl-N``
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from foreman.branches import impl_branch, spec_branch
 from foreman.config import Config, ProjectConfig
 from foreman.dispatcher import Ticket
 from foreman.provider import ProviderFacade
@@ -54,14 +55,6 @@ class _HostLike(Protocol):
         self, repo: str, issue_number: int, label: str
     ) -> None: ...
     def close_issue(self, repo: str, issue_number: int) -> None: ...
-
-
-def _spec_branch(issue_number: int) -> str:
-    return f"foreman/issue-{issue_number}"
-
-
-def _impl_branch(issue_number: int) -> str:
-    return f"foreman/issue-{issue_number}-impl"
 
 
 def _issue_url(repo: str, issue_number: int) -> str:
@@ -136,9 +129,9 @@ class DaemonRunners:
     ) -> RoleRunResult:
         project = self._project(ticket, config)
         branch = (
-            _spec_branch(ticket.issue_number)
+            spec_branch(ticket.issue_number)
             if target == "spec_pr"
-            else _impl_branch(ticket.issue_number)
+            else impl_branch(ticket.issue_number)
         )
         pr_number = self._host.find_pr_for_branch(project.repo, branch)
         if pr_number is None:
@@ -189,7 +182,7 @@ class DaemonRunners:
 
     async def merge_spec_pr(self, *, ticket: Ticket, config: Config) -> RoleRunResult:
         project = self._project(ticket, config)
-        branch = _spec_branch(ticket.issue_number)
+        branch = spec_branch(ticket.issue_number)
         pr_number = self._host.find_pr_for_branch(project.repo, branch)
         if pr_number is None:
             raise RuntimeError(
@@ -210,7 +203,7 @@ class DaemonRunners:
 
     async def merge_impl_pr(self, *, ticket: Ticket, config: Config) -> RoleRunResult:
         project = self._project(ticket, config)
-        branch = _impl_branch(ticket.issue_number)
+        branch = impl_branch(ticket.issue_number)
         pr_number = self._host.find_pr_for_branch(project.repo, branch)
         if pr_number is None:
             raise RuntimeError(

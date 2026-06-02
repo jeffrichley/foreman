@@ -52,6 +52,7 @@ from github.PullRequest import PullRequest
 from github.Repository import Repository
 from pydantic import ValidationError
 
+from foreman.branches import spec_branch
 from foreman.config import Config
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
@@ -431,7 +432,7 @@ async def run_fixer(
     issue.add_to_labels(attempt_label)
 
     # Resolve the spec PR from the issue's branch convention.
-    branch = f"foreman/issue-{issue_number}"
+    branch = spec_branch(issue_number)
     pr = _find_spec_pr(repo, owner=owner, branch=branch)
     review_comment = _latest_reviewer_review_comment(pr)
 
