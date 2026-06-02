@@ -14,7 +14,7 @@ import pytest
 from github import Github
 
 from foreman.auth import AppMetadata, InstallationToken
-from foreman.config import AppsConfig, ProjectConfig
+from foreman.config import AppsConfig, OrchestratorConfig, ProjectConfig
 from foreman.git_hosts.github import GitHubProvider
 from foreman.identity import IdentityRegistry
 
@@ -37,6 +37,14 @@ def _make_project() -> ProjectConfig:
             worker_app_id=444444,
             worker_private_key_path="/tmp/worker.pem",
         ),
+    )
+
+
+def _make_orchestrator() -> OrchestratorConfig:
+    return OrchestratorConfig(
+        app_id_env="FOREMAN_ORCHESTRATOR_APP_ID",
+        app_id=222222,
+        private_key_path="/tmp/orchestrator.pem",
     )
 
 
@@ -395,3 +403,101 @@ def test_worker_client_and_planner_client_share_no_cache() -> None:
         w_token = reg.get_worker_token()
     assert p_token == "ghs_planner_wrk"
     assert w_token == "ghs_worker_wrk"
+
+
+# ----------------------------------------------------------------------
+# Orchestrator role accessors — mirror the per-role accessor pair, but
+# the credentials come from the top-level OrchestratorConfig rather
+# than the project's AppsConfig.
+# ----------------------------------------------------------------------
+
+
+def test_get_orchestrator_client_returns_github_instance() -> None:
+    fake_token = _fresh_token()
+    with patch("foreman.identity.mint_installation_token", return_value=fake_token):
+        reg = IdentityRegistry(_make_project(), orchestrator=_make_orchestrator())
+        client = reg.get_orchestrator_client()
+    assert isinstance(client, Github)
+
+
+def test_get_orchestrator_token_returns_installation_token_string() -> None:
+    fake_token = _fresh_token(token="ghs_orchestrator_installtoken_abc")
+    with patch("foreman.identity.mint_installation_token", return_value=fake_token):
+        reg = IdentityRegistry(_make_project(), orchestrator=_make_orchestrator())
+        token = reg.get_orchestrator_token()
+    assert token == "ghs_orchestrator_installtoken_abc"
+
+
+def test_get_orchestrator_mint_invoked_with_orchestrator_app_credentials() -> None:
+    """The orchestrator accessor must resolve the orchestrator-specific App
+    fields (top-level config.orchestrator), not any project-scoped role's."""
+    fake_token = _fresh_token()
+    with patch("foreman.identity.mint_installation_token", return_value=fake_token) as mock_mint:
+        reg = IdentityRegistry(_make_project(), orchestrator=_make_orchestrator())
+        reg.get_orchestrator_client()
+    call_args = mock_mint.call_args
+    assert call_args.args[0] == 222222
+    assert call_args.args[1] == Path("/tmp/orchestrator.pem")
+    # The repo slug used for installation lookup comes from the project — the
+    # resulting token is valid across the whole installation regardless.
+    assert call_args.args[2] == "jeffrichley/voice"
+
+
+def test_orchestrator_env_var_overrides_config_file_app_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Env-var precedence for the orchestrator App id mirrors the role bots'."""
+    monkeypatch.setenv("FOREMAN_ORCHESTRATOR_APP_ID", "333333")
+    fake_token = _fresh_token()
+    with patch("foreman.identity.mint_installation_token", return_value=fake_token) as mock_mint:
+        reg = IdentityRegistry(_make_project(), orchestrator=_make_orchestrator())
+        reg.get_orchestrator_client()
+    assert mock_mint.call_args.args[0] == 333333
+
+
+def test_orchestrator_client_and_planner_client_share_no_cache() -> None:
+    """Per-role tokens must NOT cross-contaminate — the orchestrator caches
+    its own installation token, separate from any of the four role bots."""
+    planner_token = _fresh_token(token="ghs_planner_orch")
+    orchestrator_token = _fresh_token(token="ghs_orchestrator_orch")
+    with patch(
+        "foreman.identity.mint_installation_token",
+        side_effect=[planner_token, orchestrator_token],
+    ):
+        reg = IdentityRegistry(_make_project(), orchestrator=_make_orchestrator())
+        p_token = reg.get_planner_token()
+        o_token = reg.get_orchestrator_token()
+    assert p_token == "ghs_planner_orch"
+    assert o_token == "ghs_orchestrator_orch"
+
+
+def test_orchestrator_role_raises_when_no_orchestrator_config_passed() -> None:
+    """Requesting the orchestrator role from a registry built without the
+    orchestrator config is a clear configuration error."""
+    reg = IdentityRegistry(_make_project())
+    with pytest.raises(ValueError, match="orchestrator config"):
+        reg.get_orchestrator_client()
+
+
+def test_orchestrator_mint_called_again_when_token_near_expiry() -> None:
+    """Regression test for the 1-hour-daemon-death bug (issue #44).
+
+    The orchestrator's installation token must be refreshed when it
+    enters the 5-minute pre-expiry window, exactly like the per-role
+    bots — proving the daemon survives past the 1-hour TTL by routing
+    every API call through the registry's refresh seam.
+    """
+    near_expiry = InstallationToken(
+        token="ghs_orch_old", expires_at=int(time.time()) + 60
+    )
+    fresh = _fresh_token(token="ghs_orch_new")
+    with patch(
+        "foreman.identity.mint_installation_token",
+        side_effect=[near_expiry, fresh],
+    ) as mock_mint:
+        reg = IdentityRegistry(_make_project(), orchestrator=_make_orchestrator())
+        first = reg.get_orchestrator_token()
+        second = reg.get_orchestrator_token()
+    assert first == "ghs_orch_old"
+    assert second == "ghs_orch_new"
+    assert mock_mint.call_count == 2

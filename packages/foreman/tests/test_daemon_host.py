@@ -58,10 +58,18 @@ class _FakePR:
 
 
 def _make_host_with_repo(repo) -> GitHubDaemonHost:
-    """Build a host whose Github client returns the given repo for any slug."""
+    """Build a host whose Github client returns the given repo for any slug.
+
+    The host now takes an IdentityRegistry rather than a raw Github client;
+    we stand up a MagicMock registry whose ``get_orchestrator_client`` returns
+    the canned Github mock. Existing tests that only exercise the host's
+    public API surface continue to work unchanged.
+    """
     gh_client = MagicMock()
     gh_client.get_repo = MagicMock(return_value=repo)
-    return GitHubDaemonHost(github_client=gh_client)
+    registry = MagicMock()
+    registry.get_orchestrator_client = MagicMock(return_value=gh_client)
+    return GitHubDaemonHost(identity_registry=registry)
 
 
 def test_search_foreman_labeled_issues_returns_issues(monkeypatch) -> None:
@@ -252,3 +260,66 @@ def test_get_default_branch_returns_repo_default_branch() -> None:
     result = host.get_default_branch("jeffrichley/voice")
 
     assert result == "main"
+
+
+# ----------------------------------------------------------------------
+# Registry-routing invariants (issue #44)
+#
+# The host must ask the registry for a fresh orchestrator client on every
+# API call, not cache one on the instance. That's where the refresh
+# logic lives.
+# ----------------------------------------------------------------------
+
+
+def test_each_api_call_asks_registry_for_fresh_orchestrator_client() -> None:
+    """Every host API call must route through the registry — that's where
+    the 5-minute-pre-expiry refresh sits. Caching the client on the host
+    would freeze the original (expiring) instance."""
+    fake_repo = MagicMock()
+    fake_issue = _FakeIssue(number=42, labels=[], updated_at=None)
+    fake_repo.get_issue = MagicMock(return_value=fake_issue)
+
+    gh_client = MagicMock()
+    gh_client.get_repo = MagicMock(return_value=fake_repo)
+    registry = MagicMock()
+    registry.get_orchestrator_client = MagicMock(return_value=gh_client)
+    host = GitHubDaemonHost(identity_registry=registry)
+
+    host.add_issue_label("jeffrichley/voice", 42, "foreman:plan")
+    host.close_issue("jeffrichley/voice", 42)
+
+    # Both API calls must consult the registry; the daemon's per-call
+    # lookup pattern is what makes refresh transparently propagate.
+    assert registry.get_orchestrator_client.call_count >= 2
+
+
+def test_host_uses_refreshed_client_after_registry_refresh() -> None:
+    """When the registry rolls the orchestrator client over (the refresh
+    case), the next host API call must use the new client. This is the
+    behavior-level proof that token rollover propagates to the daemon's
+    next API call without the host holding stale state."""
+    fake_repo_old = MagicMock()
+    fake_issue_old = _FakeIssue(number=42, labels=[], updated_at=None)
+    fake_repo_old.get_issue = MagicMock(return_value=fake_issue_old)
+
+    fake_repo_new = MagicMock()
+    fake_issue_new = _FakeIssue(number=99, labels=[], updated_at=None)
+    fake_repo_new.get_issue = MagicMock(return_value=fake_issue_new)
+
+    old_client = MagicMock()
+    old_client.get_repo = MagicMock(return_value=fake_repo_old)
+    new_client = MagicMock()
+    new_client.get_repo = MagicMock(return_value=fake_repo_new)
+
+    registry = MagicMock()
+    registry.get_orchestrator_client = MagicMock(side_effect=[old_client, new_client])
+    host = GitHubDaemonHost(identity_registry=registry)
+
+    host.add_issue_label("jeffrichley/voice", 42, "foreman:plan")
+    host.close_issue("jeffrichley/voice", 99)
+
+    # The second call must have used the refreshed client, not the
+    # original one — otherwise the host is caching the client across
+    # API calls and would silently use an expired token.
+    old_client.get_repo.assert_called_once()
+    new_client.get_repo.assert_called_once()

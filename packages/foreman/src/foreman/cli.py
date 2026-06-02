@@ -406,16 +406,17 @@ def _resolve_host_and_runners(config: Config) -> tuple[Any, Any]:
     """
     from pathlib import Path as _Path
 
-    from foreman.daemon_host import (
-        GitHubDaemonHost,
-        build_orchestrator_github_client,
-    )
+    from foreman.daemon_host import GitHubDaemonHost
     from foreman.daemon_runners import DaemonRunners
+    from foreman.identity import IdentityRegistry
 
     # If orchestrator config is missing, fall back to nulls + warn.
+    # Fail fast on missing credentials here so operators see the
+    # configuration error at startup rather than discovering it on the
+    # first API call (the registry mints lazily).
     try:
-        app_id = config.orchestrator.resolve_app_id()
-        key_path = config.orchestrator.resolve_private_key_path()
+        config.orchestrator.resolve_app_id()
+        config.orchestrator.resolve_private_key_path()
     except RuntimeError as exc:
         click.echo(
             f"WARNING: orchestrator not configured ({exc}). "
@@ -425,22 +426,23 @@ def _resolve_host_and_runners(config: Config) -> tuple[Any, Any]:
         )
         return _build_null_host_and_runners()
 
-    # Need a repo slug to look up the installation id. Use the first
-    # configured project's repo — the App should be installed on at
-    # least one of the configured repos for the token to be valid.
+    # Need a project for the registry. The orchestrator's installation
+    # token is global to the App installation; the registry uses the
+    # project's repo only as the installation-id lookup, so any
+    # configured project works (use the first one to match the
+    # historical "first repo" convention).
     if not config.projects:
         raise RuntimeError(
             "No projects configured; daemon needs at least one project "
             "to look up the orchestrator's installation token."
         )
-    first_repo = next(iter(config.projects.values())).repo
+    first_project = next(iter(config.projects.values()))
 
-    gh_client = build_orchestrator_github_client(
-        app_id=app_id,
-        private_key_path=key_path,
-        repo_slug_for_install=first_repo,
+    registry = IdentityRegistry(
+        first_project,
+        orchestrator=config.orchestrator,
     )
-    host = GitHubDaemonHost(github_client=gh_client)
+    host = GitHubDaemonHost(identity_registry=registry)
 
     worktrees_root = _Path("~/.foreman/worktrees").expanduser()
     runners = DaemonRunners(host=host, worktrees_root=worktrees_root)

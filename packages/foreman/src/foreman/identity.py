@@ -18,8 +18,22 @@ renamed in GitHub's UI, which is an admin event. The installation token is
 refreshed independently; a fresh :class:`~foreman.git_host.BotIdentity` is
 constructed each time the token rolls over.
 
-Walking skeleton wires planner + reviewer. Fixer/worker will be added
-during thickening.
+Five App identities flow through this registry:
+
+* ``planner`` / ``reviewer`` / ``fixer`` / ``worker`` — the four per-role
+  bots. Each is project-scoped: credentials come from
+  ``project.apps.resolve_<role>_app_id()`` / ``resolve_<role>_private_key_path()``
+  and the installation token is minted against the project's repo.
+* ``orchestrator`` — the daemon's host-operation bot. It is *global* to
+  one App installation rather than per-project: credentials come from
+  the top-level ``config.orchestrator`` block and the resulting
+  installation token is valid for every repo in the installation. The
+  registry uses the project's repo slug only as the installation-id
+  lookup; the resulting token still spans every repo the App is
+  installed on. Passing ``orchestrator=config.orchestrator`` to
+  :class:`IdentityRegistry` opts the registry into serving the
+  ``"orchestrator"`` role; omit it (the default) and only the four
+  per-role bots are addressable.
 """
 
 from __future__ import annotations
@@ -36,7 +50,7 @@ from foreman.auth import (
     fetch_app_metadata,
     mint_installation_token,
 )
-from foreman.config import ProjectConfig
+from foreman.config import OrchestratorConfig, ProjectConfig
 from foreman.git_host import BotIdentity, GitHostProvider
 from foreman.git_hosts.github import GitHubProvider
 
@@ -53,8 +67,14 @@ class IdentityRegistry:
     """Holds per-role PyGithub clients + host providers (App-installation-token
     authenticated) for one project."""
 
-    def __init__(self, project: ProjectConfig) -> None:
+    def __init__(
+        self,
+        project: ProjectConfig,
+        *,
+        orchestrator: OrchestratorConfig | None = None,
+    ) -> None:
         self._project = project
+        self._orchestrator = orchestrator
         self._cache: dict[str, _CachedClient] = {}
         # App metadata is stable across token refreshes — cache for the
         # registry's lifetime.
@@ -129,6 +149,21 @@ class IdentityRegistry:
         """Return the worker-bot's current installation token string."""
         return self.get_token("worker")
 
+    def get_orchestrator_client(self) -> Github:
+        """Return the PyGithub client authenticated as the orchestrator bot.
+
+        The daemon's host adapter uses this client for every API call —
+        label management, PR merging, polling search, issue close.
+        Asking on every call lets the registry's 5-minute-pre-expiry
+        refresh transparently propagate, so the daemon survives past
+        the 1-hour installation-token TTL.
+        """
+        return self.get_client("orchestrator")
+
+    def get_orchestrator_token(self) -> str:
+        """Return the orchestrator bot's current installation token."""
+        return self.get_token("orchestrator")
+
     def get_host_provider(self, role: str) -> GitHostProvider:
         """Return a :class:`~foreman.git_host.GitHostProvider` for the role.
 
@@ -196,7 +231,18 @@ class IdentityRegistry:
                 self._project.apps.resolve_worker_app_id(),
                 self._project.apps.resolve_worker_private_key_path(),
             )
+        if role == "orchestrator":
+            if self._orchestrator is None:
+                raise ValueError(
+                    "Orchestrator role requested but registry was not "
+                    "constructed with orchestrator config. Pass "
+                    "orchestrator=config.orchestrator at construction time."
+                )
+            return (
+                self._orchestrator.resolve_app_id(),
+                self._orchestrator.resolve_private_key_path(),
+            )
         raise ValueError(
             f"Unknown role: {role!r}. Walking skeleton supports "
-            "'planner', 'reviewer', 'fixer', and 'worker'."
+            "'planner', 'reviewer', 'fixer', 'worker', and 'orchestrator'."
         )
