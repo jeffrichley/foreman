@@ -70,7 +70,6 @@ import os
 import re
 import subprocess
 import time
-from importlib import resources
 from pathlib import Path
 
 from github import Github
@@ -144,8 +143,30 @@ def _count_impl_attempts(label_names: set[str]) -> int:
 
 
 def _load_worker_prompt() -> str:
-    """Load the worker system prompt from packaged resources."""
-    return resources.files("foreman.prompts").joinpath("worker.md").read_text(encoding="utf-8")
+    """Load the Worker system prompt: four vendored superpowers skills
+    followed by the Foreman-specific Worker contract.
+
+    Order is deliberate. ``test-driven-development`` sets the red→green
+    rhythm the Worker LLM should follow on every change.
+    ``executing-plans`` frames the spec doc as an ordered plan with
+    bite-sized steps. ``verification-before-completion`` raises the bar
+    on what ``done`` requires (the foreman#39 family of bugs lives here
+    — the Worker bailing with ``incomplete`` and ``total_sub_requests=0``
+    is exactly what this skill exists to prevent).
+    ``finishing-a-development-branch`` covers the commit + push + PR
+    hygiene at the end. Each layer feeds the next.
+    """
+    from foreman.prompts import compose_role_prompt
+
+    return compose_role_prompt(
+        role="worker",
+        superpowers=[
+            "test-driven-development",
+            "executing-plans",
+            "verification-before-completion",
+            "finishing-a-development-branch",
+        ],
+    )
 
 
 def _resolve_check_command(project_check_command: str | None) -> str:

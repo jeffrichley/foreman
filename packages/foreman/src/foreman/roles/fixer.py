@@ -45,7 +45,6 @@ import logging
 import os
 import re
 import time
-from importlib import resources
 from pathlib import Path
 
 from github import Github
@@ -123,8 +122,20 @@ def _count_fix_attempts(label_names: set[str]) -> int:
 
 
 def _load_fixer_prompt() -> str:
-    """Load the fixer system prompt from packaged resources."""
-    return resources.files("foreman.prompts").joinpath("fixer.md").read_text(encoding="utf-8")
+    """Load the Fixer system prompt: vendored ``receiving-code-review``
+    followed by the Foreman-specific Fixer contract.
+
+    The Fixer's whole job is reading a Reviewer's findings and addressing
+    each one. Superpowers' ``receiving-code-review`` is the canonical
+    discipline for that move (track each finding, address explicitly,
+    explain disagreement rather than ignoring) and dropping it in front
+    of the Foreman Fixer contract gives every fix-cycle the same shape.
+    """
+    from foreman.prompts import compose_role_prompt
+
+    return compose_role_prompt(
+        role="fixer", superpowers=["receiving-code-review"]
+    )
 
 
 def _extract_findings_from_review_comment(body: str) -> list[Finding]:

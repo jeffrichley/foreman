@@ -32,7 +32,6 @@ import json
 import os
 import re
 import subprocess
-from importlib import resources
 from pathlib import Path
 
 from github import Github
@@ -126,8 +125,19 @@ def _issue_number_from_branch(branch: str) -> int:
 
 
 def _load_reviewer_prompt() -> str:
-    """Load the reviewer system prompt from packaged resources."""
-    return resources.files("foreman.prompts").joinpath("reviewer.md").read_text(encoding="utf-8")
+    """Load the Reviewer system prompt: vendored ``requesting-code-review``
+    followed by the Foreman-specific Reviewer contract.
+
+    Inlining superpowers' code-review framing gives the SDK-driven
+    Reviewer the same structure interactive Claude Code uses when asked
+    to review a PR (clear severity tiers, file:line citations,
+    actionable findings vs nits).
+    """
+    from foreman.prompts import compose_role_prompt
+
+    return compose_role_prompt(
+        role="reviewer", superpowers=["requesting-code-review"]
+    )
 
 
 def _build_user_prompt(
