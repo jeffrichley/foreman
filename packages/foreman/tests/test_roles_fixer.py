@@ -1323,8 +1323,8 @@ def test_fixer_superpowers_by_target_mapping_is_complete() -> None:
 def test_load_fixer_prompt_default_uses_spec_composition() -> None:
     """Zero-arg call returns the spec composition — back-compat for
     existing call sites and tests."""
-    from foreman.roles.fixer import _load_fixer_prompt
     from foreman.prompts import compose_role_prompt
+    from foreman.roles.fixer import _load_fixer_prompt
 
     actual = _load_fixer_prompt()
     expected = compose_role_prompt(
@@ -1339,8 +1339,8 @@ def test_load_fixer_prompt_impl_target_loads_impl_composition() -> None:
     """``target="impl_pr"`` loads ``fixer_impl.md`` with the impl
     superpowers list. Without this, the Fixer reads spec-fix content
     while trying to fix impl-PR code."""
-    from foreman.roles.fixer import _load_fixer_prompt
     from foreman.prompts import compose_role_prompt
+    from foreman.roles.fixer import _load_fixer_prompt
 
     actual = _load_fixer_prompt(target="impl_pr")
     expected = compose_role_prompt(

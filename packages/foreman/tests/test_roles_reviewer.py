@@ -947,8 +947,8 @@ def test_load_reviewer_prompt_default_uses_spec_composition() -> None:
     """The legacy zero-arg call MUST keep working — many tests and
     the spec-side dispatcher rely on it. It returns the spec
     composition."""
-    from foreman.roles.reviewer import _load_reviewer_prompt
     from foreman.prompts import compose_role_prompt
+    from foreman.roles.reviewer import _load_reviewer_prompt
 
     actual = _load_reviewer_prompt()
     expected = compose_role_prompt(
@@ -964,8 +964,8 @@ def test_load_reviewer_prompt_impl_target_loads_impl_composition() -> None:
     impl superpowers list. Without this, the bug fix is incomplete —
     the role function reads spec content while claiming to do impl
     review."""
-    from foreman.roles.reviewer import _load_reviewer_prompt
     from foreman.prompts import compose_role_prompt
+    from foreman.roles.reviewer import _load_reviewer_prompt
 
     actual = _load_reviewer_prompt(target="impl_pr")
     expected = compose_role_prompt(
