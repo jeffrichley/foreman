@@ -221,6 +221,57 @@ class WorktreeManager:
         _maybe_sync_worktree_deps(wt_path)
         return wt_path
 
+    def attach_impl(self, clone_path: Path, repo_slug: str, ticket_id: int) -> Path:
+        """Attach a worktree to an existing ``foreman/impl-<N>`` branch.
+
+        Read-side counterpart to :meth:`create_impl`. After the Worker pushes
+        ``foreman/impl-<N>`` and opens an impl PR, downstream roles (the
+        Reviewer running on the impl PR, eventually the impl-Fixer) need
+        their own worktree pinned at ``impl-<N>/`` checked out on the impl
+        branch. They must NOT recreate the branch (the Worker already
+        authored it) and they must NOT share the Worker's worktree (which
+        may be cleaned up or carry uncommitted state).
+
+        Path: ``<worktrees_root>/<repo_slug>/impl-<N>/`` — sibling of
+        ``issue-<N>/`` (the spec-side worktree). Idempotent: if the
+        worktree path already exists, it is returned untouched.
+
+        Falls back to ``git fetch origin foreman/impl-<N>`` when the local
+        branch is absent — defense-in-depth mirror of :meth:`attach`. On
+        a fresh clone where only the remote ref exists, this lets
+        ``git worktree add`` resolve the branch.
+
+        Like :meth:`attach`, this best-effort syncs the worktree's ``.venv``
+        afterward so the target repo's pre-push hook can ``uv run --no-sync``
+        without exploding.
+        """
+        wt_path = self.worktrees_root / repo_slug / f"impl-{ticket_id}"
+        if wt_path.exists():
+            return wt_path
+        wt_path.parent.mkdir(parents=True, exist_ok=True)
+        branch = impl_branch(ticket_id)
+        if not _local_branch_exists(clone_path, branch):
+            # Branch isn't local yet — fetch the remote ref so worktree add
+            # can resolve it. The Worker pushes the branch, so origin should
+            # have it. We tolerate fetch failure here and let the worktree
+            # add command surface a clearer error.
+            subprocess.run(
+                ["git", "fetch", "origin", branch],
+                cwd=clone_path,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        subprocess.run(
+            ["git", "worktree", "add", str(wt_path), branch],
+            cwd=clone_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        _maybe_sync_worktree_deps(wt_path)
+        return wt_path
+
     def cleanup(self, clone_path: Path, worktree_path: Path) -> None:
         """Remove a worktree. Safe to call on already-removed worktrees."""
         if not worktree_path.exists():

@@ -727,6 +727,74 @@ def test_create_impl_filters_env_on_git_subprocess_calls(
         assert "VIRTUAL_ENV" not in env
 
 
+def test_attach_impl_attaches_to_existing_impl_branch(tmp_path: Path) -> None:
+    """``attach_impl`` is the read-side counterpart to ``create_impl`` —
+    downstream roles (Reviewer on the impl PR, eventual impl-Fixer) attach
+    a sibling worktree at ``impl-<N>/`` checked out on the impl branch the
+    Worker already pushed. No new branch is created (no ``-b`` passed)."""
+    clone = tmp_path / "clone"
+    spec_head = _seed_clone_with_spec_branch_pushed(clone, ticket_id=42)
+
+    # Seed an additional ``foreman/impl-42`` branch stacked on the spec
+    # branch the helper just pushed. This mirrors the state of the clone
+    # after the Worker's ``create_impl`` + push.
+    impl_branch = "foreman/impl-42"
+    subprocess.run(
+        ["git", "checkout", "-b", impl_branch, "foreman/issue-42"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    (clone / "src").mkdir(parents=True, exist_ok=True)
+    (clone / "src" / "foo.py").write_text("# impl stub\n")
+    subprocess.run(["git", "add", "."], cwd=clone, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "feat: impl stub"], cwd=clone, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "push", "origin", impl_branch], cwd=clone, check=True, capture_output=True
+    )
+    impl_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "checkout", "main"], cwd=clone, check=True, capture_output=True)
+
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+    wt_path = mgr.attach_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    assert wt_path.exists()
+    assert wt_path == worktrees_root / "voice" / "impl-42"
+
+    branch_check = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert branch_check.stdout.strip() == impl_branch
+
+    # The attached worktree's HEAD must match the existing impl branch
+    # tip (proves attach to existing branch, not create-with-new-branch
+    # off main / spec).
+    attached_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert attached_head == impl_head
+    assert attached_head != spec_head, (
+        "attach_impl must check out the impl branch's tip, not the spec tip"
+    )
+
+
 # ----------------------------------------------------------------------
 # dev_base_branch override — Foreman issue #16
 #

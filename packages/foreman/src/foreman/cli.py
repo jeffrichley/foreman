@@ -91,7 +91,12 @@ def plan(issue_url: str, project: str, config_path: Path | None) -> None:
     help="Path to foreman config (default: $FOREMAN_CONFIG or ~/.foreman/config.toml)",
 )
 def review(pr_url: str, project: str, config_path: Path | None) -> None:
-    """Run the Reviewer on a spec PR opened by the Planner."""
+    """Run the Reviewer on a spec PR opened by the Planner OR an impl
+    PR opened by the Worker.
+
+    The Reviewer derives spec-vs-impl from the PR's head branch shape
+    (foreman/issue-<N> vs foreman/impl-<N>) — no flag required.
+    """
     cfg_path = config_path or _default_config_path()
     cfg = load_config(cfg_path)
     provider = AnthropicSDKProvider()
