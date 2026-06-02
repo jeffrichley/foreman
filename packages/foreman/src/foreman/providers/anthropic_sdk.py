@@ -78,7 +78,7 @@ class AnthropicSDKProvider(ProviderFacade):
         allowed_tools: list[str],
         output_model: type[T],
         cwd: Path,
-        max_turns: int = 40,
+        max_turns: int = 1000,
         env: dict[str, str] | None = None,
     ) -> T:
         schema = output_model.model_json_schema()
