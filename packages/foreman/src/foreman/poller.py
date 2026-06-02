@@ -17,6 +17,7 @@ from typing import Protocol
 
 from foreman.config import ProjectConfig
 from foreman.dispatcher import Ticket
+from foreman.queue import DaemonQueue
 from foreman.storage import Storage
 
 _log = logging.getLogger("foreman.daemon.poller")
@@ -38,10 +39,14 @@ def poll_project(
     project: ProjectConfig,
     host: _HostLike,
     storage: Storage,
+    queue: DaemonQueue,
 ) -> list[Ticket]:
     """Poll one project. Return tickets whose labels changed since last poll.
 
-    Side effect: persists the new label snapshot to ``labels_seen``.
+    Side effects:
+      - Persists the new label snapshot to ``labels_seen``.
+      - Enqueues each changed ticket onto ``queue`` (dedup-by-key, so
+        idempotent against the daemon's self-notify path).
     """
     now = datetime.now(UTC)
     issues = host.search_foreman_labeled_issues(project.repo)
@@ -61,14 +66,14 @@ def poll_project(
                     "current_labels": current,
                 },
             )
-            changed.append(
-                Ticket(
-                    project_name=project_name,
-                    issue_number=issue.number,
-                    labels=frozenset(current),
-                    last_transition_at=issue.updated_at,
-                )
+            ticket = Ticket(
+                project_name=project_name,
+                issue_number=issue.number,
+                labels=frozenset(current),
+                last_transition_at=issue.updated_at,
             )
+            changed.append(ticket)
+            queue.enqueue(ticket)
 
     _log.info(
         "polled project",
@@ -76,6 +81,7 @@ def poll_project(
             "project": project_name,
             "issues_seen": len(issues),
             "changed": len(changed),
+            "queue_depth": len(queue),
         },
     )
 
