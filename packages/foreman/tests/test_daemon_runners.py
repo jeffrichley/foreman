@@ -108,9 +108,9 @@ async def test_run_reviewer_with_impl_target_uses_impl_branch(
 
     await runners.run_reviewer(ticket=_ticket(), config=config, target="impl_pr")
 
-    # impl_pr target → looks up PR for branch foreman/issue-42-impl
+    # impl_pr target → looks up PR for branch foreman/impl-42
     host.find_pr_for_branch.assert_called_once_with(
-        "jeffrichley/voice", "foreman/issue-42-impl"
+        "jeffrichley/voice", "foreman/impl-42"
     )
 
 
@@ -169,7 +169,7 @@ async def test_merge_impl_pr_merges_and_closes_issue(
     result = await runners.merge_impl_pr(ticket=_ticket(), config=config)
 
     host.find_pr_for_branch.assert_called_once_with(
-        "jeffrichley/voice", "foreman/issue-42-impl"
+        "jeffrichley/voice", "foreman/impl-42"
     )
     host.merge_pull_request.assert_called_once_with("jeffrichley/voice", 25)
     host.close_issue.assert_called_once_with("jeffrichley/voice", 42)

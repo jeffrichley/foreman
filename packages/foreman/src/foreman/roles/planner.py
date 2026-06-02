@@ -36,6 +36,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from foreman.branches import spec_branch
 from foreman.config import Config
 from foreman.git_host import GitHostProvider, IssueRef
 from foreman.identity import IdentityRegistry
@@ -167,7 +168,7 @@ async def run_planner(
         cwd=wt_path,
     )
 
-    branch = f"foreman/issue-{issue_number}"
+    branch = spec_branch(issue_number)
     host.commit_files_to_worktree(
         worktree_path=wt_path,
         files={_spec_doc_relpath(issue_number): llm_output.spec_doc_content},
