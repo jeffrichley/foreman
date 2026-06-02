@@ -11,13 +11,16 @@ then:
   3. Returns :class:`~foreman.schemas.reviewer.ReviewerOutput` to the caller
      for display / persistence
 
-The label transition is on the originating ISSUE, not the spec PR — same
-pattern the Planner uses. The Reviewer derives the issue number from the
-PR's head branch (the Planner names branches ``foreman/issue-<N>``).
+The label transition is on the originating ISSUE, not the PR — same
+pattern the Planner uses. The Reviewer derives the issue number and
+the review target (spec PR vs impl PR) from the PR's head branch:
+- ``foreman/issue-<N>`` → spec PR (label ``foreman:spec-review``)
+- ``foreman/impl-<N>``  → impl PR (label ``foreman:impl-review``)
 
-Pre-flight guard: if the PR does not carry the ``foreman:spec-review``
-label, the orchestrator raises before doing any work — we will not
-silently advance a PR that was not queued for review.
+Pre-flight guard: if the source issue does not carry the
+target-appropriate review label, the orchestrator raises before
+doing any work — we will not silently advance a PR whose source
+issue was not queued for review.
 
 The Reviewer LLM is read-only on the filesystem (Read / Glob / Grep) plus
 Bash for shell-level recon (e.g., ``gh pr view`` if it needs more context).
@@ -33,6 +36,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
+from typing import Literal
 
 from github import Github
 from github.Repository import Repository
@@ -48,16 +52,22 @@ _PR_URL_RE = re.compile(
     r"https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)"
 )
 _BRANCH_ISSUE_RE = re.compile(r"^foreman/issue-(?P<number>\d+)$")
+_BRANCH_IMPL_RE = re.compile(r"^foreman/impl-(?P<number>\d+)$")
 
 # Tool capabilities matrix for the Reviewer. Read-only on the filesystem;
 # Bash is allowed for read-only recon (e.g., ``gh pr view``, ``git log``).
 # Pinning this here prevents accidental ``Edit`` / ``Write`` reintroduction.
 REVIEWER_ALLOWED_TOOLS = ["Read", "Grep", "Glob", "Bash"]
 
-# Labels the Reviewer touches on the originating issue.
-_LABEL_IN_REVIEW = "foreman:spec-review"
+# Labels the Reviewer touches on the originating issue. The spec-PR labels
+# and impl-PR labels form parallel triples; ``run_reviewer`` picks one
+# triple based on the PR's head-branch shape.
+_LABEL_SPEC_REVIEW = "foreman:spec-review"
 _LABEL_SPEC_READY = "foreman:spec-ready"
 _LABEL_SPEC_FIX = "foreman:spec-fix"
+_LABEL_IMPL_REVIEW = "foreman:impl-review"
+_LABEL_READY_FOR_MERGE = "foreman:ready-for-merge"
+_LABEL_IMPL_FIX = "foreman:impl-fix"
 
 # Machine-parseable markers embedded in the posted review body so the Fixer
 # can recover the Reviewer's structured findings from what GitHub stores.
@@ -107,21 +117,28 @@ def parse_pr_url(url: str) -> tuple[str, str, int]:
     return m["owner"], m["repo"], int(m["number"])
 
 
-def _issue_number_from_branch(branch: str) -> int:
-    """Derive the originating issue number from a ``foreman/issue-<N>`` head.
+def _parse_review_branch(branch: str) -> tuple[int, Literal["spec_pr", "impl_pr"]]:
+    """Derive ``(issue_number, target)`` from a Reviewer-eligible head branch.
 
-    The Planner names spec-PR branches ``foreman/issue-<N>`` (see
-    :mod:`foreman.roles.planner`). The Reviewer's PR URL doesn't carry the
-    issue number, but the branch does — so we read it from there.
+    Two valid shapes:
+    - ``foreman/issue-<N>`` → spec PR review (``target="spec_pr"``)
+    - ``foreman/impl-<N>``  → impl PR review (``target="impl_pr"``)
+
+    Raises ``ValueError`` on any other shape — the Reviewer only acts
+    on PRs produced by the Planner or the Worker, both of which use
+    the conventions above.
     """
     m = _BRANCH_ISSUE_RE.match(branch)
-    if not m:
-        raise ValueError(
-            f"PR head branch {branch!r} is not a Foreman spec branch "
-            "(expected 'foreman/issue-<N>'). The Reviewer only acts on "
-            "Planner-produced spec PRs."
-        )
-    return int(m["number"])
+    if m is not None:
+        return int(m["number"]), "spec_pr"
+    m = _BRANCH_IMPL_RE.match(branch)
+    if m is not None:
+        return int(m["number"]), "impl_pr"
+    raise ValueError(
+        f"PR head branch {branch!r} is not a Foreman review branch "
+        "(expected 'foreman/issue-<N>' for spec PRs or "
+        "'foreman/impl-<N>' for impl PRs)."
+    )
 
 
 def _load_reviewer_prompt() -> str:
@@ -264,10 +281,12 @@ async def run_reviewer(
 
     Raises:
         ValueError: PR URL malformed, repo mismatch, or PR head branch is
-            not a Foreman spec branch.
-        RuntimeError: Source issue is missing the ``foreman:spec-review``
-            label — we refuse to advance PRs whose source issue was not
-            queued for review.
+            not a Foreman review branch (``foreman/issue-<N>`` or
+            ``foreman/impl-<N>``).
+        RuntimeError: Source issue is missing the target-appropriate
+            review label (``foreman:spec-review`` for spec PRs,
+            ``foreman:impl-review`` for impl PRs) — we refuse to advance
+            PRs whose source issue was not queued for review.
     """
     owner, repo_name, pr_number = parse_pr_url(pr_url)
     project = config.projects[project_name]
@@ -289,14 +308,23 @@ async def run_reviewer(
     head_branch = pr.head.ref
     head_sha = pr.head.sha
     base_branch = pr.base.ref
-    issue_number = _issue_number_from_branch(head_branch)
+    issue_number, target = _parse_review_branch(head_branch)
+
+    if target == "impl_pr":
+        in_review_label = _LABEL_IMPL_REVIEW
+        clean_label = _LABEL_READY_FOR_MERGE
+        fix_label = _LABEL_IMPL_FIX
+    else:
+        in_review_label = _LABEL_SPEC_REVIEW
+        clean_label = _LABEL_SPEC_READY
+        fix_label = _LABEL_SPEC_FIX
 
     issue = repo.get_issue(issue_number)
     issue_labels = {label.name for label in issue.labels}
-    if _LABEL_IN_REVIEW not in issue_labels:
+    if in_review_label not in issue_labels:
         raise RuntimeError(
             f"Issue #{issue_number} (source of PR #{pr_number}) does not carry "
-            f"the {_LABEL_IN_REVIEW!r} label (labels: "
+            f"the {in_review_label!r} label (labels: "
             + ", ".join(sorted(issue_labels) or ["<none>"])
             + "). The Reviewer only acts on issues queued via the Planner."
         )
@@ -305,11 +333,18 @@ async def run_reviewer(
     issue_body = issue.body or ""
 
     wt_mgr = WorktreeManager(worktrees_root=worktrees_root)
-    wt_path = wt_mgr.attach(
-        clone_path=Path(project.local_clone_path),
-        repo_slug=repo_name,
-        ticket_id=issue_number,
-    )
+    if target == "impl_pr":
+        wt_path = wt_mgr.attach_impl(
+            clone_path=Path(project.local_clone_path),
+            repo_slug=repo_name,
+            ticket_id=issue_number,
+        )
+    else:
+        wt_path = wt_mgr.attach(
+            clone_path=Path(project.local_clone_path),
+            repo_slug=repo_name,
+            ticket_id=issue_number,
+        )
 
     pr_diff = _get_pr_diff(wt_path, base_branch=base_branch, head_sha=head_sha)
     spec_doc_content = _read_spec_doc(wt_path, issue_number)
@@ -354,11 +389,11 @@ async def run_reviewer(
     # Advance the originating ISSUE's label (not the PR's) — same pattern
     # the Planner uses.
     if llm_output.outcome == "clean":
-        add_label = _LABEL_SPEC_READY
+        add_label = clean_label
     else:
-        add_label = _LABEL_SPEC_FIX
+        add_label = fix_label
 
-    issue.remove_from_labels(_LABEL_IN_REVIEW)
+    issue.remove_from_labels(in_review_label)
     issue.add_to_labels(add_label)
 
     return llm_output

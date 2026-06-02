@@ -23,7 +23,7 @@ from foreman.roles.reviewer import (
     FINDINGS_BEGIN_MARKER,
     FINDINGS_END_MARKER,
     REVIEWER_ALLOWED_TOOLS,
-    _issue_number_from_branch,
+    _parse_review_branch,
     parse_pr_url,
     run_reviewer,
 )
@@ -47,17 +47,21 @@ def test_parse_pr_url_rejects_issue_url() -> None:
 
 
 # ----------------------------------------------------------------------
-# _issue_number_from_branch
+# _parse_review_branch
 # ----------------------------------------------------------------------
 
 
-def test_issue_number_from_branch_parses_foreman_branch() -> None:
-    assert _issue_number_from_branch("foreman/issue-42") == 42
+def test_parse_review_branch_parses_spec_branch() -> None:
+    assert _parse_review_branch("foreman/issue-42") == (42, "spec_pr")
 
 
-def test_issue_number_from_branch_rejects_unrelated_branch() -> None:
-    with pytest.raises(ValueError, match="not a Foreman spec branch"):
-        _issue_number_from_branch("feature/some-thing")
+def test_parse_review_branch_parses_impl_branch() -> None:
+    assert _parse_review_branch("foreman/impl-42") == (42, "impl_pr")
+
+
+def test_parse_review_branch_rejects_unrelated_branch() -> None:
+    with pytest.raises(ValueError, match="foreman/issue-<N>.*foreman/impl-<N>"):
+        _parse_review_branch("feature/some-thing")
 
 
 # ----------------------------------------------------------------------
@@ -209,6 +213,40 @@ def _seed_clone_with_spec_branch(clone: Path, issue_number: int) -> str:
     return head_sha
 
 
+def _seed_clone_with_impl_branch(clone: Path, issue_number: int) -> str:
+    """Init a minimal git repo with both a spec branch AND a Worker-style
+    ``foreman/impl-<N>`` branch stacked on the spec branch.
+
+    Returns the head SHA on the impl branch so callers can verify the
+    attach picks it up. Leaves the clone checked out on ``main``.
+    """
+    _seed_clone_with_spec_branch(clone, issue_number)
+    spec_branch = f"foreman/issue-{issue_number}"
+    impl_branch = f"foreman/impl-{issue_number}"
+    subprocess.run(
+        ["git", "checkout", spec_branch], cwd=clone, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "checkout", "-b", impl_branch], cwd=clone, check=True, capture_output=True
+    )
+    src_dir = clone / "src"
+    src_dir.mkdir(parents=True, exist_ok=True)
+    (src_dir / "foo.py").write_text("# impl stub\n")
+    subprocess.run(["git", "add", "."], cwd=clone, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "impl: stub"], cwd=clone, check=True, capture_output=True
+    )
+    head_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "checkout", "main"], cwd=clone, check=True, capture_output=True)
+    return head_sha
+
+
 def _make_config(clone: Path) -> Config:
     return Config(
         projects={
@@ -265,6 +303,29 @@ def _make_fake_repo(
         head_ref=f"foreman/issue-{issue_number}",
         head_sha=head_sha,
         base_ref="main",
+    )
+    issue = _FakeIssue(number=issue_number, title="SSML", body="Add SSML support.", labels=labels)
+    repo = _FakeRepo(pr=pr, issue=issue)
+    return repo, pr, issue
+
+
+def _make_fake_impl_repo(
+    *,
+    issue_number: int,
+    head_sha: str,
+    labels: list[str] | None = None,
+) -> tuple[_FakeRepo, _FakePR, _FakeIssue]:
+    """``_make_fake_repo`` sibling for impl-PR review tests — PR head on
+    ``foreman/impl-<N>``, base on the spec branch, default issue label
+    is ``foreman:impl-review``."""
+    labels = labels if labels is not None else ["foreman:impl-review"]
+    pr = _FakePR(
+        number=99,
+        title="feat(ssml): implement SSML",
+        body="Implements #" + str(issue_number) + ".",
+        head_ref=f"foreman/impl-{issue_number}",
+        head_sha=head_sha,
+        base_ref=f"foreman/issue-{issue_number}",
     )
     issue = _FakeIssue(number=issue_number, title="SSML", body="Add SSML support.", labels=labels)
     repo = _FakeRepo(pr=pr, issue=issue)
@@ -701,3 +762,141 @@ async def test_run_reviewer_passes_env_with_reviewer_token_and_parent_env(
     env = fake_provider.run_agent.call_args.kwargs["env"]
     assert env["GH_TOKEN"] == "ghs_specific_reviewer_token"
     assert env["MY_SENTINEL_VAR"] == "sentinel"  # parent env merged in
+
+
+# ----------------------------------------------------------------------
+# run_reviewer end-to-end — impl PR path
+#
+# Mirrors the spec-PR tests above but exercises the
+# ``foreman/impl-<N>`` branch shape and the impl-side label triple
+# (``foreman:impl-review`` → ``foreman:ready-for-merge`` /
+# ``foreman:impl-fix``). The daemon's ``RUN_REVIEWER_IMPL`` dispatch
+# routes here once the Worker has opened the impl PR.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_reviewer_impl_clean_outcome_advances_to_ready_for_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_impl_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
+
+    cfg = _make_config(clone)
+    repo, pr, issue = _make_fake_impl_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeReviewerClient(repo=repo)
+    registry = _make_registry(client)
+
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_make_clean_output())
+
+    result = await run_reviewer(
+        pr_url="https://github.com/jeffrichley/voice/pull/99",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    # Worktree path is the impl sibling, not the spec one
+    wt_path = tmp_path / "worktrees" / "voice" / "impl-42"
+    assert wt_path.exists()
+    current_branch = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert current_branch == "foreman/impl-42"
+
+    # Review posted as COMMENT
+    assert len(pr.reviews_posted) == 1
+    body, event = pr.reviews_posted[0]
+    assert event == "COMMENT"
+    assert body.startswith("Clean — traced ACs 1-4 against the spec.")
+
+    # Issue label advanced: impl-review → ready-for-merge
+    assert issue.removed == ["foreman:impl-review"]
+    assert issue.added == ["foreman:ready-for-merge"]
+
+    assert isinstance(result, ReviewerOutput)
+    assert result.outcome == "clean"
+
+
+@pytest.mark.asyncio
+async def test_run_reviewer_impl_needs_fix_outcome_advances_to_impl_fix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_impl_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
+
+    cfg = _make_config(clone)
+    repo, pr, issue = _make_fake_impl_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeReviewerClient(repo=repo)
+    registry = _make_registry(client)
+
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_make_needs_fix_output())
+
+    result = await run_reviewer(
+        pr_url="https://github.com/jeffrichley/voice/pull/99",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    assert len(pr.reviews_posted) == 1
+    body, event = pr.reviews_posted[0]
+    assert "needs_fix" in body
+    assert event == "COMMENT"
+
+    # Issue label advanced: impl-review → impl-fix
+    assert issue.removed == ["foreman:impl-review"]
+    assert issue.added == ["foreman:impl-fix"]
+
+    assert result.outcome == "needs_fix"
+
+
+@pytest.mark.asyncio
+async def test_run_reviewer_missing_impl_review_label_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pre-flight guard for impl-PR path: source issue without
+    ``foreman:impl-review`` is not advanced — same defense-in-depth as the
+    spec-PR path."""
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_impl_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
+
+    cfg = _make_config(clone)
+    # Issue has a random unrelated label, NOT foreman:impl-review
+    repo, pr, issue = _make_fake_impl_repo(
+        issue_number=42, head_sha=head_sha, labels=["random-label"]
+    )
+    client = _FakeReviewerClient(repo=repo)
+    registry = _make_registry(client)
+
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_make_clean_output())
+
+    with pytest.raises(RuntimeError, match="foreman:impl-review"):
+        await run_reviewer(
+            pr_url="https://github.com/jeffrichley/voice/pull/99",
+            config=cfg,
+            project_name="voice",
+            worktrees_root=tmp_path / "worktrees",
+            provider=fake_provider,
+            identity_registry=registry,
+        )
+
+    # No LLM dispatch, no review post, no label mutation
+    fake_provider.run_agent.assert_not_called()
+    assert pr.reviews_posted == []
+    assert issue.removed == []
+    assert issue.added == []
