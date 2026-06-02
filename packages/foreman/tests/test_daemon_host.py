@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from foreman.daemon_host import GitHubDaemonHost
@@ -36,10 +37,24 @@ class _FakeIssue:
 class _FakePR:
     number: int
     head_branch: str
+    base_ref: str = "main"
+    merged: bool = False
+    last_edit_kwargs: dict = field(default_factory=dict)
+
+    @property
+    def base(self) -> object:
+        return SimpleNamespace(ref=self.base_ref)
+
+    @property
+    def head(self) -> object:
+        return SimpleNamespace(ref=self.head_branch)
 
     def merge(self, commit_message: str | None = None, merge_method: str = "merge") -> None:
         self.merged = True
         self.merge_method = merge_method
+
+    def edit(self, **kwargs: object) -> None:
+        self.last_edit_kwargs.update(kwargs)
 
 
 def _make_host_with_repo(repo) -> GitHubDaemonHost:
@@ -166,3 +181,74 @@ def test_merge_pull_request_calls_pygithub_merge() -> None:
     host.merge_pull_request("jeffrichley/voice", 18)
 
     fake_pr.merge.assert_called_once()
+
+
+def test_get_pr_base_ref_returns_base_ref() -> None:
+    fake_repo = MagicMock()
+    fake_pr = _FakePR(number=25, head_branch="foreman/impl-42", base_ref="foreman/issue-42")
+    fake_repo.get_pull = MagicMock(return_value=fake_pr)
+
+    host = _make_host_with_repo(fake_repo)
+    result = host.get_pr_base_ref("jeffrichley/voice", 25)
+
+    assert result == "foreman/issue-42"
+
+
+def test_is_pr_merged_for_branch_true_when_closed_merged_pr_exists() -> None:
+    fake_repo = MagicMock()
+    merged_pr = _FakePR(
+        number=18, head_branch="foreman/issue-42", merged=True
+    )
+    fake_repo.get_pulls = MagicMock(return_value=iter([merged_pr]))
+
+    host = _make_host_with_repo(fake_repo)
+    result = host.is_pr_merged_for_branch("jeffrichley/voice", "foreman/issue-42")
+
+    assert result is True
+    fake_repo.get_pulls.assert_called_once_with(
+        state="closed", head="jeffrichley:foreman/issue-42"
+    )
+
+
+def test_is_pr_merged_for_branch_false_when_no_merged_pr() -> None:
+    fake_repo = MagicMock()
+    fake_repo.get_pulls = MagicMock(return_value=iter([]))
+
+    host = _make_host_with_repo(fake_repo)
+    result = host.is_pr_merged_for_branch("jeffrichley/voice", "foreman/issue-99")
+
+    assert result is False
+
+
+def test_is_pr_merged_for_branch_false_when_pr_closed_but_unmerged() -> None:
+    fake_repo = MagicMock()
+    closed_unmerged_pr = _FakePR(
+        number=18, head_branch="foreman/issue-42", merged=False
+    )
+    fake_repo.get_pulls = MagicMock(return_value=iter([closed_unmerged_pr]))
+
+    host = _make_host_with_repo(fake_repo)
+    result = host.is_pr_merged_for_branch("jeffrichley/voice", "foreman/issue-42")
+
+    assert result is False
+
+
+def test_retarget_pr_base_calls_pygithub_edit_with_base_arg() -> None:
+    fake_repo = MagicMock()
+    fake_pr = _FakePR(number=25, head_branch="foreman/impl-42", base_ref="foreman/issue-42")
+    fake_repo.get_pull = MagicMock(return_value=fake_pr)
+
+    host = _make_host_with_repo(fake_repo)
+    host.retarget_pr_base("jeffrichley/voice", 25, "main")
+
+    assert fake_pr.last_edit_kwargs == {"base": "main"}
+
+
+def test_get_default_branch_returns_repo_default_branch() -> None:
+    fake_repo = MagicMock()
+    fake_repo.default_branch = "main"
+
+    host = _make_host_with_repo(fake_repo)
+    result = host.get_default_branch("jeffrichley/voice")
+
+    assert result == "main"

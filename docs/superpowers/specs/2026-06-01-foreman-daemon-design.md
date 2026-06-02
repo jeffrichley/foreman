@@ -139,6 +139,52 @@ def next_action(ticket: Ticket) -> Action | None:
 
 **v1 simplification:** `is_blocked` only checks `foreman:hold` and `foreman:failed`. v2 adds inter-ticket dependency checks via the same predicate.
 
+### Impl PR base retarget before merge
+
+`MergeImplPR` is not a single `pr.merge()` call. Before merging, the
+runner inspects the impl PR's current `base.ref` and retargets it to
+the repo's default branch when both of these are true:
+
+1. The impl PR's current base is still the spec branch
+   (`foreman/issue-N`).
+2. The spec PR for that branch has already merged.
+
+Why: the Worker opens impl PRs with `base=foreman/issue-N` (the
+stacked-PR pattern — see `worktree.create_impl`). If the daemon then
+calls `pr.merge() + delete_branch=True` without retargeting, GitHub
+squashes the impl commits onto the spec branch and immediately deletes
+the branch per `--delete-branch`. The squash commit becomes orphaned:
+`gh pr view` reports `state: MERGED`, the commit SHA exists, but
+`git log main` doesn't include it. The work is silently lost.
+
+This failure mode bit a manual walk on 2026-06-02: foreman#49's
+eight-file impl PR ghost-merged onto its spec branch, and recovery
+required `git fetch origin refs/pull/N/head:refs/recover/prN` +
+`git cherry-pick` into a new PR (#61). The retarget step closes the
+same gap for the autonomous path before `auto_merge_impl` is ever
+flipped to `True` in production.
+
+The two checks matter in order:
+
+- **Check 1 (base.ref == spec branch)** makes the retarget idempotent.
+  The daemon may re-enqueue `MergeImplPR` after a crash; if a prior
+  run (or an operator) already retargeted, we skip and go straight to
+  merge.
+- **Check 2 (spec PR merged)** prevents the opposite failure mode:
+  retargeting to `main` when the spec PR is still open would land
+  impl changes on `main` that depend on un-landed spec changes,
+  breaking the build. The conservative fallback is to merge onto the
+  spec branch as before — the impl commits become reachable from the
+  spec branch and will land with the spec PR's eventual merge.
+
+The four host adapter methods supporting this step
+(`get_pr_base_ref`, `is_pr_merged_for_branch`, `retarget_pr_base`,
+`get_default_branch`) are thin PyGithub wrappers on
+`GitHubDaemonHost`; the conditional itself lives in
+`daemon_runners.merge_impl_pr` where the spec-branch name resolution
+(via `foreman.branches.spec_branch`) already lives. See issue #62 for
+the original report.
+
 ---
 
 ## 4. Per-ticket locks

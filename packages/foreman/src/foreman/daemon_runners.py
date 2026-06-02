@@ -55,6 +55,12 @@ class _HostLike(Protocol):
         self, repo: str, issue_number: int, label: str
     ) -> None: ...
     def close_issue(self, repo: str, issue_number: int) -> None: ...
+    def get_pr_base_ref(self, repo: str, pr_number: int) -> str: ...
+    def is_pr_merged_for_branch(self, repo: str, branch: str) -> bool: ...
+    def retarget_pr_base(
+        self, repo: str, pr_number: int, new_base: str
+    ) -> None: ...
+    def get_default_branch(self, repo: str) -> str: ...
 
 
 def _issue_url(repo: str, issue_number: int) -> str:
@@ -202,12 +208,43 @@ class DaemonRunners:
         )
 
     async def merge_impl_pr(self, *, ticket: Ticket, config: Config) -> RoleRunResult:
+        """Merge the impl PR, retargeting its base to the default branch first
+        if it still points at the spec branch and the spec PR has merged.
+
+        Why the retarget step (issue #62): the Worker opens impl PRs with
+        ``base=foreman/issue-N`` per the stacked-PR pattern. Once the
+        spec PR merges, calling ``pr.merge() + delete_branch=True``
+        without retargeting produces a squash commit on the
+        about-to-be-deleted spec branch — an orphan commit unreachable
+        from main. The PR is reported MERGED but the work is lost
+        (foreman#49 → recovery PR #61, caught 2026-06-02). Retargeting
+        the impl PR's base to main before merge ensures the squash
+        commit lands on a reachable ref.
+
+        Conditional on two checks: (1) impl PR's current base IS the
+        spec branch — skip if already retargeted, for idempotency under
+        crash re-enqueue; (2) the spec PR has merged — skip if the spec
+        is still pending, since retargeting to main and merging would
+        land impl changes that depend on un-landed spec changes.
+        """
         project = self._project(ticket, config)
         branch = impl_branch(ticket.issue_number)
         pr_number = self._host.find_pr_for_branch(project.repo, branch)
         if pr_number is None:
             raise RuntimeError(
                 f"No open impl PR found for branch {branch} on {project.repo}"
+            )
+        # Retarget impl PR to default branch before merge if it still
+        # points at the spec branch AND the spec PR has merged. See
+        # issue #62 for the ghost-merge failure mode this guards against.
+        spec_branch_name = spec_branch(ticket.issue_number)
+        current_base = self._host.get_pr_base_ref(project.repo, pr_number)
+        if current_base == spec_branch_name and self._host.is_pr_merged_for_branch(
+            project.repo, spec_branch_name
+        ):
+            default_branch = self._host.get_default_branch(project.repo)
+            self._host.retarget_pr_base(
+                project.repo, pr_number, default_branch
             )
         self._host.merge_pull_request(project.repo, pr_number)
         self._host.close_issue(project.repo, ticket.issue_number)

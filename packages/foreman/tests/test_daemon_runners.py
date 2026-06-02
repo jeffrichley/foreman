@@ -46,6 +46,13 @@ def host() -> MagicMock:
     m.add_issue_label = MagicMock()
     m.remove_issue_label = MagicMock()
     m.close_issue = MagicMock()
+    # Defaults that make the retarget branch in merge_impl_pr a no-op so
+    # existing tests don't trip it. Tests that want to exercise the
+    # retarget logic override these.
+    m.get_pr_base_ref = MagicMock(return_value="main")
+    m.is_pr_merged_for_branch = MagicMock(return_value=False)
+    m.retarget_pr_base = MagicMock()
+    m.get_default_branch = MagicMock(return_value="main")
     return m
 
 
@@ -188,3 +195,88 @@ async def test_merge_spec_pr_raises_when_no_pr_found(
     with pytest.raises(RuntimeError, match="No open spec PR"):
         await runners.merge_spec_pr(ticket=_ticket(), config=config)
     host.merge_pull_request.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_merge_impl_pr_retargets_base_when_spec_pr_merged(
+    tmp_path: Path, host: MagicMock
+) -> None:
+    """The retarget step (issue #62): when the impl PR's base is still the
+    spec branch AND the spec PR has already merged, retarget the impl PR
+    to the default branch BEFORE calling merge — otherwise GitHub would
+    squash impl commits onto the about-to-be-deleted spec branch.
+    """
+    config = _config(tmp_path)
+    host.find_pr_for_branch.return_value = 25
+    host.get_issue_labels.return_value = []
+    # Impl PR is still pointing at the spec branch (the Worker creates it
+    # this way per the stacked-PR pattern).
+    host.get_pr_base_ref.return_value = "foreman/issue-42"
+    # And the spec PR has already merged.
+    host.is_pr_merged_for_branch.return_value = True
+    host.get_default_branch.return_value = "main"
+
+    runners = DaemonRunners(host=host, worktrees_root=tmp_path / "worktrees")
+
+    await runners.merge_impl_pr(ticket=_ticket(), config=config)
+
+    host.retarget_pr_base.assert_called_once_with("jeffrichley/voice", 25, "main")
+    host.merge_pull_request.assert_called_once_with("jeffrichley/voice", 25)
+    # Ordering — retarget BEFORE merge.
+    call_names = [c[0] for c in host.method_calls]
+    assert call_names.index("retarget_pr_base") < call_names.index(
+        "merge_pull_request"
+    )
+
+
+@pytest.mark.asyncio
+async def test_merge_impl_pr_skips_retarget_when_spec_pr_still_open(
+    tmp_path: Path, host: MagicMock
+) -> None:
+    """When the spec PR has NOT yet merged, we must NOT retarget — landing
+    impl changes on main that depend on un-landed spec changes would
+    break the build. Merge proceeds against the spec branch (the
+    stacked-PR pattern's "spec hasn't landed yet" case).
+    """
+    config = _config(tmp_path)
+    host.find_pr_for_branch.return_value = 25
+    host.get_issue_labels.return_value = []
+    host.get_pr_base_ref.return_value = "foreman/issue-42"
+    # Spec PR is still open (not yet merged).
+    host.is_pr_merged_for_branch.return_value = False
+
+    runners = DaemonRunners(host=host, worktrees_root=tmp_path / "worktrees")
+
+    await runners.merge_impl_pr(ticket=_ticket(), config=config)
+
+    host.retarget_pr_base.assert_not_called()
+    # We still call merge_pull_request — Foreman does not short-circuit;
+    # the impl commits land on the spec branch, which preserves them.
+    host.merge_pull_request.assert_called_once_with("jeffrichley/voice", 25)
+
+
+@pytest.mark.asyncio
+async def test_merge_impl_pr_skips_retarget_when_base_already_default(
+    tmp_path: Path, host: MagicMock
+) -> None:
+    """Idempotency: if an operator (or a prior crashed run) already
+    retargeted the impl PR to main, we skip the retarget and merge
+    directly. The daemon may re-enqueue this action on crash, so this
+    path matters.
+    """
+    config = _config(tmp_path)
+    host.find_pr_for_branch.return_value = 25
+    host.get_issue_labels.return_value = []
+    # Already on the default branch.
+    host.get_pr_base_ref.return_value = "main"
+    # is_pr_merged_for_branch should not even be consulted, but make it
+    # True just to be sure we're skipping based on base.ref, not on the
+    # spec PR's merge state.
+    host.is_pr_merged_for_branch.return_value = True
+
+    runners = DaemonRunners(host=host, worktrees_root=tmp_path / "worktrees")
+
+    await runners.merge_impl_pr(ticket=_ticket(), config=config)
+
+    host.retarget_pr_base.assert_not_called()
+    host.merge_pull_request.assert_called_once_with("jeffrichley/voice", 25)
