@@ -131,11 +131,12 @@ class Daemon:
 
             for project_name, project in self.config.projects.items():
                 try:
-                    changed = poll_project(
+                    poll_project(
                         project_name=project_name,
                         project=project,
                         host=self.host,
                         storage=self.storage,
+                        queue=self.queue,
                     )
                 except Exception:
                     _log.exception(
@@ -143,8 +144,6 @@ class Daemon:
                         extra={"project": project_name},
                     )
                     continue
-                for ticket in changed:
-                    self.queue.enqueue(ticket)
 
     async def _worker_loop(self) -> None:
         while not self._shutdown_event.is_set():
