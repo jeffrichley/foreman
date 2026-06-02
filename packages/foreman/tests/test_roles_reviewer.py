@@ -900,3 +900,84 @@ async def test_run_reviewer_missing_impl_review_label_raises(
     assert pr.reviews_posted == []
     assert issue.removed == []
     assert issue.added == []
+
+
+# ----------------------------------------------------------------------
+# Per-target prompt routing — foreman#78
+#
+# The Reviewer's ``target`` kwarg now drives both the entry-label
+# precondition AND the prompt loaded. Today's bug (foreman#78) was
+# that ``target="impl_pr"`` correctly drove label transitions but
+# silently kept the spec prompt — so impl PRs got reviewed as if
+# they were spec PRs. These tests pin both halves of the routing.
+# ----------------------------------------------------------------------
+
+
+def test_reviewer_entry_label_by_target_mapping_is_complete() -> None:
+    """The mapping covers the two valid targets and nothing else.
+    A future target string (e.g. ``"docs_pr"``) must require an
+    explicit addition to the mapping — not silently fall back to
+    spec behavior."""
+    from foreman.roles.reviewer import _REVIEWER_ENTRY_LABEL_BY_TARGET
+
+    assert _REVIEWER_ENTRY_LABEL_BY_TARGET == {
+        "spec_pr": "foreman:spec-review",
+        "impl_pr": "foreman:impl-review",
+    }
+
+
+def test_reviewer_superpowers_by_target_mapping_is_complete() -> None:
+    """Each target gets its own superpowers composition list. The
+    impl variant adds verification-before-completion and
+    test-driven-development (Worker's discipline patterns the
+    impl-PR Reviewer needs to enforce)."""
+    from foreman.roles.reviewer import _REVIEWER_SUPERPOWERS_BY_TARGET
+
+    assert _REVIEWER_SUPERPOWERS_BY_TARGET == {
+        "spec_pr": ["requesting-code-review"],
+        "impl_pr": [
+            "requesting-code-review",
+            "verification-before-completion",
+            "test-driven-development",
+        ],
+    }
+
+
+def test_load_reviewer_prompt_default_uses_spec_composition() -> None:
+    """The legacy zero-arg call MUST keep working — many tests and
+    the spec-side dispatcher rely on it. It returns the spec
+    composition."""
+    from foreman.roles.reviewer import _load_reviewer_prompt
+    from foreman.prompts import compose_role_prompt
+
+    actual = _load_reviewer_prompt()
+    expected = compose_role_prompt(
+        role="reviewer",
+        superpowers=["requesting-code-review"],
+        target="spec_pr",
+    )
+    assert actual == expected
+
+
+def test_load_reviewer_prompt_impl_target_loads_impl_composition() -> None:
+    """``target="impl_pr"`` loads ``reviewer_impl.md`` with the
+    impl superpowers list. Without this, the bug fix is incomplete —
+    the role function reads spec content while claiming to do impl
+    review."""
+    from foreman.roles.reviewer import _load_reviewer_prompt
+    from foreman.prompts import compose_role_prompt
+
+    actual = _load_reviewer_prompt(target="impl_pr")
+    expected = compose_role_prompt(
+        role="reviewer",
+        superpowers=[
+            "requesting-code-review",
+            "verification-before-completion",
+            "test-driven-development",
+        ],
+        target="impl_pr",
+    )
+    assert actual == expected
+    # Sanity: ensure the impl composition contains impl-file content.
+    # If the loader silently fell back to reviewer.md, this would fail.
+    assert "impl pull request" in actual.lower() or "impl-pr variant" in actual.lower()

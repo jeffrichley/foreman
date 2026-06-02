@@ -69,6 +69,34 @@ _LABEL_IMPL_REVIEW = "foreman:impl-review"
 _LABEL_READY_FOR_MERGE = "foreman:ready-for-merge"
 _LABEL_IMPL_FIX = "foreman:impl-fix"
 
+# foreman#78: per-target routing for the Reviewer. The role accepts
+# a ``target`` kwarg (added by foreman#41) that distinguishes spec
+# PRs (``foreman/issue-<N>``) from impl PRs (``foreman/impl-<N>``).
+# Each target gets its own entry-label precondition and its own
+# prompt composition. The mappings are intentionally explicit
+# rather than computed — adding a new target later (``docs_pr``,
+# ``release_pr``) requires updating the mappings deliberately, not
+# silently falling back to spec behavior.
+_REVIEWER_ENTRY_LABEL_BY_TARGET: dict[str, str] = {
+    "spec_pr": _LABEL_SPEC_REVIEW,
+    "impl_pr": _LABEL_IMPL_REVIEW,
+}
+
+_REVIEWER_SUPERPOWERS_BY_TARGET: dict[str, list[str]] = {
+    # Spec-side: today's discipline — empirical code review.
+    "spec_pr": ["requesting-code-review"],
+    # Impl-side: same code-review discipline PLUS what-counts-as-done
+    # (verification-before-completion) and TDD-shape checking
+    # (test-driven-development). The impl Reviewer judges whether the
+    # Worker did right, so it needs the Worker's discipline patterns
+    # to know what right looks like.
+    "impl_pr": [
+        "requesting-code-review",
+        "verification-before-completion",
+        "test-driven-development",
+    ],
+}
+
 # Machine-parseable markers embedded in the posted review body so the Fixer
 # can recover the Reviewer's structured findings from what GitHub stores.
 # GitHub renders Markdown but preserves HTML comments verbatim in the source,
@@ -141,19 +169,36 @@ def _parse_review_branch(branch: str) -> tuple[int, Literal["spec_pr", "impl_pr"
     )
 
 
-def _load_reviewer_prompt() -> str:
-    """Load the Reviewer system prompt: vendored ``requesting-code-review``
-    followed by the Foreman-specific Reviewer contract.
+def _load_reviewer_prompt(target: str = "spec_pr") -> str:
+    """Load the Reviewer system prompt for the given ``target``.
 
-    Inlining superpowers' code-review framing gives the SDK-driven
-    Reviewer the same structure interactive Claude Code uses when asked
-    to review a PR (clear severity tiers, file:line citations,
-    actionable findings vs nits).
+    ``target="spec_pr"`` (default for back-compat with existing call
+    sites) loads ``reviewer.md`` composed with
+    ``requesting-code-review``. ``target="impl_pr"`` loads
+    ``reviewer_impl.md`` composed with the impl-side superpowers list
+    (adds ``verification-before-completion`` + ``test-driven-development``).
+    See ``_REVIEWER_SUPERPOWERS_BY_TARGET`` for the exact composition.
+
+    Unknown target values fall back to the spec composition — the
+    role's precondition gate is the right place to surface
+    wrong-target errors, not this loader.
+
+    Composed via :func:`foreman.prompts.compose_role_prompt` so the
+    adapter preamble + per-skill wrappers from PR #43 are applied
+    consistently with the other roles.
     """
     from foreman.prompts import compose_role_prompt
 
+    superpowers = _REVIEWER_SUPERPOWERS_BY_TARGET.get(
+        target, _REVIEWER_SUPERPOWERS_BY_TARGET["spec_pr"]
+    )
+    # Map unknown target to "spec_pr" for the prompt loader call too,
+    # so the file resolution stays consistent with the superpowers list.
+    safe_target = target if target in _REVIEWER_SUPERPOWERS_BY_TARGET else "spec_pr"
     return compose_role_prompt(
-        role="reviewer", superpowers=["requesting-code-review"]
+        role="reviewer",
+        superpowers=superpowers,
+        target=safe_target,
     )
 
 
@@ -310,12 +355,11 @@ async def run_reviewer(
     base_branch = pr.base.ref
     issue_number, target = _parse_review_branch(head_branch)
 
+    in_review_label = _REVIEWER_ENTRY_LABEL_BY_TARGET[target]
     if target == "impl_pr":
-        in_review_label = _LABEL_IMPL_REVIEW
         clean_label = _LABEL_READY_FOR_MERGE
         fix_label = _LABEL_IMPL_FIX
     else:
-        in_review_label = _LABEL_SPEC_REVIEW
         clean_label = _LABEL_SPEC_READY
         fix_label = _LABEL_SPEC_FIX
 
@@ -350,7 +394,7 @@ async def run_reviewer(
     spec_doc_content = _read_spec_doc(wt_path, issue_number)
     instructions = load_project_instructions(Path(project.local_clone_path))
 
-    system_prompt = _load_reviewer_prompt()
+    system_prompt = _load_reviewer_prompt(target=target)
     user_prompt = _build_user_prompt(
         issue_title=issue_title,
         issue_body=issue_body,
