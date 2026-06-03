@@ -37,9 +37,75 @@ class Rule:
     then: Action
 
 
-# Filled in by Tasks 5 (safety) and 6 (forward-progress). Order matters:
-# the evaluator iterates from index 0 forward and fires the first match.
-RULES: tuple[Rule, ...] = ()
+def _needs_help_label(ctx: ActionContext) -> bool:
+    return "foreman:needs-help" in ctx.issue.labels
+
+
+def _mergeable_conflict(ctx: ActionContext) -> bool:
+    return ctx.pr is not None and ctx.pr.mergeable == "CONFLICTING"
+
+
+def _impl_pr_ci_failure(ctx: ActionContext) -> bool:
+    if ctx.pr is None or ctx.pr.ci_status != "FAILURE":
+        return False
+    return any(
+        label in ctx.issue.labels
+        for label in ("foreman:impl-review", "foreman:impl-approved", "foreman:impl-fix")
+    )
+
+
+def _spec_pr_ci_failure(ctx: ActionContext) -> bool:
+    if ctx.pr is None or ctx.pr.ci_status != "FAILURE":
+        return False
+    return "foreman:planning" in ctx.issue.labels
+
+
+def _safety_with_rate_limit(predicate):
+    """Wrap a safety predicate so it stops re-firing if surface_help has been
+    emitted for this ticket in the last hour.
+    """
+    def wrapped(ctx: ActionContext) -> bool:
+        if not predicate(ctx):
+            return False
+        if ctx.log.has_recent("surface_help", ctx.ticket_id, within_seconds=3600):
+            return False
+        return True
+    return wrapped
+
+
+_SAFETY_RULES: tuple[Rule, ...] = (
+    Rule(
+        name="needs_help_label",
+        tier=PrecedenceTier.SAFETY,
+        precedence=10,
+        when=_safety_with_rate_limit(_needs_help_label),
+        then=Action.SURFACE_HELP,
+    ),
+    Rule(
+        name="mergeable_conflict",
+        tier=PrecedenceTier.SAFETY,
+        precedence=20,
+        when=_safety_with_rate_limit(_mergeable_conflict),
+        then=Action.SURFACE_HELP,
+    ),
+    Rule(
+        name="impl_pr_ci_failure",
+        tier=PrecedenceTier.SAFETY,
+        precedence=30,
+        when=_safety_with_rate_limit(_impl_pr_ci_failure),
+        then=Action.SURFACE_HELP,
+    ),
+    Rule(
+        name="spec_pr_ci_failure",
+        tier=PrecedenceTier.SAFETY,
+        precedence=40,
+        when=_safety_with_rate_limit(_spec_pr_ci_failure),
+        then=Action.SURFACE_HELP,
+    ),
+)
+
+
+RULES: tuple[Rule, ...] = _SAFETY_RULES  # forward-progress rules append in Task 6
 
 
 def evaluate(ctx: ActionContext, *, rules: tuple[Rule, ...] | None = None) -> Action:
