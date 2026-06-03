@@ -18,7 +18,7 @@ from foreman.schemas.fixer import (
     UnaddressedFinding,
 )
 from foreman.schemas.planner import PlannerOutput, PlannerRunResult
-from foreman.schemas.reviewer import Finding, ReviewerOutput
+from foreman.schemas.reviewer import Finding, ReviewerOutput, ReviewerRunResult
 from foreman.schemas.worker import (
     ImplementedSubRequest,
     SkippedSubRequest,
@@ -60,6 +60,7 @@ planner_private_key_path = "/tmp/planner.pem"
             base_branch="main",
             repo_slug="jeffrichley/voice",
         ),
+        final_labels=["foreman:spec-review"],
     )
 
     runner = CliRunner()
@@ -114,18 +115,21 @@ reviewer_private_key_path = "/tmp/reviewer.pem"
 """
     )
 
-    fake_result = ReviewerOutput(
-        outcome="needs_fix",
-        review_comment="needs_fix — see findings.",
-        findings=[
-            Finding(
-                severity="important",
-                target="Acceptance criteria bullet 3",
-                issue="Uses 'improve' which is not testable.",
-                needed="Replace with a concrete verb.",
-            )
-        ],
-        confidence="medium",
+    fake_result = ReviewerRunResult(
+        llm_output=ReviewerOutput(
+            outcome="needs_fix",
+            review_comment="needs_fix — see findings.",
+            findings=[
+                Finding(
+                    severity="important",
+                    target="Acceptance criteria bullet 3",
+                    issue="Uses 'improve' which is not testable.",
+                    needed="Replace with a concrete verb.",
+                )
+            ],
+            confidence="medium",
+        ),
+        final_labels=["foreman:spec-fix"],
     )
 
     runner = CliRunner()
@@ -194,6 +198,7 @@ fixer_private_key_path = "/tmp/fixer.pem"
             confidence="high",
         ),
         attempt=2,
+        final_labels=["foreman:spec-review"],
     )
 
     runner = CliRunner()
@@ -267,6 +272,7 @@ worker_private_key_path = "/tmp/worker.pem"
         attempt=1,
         pr_url="https://github.com/jeffrichley/voice/pull/101",
         final_did_check_pass=True,
+        final_labels=["foreman:impl-review"],
     )
 
     runner = CliRunner()

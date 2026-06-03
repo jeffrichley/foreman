@@ -27,7 +27,7 @@ from foreman.roles.reviewer import (
     parse_pr_url,
     run_reviewer,
 )
-from foreman.schemas.reviewer import Finding, ReviewerOutput
+from foreman.schemas.reviewer import Finding, ReviewerOutput, ReviewerRunResult
 
 # ----------------------------------------------------------------------
 # parse_pr_url
@@ -406,10 +406,15 @@ async def test_run_reviewer_clean_outcome_advances_to_spec_ready(
     # (The fake PR's `add_to_labels` / `remove_from_labels` don't exist;
     # this passes implicitly — leaving an assertion-by-omission note.)
 
-    # ReviewerOutput returned
-    assert isinstance(result, ReviewerOutput)
-    assert result.outcome == "clean"
-    assert result.confidence == "high"
+    # ReviewerRunResult returned (foreman#91 wrapper); the LLM output is
+    # accessed through ``.llm_output``.
+    assert isinstance(result, ReviewerRunResult)
+    assert isinstance(result.llm_output, ReviewerOutput)
+    assert result.llm_output.outcome == "clean"
+    assert result.llm_output.confidence == "high"
+    # foreman#91: final_labels is the authoritative post-transition set,
+    # computed in-process by the role.
+    assert result.final_labels == ["foreman:spec-ready"]
 
 
 @pytest.mark.asyncio
@@ -539,8 +544,9 @@ async def test_run_reviewer_needs_fix_outcome_advances_to_spec_fix(
     assert issue.removed == ["foreman:spec-review"]
     assert issue.added == ["foreman:spec-fix"]
 
-    assert result.outcome == "needs_fix"
-    assert len(result.findings) == 1
+    assert result.llm_output.outcome == "needs_fix"
+    assert len(result.llm_output.findings) == 1
+    assert result.final_labels == ["foreman:spec-fix"]
 
 
 @pytest.mark.asyncio
@@ -822,8 +828,10 @@ async def test_run_reviewer_impl_clean_outcome_advances_to_ready_for_merge(
     assert issue.removed == ["foreman:impl-review"]
     assert issue.added == ["foreman:ready-for-merge"]
 
-    assert isinstance(result, ReviewerOutput)
-    assert result.outcome == "clean"
+    assert isinstance(result, ReviewerRunResult)
+    assert isinstance(result.llm_output, ReviewerOutput)
+    assert result.llm_output.outcome == "clean"
+    assert result.final_labels == ["foreman:ready-for-merge"]
 
 
 @pytest.mark.asyncio
@@ -860,7 +868,8 @@ async def test_run_reviewer_impl_needs_fix_outcome_advances_to_impl_fix(
     assert issue.removed == ["foreman:impl-review"]
     assert issue.added == ["foreman:impl-fix"]
 
-    assert result.outcome == "needs_fix"
+    assert result.llm_output.outcome == "needs_fix"
+    assert result.final_labels == ["foreman:impl-fix"]
 
 
 @pytest.mark.asyncio
@@ -981,3 +990,81 @@ def test_load_reviewer_prompt_impl_target_loads_impl_composition() -> None:
     # Sanity: ensure the impl composition contains impl-file content.
     # If the loader silently fell back to reviewer.md, this would fail.
     assert "impl pull request" in actual.lower() or "impl-pr variant" in actual.lower()
+
+
+
+# ----------------------------------------------------------------------
+# foreman#91 — final_labels is the authoritative post-transition set
+#
+# The Reviewer must return ``final_labels`` matching the in-process
+# transition (``(initial_labels - {entry_label}) | {add_label}``), so
+# ``DaemonRunners.run_reviewer`` can populate the worker's
+# ``RoleResult.new_labels`` without a post-mutation host re-read that
+# would race GitHub's eventual-consistency window.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("seed_with_impl", "labels", "outcome", "expected_final"),
+    [
+        # spec_pr + clean → spec-review removed, spec-ready added
+        (False, ["foreman:spec-review"], "clean", ["foreman:spec-ready"]),
+        # spec_pr + needs_fix → spec-review removed, spec-fix added
+        (False, ["foreman:spec-review"], "needs_fix", ["foreman:spec-fix"]),
+        # impl_pr + clean → impl-review removed, ready-for-merge added
+        (True, ["foreman:impl-review"], "clean", ["foreman:ready-for-merge"]),
+        # impl_pr + needs_fix → impl-review removed, impl-fix added
+        (True, ["foreman:impl-review"], "needs_fix", ["foreman:impl-fix"]),
+    ],
+)
+async def test_run_reviewer_returns_authoritative_final_labels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seed_with_impl: bool,
+    labels: list[str],
+    outcome: str,
+    expected_final: list[str],
+) -> None:
+    """foreman#91: ``ReviewerRunResult.final_labels`` is the sorted list
+    of ``(initial_issue_labels - {entry_label}) | {add_label}`` for each
+    branch, computed in-process from the role's known transitions —
+    not from a post-mutation host re-read."""
+    clone = tmp_path / "clone"
+    if seed_with_impl:
+        head_sha = _seed_clone_with_impl_branch(clone, issue_number=42)
+        pr_url = "https://github.com/jeffrichley/voice/pull/99"
+    else:
+        head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+        pr_url = "https://github.com/jeffrichley/voice/pull/77"
+    monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
+
+    cfg = _make_config(clone)
+    if seed_with_impl:
+        repo, _pr, _issue = _make_fake_impl_repo(
+            issue_number=42, head_sha=head_sha, labels=labels
+        )
+    else:
+        repo, _pr, _issue = _make_fake_repo(
+            issue_number=42, head_sha=head_sha, labels=labels
+        )
+    client = _FakeReviewerClient(repo=repo)
+    registry = _make_registry(client)
+
+    llm_output = (
+        _make_clean_output() if outcome == "clean" else _make_needs_fix_output()
+    )
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=llm_output)
+
+    result = await run_reviewer(
+        pr_url=pr_url,
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    assert isinstance(result, ReviewerRunResult)
+    assert result.final_labels == expected_final

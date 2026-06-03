@@ -466,10 +466,17 @@ async def run_fixer(
             f"Existing attempts: {previous_attempts}."
         )
 
+    # foreman#91: track the in-process label set parallel to each
+    # remote add/remove so the role can return the authoritative
+    # post-transition set in ``FixerRunResult.final_labels``. Avoids
+    # the eventual-consistency race of a post-mutation host re-read.
+    current_labels: set[str] = set(issue_labels)
+
     # Stamp the new attempt label IMMEDIATELY so it's visible even if
     # the LLM dispatch crashes mid-run. Audit-trail before audit-loss.
     attempt_label = f"foreman:fix-attempt-{attempt}"
     issue.add_to_labels(attempt_label)
+    current_labels.add(attempt_label)
 
     # Resolve the spec PR from the issue's branch convention.
     branch = spec_branch(issue_number)
@@ -542,10 +549,14 @@ async def run_fixer(
         # labels reflect current-cycle state only.
         if target == "impl_pr":
             issue.remove_from_labels(_LABEL_IMPL_FIX)
+            current_labels.discard(_LABEL_IMPL_FIX)
             issue.add_to_labels(_LABEL_IMPL_REVIEW)
+            current_labels.add(_LABEL_IMPL_REVIEW)
         else:
             issue.remove_from_labels(_LABEL_SPEC_FIX)
+            current_labels.discard(_LABEL_SPEC_FIX)
             issue.add_to_labels(_LABEL_SPEC_REVIEW)
+            current_labels.add(_LABEL_SPEC_REVIEW)
         all_known_labels = issue_labels | {attempt_label}
         for label_name in all_known_labels:
             if label_name.startswith("foreman:fix-attempt-") or label_name == _LABEL_NEEDS_HELP:
@@ -553,13 +564,16 @@ async def run_fixer(
                     issue.remove_from_labels(label_name)
                 except Exception:
                     pass  # label may already be absent on the GitHub side
+                current_labels.discard(label_name)
     else:
         # incomplete: keep spec-fix so the human (or a later daemon
         # pass) can re-trigger; flag for help; if last attempt, also
         # add the failed escalation.
         issue.add_to_labels(_LABEL_NEEDS_HELP)
+        current_labels.add(_LABEL_NEEDS_HELP)
         if attempt == max_fix_attempts:
             issue.add_to_labels(_LABEL_FAILED)
+            current_labels.add(_LABEL_FAILED)
 
     # JSONL stats — write regardless of outcome.
     unaddressed_hist = _unaddressed_by_reason_histogram(llm_output)
@@ -579,4 +593,8 @@ async def run_fixer(
         duration_seconds=duration_seconds,
     )
 
-    return FixerRunResult(llm_output=llm_output, attempt=attempt)
+    return FixerRunResult(
+        llm_output=llm_output,
+        attempt=attempt,
+        final_labels=sorted(current_labels),
+    )

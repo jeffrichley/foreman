@@ -1355,3 +1355,70 @@ def test_load_fixer_prompt_impl_target_loads_impl_composition() -> None:
     assert actual == expected
     # Sanity: ensure the impl composition contains impl-file content.
     assert "implementation pull request" in actual.lower() or "impl-pr variant" in actual.lower()
+
+
+# ----------------------------------------------------------------------
+# foreman#91 — final_labels is the authoritative post-transition set
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("output_factory", "starting_labels", "expected_final"),
+    [
+        # fixed outcome: spec-fix removed, spec-review added,
+        # fix-attempt-1 cleared (per-episode reset).
+        (
+            _fixed_output,
+            ["foreman:spec-fix"],
+            ["foreman:spec-review"],
+        ),
+        # incomplete: spec-fix kept, fix-attempt-1 retained, needs-help added.
+        (
+            _incomplete_output,
+            ["foreman:spec-fix"],
+            sorted(
+                [
+                    "foreman:spec-fix",
+                    "foreman:fix-attempt-1",
+                    "foreman:needs-help",
+                ]
+            ),
+        ),
+    ],
+)
+async def test_run_fixer_returns_authoritative_final_labels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    output_factory: Any,
+    starting_labels: list[str],
+    expected_final: list[str],
+) -> None:
+    """foreman#91: ``FixerRunResult.final_labels`` is the deterministic
+    post-transition set, computed in-process from the role's known
+    mutations. Not a host re-read."""
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    cfg = _make_config(clone)
+    repo, _pr, _issue = _make_fake_repo(
+        issue_number=42, head_sha=head_sha, labels=starting_labels
+    )
+    client = _FakeFixerClient(repo=repo)
+    registry = _make_registry(client)
+
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=output_factory())
+
+    result = await run_fixer(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    assert result.final_labels == expected_final

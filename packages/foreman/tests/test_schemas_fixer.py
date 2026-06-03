@@ -207,12 +207,17 @@ def test_fixer_output_json_schema_is_serializable() -> None:
 
 def test_fixer_run_result_bundles_output_and_attempt() -> None:
     output = FixerOutput.model_validate(_minimal_fixed())
-    result = FixerRunResult(llm_output=output, attempt=2)
+    result = FixerRunResult(
+        llm_output=output,
+        attempt=2,
+        final_labels=["foreman:spec-review"],
+    )
     assert result.llm_output.outcome == "fixed"
     assert result.attempt == 2
+    assert result.final_labels == ["foreman:spec-review"]
 
 
 def test_fixer_run_result_requires_attempt() -> None:
     output = FixerOutput.model_validate(_minimal_fixed())
     with pytest.raises(ValidationError, match="attempt"):
-        FixerRunResult(llm_output=output)  # type: ignore[call-arg]
+        FixerRunResult(llm_output=output, final_labels=[])  # type: ignore[call-arg]

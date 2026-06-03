@@ -76,6 +76,11 @@ def test_planner_run_result_carries_llm_output_and_pr() -> None:
         base_branch="main",
         repo_slug="o/r",
     )
-    result = PlannerRunResult(llm_output=llm, pr=pr)
+    result = PlannerRunResult(
+        llm_output=llm,
+        pr=pr,
+        final_labels=["foreman:spec-review"],
+    )
     assert result.pr.number == 42
     assert result.llm_output.confidence == "medium"
+    assert result.final_labels == ["foreman:spec-review"]

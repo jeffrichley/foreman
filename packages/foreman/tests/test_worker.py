@@ -261,3 +261,145 @@ async def test_run_one_iteration_without_timeout_does_not_wrap(tmp_path: Path) -
     with storage.connect() as conn:
         failures = list(conn.execute("SELECT * FROM failures"))
     assert failures == []
+
+
+@pytest.mark.asyncio
+async def test_run_one_iteration_does_not_re_dispatch_on_stale_labels(
+    tmp_path: Path,
+) -> None:
+    """foreman#91: after a Reviewer-on-impl success transition
+    (``foreman:impl-review`` → ``foreman:ready-for-merge``), the worker
+    must NOT re-dispatch ``run_reviewer_impl`` on stale labels. The
+    role's authoritative ``final_labels`` (via
+    ``DaemonRunners.RoleResult.new_labels``) is what the next iteration
+    sees — not a stale GitHub re-read.
+
+    End-to-end shape: enqueue a ticket with
+    ``foreman:impl-review``; the fake dispatcher returns
+    ``new_labels={foreman:ready-for-merge}``. Run the iteration twice.
+    Iteration 1 dispatches ``RUN_REVIEWER_IMPL``. Iteration 2 must
+    dispatch ``MERGE_IMPL_PR`` (when ``auto_merge_impl=True``) — NEVER
+    ``RUN_REVIEWER_IMPL`` again.
+    """
+    storage = Storage(tmp_path / "f.sqlite")
+    storage.init()
+    queue = DaemonQueue()
+    locks = TicketLockManager()
+
+    def _result(ticket: Ticket, action: Action) -> RoleResult:
+        if action.kind == ActionKind.RUN_REVIEWER_IMPL:
+            return RoleResult(
+                new_labels=frozenset({"foreman:ready-for-merge"}),
+                structured_output={"reviewer_outcome": "clean"},
+                outcome="success",
+            )
+        # MERGE_IMPL_PR → empty (issue closed, label removed).
+        return RoleResult(
+            new_labels=frozenset(),
+            structured_output={"merged_impl_pr": 99},
+            outcome="success",
+        )
+
+    dispatcher = _FakeRoleDispatcher(result_factory=_result)
+    # auto_merge_impl=True so the second iteration dispatches MERGE_IMPL_PR
+    # rather than parking the ticket on ready-for-merge.
+    projects = {
+        "voice": ProjectConfig(
+            repo="jeffrichley/voice",
+            local_clone_path="/tmp/voice",
+            apps=AppsConfig(),
+            auto_merge_impl=True,
+        )
+    }
+
+    impl_review_ticket = Ticket(
+        project_name="voice",
+        issue_number=42,
+        labels=frozenset({"foreman:impl-review"}),
+        last_transition_at=datetime(2026, 6, 1, tzinfo=UTC),
+    )
+    queue.enqueue(impl_review_ticket)
+
+    # Iteration 1: dispatches RUN_REVIEWER_IMPL on impl-review labels.
+    await run_one_iteration(
+        queue=queue, locks=locks, dispatcher=dispatcher, storage=storage, projects=projects
+    )
+    assert len(dispatcher.calls) == 1
+    _ticket1, action1 = dispatcher.calls[0]
+    assert action1.kind == ActionKind.RUN_REVIEWER_IMPL
+
+    # Iteration 2: the next-iteration dispatch decision uses the role's
+    # authoritative ``new_labels`` ({foreman:ready-for-merge}), NOT a stale
+    # snapshot. Therefore the next action is MERGE_IMPL_PR — not a
+    # repeat RUN_REVIEWER_IMPL on the stale impl-review snapshot (the
+    # foreman#91 bug).
+    await run_one_iteration(
+        queue=queue, locks=locks, dispatcher=dispatcher, storage=storage, projects=projects
+    )
+    assert len(dispatcher.calls) == 2
+    _ticket2, action2 = dispatcher.calls[1]
+    assert action2.kind == ActionKind.MERGE_IMPL_PR, (
+        f"Expected MERGE_IMPL_PR on iteration 2, got {action2.kind} — "
+        "this would happen if the worker re-dispatched on a stale "
+        "impl-review snapshot (foreman#91 regression)."
+    )
+
+    # And critically: no call's action is RUN_REVIEWER_IMPL beyond the first.
+    later_reviewer_impl = [
+        c for c in dispatcher.calls[1:] if c[1].kind == ActionKind.RUN_REVIEWER_IMPL
+    ]
+    assert later_reviewer_impl == [], (
+        "Worker re-dispatched RUN_REVIEWER_IMPL on stale labels — "
+        "foreman#91 regression."
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_one_iteration_parks_after_reviewer_impl_when_auto_merge_disabled(
+    tmp_path: Path,
+) -> None:
+    """foreman#91 second variant: when ``auto_merge_impl=False``, the
+    second iteration finds no action on ``foreman:ready-for-merge`` (the
+    project requires a human merge) — it must NOT dispatch
+    ``RUN_REVIEWER_IMPL`` again on stale labels.
+    """
+    storage = Storage(tmp_path / "f.sqlite")
+    storage.init()
+    queue = DaemonQueue()
+    locks = TicketLockManager()
+
+    def _result(ticket: Ticket, action: Action) -> RoleResult:
+        return RoleResult(
+            new_labels=frozenset({"foreman:ready-for-merge"}),
+            structured_output={"reviewer_outcome": "clean"},
+            outcome="success",
+        )
+
+    dispatcher = _FakeRoleDispatcher(result_factory=_result)
+    projects = _project_configs()  # auto_merge_impl=False by default
+
+    impl_review_ticket = Ticket(
+        project_name="voice",
+        issue_number=42,
+        labels=frozenset({"foreman:impl-review"}),
+        last_transition_at=datetime(2026, 6, 1, tzinfo=UTC),
+    )
+    queue.enqueue(impl_review_ticket)
+
+    await run_one_iteration(
+        queue=queue, locks=locks, dispatcher=dispatcher, storage=storage, projects=projects
+    )
+    assert len(dispatcher.calls) == 1
+    assert dispatcher.calls[0][1].kind == ActionKind.RUN_REVIEWER_IMPL
+    # With auto_merge_impl=False, next_action returns None for
+    # ready-for-merge → ticket parked, queue empty.
+    assert len(queue) == 0
+
+    # Iteration 2 finds nothing to do.
+    advanced = await run_one_iteration(
+        queue=queue, locks=locks, dispatcher=dispatcher, storage=storage, projects=projects
+    )
+    assert advanced is False
+    # Critically: dispatcher still has only 1 call. No stale-snapshot
+    # RUN_REVIEWER_IMPL re-dispatch.
+    assert len(dispatcher.calls) == 1

@@ -109,7 +109,8 @@ def review(pr_url: str, project: str, config_path: Path | None) -> None:
             provider=provider,
         )
     )
-    click.echo(f"{result.outcome}: {len(result.findings)} findings, confidence={result.confidence}")
+    llm = result.llm_output
+    click.echo(f"{llm.outcome}: {len(llm.findings)} findings, confidence={llm.confidence}")
 
 
 @cli.command()

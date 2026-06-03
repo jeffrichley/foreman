@@ -45,7 +45,7 @@ from foreman.config import Config
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade
-from foreman.schemas.reviewer import Finding, ReviewerOutput
+from foreman.schemas.reviewer import Finding, ReviewerOutput, ReviewerRunResult
 from foreman.worktree import WorktreeManager
 
 _PR_URL_RE = re.compile(
@@ -305,7 +305,7 @@ async def run_reviewer(
     worktrees_root: Path,
     provider: ProviderFacade,
     identity_registry: IdentityRegistry | None = None,
-) -> ReviewerOutput:
+) -> ReviewerRunResult:
     """Run the Reviewer role end-to-end on one spec PR.
 
     Args:
@@ -320,9 +320,12 @@ async def run_reviewer(
             Tests inject a fake registry to bypass real App auth.
 
     Returns:
-        The :class:`~foreman.schemas.reviewer.ReviewerOutput` produced by
-        the LLM. The CLI surfaces ``outcome`` / ``findings`` / ``confidence``
-        for human inspection.
+        A :class:`~foreman.schemas.reviewer.ReviewerRunResult` bundling
+        the LLM's :class:`~foreman.schemas.reviewer.ReviewerOutput` and
+        the deterministic post-transition label set
+        (``final_labels``). The CLI surfaces ``outcome`` / ``findings``
+        / ``confidence`` for human inspection by reading
+        ``result.llm_output``.
 
     Raises:
         ValueError: PR URL malformed, repo mismatch, or PR head branch is
@@ -440,4 +443,10 @@ async def run_reviewer(
     issue.remove_from_labels(in_review_label)
     issue.add_to_labels(add_label)
 
-    return llm_output
+    # foreman#91: compute final_labels deterministically from the
+    # in-memory pre-mutation set + the role's known transitions, not
+    # via a post-mutation host re-read. The fresh GET against GitHub
+    # raced its own write and produced stale-snapshot dispatches at
+    # the next worker iteration.
+    final_labels = sorted((issue_labels - {in_review_label}) | {add_label})
+    return ReviewerRunResult(llm_output=llm_output, final_labels=final_labels)

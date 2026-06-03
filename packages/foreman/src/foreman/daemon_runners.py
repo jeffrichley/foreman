@@ -112,10 +112,6 @@ class DaemonRunners:
     def _project(self, ticket: Ticket, config: Config) -> ProjectConfig:
         return config.projects[ticket.project_name]
 
-    def _read_labels(self, ticket: Ticket, config: Config) -> frozenset[str]:
-        project = self._project(ticket, config)
-        return frozenset(self._host.get_issue_labels(project.repo, ticket.issue_number))
-
     async def run_planner(self, *, ticket: Ticket, config: Config) -> RoleRunResult:
         project = self._project(ticket, config)
         result = await self._planner_fn(
@@ -125,9 +121,17 @@ class DaemonRunners:
             worktrees_root=self._worktrees_root,
             provider=self._provider,
         )
+        # foreman#91: the role-returned ``final_labels`` is the
+        # authoritative post-run label set, computed in-process by
+        # the role from its known mutations. We trust that signal
+        # over a fresh ``host.get_issue_labels`` GET which would
+        # race GitHub's eventual-consistency window and could
+        # return the OLD labels even though the role's writes
+        # succeeded — producing stale-snapshot re-dispatches at the
+        # next worker iteration.
         return RoleRunResult(
-            new_labels=self._read_labels(ticket, config),
-            structured_output=_safe_dump(result),
+            new_labels=frozenset(result.final_labels),
+            structured_output=_safe_dump(result.llm_output),
         )
 
     async def run_reviewer(
@@ -152,8 +156,8 @@ class DaemonRunners:
             provider=self._provider,
         )
         return RoleRunResult(
-            new_labels=self._read_labels(ticket, config),
-            structured_output=_safe_dump(result),
+            new_labels=frozenset(result.final_labels),
+            structured_output=_safe_dump(result.llm_output),
         )
 
     async def run_fixer(
@@ -169,8 +173,8 @@ class DaemonRunners:
             target=target,
         )
         return RoleRunResult(
-            new_labels=self._read_labels(ticket, config),
-            structured_output=_safe_dump(result),
+            new_labels=frozenset(result.final_labels),
+            structured_output=_safe_dump(result.llm_output),
         )
 
     async def run_worker(self, *, ticket: Ticket, config: Config) -> RoleRunResult:
@@ -183,8 +187,8 @@ class DaemonRunners:
             provider=self._provider,
         )
         return RoleRunResult(
-            new_labels=self._read_labels(ticket, config),
-            structured_output=_safe_dump(result),
+            new_labels=frozenset(result.final_labels),
+            structured_output=_safe_dump(result.llm_output),
         )
 
     async def merge_spec_pr(self, *, ticket: Ticket, config: Config) -> RoleRunResult:
@@ -203,8 +207,18 @@ class DaemonRunners:
         self._host.add_issue_label(
             project.repo, ticket.issue_number, "foreman:implementing-ready"
         )
+        # foreman#91: compute the post-merge label set deterministically
+        # from the pre-merge snapshot in ``ticket.labels`` + the merge
+        # transitions above. Avoids the eventual-consistency hazard of a
+        # remote GET right after the writes (different client identity
+        # for the merge writes vs. the read in v1 — see
+        # ``DaemonRunners._read_labels``'s now-removed implementation).
+        final_labels = frozenset(
+            (set(ticket.labels) - {"foreman:spec-ready"})
+            | {"foreman:implementing-ready"}
+        )
         return RoleRunResult(
-            new_labels=self._read_labels(ticket, config),
+            new_labels=final_labels,
             structured_output={"merged_spec_pr": pr_number},
         )
 
@@ -249,8 +263,14 @@ class DaemonRunners:
             )
         self._host.merge_pull_request(project.repo, pr_number)
         self._host.close_issue(project.repo, ticket.issue_number)
+        # foreman#91: compute the post-merge label set deterministically.
+        # The issue is closed; the only label transition relative to the
+        # queue's view is dropping ``foreman:ready-for-merge``. With no
+        # actionable label remaining, ``next_action`` returns ``None`` and
+        # the queue parks the ticket — correct terminal state.
+        final_labels = frozenset(set(ticket.labels) - {"foreman:ready-for-merge"})
         return RoleRunResult(
-            new_labels=self._read_labels(ticket, config),
+            new_labels=final_labels,
             structured_output={"merged_impl_pr": pr_number},
         )
 
