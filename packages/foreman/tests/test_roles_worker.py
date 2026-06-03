@@ -1474,3 +1474,71 @@ async def test_run_worker_sdk_error_surfaces_as_incomplete_not_crash(
     # Incomplete branch: needs-help added, no impl PR opened
     assert "foreman:needs-help" in issue.added
     assert repo.create_pull_calls == []
+
+
+# ----------------------------------------------------------------------
+# Issue #48 — impl PR opens against the base reported by create_impl
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_worker_opens_impl_pr_with_base_from_create_impl_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ``create_impl`` returns an :class:`ImplWorktreeResult` whose
+    ``base_branch`` is the repo default (issue #48 fallback path — spec
+    branch was deleted between Reviewer and Worker, spec doc landed on
+    default), the Worker MUST open the impl PR with ``base=<default>``,
+    not with a hard-coded ``foreman/issue-<N>``. Locks the Worker's
+    contract on the new dataclass."""
+    from foreman.worktree import ImplWorktreeResult
+
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    # Pre-create a fake worktree directory with the spec doc so the
+    # Worker's on-disk spec read finds something. The dir does NOT
+    # have to be a real git worktree because we monkeypatch both
+    # ``create_impl`` and ``_run_check_command``.
+    fake_worktree = tmp_path / "fake-impl-wt"
+    spec_dir = fake_worktree / "docs" / "superpowers" / "specs"
+    spec_dir.mkdir(parents=True)
+    (spec_dir / "foreman-issue-42-spec.md").write_text(
+        "# Spec for issue #42\n\n## Sub-requests\n1. Add X.\n"
+    )
+
+    def fake_create_impl(
+        self: Any, *, clone_path: Path, repo_slug: str, ticket_id: int
+    ) -> ImplWorktreeResult:
+        return ImplWorktreeResult(path=fake_worktree, base_branch="main")
+
+    monkeypatch.setattr(
+        "foreman.roles.worker.WorktreeManager.create_impl", fake_create_impl
+    )
+
+    cfg = _make_config(clone)
+    repo, _spec_pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeWorkerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    _make_passing_check_command(monkeypatch)
+
+    await run_worker(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    assert len(repo.create_pull_calls) == 1
+    create_call = repo.create_pull_calls[0]
+    assert create_call["base"] == "main", (
+        f"Worker must use wt_result.base_branch as the impl PR's base "
+        f"(here: 'main' from the fallback path); got base={create_call['base']!r}"
+    )
+    assert create_call["head"] == "foreman/impl-42"

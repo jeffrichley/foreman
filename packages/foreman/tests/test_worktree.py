@@ -640,7 +640,8 @@ def test_create_impl_creates_dir_with_stacked_branch(tmp_path: Path) -> None:
 
     worktrees_root = tmp_path / "worktrees"
     mgr = WorktreeManager(worktrees_root=worktrees_root)
-    wt_path = mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
+    result = mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
+    wt_path = result.path
 
     assert wt_path.exists()
     assert wt_path == worktrees_root / "voice" / "impl-42"
@@ -676,7 +677,7 @@ def test_create_impl_is_idempotent_on_existing_path(tmp_path: Path) -> None:
     mgr = WorktreeManager(worktrees_root=worktrees_root)
     wt1 = mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
     wt2 = mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
-    assert wt1 == wt2
+    assert wt1.path == wt2.path
 
 
 def test_create_impl_separate_from_spec_worktree(tmp_path: Path) -> None:
@@ -687,7 +688,7 @@ def test_create_impl_separate_from_spec_worktree(tmp_path: Path) -> None:
 
     worktrees_root = tmp_path / "worktrees"
     mgr = WorktreeManager(worktrees_root=worktrees_root)
-    impl_wt = mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
+    impl_wt = mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=42).path
     spec_wt = mgr.attach(clone_path=clone, repo_slug="voice", ticket_id=42)
     assert impl_wt != spec_wt
     assert impl_wt.name == "impl-42"
@@ -725,6 +726,229 @@ def test_create_impl_filters_env_on_git_subprocess_calls(
             "default env=None would inherit VIRTUAL_ENV and re-leak the fix"
         )
         assert "VIRTUAL_ENV" not in env
+
+
+# ----------------------------------------------------------------------
+# create_impl — fallback to default branch when spec branch missing (issue #48)
+#
+# The spec branch ``origin/foreman/issue-<N>`` may be missing by the time
+# the Worker runs: spec PR merged with ``--delete-branch``, "Automatically
+# delete head branches" enabled on the repo, or an operator deleted it
+# manually between Reviewer and Worker. In that case, if the spec doc
+# landed on the default branch, ``create_impl`` falls back to branching
+# off ``origin/<default>`` and reports that as the impl PR's base. If the
+# spec doc is ALSO missing from default, the fallback aborts loudly
+# rather than silently branching from an unrelated default.
+# ----------------------------------------------------------------------
+
+
+def _seed_clone_with_spec_doc_on_default_only(clone: Path, *, ticket_id: int) -> str:
+    """Init a clone whose ``origin/main`` carries the spec doc but where
+    ``foreman/issue-<N>`` was never pushed (or has been deleted).
+
+    Returns the ``origin/main`` tip SHA after the spec doc commit so
+    callers can verify the new impl branch's tip matches.
+    """
+    clone.mkdir()
+    _init_git_repo(clone, origin_path=clone.parent / "origin.git")
+    # Add the spec doc on main and push so origin/main carries it.
+    spec_dir = clone / "docs" / "superpowers" / "specs"
+    spec_dir.mkdir(parents=True, exist_ok=True)
+    (spec_dir / f"foreman-issue-{ticket_id}-spec.md").write_text(f"# Spec for issue #{ticket_id}\n")
+    subprocess.run(["git", "add", "."], cwd=clone, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "docs: spec for issue"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "push", "origin", "main"], cwd=clone, check=True, capture_output=True)
+    return subprocess.run(
+        ["git", "rev-parse", "origin/main"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def test_create_impl_falls_back_to_default_when_spec_branch_missing(tmp_path: Path) -> None:
+    """When ``origin/foreman/issue-<N>`` is gone but the spec doc landed on
+    ``origin/main``, ``create_impl`` branches the new impl worktree off
+    ``origin/main`` and reports ``base_branch="main"`` so the impl PR
+    can open with the correct base from the start. No stacking, no
+    retarget step needed."""
+    clone = tmp_path / "clone"
+    origin_main_tip = _seed_clone_with_spec_doc_on_default_only(clone, ticket_id=42)
+
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+    result = mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    assert result.path.exists()
+    assert result.base_branch == "main", (
+        f"Fallback path must report base_branch='main' so the impl PR "
+        f"opens with the right base; got {result.base_branch!r}"
+    )
+
+    branch_check = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=result.path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert branch_check.stdout.strip() == "foreman/impl-42"
+
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=result.path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert head == origin_main_tip, (
+        f"Fallback impl branch must be based on origin/main's tip "
+        f"({origin_main_tip}); got {head}"
+    )
+
+
+def test_create_impl_prefers_spec_branch_when_present(tmp_path: Path) -> None:
+    """If BOTH the spec branch and the spec doc on default are present
+    (in-flight pipeline before spec PR merge), the stacked path remains
+    preferred — ``base_branch == "foreman/issue-<N>"`` and the worktree
+    tip matches the spec branch."""
+    clone = tmp_path / "clone"
+    spec_head = _seed_clone_with_spec_branch_pushed(clone, ticket_id=42)
+    # The seed already places the spec doc on the spec branch; merge it
+    # onto main so origin/main also carries the spec doc, simulating
+    # the "spec PR already merged but its branch wasn't deleted" state.
+    subprocess.run(
+        ["git", "merge", "--ff-only", "foreman/issue-42"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "push", "origin", "main"], cwd=clone, check=True, capture_output=True)
+
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+    result = mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    assert result.base_branch == "foreman/issue-42", (
+        "When both the spec branch and the spec doc on default exist, "
+        "the stacked path must be preferred — base_branch should be "
+        f"'foreman/issue-42', got {result.base_branch!r}"
+    )
+
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=result.path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert head == spec_head, (
+        f"Stacked impl branch must be based on the spec branch's tip "
+        f"({spec_head}); got {head}"
+    )
+
+
+def test_create_impl_raises_when_neither_spec_branch_nor_spec_doc_on_default(
+    tmp_path: Path,
+) -> None:
+    """Both probes failing → loud, actionable RuntimeError citing the
+    missing pieces and issue #48 — strictly better than the deep
+    ``subprocess.CalledProcessError`` ``git worktree add`` would raise."""
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    # Plain clone with origin/main but NO spec doc and NO spec branch.
+    _init_git_repo(clone, origin_path=tmp_path / "origin.git")
+
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    message = str(exc_info.value)
+    assert "foreman/issue-42" in message, (
+        f"Error must name the missing spec branch; got {message!r}"
+    )
+    assert "main" in message, f"Error must name the default branch checked; got {message!r}"
+    assert "docs/superpowers/specs/foreman-issue-42-spec.md" in message, (
+        f"Error must name the expected spec doc path; got {message!r}"
+    )
+    assert "#48" in message, (
+        f"Error must reference issue #48 so the next reader lands on "
+        f"the design notes; got {message!r}"
+    )
+
+
+def test_create_impl_idempotent_returns_result_with_recomputed_base(
+    tmp_path: Path,
+) -> None:
+    """On idempotent re-call (impl worktree path already exists), the
+    returned ``base_branch`` is recomputed from current origin state —
+    NOT cached from the first call. This matters for crash-recovery
+    after the spec PR merges + ``--delete-branch`` between the first
+    ``create_impl`` and the second."""
+    clone = tmp_path / "clone"
+    spec_head = _seed_clone_with_spec_branch_pushed(clone, ticket_id=42)
+    # Also publish the spec doc on origin/main so the fallback path is
+    # viable later, when we simulate the spec branch being deleted.
+    subprocess.run(
+        ["git", "merge", "--ff-only", "foreman/issue-42"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "push", "origin", "main"], cwd=clone, check=True, capture_output=True)
+
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+
+    # First call: spec branch present → stacked path
+    first = mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
+    assert first.base_branch == "foreman/issue-42"
+    assert first.path.exists()
+
+    # Sanity: confirm first call branched off the spec head.
+    first_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=first.path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert first_head == spec_head
+
+    # Simulate spec PR merge + ``--delete-branch``: delete the spec
+    # branch from the bare upstream + prune the local origin tracking
+    # ref. Mirrors the operator-walked-the-pipeline state that caused
+    # issue #48 on foreman#46 (2026-06-02 dogfood).
+    subprocess.run(
+        ["git", "push", "origin", "--delete", "foreman/issue-42"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "remote", "prune", "origin"], cwd=clone, check=True, capture_output=True
+    )
+
+    # Second call: worktree exists → idempotent path → base_branch
+    # recomputed from current origin state (now: spec branch gone, spec
+    # doc on origin/main → fallback path).
+    second = mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
+    assert second.path == first.path, (
+        "Idempotent re-call must return the same worktree path"
+    )
+    assert second.base_branch == "main", (
+        "After spec branch deletion, idempotent re-call must RECOMPUTE "
+        "base_branch from current origin state — should fall back to "
+        f"'main'; got {second.base_branch!r}"
+    )
 
 
 def test_attach_impl_attaches_to_existing_impl_branch(tmp_path: Path) -> None:

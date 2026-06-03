@@ -12,8 +12,10 @@ described code change. It commits + pushes to a stacked impl branch
   2. Branches on the (post-verification) outcome:
 
      - ``implemented`` → opens the impl PR via PyGithub with
-       ``base=foreman/issue-<N>`` (stacked on the spec branch — D1).
-       Advances issue label: remove ``implementing``, add
+       ``base=wt_result.base_branch`` — either the spec branch (D1,
+       stacked PR) or the default branch (fallback when the spec
+       branch is gone, issue #48). Advances issue label: remove
+       ``implementing``, add
        ``impl-review``. Per-episode counter reset: drops all
        ``foreman:impl-attempt-N`` labels (the implementation episode
        closed cleanly; a future re-trigger gets a fresh 3-attempt
@@ -518,12 +520,17 @@ async def run_worker(
     # Create the Worker's stacked impl worktree. NOT ``create`` (would
     # branch from main) and NOT ``attach`` (would reuse the spec-side
     # ``issue-<N>/`` worktree and inherit any Fixer WIP state).
+    # ``create_impl`` returns the worktree path AND the branch the impl
+    # PR should target — usually the spec branch (D1 stacked PR), or
+    # the default branch when the spec branch is gone (issue #48
+    # fallback).
     wt_mgr = WorktreeManager(worktrees_root=worktrees_root)
-    wt_path = wt_mgr.create_impl(
+    wt_result = wt_mgr.create_impl(
         clone_path=Path(project.local_clone_path),
         repo_slug=repo_name,
         ticket_id=issue_number,
     )
+    wt_path = wt_result.path
 
     # Read the spec doc — on-disk first (it's checked out on this
     # branch), git-show fallback to authoritative spec-branch content.
@@ -648,7 +655,7 @@ async def run_worker(
         impl_pr = repo.create_pull(
             title=llm_output.pr_title,
             body=llm_output.pr_body,
-            base=spec_branch_name,
+            base=wt_result.base_branch,
             head=impl_branch_name,
         )
         pr_url = impl_pr.html_url
