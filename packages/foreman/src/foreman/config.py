@@ -75,6 +75,7 @@ class DaemonConfig(BaseModel):
     log_path: str = Field(default="~/.foreman/daemon.log")
     log_level: str = Field(default="INFO")
     sqlite_path: str = Field(default="~/.foreman/foreman.sqlite")
+    lock_path: str = Field(default="~/.foreman/daemon.lock")
     # Wall-clock cap on a single role dispatch. ``None`` (the default)
     # disables the cap entirely — the daemon trusts the role to finish.
     # Set this only after empirical stats from ``node_runs.duration_ms``
