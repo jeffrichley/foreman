@@ -13,6 +13,8 @@ import asyncio
 import os
 import shutil
 import signal
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -304,6 +306,56 @@ def init(
     click.echo(result.summary)
 
 
+# --- daemon lock-file helpers (foreman#72 + foreman#88) ---
+#
+# A single file at ``~/.foreman/daemon.lock`` serves two roles:
+#  - It is the OS-level exclusive lock that prevents a second daemon
+#    from starting (foreman#88).
+#  - Its contents are the daemon's PID, written by ``DaemonLock`` on
+#    acquisition, so ``daemon stop`` / ``daemon status`` can identify
+#    the running daemon without a separate pid file.
+#
+# Keeping it to one file eliminates the "two stale-file lifecycles"
+# class of bug that bit foreman#72's first revision on CI Windows.
+
+_STOP_GRACE_SECONDS = 10.0
+_STOP_POLL_INTERVAL_SECONDS = 0.1
+
+
+def _resolve_lock_path(config: Config | None) -> Path:
+    """Return the daemon's lock-file path.
+
+    ``FOREMAN_LOCK_PATH`` env var wins over config, matching
+    ``daemon_start``'s resolution order. When ``config`` is ``None``
+    (e.g., ``daemon stop`` called on a host without a config file),
+    falls back to the hardcoded default so stop / status still work.
+    An empty-string env value is treated as unset.
+    """
+    env_override = os.environ.get("FOREMAN_LOCK_PATH") or None
+    if env_override is not None:
+        return Path(env_override).expanduser()
+    if config is None:
+        return Path("~/.foreman/daemon.lock").expanduser()
+    return Path(config.daemon.lock_path).expanduser()
+
+
+def _read_lock_file_pid(lock_path: Path) -> int | None:
+    """Best-effort: parse the PID from a daemon lock file.
+
+    Returns ``None`` when the file is missing, unreadable, or contains
+    non-integer content (transient: daemon mid-write, or a corrupted
+    file). Callers should treat ``None`` as "no addressable daemon".
+    """
+    try:
+        text = lock_path.read_text(encoding="ascii").strip()
+    except (FileNotFoundError, OSError):
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
 @cli.group()
 def daemon() -> None:
     """Daemon lifecycle commands."""
@@ -321,12 +373,7 @@ def daemon_start(max_iterations: int | None) -> None:
     from foreman.daemon_lock import DaemonLock, LockAcquisitionError
 
     config = _load_config_from_env()
-    # FOREMAN_LOCK_PATH env var wins over config.daemon.lock_path
-    # (matches the FOREMAN_CONFIG / FOREMAN_WORKTREES_ROOT override
-    # pattern at the top of cli.py). An empty-string env value is
-    # treated as unset.
-    lock_path_str = os.environ.get("FOREMAN_LOCK_PATH") or config.daemon.lock_path
-    lock_path = Path(lock_path_str).expanduser()
+    lock_path = _resolve_lock_path(config)
     try:
         with DaemonLock(lock_path):
             asyncio.run(_daemon_run(config=config, max_iterations=max_iterations))
@@ -336,33 +383,95 @@ def daemon_start(max_iterations: int | None) -> None:
 
 @daemon.command("stop")
 def daemon_stop() -> None:
-    """Signal a running daemon to stop. (v1: send SIGTERM to the pid)."""
-    pid_path = Path("~/.foreman/daemon.pid").expanduser()
-    if not pid_path.exists():
-        click.echo("No daemon pid file found at ~/.foreman/daemon.pid.")
+    """Signal a running daemon to stop and wait for clean exit.
+
+    Reads the daemon's PID from the lock file (``DaemonLock`` writes
+    the PID on acquisition), sends SIGTERM, and polls the PID for
+    process death up to ``_STOP_GRACE_SECONDS``. The lock file
+    remains on disk after stop — its content is now stale but the
+    OS lock is released when the daemon's fd closes, so the next
+    ``daemon start`` succeeds and overwrites the PID.
+    """
+    try:
+        config: Config | None = _load_config_from_env()
+    except (FileNotFoundError, OSError):
+        config = None
+    lock_path = _resolve_lock_path(config)
+
+    if not lock_path.exists():
+        discover = (
+            "tasklist | findstr foreman"
+            if sys.platform == "win32"
+            else "ps aux | grep foreman"
+        )
+        click.echo(
+            f"No daemon lock file at {lock_path}. Either the daemon "
+            f"was never started, or the lock file was removed. To find "
+            f"a stray process: `{discover}`, then kill the PID directly."
+        )
         return
-    pid = int(pid_path.read_text().strip())
+
+    pid = _read_lock_file_pid(lock_path)
+    if pid is None:
+        click.echo(
+            f"Lock file at {lock_path} has unreadable content. "
+            f"Cannot identify the daemon PID; remove the file manually "
+            f"if you're certain no daemon is running."
+        )
+        return
+
     try:
         os.kill(pid, signal.SIGTERM)
-        click.echo(f"Sent SIGTERM to daemon pid {pid}.")
     except ProcessLookupError:
-        click.echo(f"Pid {pid} not running. Removing stale pid file.")
-        pid_path.unlink()
+        click.echo(f"Pid {pid} not running (stale lock file).")
+        return
+    click.echo(f"Sent SIGTERM to daemon pid {pid}; waiting for graceful shutdown.")
+
+    # Poll for process death via os.kill(pid, 0). On POSIX the daemon
+    # catches SIGTERM and runs its cleanup before exiting; on Windows
+    # os.kill(pid, SIGTERM) is TerminateProcess (hard kill) so the
+    # process dies near-instantly. Either way, the OS releases the
+    # lock when the daemon process dies — file content stays but the
+    # exclusive lock is gone.
+    deadline = time.monotonic() + _STOP_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, OSError):
+            click.echo("Daemon stopped cleanly.")
+            return
+        time.sleep(_STOP_POLL_INTERVAL_SECONDS)
+    click.echo(
+        f"Daemon (pid {pid}) did not exit within {_STOP_GRACE_SECONDS}s. "
+        f"It may still be running; investigate via the discovery "
+        f"command before force-killing."
+    )
 
 
 @daemon.command("status")
 def daemon_status() -> None:
     """Show daemon status — running / stopped."""
-    pid_path = Path("~/.foreman/daemon.pid").expanduser()
-    if not pid_path.exists():
+    try:
+        config: Config | None = _load_config_from_env()
+    except (FileNotFoundError, OSError):
+        config = None
+    lock_path = _resolve_lock_path(config)
+    if not lock_path.exists():
         click.echo("Daemon: not running.")
         return
-    pid = int(pid_path.read_text().strip())
+    pid = _read_lock_file_pid(lock_path)
+    if pid is None:
+        click.echo(f"Daemon: lock file at {lock_path} has unreadable content.")
+        return
     try:
         os.kill(pid, 0)
         click.echo(f"Daemon: running (pid {pid}).")
-    except ProcessLookupError:
-        click.echo(f"Daemon: stale pid file (pid {pid} dead). Run `foreman daemon stop` to clean.")
+    except (ProcessLookupError, OSError):
+        click.echo(
+            f"Daemon: stale lock file (pid {pid} dead). "
+            f"The OS released the lock; the next `foreman daemon start` "
+            f"will overwrite the file."
+        )
 
 
 def _load_config_from_env() -> Config:
