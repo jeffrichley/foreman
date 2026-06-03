@@ -202,3 +202,111 @@ def test_no_safety_condition_does_not_emit_surface_help(tmp_path: Path) -> None:
     # Forward-progress catalog might fire; but no safety condition means SURFACE_HELP
     # is not the answer.
     assert evaluate(ctx, rules=RULES) is not Action.SURFACE_HELP
+
+
+# --- Forward-progress rule cases ---
+
+
+def test_dispatch_planner_fires_on_planning_no_pr(tmp_path: Path) -> None:
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(tmp_path, _issue(labels=("foreman:planning",)))
+    assert evaluate(ctx, rules=RULES) is Action.DISPATCH_PLANNER
+
+
+def test_dispatch_planner_skipped_when_already_running(tmp_path: Path) -> None:
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(tmp_path, _issue(labels=("foreman:planning",)))
+    ctx.log.write_action(
+        ticket_id=ctx.ticket_id,
+        project="foreman",
+        rule_name="dispatch_planner",
+        action="dispatch_planner",
+        outcome="running",
+        details={},
+    )
+    assert evaluate(ctx, rules=RULES) is Action.NOOP
+
+
+def test_merge_spec_pr_fires_when_planning_pr_green(tmp_path: Path) -> None:
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:planning",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
+    )
+    assert evaluate(ctx, rules=RULES) is Action.MERGE_SPEC_PR
+
+
+def test_advance_label_to_plan_approved_when_spec_pr_merged(tmp_path: Path) -> None:
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:planning",)),
+        _pr(is_merged=True),
+    )
+    assert evaluate(ctx, rules=RULES) is Action.ADVANCE_LABEL_TO_PLAN_APPROVED
+
+
+def test_advance_label_to_plan_approved_idempotent(tmp_path: Path) -> None:
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:planning",)),
+        _pr(is_merged=True),
+    )
+    # Pre-seed the advance as already done.
+    ctx.log.write_action(
+        ticket_id=ctx.ticket_id,
+        project="foreman",
+        rule_name="advance_label_to_plan_approved",
+        action="advance_label_to_plan_approved",
+        outcome="success",
+        details={"from": "foreman:planning", "to": "foreman:plan-approved"},
+    )
+    assert evaluate(ctx, rules=RULES) is Action.NOOP
+
+
+def test_dispatch_worker_fires_on_plan_approved(tmp_path: Path) -> None:
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(tmp_path, _issue(labels=("foreman:plan-approved",)))
+    assert evaluate(ctx, rules=RULES) is Action.DISPATCH_WORKER
+
+
+def test_dispatch_reviewer_fires_on_impl_review_green(tmp_path: Path) -> None:
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-review",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
+    )
+    assert evaluate(ctx, rules=RULES) is Action.DISPATCH_REVIEWER
+
+
+def test_dispatch_fixer_fires_on_impl_fix_label(tmp_path: Path) -> None:
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-fix",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
+    )
+    assert evaluate(ctx, rules=RULES) is Action.DISPATCH_FIXER
+
+
+def test_merge_impl_pr_fires_on_impl_approved(tmp_path: Path) -> None:
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-approved",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
+    )
+    assert evaluate(ctx, rules=RULES) is Action.MERGE_IMPL_PR
+
+
+def test_advance_label_to_done_when_impl_pr_merged(tmp_path: Path) -> None:
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-approved",)),
+        _pr(is_merged=True),
+    )
+    assert evaluate(ctx, rules=RULES) is Action.ADVANCE_LABEL_TO_DONE

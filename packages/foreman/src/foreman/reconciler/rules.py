@@ -105,7 +105,144 @@ _SAFETY_RULES: tuple[Rule, ...] = (
 )
 
 
-RULES: tuple[Rule, ...] = _SAFETY_RULES  # forward-progress rules append in Task 6
+def _planning_no_pr(ctx: ActionContext) -> bool:
+    return (
+        "foreman:planning" in ctx.issue.labels
+        and ctx.pr is None
+        and not ctx.log.has_unterminated("dispatch_planner", ctx.ticket_id)
+    )
+
+
+def _planning_pr_green(ctx: ActionContext) -> bool:
+    return (
+        "foreman:planning" in ctx.issue.labels
+        and ctx.pr is not None
+        and not ctx.pr.is_merged
+        and ctx.pr.mergeable == "MERGEABLE"
+        and ctx.pr.ci_status == "SUCCESS"
+    )
+
+
+def _spec_pr_merged_label_lagging(ctx: ActionContext) -> bool:
+    if ctx.pr is None or not ctx.pr.is_merged:
+        return False
+    if "foreman:planning" not in ctx.issue.labels:
+        return False
+    if ctx.log.has_recent(
+        "advance_label_to_plan_approved", ctx.ticket_id, within_seconds=3600 * 24
+    ):
+        return False
+    return True
+
+
+def _plan_approved_no_impl_pr(ctx: ActionContext) -> bool:
+    return (
+        "foreman:plan-approved" in ctx.issue.labels
+        and not ctx.log.has_unterminated("dispatch_worker", ctx.ticket_id)
+    )
+
+
+def _impl_review_green(ctx: ActionContext) -> bool:
+    return (
+        "foreman:impl-review" in ctx.issue.labels
+        and ctx.pr is not None
+        and not ctx.pr.is_merged
+        and ctx.pr.ci_status == "SUCCESS"
+        and not ctx.log.has_unterminated("dispatch_reviewer", ctx.ticket_id)
+    )
+
+
+def _impl_fix_pending(ctx: ActionContext) -> bool:
+    return (
+        "foreman:impl-fix" in ctx.issue.labels
+        and ctx.pr is not None
+        and not ctx.log.has_unterminated("dispatch_fixer", ctx.ticket_id)
+    )
+
+
+def _impl_approved_pr_green(ctx: ActionContext) -> bool:
+    return (
+        "foreman:impl-approved" in ctx.issue.labels
+        and ctx.pr is not None
+        and not ctx.pr.is_merged
+        and ctx.pr.mergeable == "MERGEABLE"
+        and ctx.pr.ci_status == "SUCCESS"
+    )
+
+
+def _impl_pr_merged_label_lagging(ctx: ActionContext) -> bool:
+    if ctx.pr is None or not ctx.pr.is_merged:
+        return False
+    if "foreman:impl-approved" not in ctx.issue.labels:
+        return False
+    if ctx.log.has_recent(
+        "advance_label_to_done", ctx.ticket_id, within_seconds=3600 * 24
+    ):
+        return False
+    return True
+
+
+_PROGRESS_RULES: tuple[Rule, ...] = (
+    Rule(
+        name="dispatch_planner",
+        tier=PrecedenceTier.FORWARD_PROGRESS,
+        precedence=100,
+        when=_planning_no_pr,
+        then=Action.DISPATCH_PLANNER,
+    ),
+    Rule(
+        name="merge_spec_pr",
+        tier=PrecedenceTier.FORWARD_PROGRESS,
+        precedence=110,
+        when=_planning_pr_green,
+        then=Action.MERGE_SPEC_PR,
+    ),
+    Rule(
+        name="advance_label_to_plan_approved",
+        tier=PrecedenceTier.FORWARD_PROGRESS,
+        precedence=120,
+        when=_spec_pr_merged_label_lagging,
+        then=Action.ADVANCE_LABEL_TO_PLAN_APPROVED,
+    ),
+    Rule(
+        name="dispatch_worker",
+        tier=PrecedenceTier.FORWARD_PROGRESS,
+        precedence=130,
+        when=_plan_approved_no_impl_pr,
+        then=Action.DISPATCH_WORKER,
+    ),
+    Rule(
+        name="dispatch_reviewer",
+        tier=PrecedenceTier.FORWARD_PROGRESS,
+        precedence=140,
+        when=_impl_review_green,
+        then=Action.DISPATCH_REVIEWER,
+    ),
+    Rule(
+        name="dispatch_fixer",
+        tier=PrecedenceTier.FORWARD_PROGRESS,
+        precedence=150,
+        when=_impl_fix_pending,
+        then=Action.DISPATCH_FIXER,
+    ),
+    Rule(
+        name="merge_impl_pr",
+        tier=PrecedenceTier.FORWARD_PROGRESS,
+        precedence=160,
+        when=_impl_approved_pr_green,
+        then=Action.MERGE_IMPL_PR,
+    ),
+    Rule(
+        name="advance_label_to_done",
+        tier=PrecedenceTier.FORWARD_PROGRESS,
+        precedence=170,
+        when=_impl_pr_merged_label_lagging,
+        then=Action.ADVANCE_LABEL_TO_DONE,
+    ),
+)
+
+
+RULES = _SAFETY_RULES + _PROGRESS_RULES
 
 
 def evaluate(ctx: ActionContext, *, rules: tuple[Rule, ...] | None = None) -> Action:
