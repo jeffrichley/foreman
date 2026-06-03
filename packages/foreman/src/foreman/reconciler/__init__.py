@@ -6,5 +6,6 @@ docs/superpowers/specs/foreman-issue-106-spec.md
 """
 
 from foreman.reconciler.exec_log import ExecutionLog
+from foreman.reconciler.state import IssueState, PRState, ProjectSnapshot
 
-__all__ = ["ExecutionLog"]
+__all__ = ["ExecutionLog", "IssueState", "PRState", "ProjectSnapshot"]
