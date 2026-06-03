@@ -1,6 +1,7 @@
 """Foreman v3 declarative reconciler."""
 
 from foreman.reconciler.actions import Action, ActionContext, execute_action
+from foreman.reconciler.daemon import Reconciler, ReconcilerProject
 from foreman.reconciler.exec_log import ExecutionLog
 from foreman.reconciler.host import ReconcilerHost
 from foreman.reconciler.observer import (
@@ -25,7 +26,9 @@ __all__ = [
     "PRState",
     "PrecedenceTier",
     "ProjectSnapshot",
+    "Reconciler",
     "ReconcilerHost",
+    "ReconcilerProject",
     "RULES",
     "Rule",
     "evaluate",
