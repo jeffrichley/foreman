@@ -46,6 +46,7 @@ import os
 import re
 import time
 from pathlib import Path
+from typing import Literal, cast
 
 from github import Github
 from github.PullRequest import PullRequest
@@ -100,6 +101,7 @@ _LABEL_FAILED = "foreman:failed"
 # distinguishes spec-PR fixes from impl-PR fixes. Each target gets
 # its own entry-label precondition and its own prompt composition.
 _LABEL_IMPL_FIX = "foreman:impl-fix"
+_LABEL_IMPL_REVIEW = "foreman:impl-review"
 
 _FIXER_ENTRY_LABEL_BY_TARGET: dict[str, str] = {
     "spec_pr": _LABEL_SPEC_FIX,
@@ -147,7 +149,7 @@ def _count_fix_attempts(label_names: set[str]) -> int:
     return max(attempts) if attempts else 0
 
 
-def _load_fixer_prompt(target: str = "spec_pr") -> str:
+def _load_fixer_prompt(target: Literal["spec_pr", "impl_pr"] = "spec_pr") -> str:
     """Load the Fixer system prompt for the given ``target``.
 
     ``target="spec_pr"`` (default for back-compat) loads ``fixer.md``
@@ -498,7 +500,10 @@ async def run_fixer(
     spec_doc_content = _read_spec_doc(wt_path, issue_number)
     instructions = load_project_instructions(Path(project.local_clone_path))
 
-    system_prompt = _load_fixer_prompt(target=target)
+    # Pre-flight gate above (_FIXER_ENTRY_LABEL_BY_TARGET[target]) guarantees
+    # target is one of the two Literals by this point; cast to satisfy mypy
+    # without widening _load_fixer_prompt's signature.
+    system_prompt = _load_fixer_prompt(target=cast(Literal["spec_pr", "impl_pr"], target))
     user_prompt = _build_user_prompt(
         issue_title=issue.title or "",
         issue_body=issue.body or "",
@@ -537,7 +542,7 @@ async def run_fixer(
         # labels reflect current-cycle state only.
         if target == "impl_pr":
             issue.remove_from_labels(_LABEL_IMPL_FIX)
-            issue.add_to_labels("foreman:impl-review")
+            issue.add_to_labels(_LABEL_IMPL_REVIEW)
         else:
             issue.remove_from_labels(_LABEL_SPEC_FIX)
             issue.add_to_labels(_LABEL_SPEC_REVIEW)
