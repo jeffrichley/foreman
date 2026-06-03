@@ -330,10 +330,12 @@ def test_worker_run_result_bundles_output_and_orchestrator_state() -> None:
         attempt=1,
         pr_url="https://github.com/owner/repo/pull/101",
         final_did_check_pass=True,
+        final_labels=["foreman:impl-review"],
     )
     assert result.attempt == 1
     assert result.pr_url == "https://github.com/owner/repo/pull/101"
     assert result.final_did_check_pass is True
+    assert result.final_labels == ["foreman:impl-review"]
 
 
 def test_worker_run_result_requires_attempt() -> None:
@@ -342,13 +344,19 @@ def test_worker_run_result_requires_attempt() -> None:
         WorkerRunResult(  # type: ignore[call-arg]
             llm_output=output,
             final_did_check_pass=True,
+            final_labels=[],
         )
 
 
 def test_worker_run_result_pr_url_defaults_to_none_for_incomplete() -> None:
     """Incomplete/spec_invalid runs don't open a PR — pr_url is None."""
     output = WorkerOutput.model_validate(_minimal_incomplete())
-    result = WorkerRunResult(llm_output=output, attempt=1, final_did_check_pass=False)
+    result = WorkerRunResult(
+        llm_output=output,
+        attempt=1,
+        final_did_check_pass=False,
+        final_labels=["foreman:implementing", "foreman:needs-help"],
+    )
     assert result.pr_url is None
 
 
@@ -359,4 +367,5 @@ def test_worker_run_result_final_did_check_pass_is_mandatory() -> None:
         WorkerRunResult(  # type: ignore[call-arg]
             llm_output=output,
             attempt=1,
+            final_labels=[],
         )

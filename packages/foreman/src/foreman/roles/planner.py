@@ -225,4 +225,14 @@ async def run_planner(
         remove=["foreman:plan"],
     )
 
-    return PlannerRunResult(llm_output=llm_output, pr=pr)
+    # foreman#91: compute final_labels deterministically from the
+    # pre-mutation set (``issue.labels`` is the snapshot taken by
+    # ``host.get_issue`` above) + the role's known transitions
+    # (remove ``foreman:plan``, add ``foreman:spec-review``). Avoids
+    # the post-mutation host re-read race that produced stale-
+    # snapshot re-dispatches at the next worker iteration.
+    final_labels = sorted(
+        (set(issue.labels) - {"foreman:plan", "foreman:planning"}) | {"foreman:spec-review"}
+    )
+
+    return PlannerRunResult(llm_output=llm_output, pr=pr, final_labels=final_labels)

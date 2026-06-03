@@ -1542,3 +1542,97 @@ async def test_worker_opens_impl_pr_with_base_from_create_impl_result(
         f"(here: 'main' from the fallback path); got base={create_call['base']!r}"
     )
     assert create_call["head"] == "foreman/impl-42"
+
+
+# ----------------------------------------------------------------------
+# foreman#91 — final_labels is the authoritative post-transition set
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("output_factory", "starting_labels", "expected_final", "check_setup"),
+    [
+        # implemented: spec-ready / implementing cleared, impl-review added,
+        # impl-attempt-1 dropped (per-episode reset), needs-help dropped.
+        ("implemented", ["foreman:spec-ready"], ["foreman:impl-review"], "pass"),
+        # incomplete: implementing kept; impl-attempt-1 + needs-help added.
+        (
+            "incomplete",
+            ["foreman:spec-ready"],
+            sorted(
+                [
+                    "foreman:impl-attempt-1",
+                    "foreman:implementing",
+                    "foreman:needs-help",
+                ]
+            ),
+            "fail",
+        ),
+        # spec_invalid: implementing cleared, spec-fix + needs-help added,
+        # impl-attempt-1 retained (no per-episode reset on invalid).
+        (
+            "spec_invalid",
+            ["foreman:spec-ready"],
+            sorted(
+                [
+                    "foreman:impl-attempt-1",
+                    "foreman:spec-fix",
+                    "foreman:needs-help",
+                ]
+            ),
+            "pass",
+        ),
+    ],
+)
+async def test_run_worker_returns_authoritative_final_labels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    output_factory: str,
+    starting_labels: list[str],
+    expected_final: list[str],
+    check_setup: str,
+) -> None:
+    """foreman#91: ``WorkerRunResult.final_labels`` is the deterministic
+    post-transition set, computed in-process from the role's known
+    mutations. Not a host re-read."""
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    cfg = _make_config(clone)
+    repo, _spec_pr, _issue = _make_fake_repo(
+        issue_number=42, head_sha=head_sha, labels=starting_labels
+    )
+    client = _FakeWorkerClient(repo=repo)
+    registry = _make_registry(client)
+
+    output_map = {
+        "implemented": _implemented_output,
+        "incomplete": _incomplete_output,
+        "spec_invalid": _spec_invalid_output,
+    }
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=output_map[output_factory]())
+
+    if check_setup == "pass":
+        _make_passing_check_command(monkeypatch)
+    else:
+        _make_check_command_pair(
+            monkeypatch,
+            baseline=set(),
+            post={"tests/test_y.py::test_y_returns_z"},
+            post_rc=1,
+        )
+
+    result = await run_worker(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    assert result.final_labels == expected_final

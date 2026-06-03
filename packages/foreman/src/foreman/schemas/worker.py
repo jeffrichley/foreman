@@ -349,3 +349,15 @@ class WorkerRunResult(BaseModel):
             "wrong; the orchestrator's truth wins."
         ),
     )
+    final_labels: list[str] = Field(
+        ...,
+        description=(
+            "Sorted list of foreman labels on the originating issue "
+            "after the role's transitions ran — the authoritative "
+            "post-run label set, computed in-process from the role's "
+            "known mutations, not via a post-mutation host re-read. "
+            "Consumed by ``DaemonRunners.run_*`` to populate the "
+            "worker's ``RoleResult.new_labels`` without the eventual-"
+            "consistency hazard of a GitHub GET right after a write."
+        ),
+    )

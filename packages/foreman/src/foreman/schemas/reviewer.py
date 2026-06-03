@@ -85,3 +85,37 @@ class ReviewerOutput(BaseModel):
         default="medium",
         description="Reviewer's self-rated confidence in the outcome.",
     )
+
+
+class ReviewerRunResult(BaseModel):
+    """What :func:`foreman.roles.reviewer.run_reviewer` returns.
+
+    Bundles the LLM's :class:`ReviewerOutput` with the
+    deterministic post-run label set computed in-process from
+    the role's known transitions. Mirrors
+    :class:`~foreman.schemas.planner.PlannerRunResult` /
+    :class:`~foreman.schemas.fixer.FixerRunResult` /
+    :class:`~foreman.schemas.worker.WorkerRunResult`.
+
+    The ``final_labels`` field is the fix for foreman#91:
+    ``DaemonRunners.run_reviewer`` used to populate the
+    worker's ``RoleResult.new_labels`` via a fresh
+    ``host.get_issue_labels`` GET, which raced GitHub's
+    eventual-consistency window and produced stale-snapshot
+    re-dispatches at the next worker iteration.
+    """
+
+    llm_output: ReviewerOutput = Field(
+        ...,
+        description="The structured output the Reviewer LLM produced.",
+    )
+    final_labels: list[str] = Field(
+        ...,
+        description=(
+            "Sorted list of foreman labels on the originating issue "
+            "after the Reviewer's clean→spec-ready/ready-for-merge "
+            "or needs_fix→spec-fix/impl-fix transition ran. The "
+            "authoritative post-run label set, computed in-process; "
+            "not a remote re-read."
+        ),
+    )

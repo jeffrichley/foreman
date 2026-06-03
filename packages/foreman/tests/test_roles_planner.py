@@ -667,3 +667,54 @@ async def test_run_planner_passes_none_when_dev_base_branch_unset(
         "run_planner must pass dev_base_branch as a kwarg even when None"
     )
     assert captured["dev_base_branch"] is None
+
+
+# ----------------------------------------------------------------------
+# foreman#91 — final_labels is the authoritative post-transition set
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_planner_returns_authoritative_final_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """foreman#91: ``PlannerRunResult.final_labels`` is the sorted list
+    of ``(initial_issue_labels - {plan, planning}) | {spec-review}`` —
+    computed in-process from the role's known transitions, not via a
+    post-mutation host re-read."""
+    clone = tmp_path / "clone"
+    _seed_clone(clone, origin_path=tmp_path / "origin.git")
+    monkeypatch.setenv("FOREMAN_PLANNER_APP_ID", "123456")
+
+    cfg = _make_config(clone)
+    fake_host = _FakeHostProvider()
+    # Pre-mutation snapshot the host returns includes the in-flight
+    # planning sentinel plus an external label that must survive the
+    # transition unchanged.
+    fake_host.issue_to_return = IssueRef(
+        number=42,
+        title="SSML",
+        body="Add SSML support.",
+        labels=["foreman:plan", "foreman:planning", "external-tag"],
+        repo_slug="jeffrichley/voice",
+    )
+    fake_registry = MagicMock()
+    fake_registry.get_host_provider.return_value = fake_host
+
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
+
+    result = await run_planner(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=fake_registry,
+    )
+
+    # Deterministic: drop foreman:plan + foreman:planning, add
+    # foreman:spec-review, keep external-tag.
+    assert result.final_labels == sorted(
+        ["external-tag", "foreman:spec-review"]
+    )

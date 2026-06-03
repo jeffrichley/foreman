@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from foreman.schemas.reviewer import Finding, ReviewerOutput
+from foreman.schemas.reviewer import Finding, ReviewerOutput, ReviewerRunResult
 
 
 def _minimal_finding_dict() -> dict[str, object]:
@@ -99,3 +99,42 @@ def test_reviewer_output_json_schema_is_serializable() -> None:
     assert "outcome" in schema["properties"]
     assert "findings" in schema["properties"]
     assert "review_comment" in schema["properties"]
+
+
+# ----------------------------------------------------------------------
+# ReviewerRunResult (foreman#91 wrapper)
+# ----------------------------------------------------------------------
+
+
+def test_reviewer_run_result_carries_llm_output_and_final_labels() -> None:
+    llm = ReviewerOutput.model_validate(_minimal_clean_output_dict())
+    result = ReviewerRunResult(
+        llm_output=llm,
+        final_labels=["foreman:spec-ready"],
+    )
+    assert result.llm_output.outcome == "clean"
+    assert result.final_labels == ["foreman:spec-ready"]
+
+
+def test_reviewer_run_result_rejects_non_list_final_labels() -> None:
+    """``final_labels`` must be a ``list[str]`` — a single string MUST
+    raise (not be coerced to a 1-char list)."""
+    llm = ReviewerOutput.model_validate(_minimal_clean_output_dict())
+    with pytest.raises(ValidationError, match="final_labels"):
+        ReviewerRunResult.model_validate(
+            {"llm_output": llm.model_dump(), "final_labels": "foreman:spec-ready"}
+        )
+
+
+def test_reviewer_run_result_rejects_non_string_label_elements() -> None:
+    llm = ReviewerOutput.model_validate(_minimal_clean_output_dict())
+    with pytest.raises(ValidationError, match="final_labels"):
+        ReviewerRunResult.model_validate(
+            {"llm_output": llm.model_dump(), "final_labels": [42]}
+        )
+
+
+def test_reviewer_run_result_requires_final_labels() -> None:
+    llm = ReviewerOutput.model_validate(_minimal_clean_output_dict())
+    with pytest.raises(ValidationError, match="final_labels"):
+        ReviewerRunResult.model_validate({"llm_output": llm.model_dump()})

@@ -502,10 +502,17 @@ async def run_worker(
             f"Existing attempts: {previous_attempts}."
         )
 
+    # foreman#91: track the in-process label set parallel to each
+    # remote add/remove so the role can return the authoritative
+    # post-transition set in ``WorkerRunResult.final_labels``. Avoids
+    # the eventual-consistency race of a post-mutation host re-read.
+    current_labels: set[str] = set(issue_labels)
+
     # Stamp the new attempt label IMMEDIATELY so it's visible even if
     # the LLM dispatch crashes mid-run. Audit-trail before audit-loss.
     attempt_label = f"foreman:impl-attempt-{attempt}"
     issue.add_to_labels(attempt_label)
+    current_labels.add(attempt_label)
 
     # Resolve the spec branch + spec PR (PR may be None — implementation
     # proceeds either way; the impl PR body's spec-PR reference adapts).
@@ -556,7 +563,9 @@ async def run_worker(
             issue.remove_from_labels(_entry_label)
         except Exception:
             pass
+        current_labels.discard(_entry_label)
     issue.add_to_labels(_LABEL_IMPLEMENTING)
+    current_labels.add(_LABEL_IMPLEMENTING)
 
     instructions = load_project_instructions(Path(project.local_clone_path))
 
@@ -664,9 +673,17 @@ async def run_worker(
         # counter reset: drop all impl-attempt-N labels + needs-help so
         # any future re-trigger starts with a fresh 3-attempt budget.
         issue.remove_from_labels(_LABEL_IMPLEMENTING)
+        current_labels.discard(_LABEL_IMPLEMENTING)
         issue.add_to_labels(_LABEL_IMPL_REVIEW)
+        current_labels.add(_LABEL_IMPL_REVIEW)
         all_known_labels = _label_names(issue_labels, attempt_label)
         _clear_impl_attempt_and_help_labels(issue, all_known_labels)
+        for _label_name in all_known_labels:
+            if (
+                _label_name.startswith("foreman:impl-attempt-")
+                or _label_name == _LABEL_NEEDS_HELP
+            ):
+                current_labels.discard(_label_name)
     elif final_outcome == "spec_invalid":
         # D6: post the spec_invalid_reason as a comment on the SPEC PR
         # (not the issue). The Worker's branch is left in place (commits,
@@ -681,6 +698,7 @@ async def run_worker(
                 llm_output.spec_invalid_reason,
             )
         issue.remove_from_labels(_LABEL_IMPLEMENTING)
+        current_labels.discard(_LABEL_IMPLEMENTING)
         # Entry labels were removed at dispatch time; idempotent re-remove
         # of BOTH so the ticket cleanly enters spec-fix regardless of which
         # entry path the Worker came in through (manual CLI vs daemon).
@@ -689,16 +707,21 @@ async def run_worker(
                 issue.remove_from_labels(_entry_label)
             except Exception:
                 pass
+            current_labels.discard(_entry_label)
         issue.add_to_labels(_LABEL_SPEC_FIX)
+        current_labels.add(_LABEL_SPEC_FIX)
         issue.add_to_labels(_LABEL_NEEDS_HELP)
+        current_labels.add(_LABEL_NEEDS_HELP)
     else:
         # incomplete: keep implementing so a re-trigger doesn't lose the
         # cycle indicator; add needs-help so observers know to look. On
         # the third attempt, also stamp foreman:failed so the queue
         # surfaces it for human triage.
         issue.add_to_labels(_LABEL_NEEDS_HELP)
+        current_labels.add(_LABEL_NEEDS_HELP)
         if attempt == max_impl_attempts:
             issue.add_to_labels(_LABEL_FAILED)
+            current_labels.add(_LABEL_FAILED)
 
     # Stats logging — write regardless of outcome. The orchestrator's
     # post-verification truth is what we persist (final_outcome +
@@ -746,4 +769,5 @@ async def run_worker(
         attempt=attempt,
         pr_url=pr_url,
         final_did_check_pass=final_did_check_pass,
+        final_labels=sorted(current_labels),
     )

@@ -36,11 +36,36 @@ def _config(tmp_path: Path) -> Config:
     )
 
 
+def _make_role_result(
+    *, final_labels: list[str], dump: dict | None = None
+) -> MagicMock:
+    """Build a fake ``*RunResult`` carrying ``final_labels`` + a stub
+    ``llm_output`` whose ``model_dump`` returns ``dump`` (default ``{}``).
+
+    The role-mock returns this object; ``DaemonRunners`` reads
+    ``result.final_labels`` (the authoritative post-transition set, per
+    foreman#91) and ``result.llm_output.model_dump()`` (for the audit
+    row). No round-trip through ``host.get_issue_labels``.
+    """
+    llm_output = MagicMock()
+    llm_output.model_dump = MagicMock(return_value=dump if dump is not None else {})
+    result = MagicMock()
+    result.final_labels = list(final_labels)
+    result.llm_output = llm_output
+    return result
+
+
 @pytest.fixture
 def host() -> MagicMock:
     """Fake GitHubDaemonHost with the methods the runners use."""
     m = MagicMock()
-    m.get_issue_labels = MagicMock(return_value=["foreman:spec-review"])
+    # NOTE: ``get_issue_labels`` is intentionally a MagicMock so tests
+    # can assert it is NOT called by the runners — foreman#91 moved the
+    # post-run label source from a host re-read to role-authoritative
+    # ``final_labels``. The method stays on the protocol because
+    # reconciliation + the poller still legitimately read labels via
+    # other code paths.
+    m.get_issue_labels = MagicMock(return_value=[])
     m.find_pr_for_branch = MagicMock(return_value=18)
     m.merge_pull_request = MagicMock()
     m.add_issue_label = MagicMock()
@@ -59,7 +84,12 @@ def host() -> MagicMock:
 @pytest.mark.asyncio
 async def test_run_planner_calls_role_with_issue_url(tmp_path: Path, host: MagicMock) -> None:
     config = _config(tmp_path)
-    mock_role = AsyncMock(return_value=MagicMock(model_dump=lambda: {"pr": 18}))
+    mock_role = AsyncMock(
+        return_value=_make_role_result(
+            final_labels=["foreman:spec-review"],
+            dump={"pr": 18},
+        )
+    )
 
     runners = DaemonRunners(
         host=host,
@@ -73,8 +103,11 @@ async def test_run_planner_calls_role_with_issue_url(tmp_path: Path, host: Magic
     kwargs = mock_role.await_args.kwargs
     assert kwargs["issue_url"] == "https://github.com/jeffrichley/voice/issues/42"
     assert kwargs["project_name"] == "voice"
-    # New labels are read back from the host after the role advances them.
+    # foreman#91: the new label set comes from the role's ``final_labels``
+    # field, not from a host re-read. The host's ``get_issue_labels`` is
+    # never consulted on this path.
     assert "foreman:spec-review" in result.new_labels
+    host.get_issue_labels.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -82,7 +115,9 @@ async def test_run_reviewer_with_spec_target_calls_role_with_spec_pr_url(
     tmp_path: Path, host: MagicMock
 ) -> None:
     config = _config(tmp_path)
-    mock_role = AsyncMock(return_value=MagicMock(model_dump=lambda: {}))
+    mock_role = AsyncMock(
+        return_value=_make_role_result(final_labels=["foreman:spec-ready"])
+    )
     host.find_pr_for_branch.return_value = 99
 
     runners = DaemonRunners(
@@ -104,7 +139,9 @@ async def test_run_reviewer_with_impl_target_uses_impl_branch(
     tmp_path: Path, host: MagicMock
 ) -> None:
     config = _config(tmp_path)
-    mock_role = AsyncMock(return_value=MagicMock(model_dump=lambda: {}))
+    mock_role = AsyncMock(
+        return_value=_make_role_result(final_labels=["foreman:ready-for-merge"])
+    )
     host.find_pr_for_branch.return_value = 100
 
     runners = DaemonRunners(
@@ -142,6 +179,47 @@ async def test_run_reviewer_raises_when_no_pr_for_branch(
 
 
 @pytest.mark.asyncio
+async def test_run_reviewer_uses_role_final_labels_not_host_reread(
+    tmp_path: Path, host: MagicMock
+) -> None:
+    """foreman#91: ``DaemonRunners.run_reviewer`` must populate
+    ``new_labels`` from the role's ``final_labels`` field, not via a
+    fresh ``host.get_issue_labels`` GET that races GitHub's eventual-
+    consistency window.
+
+    Setup: stub ``host.get_issue_labels`` to return a STALE label set
+    (the bug scenario — the GET happened just after the role's write
+    and returned the OLD labels). Stub the reviewer role to return a
+    wrapper whose ``final_labels`` is the FRESH set the role actually
+    wrote. The runner must trust the role's value, not the host's.
+    """
+    config = _config(tmp_path)
+    host.find_pr_for_branch.return_value = 99
+    # STALE — the bug scenario.
+    host.get_issue_labels.return_value = ["foreman:impl-review"]
+    # FRESH — the role-authoritative truth.
+    mock_role = AsyncMock(
+        return_value=_make_role_result(final_labels=["foreman:ready-for-merge"])
+    )
+
+    runners = DaemonRunners(
+        host=host,
+        worktrees_root=tmp_path / "worktrees",
+        _reviewer=mock_role,
+    )
+
+    result = await runners.run_reviewer(
+        ticket=_ticket(labels={"foreman:impl-review"}),
+        config=config,
+        target="impl_pr",
+    )
+
+    assert result.new_labels == frozenset({"foreman:ready-for-merge"})
+    # The post-mutation host re-read MUST be gone — that's the whole fix.
+    host.get_issue_labels.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_run_fixer_forwards_target_to_role_function(
     tmp_path: Path, host: MagicMock
 ) -> None:
@@ -151,7 +229,9 @@ async def test_run_fixer_forwards_target_to_role_function(
     ``foreman:impl-fix``-labeled issues, and the autonomous
     Fixer-on-impl flow stalls forever."""
     config = _config(tmp_path)
-    mock_role = AsyncMock(return_value=MagicMock(model_dump=lambda: {}))
+    mock_role = AsyncMock(
+        return_value=_make_role_result(final_labels=["foreman:impl-review"])
+    )
 
     runners = DaemonRunners(
         host=host,
@@ -172,11 +252,12 @@ async def test_merge_spec_pr_merges_and_sets_implementing_ready(
 ) -> None:
     config = _config(tmp_path)
     host.find_pr_for_branch.return_value = 18
-    host.get_issue_labels.return_value = ["foreman:implementing-ready"]
 
     runners = DaemonRunners(host=host, worktrees_root=tmp_path / "worktrees")
 
-    result = await runners.merge_spec_pr(ticket=_ticket(), config=config)
+    result = await runners.merge_spec_pr(
+        ticket=_ticket(labels={"foreman:spec-ready"}), config=config
+    )
 
     host.find_pr_for_branch.assert_called_once_with("jeffrichley/voice", "foreman/issue-42")
     host.merge_pull_request.assert_called_once_with("jeffrichley/voice", 18)
@@ -189,16 +270,43 @@ async def test_merge_spec_pr_merges_and_sets_implementing_ready(
 
 
 @pytest.mark.asyncio
+async def test_merge_spec_pr_uses_deterministic_labels_not_host_reread(
+    tmp_path: Path, host: MagicMock
+) -> None:
+    """foreman#91: ``DaemonRunners.merge_spec_pr`` computes
+    ``new_labels`` deterministically from ``ticket.labels`` + the merge
+    transitions (drop ``foreman:spec-ready``, add
+    ``foreman:implementing-ready``). The post-mutation host re-read is
+    gone.
+    """
+    config = _config(tmp_path)
+    host.find_pr_for_branch.return_value = 18
+    # STALE — would have been read by the old code path. Assert below
+    # that this value is NOT what populates ``new_labels``.
+    host.get_issue_labels.return_value = ["foreman:spec-ready"]
+
+    runners = DaemonRunners(host=host, worktrees_root=tmp_path / "worktrees")
+
+    result = await runners.merge_spec_pr(
+        ticket=_ticket(labels={"foreman:spec-ready"}), config=config
+    )
+
+    assert result.new_labels == frozenset({"foreman:implementing-ready"})
+    host.get_issue_labels.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_merge_impl_pr_merges_and_closes_issue(
     tmp_path: Path, host: MagicMock
 ) -> None:
     config = _config(tmp_path)
     host.find_pr_for_branch.return_value = 25
-    host.get_issue_labels.return_value = []
 
     runners = DaemonRunners(host=host, worktrees_root=tmp_path / "worktrees")
 
-    result = await runners.merge_impl_pr(ticket=_ticket(), config=config)
+    result = await runners.merge_impl_pr(
+        ticket=_ticket(labels={"foreman:ready-for-merge"}), config=config
+    )
 
     host.find_pr_for_branch.assert_called_once_with(
         "jeffrichley/voice", "foreman/impl-42"
@@ -206,6 +314,30 @@ async def test_merge_impl_pr_merges_and_closes_issue(
     host.merge_pull_request.assert_called_once_with("jeffrichley/voice", 25)
     host.close_issue.assert_called_once_with("jeffrichley/voice", 42)
     assert result.new_labels == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_merge_impl_pr_uses_deterministic_labels_not_host_reread(
+    tmp_path: Path, host: MagicMock
+) -> None:
+    """foreman#91 symmetric: ``merge_impl_pr`` computes ``new_labels``
+    deterministically from ``ticket.labels`` minus
+    ``foreman:ready-for-merge``. The issue is closed, so the resulting
+    set is empty — ``next_action`` will return ``None`` and the queue
+    parks the ticket (correct terminal state).
+    """
+    config = _config(tmp_path)
+    host.find_pr_for_branch.return_value = 25
+    host.get_issue_labels.return_value = ["foreman:ready-for-merge"]
+
+    runners = DaemonRunners(host=host, worktrees_root=tmp_path / "worktrees")
+
+    result = await runners.merge_impl_pr(
+        ticket=_ticket(labels={"foreman:ready-for-merge"}), config=config
+    )
+
+    assert result.new_labels == frozenset()
+    host.get_issue_labels.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -233,7 +365,6 @@ async def test_merge_impl_pr_retargets_base_when_spec_pr_merged(
     """
     config = _config(tmp_path)
     host.find_pr_for_branch.return_value = 25
-    host.get_issue_labels.return_value = []
     # Impl PR is still pointing at the spec branch (the Worker creates it
     # this way per the stacked-PR pattern).
     host.get_pr_base_ref.return_value = "foreman/issue-42"
@@ -265,7 +396,6 @@ async def test_merge_impl_pr_skips_retarget_when_spec_pr_still_open(
     """
     config = _config(tmp_path)
     host.find_pr_for_branch.return_value = 25
-    host.get_issue_labels.return_value = []
     host.get_pr_base_ref.return_value = "foreman/issue-42"
     # Spec PR is still open (not yet merged).
     host.is_pr_merged_for_branch.return_value = False
@@ -291,7 +421,6 @@ async def test_merge_impl_pr_skips_retarget_when_base_already_default(
     """
     config = _config(tmp_path)
     host.find_pr_for_branch.return_value = 25
-    host.get_issue_labels.return_value = []
     # Already on the default branch.
     host.get_pr_base_ref.return_value = "main"
     # is_pr_merged_for_branch should not even be consulted, but make it
