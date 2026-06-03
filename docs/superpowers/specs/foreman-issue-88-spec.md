@@ -31,6 +31,15 @@ both can coexist without coordination.
   field, adjacent to the existing `log_path` and `sqlite_path`
   defaults, so tests and multi-daemon setups can override the path
   via the config file.
+- The lock-file path is also overridable via the `FOREMAN_LOCK_PATH`
+  environment variable, matching the existing `FOREMAN_CONFIG` /
+  `FOREMAN_WORKTREES_ROOT` pattern (issue #88 acceptance criterion
+  #4). Precedence: `FOREMAN_LOCK_PATH` env var (when set and
+  non-empty) wins over `DaemonConfig.lock_path` from the config
+  file, which in turn wins over the field default. The env var is
+  read inside `daemon_start` (cli.py), not in `_load_config_from_env`,
+  so the resolution is local to the one command that needs it —
+  same shape as `_default_worktrees_root()` and `_default_config_path()`.
 - A new module `packages/foreman/src/foreman/daemon_lock.py` provides
   a `DaemonLock` context manager that acquires an OS-level exclusive
   lock on a configurable path (auto-releases on process death) and
@@ -46,12 +55,14 @@ both can coexist without coordination.
   - On lock acquisition failure: reads the existing file's PID
     content (without holding the lock), raises
     `click.ClickException` so click exits non-zero, with message
-    `"Foreman daemon is already running (pid <N>). Use `foreman
+    `"Foreman daemon is already running (pid: <N>). Use `foreman
     daemon stop` to stop it first."`. When the file content is
     unreadable / not an int, the message falls back to
     `"Foreman daemon is already running (pid: unknown). Use
     `foreman daemon stop` to stop it first."` rather than blowing
-    up.
+    up. The `(pid: <token>)` form is canonical — same shape for
+    the known-PID case and the unknown case, so the Worker tests
+    one substring, not two.
 - After a daemon crash (lock file present, but lock holder dead),
   the next `foreman daemon start` succeeds and reuses the file —
   the OS released the lock at the dead process's death, so the
@@ -103,6 +114,18 @@ both can coexist without coordination.
     attempt acquisition and assert success (the lock was released
     at the OS level by the holder's death). This is the
     crash-recovery acceptance criterion.
+- A unit test `test_daemon_start_honors_foreman_lock_path_env`
+  in `packages/foreman/tests/test_cli.py` covers the env-var
+  precedence (acceptance criterion #4): write a config with
+  `lock_path = "<tmp_path>/from_config.lock"`, set
+  `FOREMAN_LOCK_PATH = "<tmp_path>/from_env.lock"`, monkeypatch
+  `_daemon_run` with a spy that records which lock file exists
+  mid-run, invoke `daemon start --max-iterations 1` via
+  `CliRunner`, assert the spy saw the env-var path's file and
+  NOT the config-file path's file. A second assertion sets
+  `FOREMAN_LOCK_PATH = ""` (empty string) and asserts the
+  config-file path is used instead (empty env value is treated
+  as unset).
 - Helper tests in `packages/foreman/tests/test_cli.py`:
   - `test_daemon_start_refuses_when_lock_held` — write a fake lock
     file path into the test config, hold the lock from inside the
@@ -125,7 +148,11 @@ both can coexist without coordination.
     — pre-create the lock file with `"garbage not a pid"`,
     hold the OS lock (via a thread or test fixture that owns the
     lock), invoke `daemon start --max-iterations 1`, assert the
-    output contains `"pid: unknown"` and the exit code is non-zero.
+    exit code is non-zero AND
+    `_format_already_running_message(None) in result.output` (the
+    test uses the helper to compute the expected substring, which
+    locks in the canonical `(pid: unknown)` form and avoids
+    duplicating the message text in the test).
 - The existing test
   `test_daemon_start_foreground_runs_and_exits_clean`
   (`packages/foreman/tests/test_cli.py:440-456`) is updated to add
@@ -242,7 +269,10 @@ The `daemon_start` function's new shape:
 def daemon_start(max_iterations: int | None) -> None:
     """Start the daemon in foreground."""
     config = _load_config_from_env()
-    lock_path = Path(config.daemon.lock_path).expanduser()
+    # FOREMAN_LOCK_PATH env var wins over config.daemon.lock_path,
+    # mirroring the FOREMAN_CONFIG / FOREMAN_WORKTREES_ROOT pattern.
+    lock_path_str = os.environ.get("FOREMAN_LOCK_PATH") or config.daemon.lock_path
+    lock_path = Path(lock_path_str).expanduser()
     try:
         with DaemonLock(lock_path):
             asyncio.run(_daemon_run(config=config, max_iterations=max_iterations))
@@ -441,16 +471,20 @@ depth. The system is robust if either layer holds.
 
 
    def _format_already_running_message(pid: int | None) -> str:
+       # Canonical form: "(pid: <token>)" for both known PID and
+       # the unknown fallback (issue #88 acceptance criterion).
        pid_part = str(pid) if pid is not None else "unknown"
        return (
-           f"Foreman daemon is already running (pid {pid_part}). "
+           f"Foreman daemon is already running (pid: {pid_part}). "
            f"Use `foreman daemon stop` to stop it first."
        )
    ```
 
 3. Update `daemon_start` in
    `packages/foreman/src/foreman/cli.py` (currently lines 311-321)
-   to wrap the asyncio run in a `DaemonLock` context manager:
+   to wrap the asyncio run in a `DaemonLock` context manager, and
+   honor the `FOREMAN_LOCK_PATH` env-var override (acceptance
+   criterion #4):
 
    ```python
    @daemon.command("start")
@@ -465,7 +499,12 @@ depth. The system is robust if either layer holds.
        from foreman.daemon_lock import DaemonLock, LockAcquisitionError
 
        config = _load_config_from_env()
-       lock_path = Path(config.daemon.lock_path).expanduser()
+       # FOREMAN_LOCK_PATH env var wins over config.daemon.lock_path
+       # (matches the FOREMAN_CONFIG / FOREMAN_WORKTREES_ROOT
+       # override pattern at the top of cli.py). An empty-string
+       # env value is treated as unset.
+       lock_path_str = os.environ.get("FOREMAN_LOCK_PATH") or config.daemon.lock_path
+       lock_path = Path(lock_path_str).expanduser()
        try:
            with DaemonLock(lock_path):
                asyncio.run(
@@ -780,17 +819,61 @@ depth. The system is robust if either layer holds.
            pass  # If this raises, the previous run leaked the lock.
 
 
+   def test_daemon_start_honors_foreman_lock_path_env(
+       tmp_path: Path, monkeypatch
+   ) -> None:
+       """FOREMAN_LOCK_PATH env var overrides config.daemon.lock_path
+       (issue #88 acceptance criterion #4)."""
+       from foreman.daemon_lock import DaemonLock
+
+       config_lock = tmp_path / "from_config.lock"
+       env_lock = tmp_path / "from_env.lock"
+       config_path = tmp_path / "config.toml"
+       config_path.write_text(
+           f'[admin]\ngithub_token_env = "X"\n'
+           f'[daemon]\n'
+           f'lock_path = "{config_lock.as_posix()}"\n'
+           f'sqlite_path = "{(tmp_path / "f.sqlite").as_posix()}"\n'
+           f'log_path = "{(tmp_path / "d.log").as_posix()}"\n'
+       )
+       monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+
+       captured: dict[str, bool] = {}
+
+       async def spy(*, config, max_iterations):  # noqa: ARG001
+           captured["env_lock_exists"] = env_lock.exists()
+           captured["config_lock_exists"] = config_lock.exists()
+
+       monkeypatch.setattr("foreman.cli._daemon_run", spy)
+
+       # Case 1: env var set → env path wins.
+       monkeypatch.setenv("FOREMAN_LOCK_PATH", str(env_lock))
+       result = CliRunner().invoke(
+           cli, ["daemon", "start", "--max-iterations", "1"]
+       )
+       assert result.exit_code == 0, result.output
+       assert captured["env_lock_exists"] is True
+       assert captured["config_lock_exists"] is False
+
+       # Case 2: env var empty → falls back to config.
+       captured.clear()
+       env_lock.unlink(missing_ok=True)
+       monkeypatch.setenv("FOREMAN_LOCK_PATH", "")
+       result = CliRunner().invoke(
+           cli, ["daemon", "start", "--max-iterations", "1"]
+       )
+       assert result.exit_code == 0, result.output
+       assert captured["config_lock_exists"] is True
+       assert captured["env_lock_exists"] is False
+
+
    def test_daemon_start_handles_unreadable_lock_content_gracefully(
        tmp_path: Path, monkeypatch
    ) -> None:
        """When the lock holder hasn't written a valid PID yet, the
        error message falls back to 'pid: unknown' instead of
        crashing."""
-       from foreman.daemon_lock import (
-           DaemonLock,
-           LockAcquisitionError,
-           _format_already_running_message,
-       )
+       from foreman.daemon_lock import _format_already_running_message
 
        lock_path = tmp_path / "d.lock"
        # Write garbage content before acquiring the lock.
@@ -828,7 +911,10 @@ depth. The system is robust if either layer holds.
                cli, ["daemon", "start", "--max-iterations", "1"]
            )
            assert result.exit_code != 0
-           assert "pid unknown" in result.output or "pid: unknown" in result.output
+           # Assert the single canonical "(pid: unknown)" form by
+           # computing the expected message from the helper, which
+           # also exercises the helper itself.
+           assert _format_already_running_message(None) in result.output
        finally:
            os.close(fd)
    ```
@@ -847,9 +933,9 @@ depth. The system is robust if either layer holds.
 |---|---|
 | `packages/foreman/src/foreman/config.py` | Add `lock_path: str = Field(default="~/.foreman/daemon.lock")` to `DaemonConfig`, adjacent to the existing `log_path` / `sqlite_path` defaults. No validator. |
 | `packages/foreman/src/foreman/daemon_lock.py` | New module. Defines `LockAcquisitionError` exception and `DaemonLock` context manager. Internal helpers `_acquire_exclusive_nonblocking` (POSIX/Windows platform branch), `_read_holder_pid`, `_format_already_running_message`. ~80 lines including docstrings. No third-party deps. |
-| `packages/foreman/src/foreman/cli.py` | Wrap `daemon_start`'s asyncio.run in `DaemonLock(lock_path)` context manager. Translate `LockAcquisitionError` into `click.ClickException` so click exits non-zero with the operator-facing message. Add `if __name__ == "__main__": main()` guard at the bottom (no-op merge if foreman#72 lands first). |
+| `packages/foreman/src/foreman/cli.py` | Wrap `daemon_start`'s asyncio.run in `DaemonLock(lock_path)` context manager. Resolve `lock_path` from `FOREMAN_LOCK_PATH` env var (matching `FOREMAN_CONFIG` / `FOREMAN_WORKTREES_ROOT` precedent), falling back to `config.daemon.lock_path` and then the field default. Translate `LockAcquisitionError` into `click.ClickException` so click exits non-zero with the operator-facing message. Add `if __name__ == "__main__": main()` guard at the bottom (no-op merge if foreman#72 lands first). |
 | `packages/foreman/tests/test_daemon_lock.py` | New test file. Five unit tests: `test_daemon_lock_acquires_and_releases`, `test_daemon_lock_writes_current_pid`, `test_daemon_lock_creates_parent_directory`, `test_daemon_lock_raises_when_held_by_another_process` (spawns a subprocess holder), `test_daemon_lock_succeeds_after_crashed_holder` (kills the holder and asserts re-acquisition works). |
-| `packages/foreman/tests/test_cli.py` | Add `lock_path` to the existing `test_daemon_start_foreground_runs_and_exits_clean` config. Add four new tests: `test_daemon_start_refuses_when_lock_held` (in-process CliRunner), `test_daemon_start_acquires_lock_and_releases_on_exit` (mid-run spy + post-run re-acquisition), `test_daemon_start_handles_unreadable_lock_content_gracefully` (garbage content), `test_daemon_start_refuses_second_instance` (subprocess end-to-end, cross-platform). Add `import os`, `import sys`, `import pytest` at top if missing. |
+| `packages/foreman/tests/test_cli.py` | Add `lock_path` to the existing `test_daemon_start_foreground_runs_and_exits_clean` config. Add five new tests: `test_daemon_start_refuses_when_lock_held` (in-process CliRunner), `test_daemon_start_acquires_lock_and_releases_on_exit` (mid-run spy + post-run re-acquisition), `test_daemon_start_honors_foreman_lock_path_env` (env-var precedence per acceptance criterion #4, both env-set and env-empty cases), `test_daemon_start_handles_unreadable_lock_content_gracefully` (garbage content, asserts canonical `(pid: unknown)` form via `_format_already_running_message(None)`), `test_daemon_start_refuses_second_instance` (subprocess end-to-end, cross-platform). Add `import os`, `import sys`, `import pytest` at top if missing. |
 
 ## Alternatives considered
 
@@ -902,15 +988,15 @@ depth. The system is robust if either layer holds.
   configs.
 
 - **Make the lock file path env-var-overridable
-  (`FOREMAN_LOCK_PATH`) like `FOREMAN_CONFIG`.** Rejected: the
-  existing per-field paths (`log_path`, `sqlite_path`) are
-  config-file-only — the env-var override pattern is reserved for
-  the config-file path itself and the worktrees-root. Adding
-  `FOREMAN_LOCK_PATH` would be a one-off inconsistency. If
-  operators need env-var-driven daemon paths, that's a separate
-  cleanup that touches all the path fields uniformly. Tests
-  already use config-file overrides via `FOREMAN_CONFIG=<tmp>`,
-  so the test surface is fine.
+  (`FOREMAN_LOCK_PATH`) like `FOREMAN_CONFIG`.** Accepted — see
+  acceptance criteria. Issue #88's 4th acceptance criterion
+  explicitly asks for "the same env override pattern as
+  `FOREMAN_CONFIG` and the state-dir path
+  (`FOREMAN_WORKTREES_ROOT`)". The override is implemented in
+  `daemon_start` (cli.py) with the env value taking precedence
+  over `DaemonConfig.lock_path`. The `log_path` / `sqlite_path`
+  fields stay config-file-only for now; if operators need env
+  overrides for those too, that's a separate uniform cleanup.
 
 - **Delete the lock file on context-manager exit.** Rejected:
   deleting the file races a concurrent `daemon start` that opens
@@ -959,11 +1045,13 @@ it.)
   queue coordination aren't designed for that yet. Multi-daemon
   is a v2 feature; this spec doesn't preclude it.
 
-- **Env-var override `FOREMAN_LOCK_PATH`.** See alternatives —
-  consistency with `log_path` / `sqlite_path` (which are
-  config-file-only) wins. If env-var overrides land, they should
-  land uniformly across all daemon path fields in a separate
-  spec.
+- **Env-var overrides for `log_path` and `sqlite_path`.** This
+  spec adds `FOREMAN_LOCK_PATH` only, because that override is
+  explicitly required by issue #88's acceptance criterion #4. The
+  parallel `FOREMAN_LOG_PATH` / `FOREMAN_SQLITE_PATH` overrides
+  for the other daemon path fields are not requested by this
+  issue; if operators want them, they should land uniformly
+  across all daemon path fields in a separate spec.
 
 - **Documenting the lock file in
   `docs/superpowers/specs/foreman-v1-architectural-spec.md` or
