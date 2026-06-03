@@ -207,3 +207,26 @@ def test_recover_orphaned_running_rows_marks_errored(tmp_path: Path) -> None:
 
     assert recovered == 1
     assert log.has_unterminated("dispatch_worker", "jeffrichley/foreman#143") is False
+
+
+def test_has_recent_returns_false_outside_window(tmp_path: Path) -> None:
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    log.write_action(
+        ticket_id="jeffrichley/foreman#143",
+        project="foreman",
+        rule_name="surface_help_rule",
+        action="surface_help",
+        outcome="success",
+        details={},
+    )
+    # Window of 0 seconds means even a just-inserted row is outside it
+    # (strict ts > cutoff requires the row to be older than the cutoff).
+    assert log.has_recent("surface_help", "jeffrichley/foreman#143", within_seconds=0) is False
+
+
+def test_terminate_action_raises_on_unknown_parent(tmp_path: Path) -> None:
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    with pytest.raises(ValueError, match="No log row with id="):
+        log.terminate_action(parent_log_id=9999, outcome="success", details={})

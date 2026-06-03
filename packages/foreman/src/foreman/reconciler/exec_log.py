@@ -15,6 +15,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+# Outcome sentinels hoisted so the partial index DDL, query predicates, and
+# recovery writer share one source of truth. A typo or rename at one site
+# would silently degrade the index without breaking tests.
+_OUTCOME_RUNNING = "running"
+_OUTCOME_ERRORED_RECOVERY = "errored:recovery"
+
 _SCHEMA = [
     """
     CREATE TABLE IF NOT EXISTS execution_log (
@@ -30,9 +36,11 @@ _SCHEMA = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_ticket_ts ON execution_log(ticket_id, ts DESC)",
-    """
+    # F-string substitution into static DDL is safe — no user input touches
+    # it. SQLite partial-index predicates cannot be parameterized.
+    f"""
     CREATE INDEX IF NOT EXISTS idx_running ON execution_log(outcome)
-    WHERE outcome = 'running'
+    WHERE outcome = '{_OUTCOME_RUNNING}'
     """,
 ]
 
@@ -125,14 +133,14 @@ class ExecutionLog:
                 SELECT 1 FROM execution_log start
                 WHERE start.ticket_id = ?
                   AND start.action = ?
-                  AND start.outcome = 'running'
+                  AND start.outcome = ?
                   AND NOT EXISTS (
                       SELECT 1 FROM execution_log term
                       WHERE term.parent_log_id = start.id
                   )
                 LIMIT 1
                 """,
-                (ticket_id, action),
+                (ticket_id, action, _OUTCOME_RUNNING),
             ).fetchone()
             return row is not None
 
@@ -165,18 +173,19 @@ class ExecutionLog:
             orphans = conn.execute(
                 """
                 SELECT start.id FROM execution_log start
-                WHERE start.outcome = 'running'
+                WHERE start.outcome = ?
                   AND NOT EXISTS (
                       SELECT 1 FROM execution_log term
                       WHERE term.parent_log_id = start.id
                   )
-                """
+                """,
+                (_OUTCOME_RUNNING,),
             ).fetchall()
         count = 0
         for (parent_id,) in orphans:
             self.terminate_action(
                 parent_log_id=parent_id,
-                outcome="errored:recovery",
+                outcome=_OUTCOME_ERRORED_RECOVERY,
                 details={"reason": "daemon restart found orphaned running row"},
             )
             count += 1
