@@ -318,8 +318,20 @@ def daemon() -> None:
 )
 def daemon_start(max_iterations: int | None) -> None:
     """Start the daemon in foreground."""
+    from foreman.daemon_lock import DaemonLock, LockAcquisitionError
+
     config = _load_config_from_env()
-    asyncio.run(_daemon_run(config=config, max_iterations=max_iterations))
+    # FOREMAN_LOCK_PATH env var wins over config.daemon.lock_path
+    # (matches the FOREMAN_CONFIG / FOREMAN_WORKTREES_ROOT override
+    # pattern at the top of cli.py). An empty-string env value is
+    # treated as unset.
+    lock_path_str = os.environ.get("FOREMAN_LOCK_PATH") or config.daemon.lock_path
+    lock_path = Path(lock_path_str).expanduser()
+    try:
+        with DaemonLock(lock_path):
+            asyncio.run(_daemon_run(config=config, max_iterations=max_iterations))
+    except LockAcquisitionError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @daemon.command("stop")
@@ -535,3 +547,7 @@ def worktree_clean(project: str, issue_number: int) -> None:
 def main() -> None:
     """Console-script entry point."""
     cli()
+
+
+if __name__ == "__main__":
+    main()
