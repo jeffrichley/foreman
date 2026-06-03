@@ -381,6 +381,102 @@ def daemon_start(max_iterations: int | None) -> None:
         raise click.ClickException(str(exc)) from exc
 
 
+@daemon.command("v3-start")
+@click.option(
+    "--dry-run/--execute",
+    default=False,
+    help="Dry-run mode: reconciler emits intended actions to the execution "
+    "log with outcome='dry_run' but does NOT call the host. Use for first "
+    "~6 polls post-cutover to gut-check the rule catalog before flipping "
+    "to executing mode.",
+)
+@click.option(
+    "--max-ticks",
+    type=int,
+    default=None,
+    help="Run this many ticks then exit. Default: forever. 0 means wire "
+    "everything and exit immediately (smoke-test the CLI path).",
+)
+def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
+    """Start the v3 declarative reconciler daemon.
+
+    GitHub IS the source of truth for ticket + PR state. The reconciler
+    derives the right action per ticket from GH + execution log, then
+    executes via the host. See docs/superpowers/specs/foreman-issue-106-spec.md.
+    """
+    from foreman.reconciler import ExecutionLog, Reconciler, ReconcilerProject
+
+    # FOREMAN_CONFIG_PATH (v3) wins; falls back to FOREMAN_CONFIG (v2)
+    # for parity with the v2 daemon's env-var convention.
+    cfg_path = os.environ.get("FOREMAN_CONFIG_PATH") or os.environ.get("FOREMAN_CONFIG")
+    if cfg_path is None:
+        cfg_path = str(Path("~/.foreman/config.toml").expanduser())
+    config = load_config(cfg_path)
+
+    db_path = Path(os.path.expanduser(config.reconciler.db_path))
+    log = ExecutionLog(db_path)
+    log.init()
+
+    # config.projects is dict[name, ProjectConfig]; ProjectConfig.repo
+    # is "owner/name" form. Split into the ReconcilerProject shape.
+    projects_list: list[ReconcilerProject] = []
+    for proj_name, proj_cfg in config.projects.items():
+        if "/" not in proj_cfg.repo:
+            raise click.ClickException(
+                f"project {proj_name!r} has malformed repo {proj_cfg.repo!r} "
+                "(expected 'owner/name')"
+            )
+        owner, repo = proj_cfg.repo.split("/", 1)
+        projects_list.append(ReconcilerProject(name=proj_name, owner=owner, repo=repo))
+    projects = tuple(projects_list)
+
+    if max_ticks == 0:
+        # Smoke-test wiring without spinning the loop.
+        click.echo(
+            f"v3-start wired: {len(projects)} projects, "
+            f"db={db_path}, dry_run={dry_run}"
+        )
+        return
+
+    gh, host = _build_v3_gh_and_host(config)
+
+    reconciler = Reconciler(
+        projects=projects,
+        log=log,
+        gh=gh,
+        host=host,
+        dry_run=dry_run,
+        alert_after_n_failures=config.reconciler.alert_after_n_failures,
+        poll_interval_seconds=config.reconciler.poll_interval_seconds,
+    )
+
+    async def _run() -> None:
+        if max_ticks is None:
+            await reconciler.run()
+        else:
+            for _ in range(max_ticks):
+                await reconciler.tick()
+                await asyncio.sleep(reconciler.poll_interval_seconds)
+
+    asyncio.run(_run())
+
+
+def _build_v3_gh_and_host(config: Config) -> tuple[Any, Any]:
+    """Construct the real GH GraphQL client + ReconcilerHost.
+
+    The v3 host wraps the existing v2 GitHubDaemonHost for action methods
+    (add_label, merge_pr, etc.) and adds a ``dispatch_role`` that spawns a
+    subprocess via the existing role-dispatch machinery. For now we raise
+    NotImplementedError to keep this task focused on CLI wiring; the host
+    construction is a separate concern handled when v3 first runs against
+    real infrastructure (see plan Task 13 / cutover docs).
+    """
+    raise NotImplementedError(
+        "v3-start runtime wiring not yet implemented. Use --max-ticks 0 to "
+        "smoke-test, or run unit + integration tests in tests/reconciler/."
+    )
+
+
 @daemon.command("stop")
 def daemon_stop() -> None:
     """Signal a running daemon to stop and wait for clean exit.
