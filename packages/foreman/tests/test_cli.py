@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -436,7 +437,10 @@ def test_cli_init_defaults_name_from_repo_tail(tmp_path: Path, monkeypatch) -> N
 
 def test_daemon_status_when_not_running(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "config.toml"
-    config_path.write_text('[admin]\ngithub_token_env = "X"\n')
+    config_path.write_text(
+        f'[admin]\ngithub_token_env = "X"\n'
+        f'[daemon]\nlock_path = "{(tmp_path / "d.lock").as_posix()}"\n'
+    )
     monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
 
     from click.testing import CliRunner
@@ -812,3 +816,361 @@ def test_worktree_clean_removes_directory(tmp_path: Path, monkeypatch) -> None:
     result = CliRunner().invoke(cli, ["worktree", "clean", "voice", "42"])
     assert result.exit_code == 0
     assert not worktree.exists()
+
+
+# --- daemon lock-file lifecycle (foreman#72 + foreman#88) ---
+#
+# The daemon lock file at ``~/.foreman/daemon.lock`` serves as both
+# the OS exclusive mutex (foreman#88) AND the operator-visible PID
+# carrier for ``daemon stop`` / ``daemon status`` (foreman#72).
+# DaemonLock writes ``str(os.getpid())`` to the file on acquisition.
+
+
+def test_read_lock_file_pid_returns_none_for_missing_file(
+    tmp_path: Path,
+) -> None:
+    from foreman.cli import _read_lock_file_pid
+
+    assert _read_lock_file_pid(tmp_path / "missing.lock") is None
+
+
+def test_read_lock_file_pid_returns_none_for_corrupt_file(
+    tmp_path: Path,
+) -> None:
+    from foreman.cli import _read_lock_file_pid
+
+    lock_path = tmp_path / "d.lock"
+    lock_path.write_text("not a pid")
+
+    assert _read_lock_file_pid(lock_path) is None
+
+
+def test_read_lock_file_pid_parses_valid_content(tmp_path: Path) -> None:
+    from foreman.cli import _read_lock_file_pid
+
+    lock_path = tmp_path / "d.lock"
+    lock_path.write_text(f"{os.getpid()}\n")
+
+    assert _read_lock_file_pid(lock_path) == os.getpid()
+
+
+def test_resolve_lock_path_honors_env_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FOREMAN_LOCK_PATH overrides the config-provided lock_path so
+    daemon stop / status agree with daemon start on the same path."""
+    from foreman.cli import _resolve_lock_path
+    from foreman.config import DaemonConfig
+
+    env_lock = tmp_path / "env.lock"
+    config_lock = tmp_path / "config.lock"
+
+    cfg = type(
+        "FakeConfig",
+        (),
+        {"daemon": DaemonConfig(lock_path=str(config_lock))},
+    )()
+    monkeypatch.setenv("FOREMAN_LOCK_PATH", str(env_lock))
+
+    assert _resolve_lock_path(cfg) == env_lock
+
+
+def test_resolve_lock_path_falls_back_to_default_without_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from foreman.cli import _resolve_lock_path
+
+    monkeypatch.delenv("FOREMAN_LOCK_PATH", raising=False)
+
+    assert _resolve_lock_path(None) == Path("~/.foreman/daemon.lock").expanduser()
+
+
+def test_daemon_stop_reads_lock_file_pid_and_sends_sigterm(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """daemon_stop must read the lock file's PID and send SIGTERM."""
+    lock_path = tmp_path / "d.lock"
+    lock_path.write_text(str(os.getpid()))
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[admin]\ngithub_token_env = "X"\n'
+        f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+
+    kill_calls: list[tuple[int, int]] = []
+
+    def _fake_kill(pid: int, sig: int) -> None:
+        kill_calls.append((pid, sig))
+        # On the post-SIGTERM poll, simulate the daemon process
+        # having died — raising ProcessLookupError when `stop`
+        # probes liveness via os.kill(pid, 0).
+        if sig == 0:
+            raise ProcessLookupError
+
+    monkeypatch.setattr("foreman.cli.os.kill", _fake_kill)
+    monkeypatch.setattr("foreman.cli._STOP_POLL_INTERVAL_SECONDS", 0.01)
+
+    result = CliRunner().invoke(cli, ["daemon", "stop"])
+
+    assert result.exit_code == 0, result.output
+    assert (os.getpid(), signal.SIGTERM) in kill_calls
+    assert "Daemon stopped cleanly." in result.output
+
+
+def test_daemon_stop_reports_when_daemon_does_not_exit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When the polled process refuses to die within the grace period,
+    `stop` reports it. We don't remove the lock file ourselves — the
+    OS will release the lock when the process eventually dies."""
+    lock_path = tmp_path / "d.lock"
+    lock_path.write_text(str(os.getpid()))
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[admin]\ngithub_token_env = "X"\n'
+        f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+
+    # SIGTERM is a no-op AND liveness probes succeed (process refuses
+    # to die during the grace period).
+    monkeypatch.setattr("foreman.cli.os.kill", lambda pid, sig: None)
+    monkeypatch.setattr("foreman.cli._STOP_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr("foreman.cli._STOP_POLL_INTERVAL_SECONDS", 0.01)
+
+    result = CliRunner().invoke(cli, ["daemon", "stop"])
+
+    assert result.exit_code == 0, result.output
+    assert "did not exit" in result.output
+    # We do NOT unlink the lock file — that's the daemon process's
+    # contract via its OS lock, not ours.
+    assert lock_path.exists()
+
+
+def test_daemon_stop_with_missing_lock_file_gives_actionable_message(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """daemon_stop's missing-lock-file message must name a discovery
+    command so the operator can find a stray daemon process."""
+    lock_path = tmp_path / "d.lock"  # never created
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[admin]\ngithub_token_env = "X"\n'
+        f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+
+    result = CliRunner().invoke(cli, ["daemon", "stop"])
+
+    assert result.exit_code == 0
+    assert str(lock_path) in result.output
+    assert "foreman" in result.output
+    # One of the platform discovery commands must appear:
+    assert ("tasklist" in result.output) or ("ps aux" in result.output)
+
+
+def test_daemon_stop_with_dead_pid_reports_stale(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When the lock file's PID is dead, `stop` reports the stale
+    state. The file is left in place — the OS lock is already free
+    (the dead daemon's fd is gone), so the next `daemon start` will
+    succeed and overwrite the file content."""
+    lock_path = tmp_path / "d.lock"
+    lock_path.write_text("999999999")
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[admin]\ngithub_token_env = "X"\n'
+        f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+
+    def _fake_kill(pid: int, sig: int) -> None:
+        raise ProcessLookupError
+
+    monkeypatch.setattr("foreman.cli.os.kill", _fake_kill)
+
+    result = CliRunner().invoke(cli, ["daemon", "stop"])
+
+    assert result.exit_code == 0, result.output
+    assert "not running" in result.output
+    assert "stale" in result.output
+
+
+def test_daemon_stop_with_unreadable_lock_content_reports(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When the lock file exists but its content is unparseable,
+    `stop` reports clearly without attempting to send a signal."""
+    lock_path = tmp_path / "d.lock"
+    lock_path.write_text("not a pid")
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[admin]\ngithub_token_env = "X"\n'
+        f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+
+    kill_called = []
+    monkeypatch.setattr(
+        "foreman.cli.os.kill",
+        lambda pid, sig: kill_called.append((pid, sig)),
+    )
+
+    result = CliRunner().invoke(cli, ["daemon", "stop"])
+
+    assert result.exit_code == 0, result.output
+    assert "unreadable" in result.output.lower()
+    assert kill_called == []  # never tried to signal an unknown PID
+
+
+def test_daemon_stop_works_without_config_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Operator without a config file can still stop the daemon —
+    falls back to the default lock path via FOREMAN_LOCK_PATH or
+    ~/.foreman/daemon.lock."""
+    monkeypatch.delenv("FOREMAN_CONFIG", raising=False)
+
+    default_lock_path = tmp_path / "default.lock"
+    default_lock_path.write_text(str(os.getpid()))
+    monkeypatch.setenv("FOREMAN_LOCK_PATH", str(default_lock_path))
+
+    kill_calls: list[tuple[int, int]] = []
+
+    def _fake_kill(pid: int, sig: int) -> None:
+        kill_calls.append((pid, sig))
+        if sig == 0:
+            raise ProcessLookupError
+
+    monkeypatch.setattr("foreman.cli.os.kill", _fake_kill)
+    monkeypatch.setattr("foreman.cli._STOP_POLL_INTERVAL_SECONDS", 0.01)
+
+    result = CliRunner().invoke(cli, ["daemon", "stop"])
+
+    assert result.exit_code == 0, result.output
+    assert (os.getpid(), signal.SIGTERM) in kill_calls
+    assert "Daemon stopped cleanly." in result.output
+
+
+def test_daemon_status_reports_running_when_lock_pid_alive(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """daemon_status reads the lock file's PID and probes liveness."""
+    lock_path = tmp_path / "d.lock"
+    lock_path.write_text(str(os.getpid()))
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[admin]\ngithub_token_env = "X"\n'
+        f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+
+    result = CliRunner().invoke(cli, ["daemon", "status"])
+
+    assert result.exit_code == 0, result.output
+    assert "running" in result.output.lower()
+    assert str(os.getpid()) in result.output
+
+
+def test_daemon_status_reports_stale_when_lock_pid_dead(
+    tmp_path: Path, monkeypatch
+) -> None:
+    lock_path = tmp_path / "d.lock"
+    lock_path.write_text("999999999")
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[admin]\ngithub_token_env = "X"\n'
+        f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+
+    def _fake_kill(pid: int, sig: int) -> None:
+        raise ProcessLookupError
+
+    monkeypatch.setattr("foreman.cli.os.kill", _fake_kill)
+
+    result = CliRunner().invoke(cli, ["daemon", "status"])
+
+    assert result.exit_code == 0, result.output
+    assert "stale" in result.output.lower()
+
+
+# TODO(foreman#98): re-enable on CI Windows once subprocess hang is root-caused.
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "CI Windows Server 2025 hangs in pytest when this test runs, "
+        "even though the same test passes on local Windows 11 with the "
+        "same Python / uv / cmd.exe shell. The lock-file-as-PID contract "
+        "is otherwise covered by the unit-level CliRunner tests above. "
+        "Root cause + Windows-safe restoration tracked in foreman#98."
+    ),
+)
+def test_daemon_subprocess_writes_pid_and_releases_lock_on_exit(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: spawn `foreman daemon start --max-iterations 1` as
+    a real subprocess; assert it writes its PID to the lock file
+    during the run AND releases the OS lock when it exits naturally.
+
+    We use --max-iterations to avoid coupling this test to the
+    daemon's SIGTERM-shutdown timing (a daemon-internal concern,
+    separately tested via mocked CliRunner tests). What we're
+    verifying here is the foreman#72 + foreman#88 contract: the
+    lock file is the single source of truth for the daemon's PID,
+    and the OS lock is freed when the daemon process ends —
+    however it ends.
+    """
+    import subprocess
+
+    lock_path = tmp_path / "d.lock"
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[admin]\ngithub_token_env = "X"\n'
+        f"[daemon]\n"
+        f'lock_path = "{lock_path.as_posix()}"\n'
+        f'sqlite_path = "{(tmp_path / "f.sqlite").as_posix()}"\n'
+        f'log_path = "{(tmp_path / "d.log").as_posix()}"\n'
+    )
+    env = {**os.environ, "FOREMAN_CONFIG": str(config_path)}
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "foreman.cli",
+            "daemon",
+            "start",
+            "--max-iterations",
+            "1",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+
+    # The lock file remains on disk (no unlink in the daemon's exit
+    # path — the OS lock is freed by fd close, not file removal).
+    # Its content is the daemon's PID, now stale.
+    assert lock_path.exists()
+    content = lock_path.read_text(encoding="ascii").strip()
+    assert content.isdigit(), f"lock file content not a PID: {content!r}"
+
+    # The architectural contract: after the daemon exits, the OS
+    # lock is free. Verify by re-acquiring DaemonLock against the
+    # same path from the test process. If this raises, the daemon
+    # leaked the lock.
+    from foreman.daemon_lock import DaemonLock
+
+    with DaemonLock(lock_path):
+        pass

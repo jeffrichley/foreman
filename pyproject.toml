@@ -36,6 +36,11 @@ select = [
     "UP",
     "B",
     "RUF100",
+    # TODO discipline: a TODO must reference a tracking issue (digit
+    # in the body satisfies TD003). Bare # TODO: comments rot — they
+    # accumulate without context and nobody knows whether they're
+    # still relevant. If a thing is worth marking, it's worth a ticket.
+    "TD003",
 ]
 ignore = [
     "E501",
