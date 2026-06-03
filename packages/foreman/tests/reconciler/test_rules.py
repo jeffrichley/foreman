@@ -9,7 +9,7 @@ from pathlib import Path
 from foreman.reconciler.actions import Action, ActionContext
 from foreman.reconciler.exec_log import ExecutionLog
 from foreman.reconciler.rules import Rule, PrecedenceTier, evaluate
-from foreman.reconciler.state import IssueState, ProjectSnapshot
+from foreman.reconciler.state import IssueState, PRState, ProjectSnapshot
 
 
 def _ctx(tmp_path: Path) -> ActionContext:
@@ -125,8 +125,7 @@ def _pr(
     ci_status: str | None = "SUCCESS",
     is_merged: bool = False,
     linked: tuple[int, ...] = (143,),
-) -> "PRState":
-    from foreman.reconciler.state import PRState
+) -> PRState:
     return PRState(
         number=144,
         head_ref="spec-143",
