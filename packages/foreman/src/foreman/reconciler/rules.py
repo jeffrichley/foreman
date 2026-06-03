@@ -42,7 +42,7 @@ class Rule:
 RULES: tuple[Rule, ...] = ()
 
 
-def evaluate(ctx: ActionContext, *, rules: tuple[Rule, ...] = None) -> Action:
+def evaluate(ctx: ActionContext, *, rules: tuple[Rule, ...] | None = None) -> Action:
     """Run the catalog over the context. Returns the first matching rule's
     action, or Action.NOOP if no rule matches.
 
