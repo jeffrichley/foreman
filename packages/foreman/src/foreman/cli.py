@@ -479,7 +479,10 @@ def _build_v3_gh_and_host(
     from foreman.reconciler.v3_host import V3GitHubHost
 
     project_config = config.projects[project_name]
-    registry = IdentityRegistry(project=project_config)
+    # IdentityRegistry needs orchestrator config — GitHubDaemonHost's REST
+    # methods call get_orchestrator_client() on every call. Mirrors the v2
+    # daemon construction path elsewhere in this file.
+    registry = IdentityRegistry(project_config, orchestrator=config.orchestrator)
     v2_host = GitHubDaemonHost(identity_registry=registry)
 
     # Use the planner App's token for the GraphQL observer (read-only).

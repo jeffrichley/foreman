@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
 from collections.abc import Callable
 from typing import Any, Protocol
 
@@ -49,17 +50,35 @@ class _SubprocessLike(Protocol):
 SubprocessRunner = Callable[[list[str]], _SubprocessLike]
 
 
+class _PopenWrapper:
+    """Adapter making subprocess.Popen match _SubprocessLike (pid + async wait()).
+
+    Async wait() runs the blocking Popen.wait() on a thread executor so the
+    daemon's running event loop isn't blocked.
+    """
+
+    def __init__(self, proc: "subprocess.Popen[bytes]") -> None:
+        self._proc = proc
+        self.pid = proc.pid
+
+    async def wait(self) -> int:
+        return await asyncio.to_thread(self._proc.wait)
+
+
 def _default_subprocess_runner(argv: list[str]) -> _SubprocessLike:
-    """Production runner. Returns immediately with the spawned subprocess."""
-    loop = asyncio.get_event_loop()
-    proc = loop.run_until_complete(
-        asyncio.create_subprocess_exec(
-            *argv,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
+    """Production runner. Spawn synchronously via subprocess.Popen.
+
+    Using `asyncio.create_subprocess_exec` via `loop.run_until_complete` fails
+    inside the daemon's tick (`RuntimeError: This event loop is already
+    running`). subprocess.Popen is fully synchronous; we wrap it so callers
+    can `await proc.wait()` without blocking the loop.
+    """
+    proc = subprocess.Popen(
+        argv,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
-    return proc
+    return _PopenWrapper(proc)
 
 
 class V3GitHubHost:
