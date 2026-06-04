@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from foreman.reconciler.exec_log import ExecutionLog
 from foreman.reconciler.v3_host import V3GitHubHost
 
@@ -116,3 +118,30 @@ def test_dispatch_role_spawns_subprocess_and_returns_pid(tmp_path: Path) -> None
     assert "plan" in argv
     assert "--issue-url" in argv
     assert "https://github.com/jeffrichley/foreman/issues/143" in argv
+
+
+def test_concurrency_cap_refuses_dispatch_when_full(tmp_path: Path) -> None:
+    """Once max_concurrent_dispatches is reached, further dispatch_role raises."""
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+
+    class _FakeProc:
+        pid = 42
+
+        async def wait(self) -> int:
+            return 0
+
+    host = V3GitHubHost(
+        v2_host=_FakeV2Host(),
+        log=log,
+        subprocess_runner=lambda _argv: _FakeProc(),
+        max_concurrent_dispatches=1,
+    )
+    # Manually acquire the only slot to simulate "already full"
+    host._dispatch_capacity.acquire(blocking=False)
+
+    # Next dispatch_role should raise — caught by executor in production
+    with pytest.raises(RuntimeError, match="concurrency cap reached"):
+        host.dispatch_role(
+            role="planner", owner="jeffrichley", repo="foreman", issue=1, pr_number=None
+        )

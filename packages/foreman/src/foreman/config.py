@@ -127,6 +127,12 @@ class ReconcilerConfig(BaseModel):
         ge=60,
         description="Hard wall-clock ceiling for a dispatched role subprocess; SIGTERM on expiry.",
     )
+    max_concurrent_dispatches: int = Field(
+        default=2,
+        ge=1,
+        le=20,
+        description="Max concurrent role subprocesses across all tickets (Planner+Worker+Reviewer+Fixer combined).",
+    )
 
 
 class AppsConfig(BaseModel):

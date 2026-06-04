@@ -548,6 +548,7 @@ def _build_v3_gh_and_host(
         log=log,
         project_name=project_name,
         role_dispatch_timeout_seconds=config.reconciler.role_dispatch_timeout_seconds,
+        max_concurrent_dispatches=config.reconciler.max_concurrent_dispatches,
     )
     return gh, host
 
