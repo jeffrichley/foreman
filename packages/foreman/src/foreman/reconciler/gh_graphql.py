@@ -82,7 +82,7 @@ class HttpxGHGraphQLClient:
     def close(self) -> None:
         self._client.close()
 
-    def __enter__(self) -> "HttpxGHGraphQLClient":
+    def __enter__(self) -> HttpxGHGraphQLClient:
         return self
 
     def __exit__(self, *exc_info: object) -> None:
