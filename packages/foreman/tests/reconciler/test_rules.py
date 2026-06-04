@@ -126,10 +126,15 @@ def _pr(
     is_merged: bool = False,
     linked: tuple[int, ...] = (143,),
     review_decision: str | None = None,
+    head_ref: str = "foreman/issue-143",
 ) -> PRState:
+    # Default head_ref is v3 spec-shaped (``foreman/issue-<N>``) so existing
+    # spec-PR rule tests still match the head-ref filter added by adversarial
+    # review fix 4c. Impl-PR tests must explicitly pass
+    # ``head_ref="foreman/impl-<N>"``.
     return PRState(
         number=144,
-        head_ref="spec-143",
+        head_ref=head_ref,
         mergeable=mergeable,
         ci_status=ci_status,
         body="Implements #143",
@@ -188,7 +193,7 @@ def test_ci_failure_on_impl_pr_fires_surface_help(tmp_path: Path) -> None:
     ctx = _ctx_with(
         tmp_path,
         _issue(labels=("foreman:impl-review",)),
-        _pr(ci_status="FAILURE"),
+        _pr(ci_status="FAILURE", head_ref="foreman/impl-143"),
     )
     assert evaluate(ctx, rules=RULES) is Action.SURFACE_HELP
 
@@ -276,12 +281,18 @@ def test_dispatch_reviewer_spec_skipped_when_reviewer_in_flight(tmp_path: Path) 
     assert evaluate(ctx, rules=RULES) is Action.NOOP
 
 
-def test_dispatch_reviewer_spec_does_not_refire_after_reviewer_completed(
+def test_dispatch_reviewer_spec_re_fires_after_prior_completed_run(
     tmp_path: Path,
 ) -> None:
-    """Once a dispatch_reviewer_spec log row terminates for this ticket, the
-    rule should not fire again — even if the planning label is still on (the
-    label transition is the Reviewer subprocess's responsibility, not the rule).
+    """After a prior Reviewer-spec run completes and a Fixer-spec cycle
+    transitions spec-fix → planning, the Reviewer must re-fire on the
+    updated spec PR — even though one dispatch_reviewer_spec row has
+    already terminated for this ticket (adversarial review HIGH #6).
+
+    Pre-fix, the rule had a ``count_completed("dispatch_reviewer_spec") == 0``
+    gate that flipped permanently False after the first Reviewer run, dead-
+    locking every spec-fix → planning re-review. The fix drops that gate;
+    the label-state machine + has_unterminated check are the right gates.
     """
     from foreman.reconciler.rules import RULES
     ctx = _ctx_with(
@@ -295,11 +306,13 @@ def test_dispatch_reviewer_spec_does_not_refire_after_reviewer_completed(
         project="foreman",
         rule_name="dispatch_reviewer_spec",
         action="dispatch_reviewer_spec",
-        outcome="running",
+        outcome="success",
         details={},
     )
     ctx.log.terminate_action(parent_log_id=start_id, outcome="success", details={})
-    assert evaluate(ctx, rules=RULES) is not Action.DISPATCH_REVIEWER_SPEC
+    # Label is back on planning (simulating Fixer-spec's spec-fix→planning
+    # transition); the rule must re-fire.
+    assert evaluate(ctx, rules=RULES) is Action.DISPATCH_REVIEWER_SPEC
 
 
 def test_merge_spec_pr_now_requires_plan_approved_label_and_flag(
@@ -381,7 +394,7 @@ def test_dispatch_reviewer_impl_fires_on_impl_review_green(tmp_path: Path) -> No
     ctx = _ctx_with(
         tmp_path,
         _issue(labels=("foreman:impl-review",)),
-        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143"),
     )
     assert evaluate(ctx, rules=RULES) is Action.DISPATCH_REVIEWER_IMPL
 
@@ -391,7 +404,7 @@ def test_dispatch_fixer_impl_fires_on_impl_fix_label(tmp_path: Path) -> None:
     ctx = _ctx_with(
         tmp_path,
         _issue(labels=("foreman:impl-fix",)),
-        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143"),
     )
     assert evaluate(ctx, rules=RULES) is Action.DISPATCH_FIXER_IMPL
 
@@ -457,7 +470,7 @@ def test_dispatch_fixer_blocked_after_3_completed_attempts(tmp_path: Path) -> No
     from foreman.reconciler.rules import RULES
 
     issue = _issue(labels=("foreman:impl-fix",))
-    pr = _pr(mergeable="MERGEABLE", ci_status="SUCCESS")
+    pr = _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143")
     ctx = _ctx_with(tmp_path, issue, pr)
     for _ in range(3):
         start_id = ctx.log.write_action(
@@ -473,7 +486,7 @@ def test_dispatch_fixer_still_fires_under_budget(tmp_path: Path) -> None:
     from foreman.reconciler.rules import RULES
 
     issue = _issue(labels=("foreman:impl-fix",))
-    pr = _pr(mergeable="MERGEABLE", ci_status="SUCCESS")
+    pr = _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143")
     ctx = _ctx_with(tmp_path, issue, pr)
     # 2 completed attempts — under cap of 3
     for _ in range(2):
@@ -537,12 +550,21 @@ def test_spec_and_impl_reviewer_count_completed_are_independent(tmp_path: Path) 
     assert evaluate(ctx, rules=RULES) is Action.DISPATCH_REVIEWER_SPEC
 
 
-def test_spec_reviewer_completed_blocks_further_spec_dispatch(tmp_path: Path) -> None:
-    """The post-split idempotence on the spec side still works: a completed
-    ``dispatch_reviewer_spec`` row stops the spec-side rule from re-firing."""
+def test_spec_reviewer_does_not_refire_when_label_off_planning(tmp_path: Path) -> None:
+    """The spec-side rule is gated by ``foreman:planning`` in labels. After
+    a Reviewer run succeeds and the Reviewer's label transition has moved
+    the label off planning (e.g., to spec-fix or plan-approved), the rule
+    must not re-fire — even though a prior dispatch_reviewer_spec row exists.
+
+    This is the right idempotence post-HIGH #6 fix: the label state, not a
+    count_completed gate, is what stops re-fire. Combined with the
+    has_unterminated check (covered separately), it produces the desired
+    spec-fix→planning re-review without deadlock.
+    """
     from foreman.reconciler.rules import RULES
 
-    issue = _issue(labels=("foreman:planning",))
+    # Label is foreman:spec-fix (post-Reviewer-needs_fix), NOT planning.
+    issue = _issue(labels=("foreman:spec-fix",))
     pr = _pr(mergeable="MERGEABLE", ci_status="SUCCESS")
     ctx = _ctx_with(tmp_path, issue, pr)
 
@@ -556,7 +578,7 @@ def test_spec_reviewer_completed_blocks_further_spec_dispatch(tmp_path: Path) ->
     )
     ctx.log.terminate_action(parent_log_id=start_id, outcome="success", details={})
 
-    # Once the spec-side reviewer has run, the spec-side rule must NOT re-fire.
+    # Label is off planning; spec-side Reviewer rule must NOT fire.
     assert evaluate(ctx, rules=RULES) is not Action.DISPATCH_REVIEWER_SPEC
 
 
@@ -615,3 +637,51 @@ def test_dispatch_fixer_spec_attempts_exhausted_surfaces_help(tmp_path: Path) ->
         )
         ctx.log.terminate_action(parent_log_id=start_id, outcome="success", details={})
     assert evaluate(ctx, rules=RULES) is Action.SURFACE_HELP
+
+
+# --- MEDIUM #4c: safety rules filter by PR head_ref, not label alone ---
+
+
+def test_spec_pr_ci_failure_ignores_impl_shaped_pr(tmp_path: Path) -> None:
+    """A FAILURE CI on an impl-shaped PR must NOT trigger the spec-side
+    safety rule even if the issue still carries foreman:planning.
+
+    During the brief stacked window where both spec and impl PRs are
+    linked to the same issue, a label-only filter could fire the wrong
+    safety rule on the wrong PR. The head-ref filter prevents that.
+    """
+    from foreman.reconciler.rules import RULES
+
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:planning",)),
+        _pr(
+            mergeable="MERGEABLE",
+            ci_status="FAILURE",
+            head_ref="foreman/impl-143",
+        ),
+    )
+    # No spec-side safety rule should fire — head_ref is impl-shaped. The
+    # impl_pr_ci_failure rule also won't fire because the labels don't include
+    # an impl-side label. End result: NOOP / no SURFACE_HELP.
+    assert evaluate(ctx, rules=RULES) is not Action.SURFACE_HELP
+
+
+def test_impl_pr_ci_failure_ignores_spec_shaped_pr(tmp_path: Path) -> None:
+    """A FAILURE CI on a spec-shaped PR must NOT trigger the impl-side
+    safety rule even if the issue still carries an impl-side label."""
+    from foreman.reconciler.rules import RULES
+
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-review",)),
+        _pr(
+            mergeable="MERGEABLE",
+            ci_status="FAILURE",
+            head_ref="foreman/issue-143",
+        ),
+    )
+    # impl-side safety rule (impl_pr_ci_failure) must refuse to match because
+    # head_ref isn't impl-shaped. spec-side safety rule also won't match
+    # (no foreman:planning label). End result: no SURFACE_HELP.
+    assert evaluate(ctx, rules=RULES) is not Action.SURFACE_HELP

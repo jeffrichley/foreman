@@ -52,6 +52,12 @@ def _mergeable_conflict(ctx: ActionContext) -> bool:
 def _impl_pr_ci_failure(ctx: ActionContext) -> bool:
     if ctx.pr is None or ctx.pr.ci_status != "FAILURE":
         return False
+    # Head-ref filter: a FAILURE on a spec-shaped PR must not trigger the
+    # impl-side safety rule even if a stale impl-side label lingers on the
+    # issue (adversarial review MEDIUM #4c). Filter by branch shape, not
+    # label alone, so misaligned PR/label combinations are inert.
+    if not ctx.pr.head_ref.startswith("foreman/impl-"):
+        return False
     return any(
         label in ctx.issue.labels
         for label in ("foreman:impl-review", "foreman:impl-approved", "foreman:impl-fix")
@@ -60,6 +66,11 @@ def _impl_pr_ci_failure(ctx: ActionContext) -> bool:
 
 def _spec_pr_ci_failure(ctx: ActionContext) -> bool:
     if ctx.pr is None or ctx.pr.ci_status != "FAILURE":
+        return False
+    # Symmetric to ``_impl_pr_ci_failure``: refuse to fire on an impl-shaped
+    # PR even when ``foreman:planning`` is set (e.g., during the brief
+    # stacked-PR window where both shapes are linked to the same issue).
+    if not ctx.pr.head_ref.startswith("foreman/issue-"):
         return False
     return "foreman:planning" in ctx.issue.labels
 
@@ -176,18 +187,26 @@ def _planning_no_pr(ctx: ActionContext) -> bool:
 
 
 def _planning_pr_needs_review(ctx: ActionContext) -> bool:
-    # Spec-side idempotence gate: only count spec-side reviewer dispatches.
-    # Pre-rescue, both spec and impl Reviewer rules emitted the same
-    # ``dispatch_reviewer`` action name; that made this gate permanently
-    # False once an impl-side dispatch landed (HIGH #7). Scoping the action
-    # key to ``dispatch_reviewer_spec`` restores spec-side re-fires after
-    # an impl-side cycle completes.
+    # Spec-side idempotence gate: only check for an in-flight spec-side
+    # Reviewer dispatch. The earlier version also required
+    # ``count_completed(...) == 0`` — but after a Fixer-spec cycle moves
+    # the label spec-fix → planning, the Reviewer must re-fire on the
+    # updated spec PR. A permanent count==0 gate deadlocked that flow
+    # (adversarial review HIGH #6). The label-state machine + the
+    # has_unterminated check are the right gates:
+    #   - while Reviewer runs: has_unterminated=True blocks re-fire
+    #   - on success: Reviewer transitions label off planning → predicate False
+    #   - on needs_fix: label becomes spec-fix → predicate False
+    #   - after Fixer moves spec-fix back to planning → predicate True → re-fire
+    # The head-ref filter (4c) ensures we only target spec-shaped PRs;
+    # impl-shaped PRs linked to the same issue (brief stacked window)
+    # must not trigger spec-side Reviewer.
     return (
         "foreman:planning" in ctx.issue.labels
         and ctx.pr is not None
         and not ctx.pr.is_merged
+        and ctx.pr.head_ref.startswith("foreman/issue-")
         and not ctx.log.has_unterminated("dispatch_reviewer_spec", ctx.ticket_id)
-        and ctx.log.count_completed("dispatch_reviewer_spec", ctx.ticket_id) == 0
     )
 
 
@@ -226,10 +245,14 @@ def _impl_review_green(ctx: ActionContext) -> bool:
     # Impl-side idempotence: only check for in-flight impl-side reviewer
     # dispatches. A live spec-side dispatch for the same ticket must not
     # block the impl-side rule (the two operate on different PR shapes).
+    # Head-ref filter (4c): only target impl-shaped PRs so a spec PR
+    # still linked to this ticket during the stacked window cannot trigger
+    # the impl-side Reviewer.
     return (
         "foreman:impl-review" in ctx.issue.labels
         and ctx.pr is not None
         and not ctx.pr.is_merged
+        and ctx.pr.head_ref.startswith("foreman/impl-")
         and ctx.pr.ci_status == "SUCCESS"
         and not ctx.log.has_unterminated("dispatch_reviewer_impl", ctx.ticket_id)
     )
@@ -239,9 +262,12 @@ def _impl_fix_pending(ctx: ActionContext) -> bool:
     # Impl-side Fixer flow. Pairs with ``_fix_attempts_exhausted`` above —
     # both scope to ``dispatch_fixer_impl`` so a future spec-side Fixer
     # rule (planned for a later stage) gets its own independent budget.
+    # Head-ref filter (4c): refuse to dispatch impl-side Fixer onto a
+    # spec-shaped PR.
     return (
         "foreman:impl-fix" in ctx.issue.labels
         and ctx.pr is not None
+        and ctx.pr.head_ref.startswith("foreman/impl-")
         and not ctx.log.has_unterminated("dispatch_fixer_impl", ctx.ticket_id)
         and ctx.log.count_completed("dispatch_fixer_impl", ctx.ticket_id) < _MAX_FIX_ATTEMPTS
     )
@@ -253,10 +279,12 @@ def _spec_fix_pending(ctx: ActionContext) -> bool:
     # when a spec PR is rejected; this rule consumes it. Without this rule the
     # label would be observed but no forward-progress action would fire — the
     # spec-side fix loop would be dead (adversarial review CRITICAL #3).
+    # Head-ref filter (4c): only target spec-shaped PRs.
     return (
         "foreman:spec-fix" in ctx.issue.labels
         and ctx.pr is not None
         and not ctx.pr.is_merged
+        and ctx.pr.head_ref.startswith("foreman/issue-")
         and not ctx.log.has_unterminated("dispatch_fixer_spec", ctx.ticket_id)
         and ctx.log.count_completed("dispatch_fixer_spec", ctx.ticket_id) < _MAX_FIX_ATTEMPTS
     )

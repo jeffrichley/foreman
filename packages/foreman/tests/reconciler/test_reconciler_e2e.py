@@ -80,10 +80,17 @@ def _pr_payload(
     mergeable: str = "MERGEABLE",
     ci: str | None = "SUCCESS",
     merged: bool = False,
+    head_ref: str | None = None,
 ) -> dict[str, Any]:
+    # Default head_ref is v3 spec-shaped (``foreman/issue-<linked-issue>``) so
+    # rule predicates with head-ref filters (adversarial review 4c) still match
+    # for spec-PR cases by default. Tests exercising impl-PR rules must pass
+    # ``head_ref="foreman/impl-<N>"`` explicitly.
+    if head_ref is None:
+        head_ref = f"foreman/issue-{closes[0]}" if closes else f"foreman/issue-{number}"
     return {
         "number": number,
-        "headRefName": f"branch-{number}",
+        "headRefName": head_ref,
         "body": "",
         "mergeable": mergeable,
         "merged": merged,
@@ -149,7 +156,7 @@ async def test_tick_safety_preempts_progress_when_ci_failed(tmp_path: Path) -> N
     gh = _StubGHClient(
         _gh_with(
             [_issue_payload(143, ["foreman:impl-review"])],
-            [_pr_payload(number=144, closes=[143], ci="FAILURE")],
+            [_pr_payload(number=144, closes=[143], ci="FAILURE", head_ref="foreman/impl-143")],
         )
     )
     host = _StubHost()
