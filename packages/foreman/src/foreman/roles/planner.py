@@ -15,12 +15,11 @@ host-platform operations through the
   7. Parse the ``PlannerOutput``
   8. Commit the spec doc (``host.commit_files_to_worktree``)
   9. Push the branch (``host.push_branch``)
-  10. Open the spec PR (``host.open_pull_request``)
-  11. Best-effort cleanup of the legacy ``foreman:plan`` entry label;
-       the issue stays at ``foreman:planning`` so v3's reconciler
-       (``dispatch_reviewer_spec``) can fire on ``foreman:planning`` +
-       open spec PR (``host.update_issue_labels``)
-  12. Return :class:`~foreman.schemas.planner.PlannerRunResult`
+  10. Open the spec PR (``host.open_pull_request``). The issue stays at
+       ``foreman:planning`` so v3's reconciler (``dispatch_reviewer_spec``)
+       fires on ``foreman:planning`` + the open spec PR — no label mutation
+       needed here.
+  11. Return :class:`~foreman.schemas.planner.PlannerRunResult`
 
 Decoupling rationale (Foreman issue #8 — the "Looper pattern"):
 the LLM is non-deterministic and host-agnostic; deterministic operations
@@ -220,25 +219,27 @@ async def run_planner(
         base=default_branch,
         head=branch,
     )
-    # v3 label vocabulary: Planner writes ZERO new labels. The issue
-    # stays at ``foreman:planning`` (the entry label) after the spec PR
-    # opens; v3's reconciler ``dispatch_reviewer_spec`` rule then fires
-    # on ``foreman:planning`` + an open spec PR. We DO remove the legacy
-    # ``foreman:plan`` entry label if a v2-era ticket still carries it,
-    # so the issue doesn't end up with both ``foreman:plan`` and
-    # ``foreman:planning`` simultaneously.
-    host.update_issue_labels(
-        repo_slug=actual_repo_slug,
-        issue_number=issue_number,
-        add=[],
-        remove=["foreman:plan"],
-    )
+    # v3 label vocabulary: Planner writes ZERO labels. The issue stays
+    # at ``foreman:planning`` (the entry label) after the spec PR opens;
+    # v3's reconciler ``dispatch_reviewer_spec`` rule then fires on
+    # ``foreman:planning`` + an open spec PR. No host label mutation
+    # happens here.
+    #
+    # Historical note: a prior revision attempted a best-effort cleanup
+    # of the legacy ``foreman:plan`` entry label on v2-era tickets. That
+    # cleanup raised PyGithub ``GithubException(404)`` on every fresh v3
+    # ticket (which never carries ``foreman:plan``) because
+    # ``issue.remove_from_labels`` 404s when the label is absent. Since
+    # ``foreman init`` no longer creates ``foreman:plan`` (PR #111), the
+    # cleanup is a back-compat tail that's no longer worth its crash
+    # surface. v2-era tickets that still carry the label must be
+    # cleaned up manually.
 
     # foreman#91: compute final_labels deterministically from the
     # pre-mutation set (``issue.labels`` is the snapshot taken by
     # ``host.get_issue`` above) + the role's known transitions.
-    # v3: only the legacy ``foreman:plan`` is dropped; ``foreman:planning``
-    # is preserved so the reconciler can fire on it next tick.
-    final_labels = sorted(set(issue.labels) - {"foreman:plan"})
+    # v3: the Planner makes no label changes, so the final set is just
+    # the pre-mutation set (sorted for stability).
+    final_labels = sorted(set(issue.labels))
 
     return PlannerRunResult(llm_output=llm_output, pr=pr, final_labels=final_labels)

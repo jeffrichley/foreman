@@ -331,13 +331,14 @@ async def test_run_planner_dispatches_and_advances_label(
     assert fake_host.commit_message == "spec: add SSML support"
     assert fake_host.pushed_branch == "foreman/issue-42"
 
-    # v3 label vocabulary: Planner adds nothing; only the legacy
-    # ``foreman:plan`` entry label is dropped for back-compat. The
-    # issue stays at ``foreman:planning`` so v3's reconciler can fire
-    # ``dispatch_reviewer_spec`` on the open spec PR.
-    assert fake_host.label_calls == [
-        ("jeffrichley/voice", 42, [], ["foreman:plan"])
-    ]
+    # v3 label vocabulary: Planner makes ZERO label mutations. The issue
+    # stays at ``foreman:planning`` so v3's reconciler can fire
+    # ``dispatch_reviewer_spec`` on the open spec PR. The legacy
+    # ``foreman:plan`` cleanup that used to live here was removed
+    # because PyGithub 404s when remove_from_labels is called on a
+    # label that isn't present — and fresh v3 tickets never carry
+    # ``foreman:plan``.
+    assert fake_host.label_calls == []
 
     # PlannerRunResult populated end-to-end
     assert result.pr.number == 99
@@ -345,6 +346,66 @@ async def test_run_planner_dispatches_and_advances_label(
     assert result.pr.branch == "foreman/issue-42"
     assert result.llm_output.confidence == "high"
     assert result.llm_output.summary == "Drafted SSML support spec"
+
+
+@pytest.mark.asyncio
+async def test_run_planner_does_not_attempt_legacy_plan_label_removal_on_fresh_v3_ticket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: v3 tickets carry only ``foreman:planning`` at hatch
+    time. A prior revision attempted a best-effort ``remove=["foreman:plan"]``
+    cleanup after opening the spec PR; PyGithub's
+    ``issue.remove_from_labels`` raises ``GithubException(404)`` when the
+    label isn't on the issue, so every fresh v3 ticket crashed the
+    Planner subprocess immediately after the PR opened.
+
+    The fix removes the cleanup entirely. This test pins the contract:
+    on a fresh v3 ticket, the Planner must NOT attempt to remove
+    ``foreman:plan`` (or any label) via ``host.update_issue_labels``.
+    """
+    clone = tmp_path / "clone"
+    _seed_clone(clone, origin_path=tmp_path / "origin.git")
+    monkeypatch.setenv("FOREMAN_PLANNER_APP_ID", "123456")
+
+    cfg = _make_config(clone)
+    fake_host = _FakeHostProvider()
+    # Fresh v3 ticket: only the planning entry label, no legacy
+    # ``foreman:plan``. This is the exact shape every ``foreman init``
+    # ticket has after PR #111.
+    fake_host.issue_to_return = IssueRef(
+        number=42,
+        title="SSML",
+        body="Add SSML support.",
+        labels=["foreman:planning"],
+        repo_slug="jeffrichley/voice",
+    )
+    fake_registry = MagicMock()
+    fake_registry.get_host_provider.return_value = fake_host
+
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
+
+    result = await run_planner(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=fake_registry,
+    )
+
+    # The Planner must not have touched labels at all on a fresh
+    # v3 ticket. If a future refactor reintroduces label mutation
+    # here, this assertion + the per-call ``"foreman:plan" not in remove``
+    # check below must both hold so the 404-crash regression cannot
+    # silently come back.
+    assert fake_host.label_calls == []
+    for _repo, _num, _add, remove in fake_host.label_calls:
+        assert "foreman:plan" not in remove
+
+    # The issue stays at ``foreman:planning`` so the v3 reconciler can
+    # fire ``dispatch_reviewer_spec`` on the open spec PR next tick.
+    assert result.final_labels == ["foreman:planning"]
 
 
 @pytest.mark.asyncio
@@ -682,11 +743,13 @@ async def test_run_planner_returns_authoritative_final_labels(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """foreman#91 + v3: ``PlannerRunResult.final_labels`` is the sorted
-    list of ``initial_issue_labels - {foreman:plan}`` — computed
-    in-process from the role's known transitions, not via a post-mutation
-    host re-read. In v3 the Planner adds zero labels; the issue stays
-    at ``foreman:planning`` (the entry label) so the reconciler can
-    fire ``dispatch_reviewer_spec`` on the open spec PR."""
+    pre-mutation label set — computed in-process from the role's known
+    transitions, not via a post-mutation host re-read. In v3 the Planner
+    performs ZERO label mutations: the issue stays at ``foreman:planning``
+    (the entry label) so the reconciler can fire ``dispatch_reviewer_spec``
+    on the open spec PR. External labels and any legacy ``foreman:plan``
+    label survive untouched — the daemon never crashed trying to remove
+    a label that isn't there."""
     clone = tmp_path / "clone"
     _seed_clone(clone, origin_path=tmp_path / "origin.git")
     monkeypatch.setenv("FOREMAN_PLANNER_APP_ID", "123456")
@@ -718,9 +781,10 @@ async def test_run_planner_returns_authoritative_final_labels(
         identity_registry=fake_registry,
     )
 
-    # v3 deterministic: drop legacy ``foreman:plan``; keep
-    # ``foreman:planning`` (the in-flight reconciler trigger) and
-    # ``external-tag``.
+    # v3 deterministic: the Planner makes no label mutations, so the
+    # final set equals the pre-mutation snapshot. Any v2-era cleanup of
+    # ``foreman:plan`` is the operator's responsibility — not worth a
+    # PyGithub 404 crash on the much-more-common fresh-v3-ticket path.
     assert result.final_labels == sorted(
-        ["external-tag", "foreman:planning"]
+        ["external-tag", "foreman:plan", "foreman:planning"]
     )
