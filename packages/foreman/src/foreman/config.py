@@ -122,6 +122,11 @@ class ReconcilerConfig(BaseModel):
         default="~/.foreman/reconciler.lock",
         description="File-based PID lock to prevent two reconciler daemons concurrently",
     )
+    role_dispatch_timeout_seconds: int = Field(
+        default=3600,  # 1 hour — Claude Code sessions typically run 10-30 min
+        ge=60,
+        description="Hard wall-clock ceiling for a dispatched role subprocess; SIGTERM on expiry.",
+    )
 
 
 class AppsConfig(BaseModel):

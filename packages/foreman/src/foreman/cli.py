@@ -543,7 +543,12 @@ def _build_v3_gh_and_host(
     # Use the planner App's token for the GraphQL observer (read-only).
     planner_token = registry.get_token("planner")
     gh = HttpxGHGraphQLClient(token=planner_token)
-    host = V3GitHubHost(v2_host=v2_host, log=log, project_name=project_name)
+    host = V3GitHubHost(
+        v2_host=v2_host,
+        log=log,
+        project_name=project_name,
+        role_dispatch_timeout_seconds=config.reconciler.role_dispatch_timeout_seconds,
+    )
     return gh, host
 
 

@@ -91,11 +91,13 @@ class V3GitHubHost:
         log: ExecutionLog,
         subprocess_runner: SubprocessRunner | None = None,
         project_name: str = "foreman",
+        role_dispatch_timeout_seconds: int = 3600,
     ) -> None:
         self._v2 = v2_host
         self._log = log
         self._runner = subprocess_runner if subprocess_runner is not None else _default_subprocess_runner
         self._project_name = project_name
+        self._timeout_seconds = role_dispatch_timeout_seconds
         # Mapping pid -> parent_log_id. Caller (the reconciler or test fixture)
         # populates this before/after dispatch_role; background termination task
         # reads it on subprocess exit.
@@ -160,7 +162,27 @@ class V3GitHubHost:
     async def _track_subprocess_completion(self, proc: _SubprocessLike, role: str) -> None:
         """Await subprocess exit, look up its start_log_id, write termination row."""
         try:
-            returncode = await proc.wait()
+            returncode = await asyncio.wait_for(proc.wait(), timeout=self._timeout_seconds)
+        except TimeoutError:
+            logger.warning(
+                "subprocess for role=%s pid=%d timed out after %ds; terminating",
+                role,
+                proc.pid,
+                self._timeout_seconds,
+            )
+            # Attempt graceful termination via the wrapped Popen (best-effort).
+            try:
+                inner = getattr(proc, "_proc", None)
+                if inner is not None and hasattr(inner, "terminate"):
+                    inner.terminate()
+            except Exception:
+                logger.exception("failed to terminate timed-out subprocess pid=%d", proc.pid)
+            self._terminate_pending(
+                proc.pid,
+                outcome="timeout",
+                details={"timeout_seconds": self._timeout_seconds, "role": role},
+            )
+            return
         except Exception as exc:
             logger.exception("subprocess for role=%s pid=%d errored awaiting", role, proc.pid)
             self._terminate_pending(proc.pid, outcome="error", details={"error": str(exc)})
