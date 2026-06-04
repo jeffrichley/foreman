@@ -87,7 +87,8 @@ class ExecutionLog:
                 """,
                 (ticket_id, project, rule_name, action, outcome, details_json, parent_log_id),
             )
-            return int(cur.lastrowid)
+            assert cur.lastrowid is not None
+            return cur.lastrowid
 
     def terminate_action(
         self,
@@ -121,7 +122,8 @@ class ExecutionLog:
                 """,
                 (ticket_id, project, rule_name, action, outcome, details_json, parent_log_id),
             )
-            return int(cur.lastrowid)
+            assert cur.lastrowid is not None
+            return cur.lastrowid
 
     def has_unterminated(self, action: str, ticket_id: str) -> bool:
         """True iff there is an outcome='running' row for (action, ticket_id)
