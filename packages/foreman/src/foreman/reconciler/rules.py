@@ -37,6 +37,10 @@ class Rule:
     then: Action
 
 
+def _hold_label(ctx: ActionContext) -> bool:
+    return "foreman:hold" in ctx.issue.labels
+
+
 def _needs_help_label(ctx: ActionContext) -> bool:
     return "foreman:needs-help" in ctx.issue.labels
 
@@ -74,6 +78,13 @@ def _safety_with_rate_limit(predicate):
 
 
 _SAFETY_RULES: tuple[Rule, ...] = (
+    Rule(
+        name="hold_label_blocks",
+        tier=PrecedenceTier.SAFETY,
+        precedence=5,
+        when=_hold_label,
+        then=Action.NOOP,
+    ),
     Rule(
         name="needs_help_label",
         tier=PrecedenceTier.SAFETY,

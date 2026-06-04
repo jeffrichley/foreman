@@ -310,3 +310,12 @@ def test_advance_label_to_done_when_impl_pr_merged(tmp_path: Path) -> None:
         _pr(is_merged=True),
     )
     assert evaluate(ctx, rules=RULES) is Action.ADVANCE_LABEL_TO_DONE
+
+
+def test_hold_label_blocks_all_actions(tmp_path: Path) -> None:
+    """A ticket with foreman:hold should produce NOOP even when other rules would fire."""
+    from foreman.reconciler.rules import RULES
+    # Ticket has BOTH foreman:hold AND foreman:planning. Without hold, planning
+    # would fire dispatch_planner. With hold, NOOP.
+    ctx = _ctx_with(tmp_path, _issue(labels=("foreman:hold", "foreman:planning")))
+    assert evaluate(ctx, rules=RULES) is Action.NOOP
