@@ -57,7 +57,7 @@ class _PopenWrapper:
     daemon's running event loop isn't blocked.
     """
 
-    def __init__(self, proc: "subprocess.Popen[bytes]") -> None:
+    def __init__(self, proc: subprocess.Popen[bytes]) -> None:
         self._proc = proc
         self.pid = proc.pid
 
