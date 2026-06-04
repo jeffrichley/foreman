@@ -835,3 +835,83 @@ def test_advance_label_to_done_ignores_spec_shaped_pr(tmp_path: Path) -> None:
         _pr(is_merged=True, head_ref="foreman/issue-143"),
     )
     assert evaluate(ctx, rules=RULES) is not Action.ADVANCE_LABEL_TO_DONE
+
+
+# --- Pass 3 HIGH: Reviewer attempt budget (spec + impl) ---
+
+
+def test_dispatch_reviewer_spec_blocked_after_3_completed_attempts(tmp_path: Path) -> None:
+    """After 3 completed Reviewer-spec runs (any outcome), the forward-progress
+    rule must not fire; the safety budget-exhausted rule fires SURFACE_HELP.
+
+    Before this fix, Plan B Stage 1+2 closed the silent-stall gap by
+    terminating crashed Reviewer rows — but with no budget cap, a persistent
+    root cause (e.g., LLM provider down) creates an infinite hot-spawn loop:
+    crash → terminate → next tick re-fire → crash → ...
+    Every other dispatch role has an attempt budget; this closes that gap.
+    """
+    from foreman.reconciler.rules import RULES
+
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:planning",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
+    )
+    for _ in range(3):
+        start_id = ctx.log.write_action(
+            ticket_id=ctx.ticket_id,
+            project="foreman",
+            rule_name="dispatch_reviewer_spec",
+            action="dispatch_reviewer_spec",
+            outcome="running",
+            details={},
+        )
+        ctx.log.terminate_action(parent_log_id=start_id, outcome="error", details={})
+    assert evaluate(ctx, rules=RULES) is Action.SURFACE_HELP
+
+
+def test_dispatch_reviewer_spec_still_fires_under_budget(tmp_path: Path) -> None:
+    """2 completed Reviewer-spec attempts is under the cap of 3 — the rule
+    must still fire on a tick with no in-flight dispatch."""
+    from foreman.reconciler.rules import RULES
+
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:planning",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
+    )
+    for _ in range(2):
+        start_id = ctx.log.write_action(
+            ticket_id=ctx.ticket_id,
+            project="foreman",
+            rule_name="dispatch_reviewer_spec",
+            action="dispatch_reviewer_spec",
+            outcome="running",
+            details={},
+        )
+        ctx.log.terminate_action(parent_log_id=start_id, outcome="error", details={})
+    assert evaluate(ctx, rules=RULES) is Action.DISPATCH_REVIEWER_SPEC
+
+
+def test_dispatch_reviewer_impl_blocked_after_3_completed_attempts(tmp_path: Path) -> None:
+    """Symmetric to spec-side: after 3 completed Reviewer-impl runs, the
+    forward-progress rule must not fire; the safety budget-exhausted rule
+    fires SURFACE_HELP."""
+    from foreman.reconciler.rules import RULES
+
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-review",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143"),
+    )
+    for _ in range(3):
+        start_id = ctx.log.write_action(
+            ticket_id=ctx.ticket_id,
+            project="foreman",
+            rule_name="dispatch_reviewer_impl",
+            action="dispatch_reviewer_impl",
+            outcome="running",
+            details={},
+        )
+        ctx.log.terminate_action(parent_log_id=start_id, outcome="error", details={})
+    assert evaluate(ctx, rules=RULES) is Action.SURFACE_HELP

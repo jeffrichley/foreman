@@ -77,6 +77,7 @@ def _spec_pr_ci_failure(ctx: ActionContext) -> bool:
 
 _MAX_FIX_ATTEMPTS = 3
 _MAX_IMPL_ATTEMPTS = 3
+_MAX_REVIEWER_ATTEMPTS = 3
 
 
 def _fix_attempts_exhausted(ctx: ActionContext) -> bool:
@@ -102,6 +103,32 @@ def _impl_attempts_exhausted(ctx: ActionContext) -> bool:
     return (
         "foreman:plan-approved" in ctx.issue.labels
         and ctx.log.count_completed("dispatch_worker", ctx.ticket_id) >= _MAX_IMPL_ATTEMPTS
+    )
+
+
+def _reviewer_spec_attempts_exhausted(ctx: ActionContext) -> bool:
+    # Spec-side Reviewer budget. Pairs with the forward-progress gate in
+    # ``_planning_pr_needs_review``. After Plan B Stage 1+2 fixed the
+    # crashed-Reviewer silent-stall by terminating the running log row
+    # promptly, the next tick re-fires the rule. If the root cause persists
+    # (e.g., LLM provider down), the loop becomes infinite hot-spawn — every
+    # other role has a budget cap, Reviewer was the only one without. This
+    # rule + the count gate in ``_planning_pr_needs_review`` close that gap.
+    # All terminations burn budget (matches Worker + Fixer behavior); the
+    # action key is scoped to ``dispatch_reviewer_spec`` so the spec-side
+    # budget is independent of impl-side.
+    return (
+        "foreman:planning" in ctx.issue.labels
+        and ctx.log.count_completed("dispatch_reviewer_spec", ctx.ticket_id) >= _MAX_REVIEWER_ATTEMPTS
+    )
+
+
+def _reviewer_impl_attempts_exhausted(ctx: ActionContext) -> bool:
+    # Impl-side Reviewer budget. Symmetric to ``_reviewer_spec_attempts_exhausted``
+    # but scoped to ``dispatch_reviewer_impl`` + ``foreman:impl-review`` label.
+    return (
+        "foreman:impl-review" in ctx.issue.labels
+        and ctx.log.count_completed("dispatch_reviewer_impl", ctx.ticket_id) >= _MAX_REVIEWER_ATTEMPTS
     )
 
 
@@ -175,6 +202,20 @@ _SAFETY_RULES: tuple[Rule, ...] = (
         when=_safety_with_rate_limit(_impl_attempts_exhausted),
         then=Action.SURFACE_HELP,
     ),
+    Rule(
+        name="reviewer_spec_attempts_exhausted",
+        tier=PrecedenceTier.SAFETY,
+        precedence=65,
+        when=_safety_with_rate_limit(_reviewer_spec_attempts_exhausted),
+        then=Action.SURFACE_HELP,
+    ),
+    Rule(
+        name="reviewer_impl_attempts_exhausted",
+        tier=PrecedenceTier.SAFETY,
+        precedence=70,
+        when=_safety_with_rate_limit(_reviewer_impl_attempts_exhausted),
+        then=Action.SURFACE_HELP,
+    ),
 )
 
 
@@ -220,12 +261,19 @@ def _planning_pr_needs_review(ctx: ActionContext) -> bool:
     # The head-ref filter (4c) ensures we only target spec-shaped PRs;
     # impl-shaped PRs linked to the same issue (brief stacked window)
     # must not trigger spec-side Reviewer.
+    # Budget cap (count_completed < _MAX_REVIEWER_ATTEMPTS): pairs with
+    # ``_reviewer_spec_attempts_exhausted`` safety rule. Plan B's Stage 1+2
+    # fixes terminate the running row on crash so the next tick re-fires;
+    # without this cap, a persistent root cause (LLM provider down) creates
+    # an infinite hot-spawn loop. Every other dispatch role has a budget;
+    # Reviewer was the only gap.
     return (
         "foreman:planning" in ctx.issue.labels
         and ctx.pr is not None
         and not ctx.pr.is_merged
         and ctx.pr.head_ref.startswith("foreman/issue-")
         and not ctx.log.has_unterminated("dispatch_reviewer_spec", ctx.ticket_id)
+        and ctx.log.count_completed("dispatch_reviewer_spec", ctx.ticket_id) < _MAX_REVIEWER_ATTEMPTS
     )
 
 
@@ -279,6 +327,8 @@ def _impl_review_green(ctx: ActionContext) -> bool:
     # Head-ref filter (4c): only target impl-shaped PRs so a spec PR
     # still linked to this ticket during the stacked window cannot trigger
     # the impl-side Reviewer.
+    # Budget cap: symmetric to spec-side; closes the hot-spawn-loop gap
+    # Plan B Stage 1+2 introduced by terminating crashed Reviewer rows.
     return (
         "foreman:impl-review" in ctx.issue.labels
         and ctx.pr is not None
@@ -286,6 +336,7 @@ def _impl_review_green(ctx: ActionContext) -> bool:
         and ctx.pr.head_ref.startswith("foreman/impl-")
         and ctx.pr.ci_status == "SUCCESS"
         and not ctx.log.has_unterminated("dispatch_reviewer_impl", ctx.ticket_id)
+        and ctx.log.count_completed("dispatch_reviewer_impl", ctx.ticket_id) < _MAX_REVIEWER_ATTEMPTS
     )
 
 
