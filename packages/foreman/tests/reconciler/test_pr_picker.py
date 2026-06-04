@@ -103,20 +103,33 @@ def test_picker_prefers_impl_when_both_phases_present() -> None:
     assert _pick_pr_for_ticket(issue, [spec, impl]).head_ref == "foreman/impl-42"
 
 
-def test_picker_falls_back_to_first_when_no_phase_match() -> None:
-    """No foreman phase labels → return the first linked PR (legacy/operator
-    PRs that don't follow foreman branch conventions still get a PR
-    assigned; rules will filter by head_ref anyway)."""
+def test_picker_returns_none_when_no_phase_label() -> None:
+    """No foreman phase labels → ``None`` (Pass 2 MEDIUM).
+
+    Previously fell back to ``linked_prs[0]``, which let some safety rules
+    that don't filter by shape fire against an arbitrarily-picked off-shape
+    PR. Returning None lets the existing ``ctx.pr is None`` guards keep
+    those rules safely inert.
+    """
     issue = _issue(("some-other-label",))
     pr_a = _pr("custom-branch-a", number=100)
     pr_b = _pr("custom-branch-b", number=200)
-    assert _pick_pr_for_ticket(issue, [pr_a, pr_b]) is pr_a
+    assert _pick_pr_for_ticket(issue, [pr_a, pr_b]) is None
 
 
-def test_picker_falls_back_when_phase_set_but_no_shape_match() -> None:
-    """If the issue is in spec phase but only an off-shape PR is linked,
-    fall back to the first PR rather than returning None — rules will
-    still refuse to fire via their own head_ref filters."""
+def test_picker_returns_none_when_phase_set_but_no_shape_match() -> None:
+    """Issue is in spec phase but only an off-shape PR is linked → ``None``
+    (Pass 2 MEDIUM). Better to skip than mispick — rules that DO filter by
+    head_ref were already inert here; the issue was the rules that don't."""
     issue = _issue(("foreman:planning",))
     odd = _pr("custom/branch", number=100)
-    assert _pick_pr_for_ticket(issue, [odd]) is odd
+    assert _pick_pr_for_ticket(issue, [odd]) is None
+
+
+def test_picker_returns_none_when_no_shape_matches() -> None:
+    """Hold-only or needs-help-only issues with PRs of unrecognized head_ref
+    shape should return None, not the arbitrary first PR."""
+    issue = _issue(("foreman:hold",))  # no spec/impl phase
+    manual_pr = _pr("feature/manual-pr-not-foreman")
+    picked = _pick_pr_for_ticket(issue, [manual_pr])
+    assert picked is None

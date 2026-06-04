@@ -59,7 +59,9 @@ query ForemanProjectState($owner: String!, $repo: String!) {
         "foreman:impl-review",
         "foreman:impl-approved",
         "foreman:impl-fix",
-        "foreman:needs-help"
+        "foreman:needs-help",
+        "foreman:hold",
+        "foreman:failed"
       ] }
     ) {
       nodes {
@@ -85,7 +87,15 @@ query ForemanProjectState($owner: String!, $repo: String!) {
       }
     }
     recentMergedPRs: pullRequests(
-      first: 20,
+      # Bounded window for lagging-label safety nets (e.g., the
+      # ``retarget_impl_after_spec_merged`` family of rules). 50 buys ~2.5x
+      # headroom over backfill bursts where foreman merges many PRs between
+      # polls. If we ever merge >50 PRs in one poll window the older merges
+      # slip out and any forward-progress label still sitting on the issue
+      # won't be cleared by the lagging-label rules — an unresolved
+      # escalation gap; the simpler mitigation is to lower
+      # poll_interval_seconds rather than add GraphQL pagination here.
+      first: 50,
       states: MERGED,
       orderBy: {field: UPDATED_AT, direction: DESC}
     ) {

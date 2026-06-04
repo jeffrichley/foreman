@@ -697,8 +697,12 @@ async def run_worker(
         pr_url = impl_pr.html_url
 
         # Label transitions for the implemented outcome. Per-episode
-        # counter reset: drop all impl-attempt-N labels + needs-help so
-        # any future re-trigger starts with a fresh 3-attempt budget.
+        # counter reset: drop all impl-attempt-N labels + needs-help +
+        # foreman:failed so any future re-trigger starts with a fresh
+        # 3-attempt budget and a clean dashboard. (Pass 2 MEDIUM: without
+        # the foreman:failed drop, an operator re-triggering a previously-
+        # failed ticket leaves stale failed state on the issue after a
+        # successful run.)
         # v3: no ``implementing`` label to clear — the entry label
         # ``foreman:plan-approved`` was already removed at dispatch.
         current_labels.add(_LABEL_IMPL_REVIEW)
@@ -707,6 +711,7 @@ async def run_worker(
             if (
                 _label_name.startswith("foreman:impl-attempt-")
                 or _label_name == _LABEL_NEEDS_HELP
+                or _label_name == _LABEL_FAILED
             ):
                 current_labels.discard(_label_name)
         added_foreman_post.add(_LABEL_IMPL_REVIEW)
@@ -766,15 +771,19 @@ async def run_worker(
     # shrinks from minutes (LLM duration) to API round-trip.
     current_label_names_post = {label.name for label in issue.labels}
     if final_outcome == "implemented":
-        # Resolve the "drop all impl-attempt-N + needs-help" rule
-        # against the CURRENT remote label set, not the pre-LLM
+        # Resolve the "drop all impl-attempt-N + needs-help + failed"
+        # rule against the CURRENT remote label set, not the pre-LLM
         # snapshot (operators may have added/removed attempt labels
         # during the LLM call — unlikely but the semantic is "clean
         # the episode from what's actually there now").
         removed_foreman_post = {
             n
             for n in current_label_names_post
-            if n.startswith("foreman:impl-attempt-") or n == _LABEL_NEEDS_HELP
+            if (
+                n.startswith("foreman:impl-attempt-")
+                or n == _LABEL_NEEDS_HELP
+                or n == _LABEL_FAILED
+            )
         }
     final_label_set = (current_label_names_post - removed_foreman_post) | added_foreman_post
     issue.set_labels(*sorted(final_label_set))

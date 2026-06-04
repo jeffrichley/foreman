@@ -1932,3 +1932,51 @@ async def test_run_worker_preserves_non_foreman_labels_added_during_window(
     assert "team:backend" in final
     # Foreman label NOT under the role's control also preserved.
     assert "foreman:hold" in final
+
+
+@pytest.mark.asyncio
+async def test_run_worker_implemented_clears_stale_foreman_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pass 2 MEDIUM: if an operator re-triggers a previously-failed ticket
+    (e.g., by re-adding ``foreman:plan-approved`` to an issue that still
+    carries ``foreman:failed`` from a prior exhausted-attempts episode) and
+    the Worker succeeds this time, the stale ``foreman:failed`` label MUST
+    be dropped by the per-episode reset — otherwise the dashboard keeps
+    showing the issue as terminal-failed despite a clean implementation."""
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    cfg = _make_config(clone)
+    # Issue carries the operator re-trigger label (plan-approved) AND the
+    # stale failed marker from the prior episode. No prior impl-attempt
+    # labels — the operator cleared them along with re-queueing.
+    repo, _spec_pr, issue = _make_fake_repo(
+        issue_number=42,
+        head_sha=head_sha,
+        labels=["foreman:plan-approved", "foreman:failed"],
+    )
+    client = _FakeWorkerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    _make_check_command_pair(monkeypatch, baseline=set(), post=set(), post_rc=0)
+
+    result = await run_worker(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    # Final post-LLM set_labels call must not include the stale failed
+    # marker — the per-episode reset on implemented drops it.
+    final = set(issue.set_labels_calls[-1])
+    assert "foreman:failed" not in final
+    assert "foreman:impl-review" in final
+    # And the returned final_labels matches the cleaned set.
+    assert "foreman:failed" not in result.final_labels

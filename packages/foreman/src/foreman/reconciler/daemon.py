@@ -51,9 +51,15 @@ def _pick_pr_for_ticket(
       ``foreman:impl-fix`` → impl PR (``foreman/impl-N``)
 
     If the label set spans both phases (transient state during a label
-    swap), prefer the impl PR — the later stage wins. Falls back to
-    ``linked_prs[0]`` when no shape filter matches (legacy or
-    operator-created PRs not following the foreman branch conventions).
+    swap), prefer the impl PR — the later stage wins.
+
+    Returns ``None`` when no shape filter matches (Pass 2 MEDIUM): the issue
+    carries no foreman phase label (e.g., only ``foreman:hold`` or
+    ``foreman:needs-help``) or the linked PR's head_ref doesn't follow the
+    foreman branch convention. Some safety rules don't filter by shape and
+    would otherwise fire against an arbitrarily-picked off-shape PR;
+    returning None makes those rules safely no-op via the existing
+    ``ctx.pr is None`` guards.
     """
     if not linked_prs:
         return None
@@ -81,7 +87,7 @@ def _pick_pr_for_ticket(
         for pr in linked_prs:
             if pr.head_ref.startswith("foreman/issue-"):
                 return pr
-    return linked_prs[0]
+    return None
 
 
 @dataclass(frozen=True)

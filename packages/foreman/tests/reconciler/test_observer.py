@@ -193,6 +193,17 @@ def test_observer_query_includes_spec_fix_label() -> None:
     assert "foreman:spec-fix" in _QUERY
 
 
+def test_observer_query_includes_hold_and_failed_labels() -> None:
+    """Pass 2 MEDIUM: tickets carrying ONLY ``foreman:hold`` (operator-paused)
+    or ONLY ``foreman:failed`` (terminal) must still be visible to the
+    reconciler so safety rules + dashboard surfacing can fire. Without these
+    in ``filterBy.labels`` the GraphQL query silently omits them and they
+    fall off the daemon's radar."""
+    from foreman.reconciler.observer import _QUERY
+    assert "foreman:hold" in _QUERY
+    assert "foreman:failed" in _QUERY
+
+
 def test_observer_fetches_recently_merged_prs_for_lagging_label_recovery() -> None:
     """Lagging-label safety rules need to see merged PRs. The observer must
     include recently-merged PRs in the snapshot so those rules can fire in
