@@ -6,10 +6,10 @@ typed exceptions so the daemon loop can fail-stop with appropriate alerts.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from foreman.reconciler.state import IssueState, PRState, ProjectSnapshot
+from foreman.reconciler.state import IssueState, ProjectSnapshot, PRState
 
 
 class GHGraphQLClient(Protocol):
@@ -109,7 +109,7 @@ def fetch_project_state(
         repo=repo,
         issues=issues,
         prs=prs,
-        fetched_at=datetime.now(timezone.utc),
+        fetched_at=datetime.now(UTC),
     )
 
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -151,7 +151,7 @@ class ExecutionLog:
         # SQLite's CURRENT_TIMESTAMP writes UTC as 'YYYY-MM-DD HH:MM:SS' (no
         # 'T' separator, no tz suffix). Match that format so string comparison
         # works correctly against the stored ts column.
-        cutoff = datetime.now(timezone.utc) - timedelta(seconds=within_seconds)
+        cutoff = datetime.now(UTC) - timedelta(seconds=within_seconds)
         cutoff_sql = cutoff.strftime("%Y-%m-%d %H:%M:%S")
         with self._connect() as conn:
             row = conn.execute(

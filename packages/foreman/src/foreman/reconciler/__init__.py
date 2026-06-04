@@ -12,7 +12,7 @@ from foreman.reconciler.observer import (
     fetch_project_state,
 )
 from foreman.reconciler.rules import RULES, PrecedenceTier, Rule, evaluate
-from foreman.reconciler.state import IssueState, PRState, ProjectSnapshot
+from foreman.reconciler.state import IssueState, ProjectSnapshot, PRState
 
 __all__ = [
     "Action",

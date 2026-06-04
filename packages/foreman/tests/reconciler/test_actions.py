@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from foreman.reconciler.actions import Action, ActionContext, execute_action
 from foreman.reconciler.exec_log import ExecutionLog
-from foreman.reconciler.state import IssueState, PRState, ProjectSnapshot
+from foreman.reconciler.state import IssueState, ProjectSnapshot, PRState
 
 
 def _snapshot() -> ProjectSnapshot:
@@ -25,11 +25,11 @@ def _snapshot() -> ProjectSnapshot:
                 labels=("foreman:planning",),
                 assignees=(),
                 body="",
-                updated_at=datetime(2026, 6, 3, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 6, 3, tzinfo=UTC),
             ),
         ),
         prs=(),
-        fetched_at=datetime(2026, 6, 3, tzinfo=timezone.utc),
+        fetched_at=datetime(2026, 6, 3, tzinfo=UTC),
     )
 
 

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import dataclasses
+from datetime import UTC, datetime
 
 import pytest
 
-from foreman.reconciler.state import IssueState, PRState, ProjectSnapshot
+from foreman.reconciler.state import IssueState, ProjectSnapshot, PRState
 
 
 def test_issue_state_is_frozen() -> None:
@@ -16,9 +17,9 @@ def test_issue_state_is_frozen() -> None:
         labels=("foreman:planning",),
         assignees=(),
         body="",
-        updated_at=datetime(2026, 6, 3, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 6, 3, tzinfo=UTC),
     )
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         issue.number = 999  # type: ignore[misc]
 
 
@@ -32,7 +33,7 @@ def test_pr_state_is_frozen() -> None:
         linked_issue_numbers=(143,),
         is_merged=False,
     )
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         pr.number = 999  # type: ignore[misc]
 
 
@@ -43,7 +44,7 @@ def test_project_snapshot_finds_issue_by_number() -> None:
         labels=("foreman:planning",),
         assignees=(),
         body="",
-        updated_at=datetime(2026, 6, 3, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 6, 3, tzinfo=UTC),
     )
     snap = ProjectSnapshot(
         project="foreman",
@@ -51,7 +52,7 @@ def test_project_snapshot_finds_issue_by_number() -> None:
         repo="foreman",
         issues=(issue,),
         prs=(),
-        fetched_at=datetime(2026, 6, 3, tzinfo=timezone.utc),
+        fetched_at=datetime(2026, 6, 3, tzinfo=UTC),
     )
     assert snap.find_issue(143) is issue
     assert snap.find_issue(999) is None
@@ -82,7 +83,7 @@ def test_project_snapshot_returns_prs_linked_to_issue() -> None:
         repo="foreman",
         issues=(),
         prs=(linked_pr, unrelated_pr),
-        fetched_at=datetime(2026, 6, 3, tzinfo=timezone.utc),
+        fetched_at=datetime(2026, 6, 3, tzinfo=UTC),
     )
     linked = snap.prs_for_issue(143)
     assert linked == (linked_pr,)
@@ -95,6 +96,6 @@ def test_ticket_id_format() -> None:
         repo="foreman",
         issues=(),
         prs=(),
-        fetched_at=datetime(2026, 6, 3, tzinfo=timezone.utc),
+        fetched_at=datetime(2026, 6, 3, tzinfo=UTC),
     )
     assert snap.ticket_id_for(143) == "jeffrichley/foreman#143"

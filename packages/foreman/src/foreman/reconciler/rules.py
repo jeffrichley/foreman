@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import enum
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from foreman.reconciler.actions import Action, ActionContext
 

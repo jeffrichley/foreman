@@ -128,7 +128,7 @@ class Reconciler:
                     self._stop_event.wait(),
                     timeout=self.poll_interval_seconds,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
 
     async def shutdown(self) -> None:

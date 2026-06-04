@@ -3,13 +3,13 @@ this module covers the evaluator's behavior over the catalog."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from foreman.reconciler.actions import Action, ActionContext
 from foreman.reconciler.exec_log import ExecutionLog
-from foreman.reconciler.rules import Rule, PrecedenceTier, evaluate
-from foreman.reconciler.state import IssueState, PRState, ProjectSnapshot
+from foreman.reconciler.rules import PrecedenceTier, Rule, evaluate
+from foreman.reconciler.state import IssueState, ProjectSnapshot, PRState
 
 
 def _ctx(tmp_path: Path) -> ActionContext:
@@ -26,11 +26,11 @@ def _ctx(tmp_path: Path) -> ActionContext:
                 labels=("foreman:planning",),
                 assignees=(),
                 body="",
-                updated_at=datetime(2026, 6, 3, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 6, 3, tzinfo=UTC),
             ),
         ),
         prs=(),
-        fetched_at=datetime(2026, 6, 3, tzinfo=timezone.utc),
+        fetched_at=datetime(2026, 6, 3, tzinfo=UTC),
     )
     return ActionContext(snapshot=snap, issue=snap.issues[0], pr=None, log=log)
 
@@ -113,7 +113,7 @@ def _issue(labels: tuple[str, ...] = (), **overrides) -> IssueState:
         labels=labels,
         assignees=(),
         body="",
-        updated_at=datetime(2026, 6, 3, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 6, 3, tzinfo=UTC),
     )
     base.update(overrides)
     return IssueState(**base)
@@ -146,7 +146,7 @@ def _ctx_with(tmp_path: Path, issue: IssueState, pr=None) -> ActionContext:
         repo="foreman",
         issues=(issue,),
         prs=(pr,) if pr else (),
-        fetched_at=datetime(2026, 6, 3, tzinfo=timezone.utc),
+        fetched_at=datetime(2026, 6, 3, tzinfo=UTC),
     )
     return ActionContext(snapshot=snap, issue=issue, pr=pr, log=log)
 

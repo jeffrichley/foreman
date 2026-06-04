@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from foreman.reconciler.exec_log import ExecutionLog
 from foreman.reconciler.host import ReconcilerHost
-from foreman.reconciler.state import IssueState, PRState, ProjectSnapshot
+from foreman.reconciler.state import IssueState, ProjectSnapshot, PRState
 
 logger = logging.getLogger(__name__)
 
