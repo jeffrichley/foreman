@@ -29,8 +29,17 @@ class Action(enum.Enum):
     MERGE_SPEC_PR = "merge_spec_pr"
     ADVANCE_LABEL_TO_PLAN_APPROVED = "advance_label_to_plan_approved"
     DISPATCH_WORKER = "dispatch_worker"
-    DISPATCH_REVIEWER = "dispatch_reviewer"
-    DISPATCH_FIXER = "dispatch_fixer"
+    # foreman v3 rescue Stage 2: split Reviewer + Fixer dispatch actions
+    # by target. Pre-split, both spec-side and impl-side dispatch_reviewer
+    # rules shared the action key ``dispatch_reviewer``, which made the
+    # spec-side ``count_completed`` idempotence gate flip permanently
+    # False once an impl-side dispatch landed (HIGH #7). Same shape for
+    # the Fixer: ``foreman fix --target spec_pr|impl_pr`` requires per-
+    # target action so the executor can plumb the right flag (CRITICAL #4).
+    DISPATCH_REVIEWER_SPEC = "dispatch_reviewer_spec"
+    DISPATCH_REVIEWER_IMPL = "dispatch_reviewer_impl"
+    DISPATCH_FIXER_SPEC = "dispatch_fixer_spec"
+    DISPATCH_FIXER_IMPL = "dispatch_fixer_impl"
     ADVANCE_LABEL_TO_IMPL_APPROVED = "advance_label_to_impl_approved"
     MERGE_IMPL_PR = "merge_impl_pr"
     ADVANCE_LABEL_TO_DONE = "advance_label_to_done"
@@ -66,11 +75,13 @@ class ActionContext:
         return self.snapshot.ticket_id_for(self.issue.number)
 
 
-_DISPATCH_ROLE_FOR_ACTION = {
-    Action.DISPATCH_PLANNER: "planner",
-    Action.DISPATCH_WORKER: "worker",
-    Action.DISPATCH_REVIEWER: "reviewer",
-    Action.DISPATCH_FIXER: "fixer",
+_DISPATCH_ROLE_FOR_ACTION: dict[Action, tuple[str, str | None]] = {
+    Action.DISPATCH_PLANNER: ("planner", None),
+    Action.DISPATCH_WORKER: ("worker", None),
+    Action.DISPATCH_REVIEWER_SPEC: ("reviewer", "spec_pr"),
+    Action.DISPATCH_REVIEWER_IMPL: ("reviewer", "impl_pr"),
+    Action.DISPATCH_FIXER_SPEC: ("fixer", "spec_pr"),
+    Action.DISPATCH_FIXER_IMPL: ("fixer", "impl_pr"),
 }
 
 
@@ -139,8 +150,10 @@ def execute_action(
                 ),
             )
         elif action in _DISPATCH_ROLE_FOR_ACTION:
+            role, target = _DISPATCH_ROLE_FOR_ACTION[action]
             host.dispatch_role(
-                role=_DISPATCH_ROLE_FOR_ACTION[action],
+                role=role,
+                target=target,
                 owner=ctx.snapshot.owner,
                 repo=ctx.snapshot.repo,
                 issue=ctx.issue.number,

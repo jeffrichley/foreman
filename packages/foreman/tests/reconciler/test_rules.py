@@ -246,18 +246,18 @@ def test_dispatch_planner_skipped_when_already_running(tmp_path: Path) -> None:
 def test_dispatch_reviewer_spec_fires_when_planning_pr_open_no_review_yet(
     tmp_path: Path,
 ) -> None:
-    """Spec PR sitting open with no Reviewer dispatch yet → dispatch Reviewer."""
+    """Spec PR sitting open with no Reviewer dispatch yet → dispatch_reviewer_spec."""
     from foreman.reconciler.rules import RULES
     ctx = _ctx_with(
         tmp_path,
         _issue(labels=("foreman:planning",)),
         _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
     )
-    assert evaluate(ctx, rules=RULES) is Action.DISPATCH_REVIEWER
+    assert evaluate(ctx, rules=RULES) is Action.DISPATCH_REVIEWER_SPEC
 
 
 def test_dispatch_reviewer_spec_skipped_when_reviewer_in_flight(tmp_path: Path) -> None:
-    """If a Reviewer dispatch is unterminated, don't re-fire."""
+    """If a spec-side Reviewer dispatch is unterminated, don't re-fire."""
     from foreman.reconciler.rules import RULES
     ctx = _ctx_with(
         tmp_path,
@@ -268,7 +268,7 @@ def test_dispatch_reviewer_spec_skipped_when_reviewer_in_flight(tmp_path: Path) 
         ticket_id=ctx.ticket_id,
         project="foreman",
         rule_name="dispatch_reviewer_spec",
-        action="dispatch_reviewer",
+        action="dispatch_reviewer_spec",
         outcome="running",
         details={},
     )
@@ -279,9 +279,9 @@ def test_dispatch_reviewer_spec_skipped_when_reviewer_in_flight(tmp_path: Path) 
 def test_dispatch_reviewer_spec_does_not_refire_after_reviewer_completed(
     tmp_path: Path,
 ) -> None:
-    """Once a dispatch_reviewer log row terminates for this ticket, the rule
-    should not fire again — even if the planning label is still on (the label
-    transition is the Reviewer subprocess's responsibility, not the rule).
+    """Once a dispatch_reviewer_spec log row terminates for this ticket, the
+    rule should not fire again — even if the planning label is still on (the
+    label transition is the Reviewer subprocess's responsibility, not the rule).
     """
     from foreman.reconciler.rules import RULES
     ctx = _ctx_with(
@@ -289,17 +289,17 @@ def test_dispatch_reviewer_spec_does_not_refire_after_reviewer_completed(
         _issue(labels=("foreman:planning",)),
         _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
     )
-    # Seed a completed dispatch_reviewer record: start running, then terminate.
+    # Seed a completed dispatch_reviewer_spec record: start running, then terminate.
     start_id = ctx.log.write_action(
         ticket_id=ctx.ticket_id,
         project="foreman",
         rule_name="dispatch_reviewer_spec",
-        action="dispatch_reviewer",
+        action="dispatch_reviewer_spec",
         outcome="running",
         details={},
     )
     ctx.log.terminate_action(parent_log_id=start_id, outcome="success", details={})
-    assert evaluate(ctx, rules=RULES) is not Action.DISPATCH_REVIEWER
+    assert evaluate(ctx, rules=RULES) is not Action.DISPATCH_REVIEWER_SPEC
 
 
 def test_merge_spec_pr_now_requires_plan_approved_label_and_flag(
@@ -376,24 +376,24 @@ def test_dispatch_worker_fires_on_plan_approved(tmp_path: Path) -> None:
     assert evaluate(ctx, rules=RULES) is Action.DISPATCH_WORKER
 
 
-def test_dispatch_reviewer_fires_on_impl_review_green(tmp_path: Path) -> None:
+def test_dispatch_reviewer_impl_fires_on_impl_review_green(tmp_path: Path) -> None:
     from foreman.reconciler.rules import RULES
     ctx = _ctx_with(
         tmp_path,
         _issue(labels=("foreman:impl-review",)),
         _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
     )
-    assert evaluate(ctx, rules=RULES) is Action.DISPATCH_REVIEWER
+    assert evaluate(ctx, rules=RULES) is Action.DISPATCH_REVIEWER_IMPL
 
 
-def test_dispatch_fixer_fires_on_impl_fix_label(tmp_path: Path) -> None:
+def test_dispatch_fixer_impl_fires_on_impl_fix_label(tmp_path: Path) -> None:
     from foreman.reconciler.rules import RULES
     ctx = _ctx_with(
         tmp_path,
         _issue(labels=("foreman:impl-fix",)),
         _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
     )
-    assert evaluate(ctx, rules=RULES) is Action.DISPATCH_FIXER
+    assert evaluate(ctx, rules=RULES) is Action.DISPATCH_FIXER_IMPL
 
 
 def test_merge_impl_pr_fires_on_impl_approved(tmp_path: Path) -> None:
@@ -451,9 +451,9 @@ def test_hold_label_blocks_all_actions(tmp_path: Path) -> None:
 
 
 def test_dispatch_fixer_blocked_after_3_completed_attempts(tmp_path: Path) -> None:
-    """Once 3 dispatch_fixer attempts have completed, the budget is exhausted
-    and the budget-exhausted safety rule fires (SURFACE_HELP), preempting any
-    further dispatch_fixer."""
+    """Once 3 dispatch_fixer_impl attempts have completed, the budget is
+    exhausted and the budget-exhausted safety rule fires (SURFACE_HELP),
+    preempting any further dispatch_fixer_impl."""
     from foreman.reconciler.rules import RULES
 
     issue = _issue(labels=("foreman:impl-fix",))
@@ -461,8 +461,8 @@ def test_dispatch_fixer_blocked_after_3_completed_attempts(tmp_path: Path) -> No
     ctx = _ctx_with(tmp_path, issue, pr)
     for _ in range(3):
         start_id = ctx.log.write_action(
-            ticket_id=ctx.ticket_id, project="foreman", rule_name="dispatch_fixer",
-            action="dispatch_fixer", outcome="running", details={},
+            ticket_id=ctx.ticket_id, project="foreman", rule_name="dispatch_fixer_impl",
+            action="dispatch_fixer_impl", outcome="running", details={},
         )
         ctx.log.terminate_action(parent_log_id=start_id, outcome="error", details={})
 
@@ -478,12 +478,12 @@ def test_dispatch_fixer_still_fires_under_budget(tmp_path: Path) -> None:
     # 2 completed attempts — under cap of 3
     for _ in range(2):
         start_id = ctx.log.write_action(
-            ticket_id=ctx.ticket_id, project="foreman", rule_name="dispatch_fixer",
-            action="dispatch_fixer", outcome="running", details={},
+            ticket_id=ctx.ticket_id, project="foreman", rule_name="dispatch_fixer_impl",
+            action="dispatch_fixer_impl", outcome="running", details={},
         )
         ctx.log.terminate_action(parent_log_id=start_id, outcome="success", details={})
 
-    assert evaluate(ctx, rules=RULES) is Action.DISPATCH_FIXER
+    assert evaluate(ctx, rules=RULES) is Action.DISPATCH_FIXER_IMPL
 
 
 def test_dispatch_worker_blocked_after_3_completed_attempts(tmp_path: Path) -> None:
@@ -499,3 +499,62 @@ def test_dispatch_worker_blocked_after_3_completed_attempts(tmp_path: Path) -> N
         ctx.log.terminate_action(parent_log_id=start_id, outcome="error", details={})
 
     assert evaluate(ctx, rules=RULES) is Action.SURFACE_HELP
+
+
+# --- HIGH #7 regression: spec-vs-impl Reviewer count_completed isolation ---
+
+
+def test_spec_and_impl_reviewer_count_completed_are_independent(tmp_path: Path) -> None:
+    """A completed impl-PR Reviewer dispatch must NOT block a future spec-PR
+    Reviewer dispatch on the same ticket (e.g., after a manual reopen / a
+    second planning cycle).
+
+    Before the action split: both spec-side ``_planning_pr_needs_review`` and
+    the impl-side dispatch_reviewer rule shared the action key
+    ``dispatch_reviewer``. Once an impl-side dispatch completed, the spec-side
+    gate's ``count_completed(...) == 0`` predicate flipped permanently False,
+    silently dropping the spec re-review. Splitting the actions by target
+    fixes this — the spec-side gate now counts only ``dispatch_reviewer_spec``.
+    """
+    from foreman.reconciler.rules import RULES
+
+    issue = _issue(labels=("foreman:planning",))
+    pr = _pr(mergeable="MERGEABLE", ci_status="SUCCESS")
+    ctx = _ctx_with(tmp_path, issue, pr)
+
+    # Pre-seed a completed impl-side Reviewer dispatch for this ticket.
+    start_id = ctx.log.write_action(
+        ticket_id=ctx.ticket_id,
+        project="foreman",
+        rule_name="dispatch_reviewer_impl",
+        action="dispatch_reviewer_impl",
+        outcome="running",
+        details={},
+    )
+    ctx.log.terminate_action(parent_log_id=start_id, outcome="success", details={})
+
+    # Spec-side rule must still fire — its count_completed("dispatch_reviewer_spec", ...) is 0.
+    assert evaluate(ctx, rules=RULES) is Action.DISPATCH_REVIEWER_SPEC
+
+
+def test_spec_reviewer_completed_blocks_further_spec_dispatch(tmp_path: Path) -> None:
+    """The post-split idempotence on the spec side still works: a completed
+    ``dispatch_reviewer_spec`` row stops the spec-side rule from re-firing."""
+    from foreman.reconciler.rules import RULES
+
+    issue = _issue(labels=("foreman:planning",))
+    pr = _pr(mergeable="MERGEABLE", ci_status="SUCCESS")
+    ctx = _ctx_with(tmp_path, issue, pr)
+
+    start_id = ctx.log.write_action(
+        ticket_id=ctx.ticket_id,
+        project="foreman",
+        rule_name="dispatch_reviewer_spec",
+        action="dispatch_reviewer_spec",
+        outcome="running",
+        details={},
+    )
+    ctx.log.terminate_action(parent_log_id=start_id, outcome="success", details={})
+
+    # Once the spec-side reviewer has run, the spec-side rule must NOT re-fire.
+    assert evaluate(ctx, rules=RULES) is not Action.DISPATCH_REVIEWER_SPEC

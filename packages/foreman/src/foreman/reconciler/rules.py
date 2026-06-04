@@ -69,9 +69,11 @@ _MAX_IMPL_ATTEMPTS = 3
 
 
 def _fix_attempts_exhausted(ctx: ActionContext) -> bool:
+    # Budget is per-impl-cycle: only impl-side Fixer dispatches count toward
+    # the attempt cap. Spec-side fixes don't share the same retry budget.
     return (
         "foreman:impl-fix" in ctx.issue.labels
-        and ctx.log.count_completed("dispatch_fixer", ctx.ticket_id) >= _MAX_FIX_ATTEMPTS
+        and ctx.log.count_completed("dispatch_fixer_impl", ctx.ticket_id) >= _MAX_FIX_ATTEMPTS
     )
 
 
@@ -157,12 +159,18 @@ def _planning_no_pr(ctx: ActionContext) -> bool:
 
 
 def _planning_pr_needs_review(ctx: ActionContext) -> bool:
+    # Spec-side idempotence gate: only count spec-side reviewer dispatches.
+    # Pre-rescue, both spec and impl Reviewer rules emitted the same
+    # ``dispatch_reviewer`` action name; that made this gate permanently
+    # False once an impl-side dispatch landed (HIGH #7). Scoping the action
+    # key to ``dispatch_reviewer_spec`` restores spec-side re-fires after
+    # an impl-side cycle completes.
     return (
         "foreman:planning" in ctx.issue.labels
         and ctx.pr is not None
         and not ctx.pr.is_merged
-        and not ctx.log.has_unterminated("dispatch_reviewer", ctx.ticket_id)
-        and ctx.log.count_completed("dispatch_reviewer", ctx.ticket_id) == 0
+        and not ctx.log.has_unterminated("dispatch_reviewer_spec", ctx.ticket_id)
+        and ctx.log.count_completed("dispatch_reviewer_spec", ctx.ticket_id) == 0
     )
 
 
@@ -198,21 +206,27 @@ def _plan_approved_no_impl_pr(ctx: ActionContext) -> bool:
 
 
 def _impl_review_green(ctx: ActionContext) -> bool:
+    # Impl-side idempotence: only check for in-flight impl-side reviewer
+    # dispatches. A live spec-side dispatch for the same ticket must not
+    # block the impl-side rule (the two operate on different PR shapes).
     return (
         "foreman:impl-review" in ctx.issue.labels
         and ctx.pr is not None
         and not ctx.pr.is_merged
         and ctx.pr.ci_status == "SUCCESS"
-        and not ctx.log.has_unterminated("dispatch_reviewer", ctx.ticket_id)
+        and not ctx.log.has_unterminated("dispatch_reviewer_impl", ctx.ticket_id)
     )
 
 
 def _impl_fix_pending(ctx: ActionContext) -> bool:
+    # Impl-side Fixer flow. Pairs with ``_fix_attempts_exhausted`` above —
+    # both scope to ``dispatch_fixer_impl`` so a future spec-side Fixer
+    # rule (planned for a later stage) gets its own independent budget.
     return (
         "foreman:impl-fix" in ctx.issue.labels
         and ctx.pr is not None
-        and not ctx.log.has_unterminated("dispatch_fixer", ctx.ticket_id)
-        and ctx.log.count_completed("dispatch_fixer", ctx.ticket_id) < _MAX_FIX_ATTEMPTS
+        and not ctx.log.has_unterminated("dispatch_fixer_impl", ctx.ticket_id)
+        and ctx.log.count_completed("dispatch_fixer_impl", ctx.ticket_id) < _MAX_FIX_ATTEMPTS
     )
 
 
@@ -252,7 +266,7 @@ _PROGRESS_RULES: tuple[Rule, ...] = (
         tier=PrecedenceTier.FORWARD_PROGRESS,
         precedence=105,
         when=_planning_pr_needs_review,
-        then=Action.DISPATCH_REVIEWER,
+        then=Action.DISPATCH_REVIEWER_SPEC,
     ),
     Rule(
         name="merge_spec_pr",
@@ -276,18 +290,18 @@ _PROGRESS_RULES: tuple[Rule, ...] = (
         then=Action.DISPATCH_WORKER,
     ),
     Rule(
-        name="dispatch_reviewer",
+        name="dispatch_reviewer_impl",
         tier=PrecedenceTier.FORWARD_PROGRESS,
         precedence=140,
         when=_impl_review_green,
-        then=Action.DISPATCH_REVIEWER,
+        then=Action.DISPATCH_REVIEWER_IMPL,
     ),
     Rule(
-        name="dispatch_fixer",
+        name="dispatch_fixer_impl",
         tier=PrecedenceTier.FORWARD_PROGRESS,
         precedence=150,
         when=_impl_fix_pending,
-        then=Action.DISPATCH_FIXER,
+        then=Action.DISPATCH_FIXER_IMPL,
     ),
     Rule(
         name="merge_impl_pr",

@@ -87,22 +87,45 @@ def plan(issue_url: str, project: str, config_path: Path | None) -> None:
 @click.argument("pr_url", type=str)
 @click.option("--project", required=True, help="Project name as defined in config.toml")
 @click.option(
+    "--target",
+    type=click.Choice(["spec_pr", "impl_pr"]),
+    default=None,
+    help=(
+        "PR shape this Reviewer dispatch is targeting (spec_pr | impl_pr). "
+        "Optional — when omitted, the Reviewer infers target from the PR "
+        "head branch (foreman/issue-<N> vs foreman/impl-<N>). v3 dispatches "
+        "pass --target explicitly for symmetry with the Fixer."
+    ),
+)
+@click.option(
     "--config",
     "config_path",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
     help="Path to foreman config (default: $FOREMAN_CONFIG or ~/.foreman/config.toml)",
 )
-def review(pr_url: str, project: str, config_path: Path | None) -> None:
+def review(
+    pr_url: str,
+    project: str,
+    target: str | None,
+    config_path: Path | None,
+) -> None:
     """Run the Reviewer on a spec PR opened by the Planner OR an impl
     PR opened by the Worker.
 
     The Reviewer derives spec-vs-impl from the PR's head branch shape
-    (foreman/issue-<N> vs foreman/impl-<N>) — no flag required.
+    (foreman/issue-<N> vs foreman/impl-<N>); ``--target`` is accepted but
+    currently advisory (the role infers target from the PR itself).
     """
     cfg_path = config_path or _default_config_path()
     cfg = load_config(cfg_path)
     provider = AnthropicSDKProvider()
+    # ``target`` is accepted for symmetry with ``foreman fix`` and to keep
+    # the v3 dispatch argv shape uniform; ``run_reviewer`` itself does not
+    # take a ``target`` kwarg today (the Reviewer parses the PR head to
+    # decide spec vs impl). Forwarding the flag would require a role-side
+    # signature change — out of scope for the Stage-2 action split.
+    _ = target
     result = asyncio.run(
         run_reviewer(
             pr_url=pr_url,
@@ -117,8 +140,36 @@ def review(pr_url: str, project: str, config_path: Path | None) -> None:
 
 
 @cli.command()
-@click.argument("issue_url", type=str)
+@click.option(
+    "--issue-url",
+    "issue_url",
+    required=True,
+    help="Full GitHub issue URL (https://github.com/owner/repo/issues/N).",
+)
+@click.option(
+    "--pr-url",
+    "pr_url",
+    default=None,
+    help=(
+        "Full GitHub PR URL. Optional — the Fixer derives the spec PR from "
+        "the issue's foreman/issue-<N> branch when omitted. v3's reconciler "
+        "passes the PR URL explicitly for the impl-fix target so the "
+        "dispatch is self-describing in logs."
+    ),
+)
 @click.option("--project", required=True, help="Project name as defined in config.toml")
+@click.option(
+    "--target",
+    type=click.Choice(["spec_pr", "impl_pr"]),
+    default="spec_pr",
+    show_default=True,
+    help=(
+        "Which Fixer flow to run. ``spec_pr`` requires foreman:spec-fix on "
+        "the issue; ``impl_pr`` requires foreman:impl-fix. Default matches "
+        "the pre-rescue behavior so any external caller that still omits "
+        "the flag gets the same spec-side path."
+    ),
+)
 @click.option(
     "--config",
     "config_path",
@@ -126,17 +177,36 @@ def review(pr_url: str, project: str, config_path: Path | None) -> None:
     default=None,
     help="Path to foreman config (default: $FOREMAN_CONFIG or ~/.foreman/config.toml)",
 )
-def fix(issue_url: str, project: str, config_path: Path | None) -> None:
+def fix(
+    issue_url: str,
+    pr_url: str | None,
+    project: str,
+    target: str,
+    config_path: Path | None,
+) -> None:
     """Run the Fixer on an issue queued by the Reviewer.
 
-    The issue must carry ``foreman:spec-fix``. The Fixer derives the spec
-    PR from the issue's ``foreman/issue-<N>`` branch, applies addressable
-    Reviewer findings to the spec doc, commits + pushes, and advances the
-    label based on outcome.
+    For ``--target spec_pr`` (default) the issue must carry
+    ``foreman:spec-fix``; the Fixer derives the spec PR from the issue's
+    ``foreman/issue-<N>`` branch, applies addressable Reviewer findings
+    to the spec doc, commits + pushes, and advances the label based on
+    outcome. For ``--target impl_pr`` the issue must carry
+    ``foreman:impl-fix`` and the Fixer operates on the stacked
+    ``foreman/impl-<N>`` branch instead.
+
+    ``--pr-url`` is accepted but currently advisory — ``run_fixer``
+    derives the PR from the branch convention. Passing it keeps the v3
+    dispatch argv self-describing in audit logs.
     """
     cfg_path = config_path or _default_config_path()
     cfg = load_config(cfg_path)
     provider = AnthropicSDKProvider()
+    # ``pr_url`` not yet plumbed into ``run_fixer`` — accepting it on the
+    # CLI keeps the v3 reconciler's argv shape uniform; threading it
+    # through the role is a separate change (out of scope for the
+    # Stage-2 action split). Keep the read so linters don't flag it as
+    # an unused arg.
+    _ = pr_url
     result = asyncio.run(
         run_fixer(
             issue_url=issue_url,
@@ -144,6 +214,7 @@ def fix(issue_url: str, project: str, config_path: Path | None) -> None:
             project_name=project,
             worktrees_root=_default_worktrees_root(),
             provider=provider,
+            target=target,
         )
     )
     llm = result.llm_output

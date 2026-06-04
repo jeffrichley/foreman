@@ -132,6 +132,7 @@ class V3GitHubHost:
         self,
         *,
         role: str,
+        target: str | None,
         owner: str,
         repo: str,
         issue: int,
@@ -139,6 +140,11 @@ class V3GitHubHost:
         start_log_id: int,
     ) -> int:
         """Spawn `uv run foreman <subcommand>` as a subprocess; return PID.
+
+        ``target`` is ``"spec_pr"`` / ``"impl_pr"`` for Reviewer + Fixer (the
+        target-ambiguous roles), and ``None`` for Planner + Worker. Plumbed
+        into the subprocess via ``--target`` so the role CLI loads the right
+        prompt and asserts the right entry label.
 
         ``start_log_id`` is the id of the 'running' row the executor wrote
         before calling this method. The background tracker carries it through
@@ -165,12 +171,16 @@ class V3GitHubHost:
                 raise ValueError("dispatch_role(role='reviewer') requires pr_number")
             pr_url = f"https://github.com/{owner}/{repo}/pull/{pr_number}"
             argv.extend([pr_url, "--project", self._project_name])
+            if target is not None:
+                argv.extend(["--target", target])
         else:
             issue_url = f"https://github.com/{owner}/{repo}/issues/{issue}"
             argv.extend(["--issue-url", issue_url, "--project", self._project_name])
             if pr_number is not None:
                 pr_url = f"https://github.com/{owner}/{repo}/pull/{pr_number}"
                 argv.extend(["--pr-url", pr_url])
+            if target is not None:
+                argv.extend(["--target", target])
 
         proc = self._runner(argv)
         logger.info("dispatched role=%s pid=%d argv=%s", role, proc.pid, argv)

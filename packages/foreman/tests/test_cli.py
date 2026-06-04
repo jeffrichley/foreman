@@ -147,6 +147,8 @@ reviewer_private_key_path = "/tmp/reviewer.pem"
                 "https://github.com/jeffrichley/voice/pull/77",
                 "--project",
                 "voice",
+                "--target",
+                "spec_pr",
                 "--config",
                 str(config_file),
             ],
@@ -157,6 +159,49 @@ reviewer_private_key_path = "/tmp/reviewer.pem"
     assert "1 findings" in result.output
     assert "confidence=medium" in result.output
     mock_run.assert_called_once()
+
+
+def test_cli_review_target_flag_optional(tmp_path: Path) -> None:
+    """``foreman review`` accepts ``--target`` but does not require it; legacy
+    callers (and pre-Stage-2 dispatchers) still work without the flag."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[projects.voice]
+repo = "jeffrichley/voice"
+local_clone_path = "/tmp/voice"
+
+[projects.voice.apps]
+planner_app_id_env = "FOREMAN_PLANNER_APP_ID"
+planner_app_id = 123456
+planner_private_key_path = "/tmp/planner.pem"
+"""
+    )
+
+    fake_result = ReviewerRunResult(
+        llm_output=ReviewerOutput(
+            outcome="clean",
+            review_comment="clean",
+            findings=[],
+            confidence="high",
+        ),
+        final_labels=["foreman:plan-approved"],
+    )
+
+    runner = CliRunner()
+    with patch("foreman.cli.run_reviewer", new=AsyncMock(return_value=fake_result)):
+        result = runner.invoke(
+            cli,
+            [
+                "review",
+                "https://github.com/jeffrichley/voice/pull/77",
+                "--project",
+                "voice",
+                "--config",
+                str(config_file),
+            ],
+        )
+    assert result.exit_code == 0, result.output
 
 
 def test_cli_help_lists_fix_subcommand() -> None:
@@ -213,6 +258,7 @@ fixer_private_key_path = "/tmp/fixer.pem"
             cli,
             [
                 "fix",
+                "--issue-url",
                 "https://github.com/jeffrichley/voice/issues/42",
                 "--project",
                 "voice",
@@ -226,6 +272,67 @@ fixer_private_key_path = "/tmp/fixer.pem"
     assert "2/3 attempt" in result.output
     assert "2 fixed" in result.output
     assert "1 unaddressed" in result.output
+    # ``--target`` defaults to ``spec_pr`` — the CLI plumbs that through.
+    mock_run.assert_called_once()
+    assert mock_run.call_args.kwargs.get("target") == "spec_pr"
+
+
+def test_cli_fix_with_target_impl_pr_plumbs_through(tmp_path: Path) -> None:
+    """CRITICAL #4 wire-up: ``foreman fix --target impl_pr`` forwards
+    ``target='impl_pr'`` to ``run_fixer``. Pre-rescue the flag did not
+    exist and v3 dispatches landed on the spec-side default."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[projects.voice]
+repo = "jeffrichley/voice"
+local_clone_path = "/tmp/voice"
+
+[projects.voice.apps]
+planner_app_id_env = "FOREMAN_PLANNER_APP_ID"
+planner_app_id = 123456
+planner_private_key_path = "/tmp/planner.pem"
+fixer_app_id_env = "FOREMAN_FIXER_APP_ID"
+fixer_app_id = 777777
+fixer_private_key_path = "/tmp/fixer.pem"
+"""
+    )
+
+    fake_result = FixerRunResult(
+        llm_output=FixerOutput(
+            outcome="fixed",
+            fix_comment="fixed",
+            commits_made=[],
+            addressed_findings=[],
+            unaddressed_findings=[],
+            confidence="medium",
+        ),
+        attempt=1,
+        final_labels=["foreman:impl-review"],
+    )
+
+    runner = CliRunner()
+    with patch("foreman.cli.run_fixer", new=AsyncMock(return_value=fake_result)) as mock_run:
+        result = runner.invoke(
+            cli,
+            [
+                "fix",
+                "--issue-url",
+                "https://github.com/jeffrichley/voice/issues/42",
+                "--pr-url",
+                "https://github.com/jeffrichley/voice/pull/77",
+                "--project",
+                "voice",
+                "--target",
+                "impl_pr",
+                "--config",
+                str(config_file),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    mock_run.assert_called_once()
+    assert mock_run.call_args.kwargs.get("target") == "impl_pr"
     mock_run.assert_called_once()
 
 

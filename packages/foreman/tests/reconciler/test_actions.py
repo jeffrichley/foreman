@@ -41,8 +41,11 @@ def test_action_enum_covers_spec_catalog() -> None:
         "MERGE_SPEC_PR",
         "ADVANCE_LABEL_TO_PLAN_APPROVED",
         "DISPATCH_WORKER",
-        "DISPATCH_REVIEWER",
-        "DISPATCH_FIXER",
+        # Per-target Reviewer + Fixer dispatch (Stage-2 action split).
+        "DISPATCH_REVIEWER_SPEC",
+        "DISPATCH_REVIEWER_IMPL",
+        "DISPATCH_FIXER_SPEC",
+        "DISPATCH_FIXER_IMPL",
         "ADVANCE_LABEL_TO_IMPL_APPROVED",
         "MERGE_IMPL_PR",
         "ADVANCE_LABEL_TO_DONE",
@@ -131,6 +134,7 @@ class _FakeHost:
         self,
         *,
         role: str,
+        target: str | None,
         owner: str,
         repo: str,
         issue: int,
@@ -142,6 +146,7 @@ class _FakeHost:
                 "dispatch_role",
                 {
                     "role": role,
+                    "target": target,
                     "owner": owner,
                     "repo": repo,
                     "issue": issue,
@@ -182,6 +187,8 @@ def test_execute_dispatch_planner_writes_running_and_calls_host(tmp_path: Path) 
     call_name, call_kwargs = host.calls[0]
     assert call_name == "dispatch_role"
     assert call_kwargs["role"] == "planner"
+    # Planner is not target-ambiguous — executor must pass target=None.
+    assert call_kwargs["target"] is None
     assert call_kwargs["owner"] == "jeffrichley"
     assert call_kwargs["repo"] == "foreman"
     assert call_kwargs["issue"] == 143
@@ -230,6 +237,91 @@ def test_dry_run_does_not_call_host_but_logs_dry_run_outcome(tmp_path: Path) -> 
     assert outcome == "dry_run"
 
 
+def test_execute_dispatch_reviewer_spec_passes_target_spec_pr(tmp_path: Path) -> None:
+    """Each per-target dispatch action must plumb the right ``target`` string
+    into ``host.dispatch_role``. CRITICAL #4: pre-rescue the executor passed
+    no target; the role then defaulted to ``spec_pr`` even on impl-fix
+    dispatches, raising on the entry-label check."""
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    snap = _snapshot()
+    ctx = ActionContext(snapshot=snap, issue=snap.issues[0], pr=None, log=log)
+    host = _FakeHost()
+
+    execute_action(
+        Action.DISPATCH_REVIEWER_SPEC,
+        ctx,
+        host=host,
+        rule_name="dispatch_reviewer_spec",
+        dry_run=False,
+    )
+
+    assert len(host.calls) == 1
+    _, kwargs = host.calls[0]
+    assert kwargs["role"] == "reviewer"
+    assert kwargs["target"] == "spec_pr"
+
+
+def test_execute_dispatch_reviewer_impl_passes_target_impl_pr(tmp_path: Path) -> None:
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    snap = _snapshot()
+    ctx = ActionContext(snapshot=snap, issue=snap.issues[0], pr=None, log=log)
+    host = _FakeHost()
+
+    execute_action(
+        Action.DISPATCH_REVIEWER_IMPL,
+        ctx,
+        host=host,
+        rule_name="dispatch_reviewer_impl",
+        dry_run=False,
+    )
+
+    _, kwargs = host.calls[0]
+    assert kwargs["role"] == "reviewer"
+    assert kwargs["target"] == "impl_pr"
+
+
+def test_execute_dispatch_fixer_spec_passes_target_spec_pr(tmp_path: Path) -> None:
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    snap = _snapshot()
+    ctx = ActionContext(snapshot=snap, issue=snap.issues[0], pr=None, log=log)
+    host = _FakeHost()
+
+    execute_action(
+        Action.DISPATCH_FIXER_SPEC,
+        ctx,
+        host=host,
+        rule_name="dispatch_fixer_spec",
+        dry_run=False,
+    )
+
+    _, kwargs = host.calls[0]
+    assert kwargs["role"] == "fixer"
+    assert kwargs["target"] == "spec_pr"
+
+
+def test_execute_dispatch_fixer_impl_passes_target_impl_pr(tmp_path: Path) -> None:
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    snap = _snapshot()
+    ctx = ActionContext(snapshot=snap, issue=snap.issues[0], pr=None, log=log)
+    host = _FakeHost()
+
+    execute_action(
+        Action.DISPATCH_FIXER_IMPL,
+        ctx,
+        host=host,
+        rule_name="dispatch_fixer_impl",
+        dry_run=False,
+    )
+
+    _, kwargs = host.calls[0]
+    assert kwargs["role"] == "fixer"
+    assert kwargs["target"] == "impl_pr"
+
+
 def test_execute_action_handles_host_exception_and_logs_error(tmp_path: Path) -> None:
     log = ExecutionLog(tmp_path / "log.sqlite")
     log.init()
@@ -237,7 +329,7 @@ def test_execute_action_handles_host_exception_and_logs_error(tmp_path: Path) ->
     ctx = ActionContext(snapshot=snap, issue=snap.issues[0], pr=None, log=log)
 
     class _BoomHost(_FakeHost):
-        def dispatch_role(self, **kwargs):
+        def dispatch_role(self, **kwargs):  # type: ignore[override]
             raise RuntimeError("boom")
 
     host = _BoomHost()
