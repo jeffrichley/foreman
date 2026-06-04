@@ -161,17 +161,8 @@ def _planning_pr_needs_review(ctx: ActionContext) -> bool:
         "foreman:planning" in ctx.issue.labels
         and ctx.pr is not None
         and not ctx.pr.is_merged
-        and ctx.pr.review_decision in (None, "REVIEW_REQUIRED")
         and not ctx.log.has_unterminated("dispatch_reviewer", ctx.ticket_id)
-    )
-
-
-def _planning_pr_approved(ctx: ActionContext) -> bool:
-    return (
-        "foreman:planning" in ctx.issue.labels
-        and ctx.pr is not None
-        and not ctx.pr.is_merged
-        and ctx.pr.review_decision == "APPROVED"
+        and ctx.log.count_completed("dispatch_reviewer", ctx.ticket_id) == 0
     )
 
 
@@ -212,17 +203,7 @@ def _impl_review_green(ctx: ActionContext) -> bool:
         and ctx.pr is not None
         and not ctx.pr.is_merged
         and ctx.pr.ci_status == "SUCCESS"
-        and ctx.pr.review_decision in (None, "REVIEW_REQUIRED")
         and not ctx.log.has_unterminated("dispatch_reviewer", ctx.ticket_id)
-    )
-
-
-def _impl_review_approved_on_gh(ctx: ActionContext) -> bool:
-    return (
-        "foreman:impl-review" in ctx.issue.labels
-        and ctx.pr is not None
-        and not ctx.pr.is_merged
-        and ctx.pr.review_decision == "APPROVED"
     )
 
 
@@ -274,13 +255,6 @@ _PROGRESS_RULES: tuple[Rule, ...] = (
         then=Action.DISPATCH_REVIEWER,
     ),
     Rule(
-        name="advance_label_to_plan_approved",
-        tier=PrecedenceTier.FORWARD_PROGRESS,
-        precedence=110,
-        when=_planning_pr_approved,
-        then=Action.ADVANCE_LABEL_TO_PLAN_APPROVED,
-    ),
-    Rule(
         name="merge_spec_pr",
         tier=PrecedenceTier.FORWARD_PROGRESS,
         precedence=115,
@@ -300,13 +274,6 @@ _PROGRESS_RULES: tuple[Rule, ...] = (
         precedence=130,
         when=_plan_approved_no_impl_pr,
         then=Action.DISPATCH_WORKER,
-    ),
-    Rule(
-        name="advance_label_to_impl_approved",
-        tier=PrecedenceTier.FORWARD_PROGRESS,
-        precedence=138,
-        when=_impl_review_approved_on_gh,
-        then=Action.ADVANCE_LABEL_TO_IMPL_APPROVED,
     ),
     Rule(
         name="dispatch_reviewer",

@@ -246,25 +246,12 @@ def test_dispatch_planner_skipped_when_already_running(tmp_path: Path) -> None:
 def test_dispatch_reviewer_spec_fires_when_planning_pr_open_no_review_yet(
     tmp_path: Path,
 ) -> None:
-    """Spec PR sitting open without Reviewer signoff → dispatch Reviewer."""
+    """Spec PR sitting open with no Reviewer dispatch yet → dispatch Reviewer."""
     from foreman.reconciler.rules import RULES
     ctx = _ctx_with(
         tmp_path,
         _issue(labels=("foreman:planning",)),
-        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", review_decision=None),
-    )
-    assert evaluate(ctx, rules=RULES) is Action.DISPATCH_REVIEWER
-
-
-def test_dispatch_reviewer_spec_fires_on_review_required(tmp_path: Path) -> None:
-    """REVIEW_REQUIRED is the same as "needs a reviewer" — fire dispatch."""
-    from foreman.reconciler.rules import RULES
-    ctx = _ctx_with(
-        tmp_path,
-        _issue(labels=("foreman:planning",)),
-        _pr(
-            mergeable="MERGEABLE", ci_status="SUCCESS", review_decision="REVIEW_REQUIRED"
-        ),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
     )
     assert evaluate(ctx, rules=RULES) is Action.DISPATCH_REVIEWER
 
@@ -275,7 +262,7 @@ def test_dispatch_reviewer_spec_skipped_when_reviewer_in_flight(tmp_path: Path) 
     ctx = _ctx_with(
         tmp_path,
         _issue(labels=("foreman:planning",)),
-        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", review_decision=None),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
     )
     ctx.log.write_action(
         ticket_id=ctx.ticket_id,
@@ -289,32 +276,30 @@ def test_dispatch_reviewer_spec_skipped_when_reviewer_in_flight(tmp_path: Path) 
     assert evaluate(ctx, rules=RULES) is Action.NOOP
 
 
-def test_advance_label_to_plan_approved_on_review_approve(tmp_path: Path) -> None:
-    """foreman:planning + PR open + reviewDecision==APPROVED → label swap."""
+def test_dispatch_reviewer_spec_does_not_refire_after_reviewer_completed(
+    tmp_path: Path,
+) -> None:
+    """Once a dispatch_reviewer log row terminates for this ticket, the rule
+    should not fire again — even if the planning label is still on (the label
+    transition is the Reviewer subprocess's responsibility, not the rule).
+    """
     from foreman.reconciler.rules import RULES
     ctx = _ctx_with(
         tmp_path,
         _issue(labels=("foreman:planning",)),
-        _pr(
-            mergeable="MERGEABLE", ci_status="SUCCESS", review_decision="APPROVED"
-        ),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
     )
-    assert evaluate(ctx, rules=RULES) is Action.ADVANCE_LABEL_TO_PLAN_APPROVED
-
-
-def test_dispatch_reviewer_spec_does_not_refire_after_approve(tmp_path: Path) -> None:
-    """If review_decision==APPROVED, dispatch_reviewer_spec should NOT fire
-    (the label-swap rule takes precedence)."""
-    from foreman.reconciler.rules import RULES
-    ctx = _ctx_with(
-        tmp_path,
-        _issue(labels=("foreman:planning",)),
-        _pr(
-            mergeable="MERGEABLE", ci_status="SUCCESS", review_decision="APPROVED"
-        ),
+    # Seed a completed dispatch_reviewer record: start running, then terminate.
+    start_id = ctx.log.write_action(
+        ticket_id=ctx.ticket_id,
+        project="foreman",
+        rule_name="dispatch_reviewer_spec",
+        action="dispatch_reviewer",
+        outcome="running",
+        details={},
     )
-    # On APPROVED, advance_label rule fires instead of dispatch_reviewer.
-    assert evaluate(ctx, rules=RULES) is Action.ADVANCE_LABEL_TO_PLAN_APPROVED
+    ctx.log.terminate_action(parent_log_id=start_id, outcome="success", details={})
+    assert evaluate(ctx, rules=RULES) is not Action.DISPATCH_REVIEWER
 
 
 def test_merge_spec_pr_now_requires_plan_approved_label_and_flag(
@@ -325,9 +310,7 @@ def test_merge_spec_pr_now_requires_plan_approved_label_and_flag(
     ctx = _ctx_with(
         tmp_path,
         _issue(labels=("foreman:plan-approved",)),
-        _pr(
-            mergeable="MERGEABLE", ci_status="SUCCESS", review_decision="APPROVED"
-        ),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
         auto_merge_spec=True,
     )
     assert evaluate(ctx, rules=RULES) is Action.MERGE_SPEC_PR
@@ -339,9 +322,7 @@ def test_merge_spec_pr_blocked_when_flag_off(tmp_path: Path) -> None:
     ctx = _ctx_with(
         tmp_path,
         _issue(labels=("foreman:plan-approved",)),
-        _pr(
-            mergeable="MERGEABLE", ci_status="SUCCESS", review_decision="APPROVED"
-        ),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
         auto_merge_spec=False,
     )
     assert evaluate(ctx, rules=RULES) is not Action.MERGE_SPEC_PR
@@ -353,9 +334,7 @@ def test_merge_spec_pr_no_longer_fires_on_planning_label(tmp_path: Path) -> None
     ctx = _ctx_with(
         tmp_path,
         _issue(labels=("foreman:planning",)),
-        _pr(
-            mergeable="MERGEABLE", ci_status="SUCCESS", review_decision=None
-        ),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
         auto_merge_spec=True,
     )
     assert evaluate(ctx, rules=RULES) is not Action.MERGE_SPEC_PR
@@ -428,42 +407,13 @@ def test_merge_impl_pr_fires_on_impl_approved(tmp_path: Path) -> None:
     assert evaluate(ctx, rules=RULES) is Action.MERGE_IMPL_PR
 
 
-def test_impl_review_advances_to_impl_approved_on_gh_approve(tmp_path: Path) -> None:
-    """foreman:impl-review + impl PR open + reviewDecision==APPROVED → label swap."""
-    from foreman.reconciler.rules import RULES
-    ctx = _ctx_with(
-        tmp_path,
-        _issue(labels=("foreman:impl-review",)),
-        _pr(
-            mergeable="MERGEABLE", ci_status="SUCCESS", review_decision="APPROVED"
-        ),
-    )
-    assert evaluate(ctx, rules=RULES) is Action.ADVANCE_LABEL_TO_IMPL_APPROVED
-
-
-def test_impl_review_no_advance_without_review_approve(tmp_path: Path) -> None:
-    """Without an APPROVED reviewDecision, no advance — should remain
-    dispatchable to Reviewer (or NOOP if dispatcher already terminated)."""
-    from foreman.reconciler.rules import RULES
-    ctx = _ctx_with(
-        tmp_path,
-        _issue(labels=("foreman:impl-review",)),
-        _pr(
-            mergeable="MERGEABLE", ci_status="SUCCESS", review_decision=None
-        ),
-    )
-    assert evaluate(ctx, rules=RULES) is not Action.ADVANCE_LABEL_TO_IMPL_APPROVED
-
-
 def test_merge_impl_pr_requires_flag(tmp_path: Path) -> None:
     """auto_merge_impl=False parks the PR at impl-approved (no auto-merge)."""
     from foreman.reconciler.rules import RULES
     ctx = _ctx_with(
         tmp_path,
         _issue(labels=("foreman:impl-approved",)),
-        _pr(
-            mergeable="MERGEABLE", ci_status="SUCCESS", review_decision="APPROVED"
-        ),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
         auto_merge_impl=False,
     )
     assert evaluate(ctx, rules=RULES) is not Action.MERGE_IMPL_PR
@@ -475,9 +425,7 @@ def test_merge_impl_pr_fires_when_flag_on(tmp_path: Path) -> None:
     ctx = _ctx_with(
         tmp_path,
         _issue(labels=("foreman:impl-approved",)),
-        _pr(
-            mergeable="MERGEABLE", ci_status="SUCCESS", review_decision="APPROVED"
-        ),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
         auto_merge_impl=True,
     )
     assert evaluate(ctx, rules=RULES) is Action.MERGE_IMPL_PR
