@@ -10,6 +10,7 @@ Thickening will add: `foreman daemon ...`, `foreman project add`, etc.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import shutil
 import signal
@@ -465,13 +466,42 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
                 poll_interval_seconds=config.reconciler.poll_interval_seconds,
             )
 
+            async def _shutdown_watcher(
+                stop_event: asyncio.Event,
+            ) -> None:
+                await stop_event.wait()
+                await reconciler.shutdown()
+
             async def _run() -> None:
-                if max_ticks is None:
-                    await reconciler.run()
-                else:
-                    for _ in range(max_ticks):
-                        await reconciler.tick()
-                        await asyncio.sleep(reconciler.poll_interval_seconds)
+                loop = asyncio.get_event_loop()
+                stop_event = asyncio.Event()
+
+                def _signal_handler() -> None:
+                    stop_event.set()
+
+                # add_signal_handler is POSIX-only; Windows raises
+                # NotImplementedError. Fall through there — Ctrl-C still
+                # raises KeyboardInterrupt which asyncio.run handles
+                # natively, and `foreman daemon stop` (v2) signals via
+                # process termination.
+                try:
+                    loop.add_signal_handler(signal.SIGTERM, _signal_handler)
+                    loop.add_signal_handler(signal.SIGINT, _signal_handler)
+                except (NotImplementedError, RuntimeError):
+                    pass
+
+                watcher = asyncio.create_task(_shutdown_watcher(stop_event))
+                try:
+                    if max_ticks is None:
+                        await reconciler.run()
+                    else:
+                        for _ in range(max_ticks):
+                            await reconciler.tick()
+                            await asyncio.sleep(reconciler.poll_interval_seconds)
+                finally:
+                    watcher.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await watcher
 
             asyncio.run(_run())
     except LockAcquisitionError as exc:
