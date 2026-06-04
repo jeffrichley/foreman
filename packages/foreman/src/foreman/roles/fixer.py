@@ -537,7 +537,7 @@ async def run_fixer(
         allowed_tools=FIXER_ALLOWED_TOOLS,
         output_model=FixerOutput,
         cwd=wt_path,
-        env={"GH_TOKEN": fixer_token, **os.environ},
+        env={**os.environ, "GH_TOKEN": fixer_token},
     )
     duration_seconds = time.monotonic() - start_time
 

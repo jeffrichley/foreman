@@ -588,7 +588,7 @@ async def run_worker(
             allowed_tools=WORKER_ALLOWED_TOOLS,
             output_model=WorkerOutput,
             cwd=wt_path,
-            env={"GH_TOKEN": worker_token, **os.environ},
+            env={**os.environ, "GH_TOKEN": worker_token},
         )
     except Exception as exc:
         # D5: SDK errors (timeout, network, validation, anything) MUST NOT

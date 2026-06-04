@@ -414,7 +414,7 @@ async def run_reviewer(
         allowed_tools=REVIEWER_ALLOWED_TOOLS,
         output_model=ReviewerOutput,
         cwd=wt_path,
-        env={"GH_TOKEN": reviewer_token, **os.environ},
+        env={**os.environ, "GH_TOKEN": reviewer_token},
     )
 
     # Post the review comment as the reviewer bot. ``event="COMMENT"``
