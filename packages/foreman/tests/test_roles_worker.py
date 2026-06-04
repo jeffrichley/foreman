@@ -1864,3 +1864,71 @@ async def test_run_worker_returns_authoritative_final_labels(
     )
 
     assert result.final_labels == expected_final
+
+
+@pytest.mark.asyncio
+async def test_run_worker_preserves_non_foreman_labels_added_during_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pass 2 HIGH: operator-added labels (``priority:high``,
+    ``needs:design``) added DURING the LLM call must survive BOTH the
+    pre-LLM dispatch transition AND the post-LLM outcome transition.
+    ``set_labels`` REPLACES the full label set on GitHub — any label
+    not present in the call's argument list is dropped.
+
+    The Worker has TWO set_labels sites (pre-LLM attempt-stamp +
+    entry-clear, and post-LLM outcome transition); both must re-read
+    labels at the WRITE site to minimize the race window.
+
+    Simulates the race by mutating the fake issue's labels via a
+    side_effect on ``run_agent`` (the LLM call) — labels added during
+    the LLM call must appear in the FINAL (post-LLM) set_labels call.
+    Also asserts that a foreman label NOT under the Worker's control
+    (``foreman:hold``) survives.
+    """
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    cfg = _make_config(clone)
+    repo, _spec_pr, issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeWorkerClient(repo=repo)
+    registry = _make_registry(client)
+
+    async def _mutate_then_return(*args: Any, **kwargs: Any) -> WorkerOutput:
+        # Operator adds two non-foreman labels + one foreman label NOT
+        # under the Worker's control during the LLM call. All three
+        # must be preserved by the post-LLM outcome transition.
+        issue.labels.append(_FakeLabel("priority:high"))
+        issue.labels.append(_FakeLabel("team:backend"))
+        issue.labels.append(_FakeLabel("foreman:hold"))
+        return _implemented_output()
+
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(side_effect=_mutate_then_return)
+    _make_check_command_pair(monkeypatch, baseline=set(), post=set(), post_rc=0)
+
+    await run_worker(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    # Two set_labels calls: pre-LLM dispatch + post-LLM outcome.
+    assert len(issue.set_labels_calls) == 2
+
+    # Post-LLM outcome call carries the FINAL set after the operator's
+    # window — this is the call that must preserve operator labels.
+    final = set(issue.set_labels_calls[-1])
+    # Worker's verdict: impl-review added, attempt counter cleared.
+    assert "foreman:impl-review" in final
+    assert "foreman:impl-attempt-1" not in final
+    # Operator-added labels preserved (the bug this test guards).
+    assert "priority:high" in final
+    assert "team:backend" in final
+    # Foreman label NOT under the role's control also preserved.
+    assert "foreman:hold" in final

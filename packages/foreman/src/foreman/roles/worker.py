@@ -515,11 +515,25 @@ async def run_worker(
     # ``implementing`` label — the attempt counter + exec log are the
     # in-flight signal, and adding a transient label would re-dispatch
     # on reconciler tick.
+    #
+    # Namespace-scoped merge (Pass 2 HIGH): re-read labels at the WRITE
+    # site so any operator-added label (``priority:high``,
+    # ``needs:design``) AND any foreman label the role isn't touching
+    # (e.g., ``foreman:hold``) passes through. The role's verdict
+    # explicitly names the foreman labels it is removing
+    # (``removed_foreman`` = entry labels) and adding (``added_foreman``
+    # = attempt counter); everything else survives.
     attempt_label = f"foreman:impl-attempt-{attempt}"
     current_labels.add(attempt_label)
     for _entry_label in _WORKER_ENTRY_LABELS:
         current_labels.discard(_entry_label)
-    issue.set_labels(*sorted(current_labels))
+    removed_foreman_pre = set(_WORKER_ENTRY_LABELS)
+    added_foreman_pre = {attempt_label}
+    current_label_names_pre = {label.name for label in issue.labels}
+    pre_dispatch_labels = sorted(
+        (current_label_names_pre - removed_foreman_pre) | added_foreman_pre
+    )
+    issue.set_labels(*pre_dispatch_labels)
 
     # Resolve the spec branch + spec PR (PR may be None — implementation
     # proceeds either way; the impl PR body's spec-PR reference adapts).
@@ -648,7 +662,18 @@ async def run_worker(
     # acceptance criteria).
 
     # Branch on the FINAL outcome (after orchestrator override).
+    #
+    # Per-branch declaration of which foreman labels the role is
+    # MUTATING this transition (Pass 2 HIGH — namespace-scoped merge).
+    # ``removed_foreman_post`` + ``added_foreman_post`` capture the
+    # role's intent; everything NOT in those sets — non-foreman labels
+    # (``priority:high``) AND foreman labels the role isn't touching
+    # (``foreman:hold``) — passes through. The actual set_labels call
+    # re-reads the label set just before writing to minimize the
+    # race window for operator-added labels during the LLM call.
     pr_url: str | None = None
+    removed_foreman_post: set[str] = set()
+    added_foreman_post: set[str] = set()
     if final_outcome == "implemented":
         # Open the impl PR, stacked on the spec branch (D1). The
         # PyGithub call gives us the new PR's html_url to return.
@@ -678,6 +703,11 @@ async def run_worker(
                 or _label_name == _LABEL_NEEDS_HELP
             ):
                 current_labels.discard(_label_name)
+        added_foreman_post.add(_LABEL_IMPL_REVIEW)
+        # ``removed_foreman_post`` is computed at the WRITE site from
+        # the freshly-read label set (impl-attempt-N matching is
+        # pattern-based, so we resolve it against CURRENT remote state,
+        # not the pre-LLM snapshot).
     elif final_outcome == "spec_invalid":
         # D6: post the spec_invalid_reason as a comment on the SPEC PR
         # (not the issue). The Worker's branch is left in place (commits,
@@ -699,14 +729,19 @@ async def run_worker(
             current_labels.discard(_entry_label)
         current_labels.add(_LABEL_SPEC_FIX)
         current_labels.add(_LABEL_NEEDS_HELP)
+        removed_foreman_post |= set(_WORKER_ENTRY_LABELS)
+        added_foreman_post.add(_LABEL_SPEC_FIX)
+        added_foreman_post.add(_LABEL_NEEDS_HELP)
     else:
         # incomplete: add needs-help so observers know to look. v3 does
         # not use an in-flight ``implementing`` label — the impl-attempt-N
         # marker carries cycle state. On the last attempt, also stamp
         # foreman:failed so the queue surfaces it for human triage.
         current_labels.add(_LABEL_NEEDS_HELP)
+        added_foreman_post.add(_LABEL_NEEDS_HELP)
         if attempt == max_impl_attempts:
             current_labels.add(_LABEL_FAILED)
+            added_foreman_post.add(_LABEL_FAILED)
 
     # Atomic label transition (adversarial review MEDIUM #12): apply the
     # full final ``current_labels`` set in one ``issue.set_labels(...)``
@@ -715,7 +750,31 @@ async def run_worker(
     # the issue half-transitioned on a subprocess crash — silently
     # dropping it out of the v3 observer's GraphQL ``filterBy.labels``
     # filter.
-    issue.set_labels(*sorted(current_labels))
+    #
+    # Namespace-scoped merge (Pass 2 HIGH): re-read labels NOW (not
+    # from the pre-LLM snapshot) so any operator-added label
+    # (``priority:high``, ``needs:design``) AND any foreman label the
+    # role isn't touching (e.g., ``foreman:hold``) passes through. The
+    # role's verdict is encoded in ``removed_foreman_post`` /
+    # ``added_foreman_post``; everything else survives. Race window
+    # shrinks from minutes (LLM duration) to API round-trip.
+    current_label_names_post = {label.name for label in issue.labels}
+    if final_outcome == "implemented":
+        # Resolve the "drop all impl-attempt-N + needs-help" rule
+        # against the CURRENT remote label set, not the pre-LLM
+        # snapshot (operators may have added/removed attempt labels
+        # during the LLM call — unlikely but the semantic is "clean
+        # the episode from what's actually there now").
+        removed_foreman_post = {
+            n
+            for n in current_label_names_post
+            if n.startswith("foreman:impl-attempt-") or n == _LABEL_NEEDS_HELP
+        }
+    final_label_set = (current_label_names_post - removed_foreman_post) | added_foreman_post
+    issue.set_labels(*sorted(final_label_set))
+    # Keep the in-process tracking aligned with what was actually
+    # applied so the WorkerRunResult.final_labels matches reality.
+    current_labels = final_label_set
 
     # Stats logging — write regardless of outcome. The orchestrator's
     # post-verification truth is what we persist (final_outcome +

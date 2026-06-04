@@ -1223,3 +1223,66 @@ async def test_run_reviewer_returns_authoritative_final_labels(
 
     assert isinstance(result, ReviewerRunResult)
     assert result.final_labels == expected_final
+
+
+@pytest.mark.asyncio
+async def test_run_reviewer_preserves_non_foreman_labels_added_during_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pass 2 HIGH: operator-added labels (``priority:high``,
+    ``needs:design``) added DURING the LLM call must survive the
+    transition. ``set_labels`` REPLACES the full label set on GitHub —
+    any label not present in the call's argument list is dropped. The
+    role must re-read labels at the WRITE site (not from the pre-LLM
+    snapshot, which was minutes stale by the time the LLM returned)
+    and merge in operator-added labels.
+
+    Simulates the race by mutating the fake issue's labels via a
+    side_effect on ``run_agent`` (the LLM call) — when the role
+    re-reads at the write site, it sees the operator-added labels.
+    """
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
+
+    cfg = _make_config(clone)
+    # Start with just ``foreman:planning`` — the operator labels arrive
+    # during the LLM call.
+    repo, _pr, issue = _make_fake_repo(
+        issue_number=42, head_sha=head_sha, labels=["foreman:planning"]
+    )
+    client = _FakeReviewerClient(repo=repo)
+    registry = _make_registry(client)
+
+    async def _mutate_then_return(*args: Any, **kwargs: Any) -> ReviewerOutput:
+        # Operator adds two non-foreman labels + one foreman label NOT
+        # under the Reviewer's control (e.g., a manual pause) during
+        # the LLM call. All three must be preserved by the transition.
+        issue.labels.append(_FakeLabel("priority:high"))
+        issue.labels.append(_FakeLabel("team:backend"))
+        issue.labels.append(_FakeLabel("foreman:hold"))
+        return _make_clean_output()
+
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(side_effect=_mutate_then_return)
+
+    await run_reviewer(
+        pr_url="https://github.com/jeffrichley/voice/pull/77",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    # Exactly one atomic set_labels call carrying the FULL final set.
+    assert len(issue.set_labels_calls) == 1
+    final = set(issue.set_labels_calls[0])
+    # Entry label removed, outcome label added (Reviewer's verdict).
+    assert "foreman:planning" not in final
+    assert "foreman:plan-approved" in final
+    # Operator-added labels preserved (the bug this test guards).
+    assert "priority:high" in final
+    assert "team:backend" in final
+    # Foreman label NOT under the role's control also preserved.
+    assert "foreman:hold" in final

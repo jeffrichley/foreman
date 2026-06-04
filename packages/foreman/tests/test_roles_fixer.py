@@ -1498,3 +1498,70 @@ async def test_run_fixer_returns_authoritative_final_labels(
     )
 
     assert result.final_labels == expected_final
+
+
+@pytest.mark.asyncio
+async def test_run_fixer_preserves_non_foreman_labels_added_during_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pass 2 HIGH: operator-added labels (``priority:high``,
+    ``needs:design``) added DURING the LLM call must survive the
+    transition. ``set_labels`` REPLACES the full label set on GitHub —
+    any label not present in the call's argument list is dropped. The
+    role must re-read labels at the WRITE site (not from the pre-LLM
+    snapshot) and merge in operator-added labels.
+
+    Simulates the race by mutating the fake issue's labels via a
+    side_effect on ``run_agent`` (the LLM call). Also asserts that a
+    foreman label NOT under the Fixer's control (``foreman:hold``,
+    e.g., a manual operator pause) survives.
+    """
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    cfg = _make_config(clone)
+    repo, _pr, issue = _make_fake_repo(
+        issue_number=42, head_sha=head_sha, labels=["foreman:spec-fix"]
+    )
+    client = _FakeFixerClient(repo=repo)
+    registry = _make_registry(client)
+
+    async def _mutate_then_return(*args: Any, **kwargs: Any) -> FixerOutput:
+        # Operator adds two non-foreman labels + one foreman label NOT
+        # under the Fixer's control during the LLM call. All three
+        # must be preserved by the transition.
+        issue.labels.append(_FakeLabel("priority:high"))
+        issue.labels.append(_FakeLabel("team:backend"))
+        issue.labels.append(_FakeLabel("foreman:hold"))
+        return _fixed_output()
+
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(side_effect=_mutate_then_return)
+
+    await run_fixer(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    # The post-LLM set_labels call is the last one. (The Fixer also
+    # uses add_to_labels for the attempt counter near the start —
+    # that doesn't go through set_labels.)
+    assert issue.set_labels_calls, "expected at least one atomic set_labels call"
+    final = set(issue.set_labels_calls[-1])
+    # Fixer's verdict: spec-fix removed, planning added.
+    assert "foreman:spec-fix" not in final
+    assert "foreman:planning" in final
+    # Per-episode reset still drops fix-attempt-N + needs-help (the
+    # role's known transitions).
+    assert "foreman:fix-attempt-1" not in final
+    # Operator-added labels preserved (the bug this test guards).
+    assert "priority:high" in final
+    assert "team:backend" in final
+    # Foreman label NOT under the role's control also preserved.
+    assert "foreman:hold" in final

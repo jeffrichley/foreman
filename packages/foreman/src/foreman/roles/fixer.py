@@ -556,6 +556,16 @@ async def run_fixer(
     # with neither the entry label nor the outcome label, falling out
     # of the v3 observer's GraphQL ``filterBy.labels`` filter — silent
     # stall.
+    #
+    # Per-branch declaration of which foreman labels the role is
+    # MUTATING this transition (Pass 2 HIGH — namespace-scoped merge).
+    # ``removed_foreman`` + ``added_foreman`` capture the role's intent;
+    # everything NOT in those sets — non-foreman labels (``priority:high``)
+    # AND foreman labels the role isn't touching (``foreman:hold``) —
+    # passes through. The actual set_labels call re-reads the label set
+    # just before writing to minimize the race window.
+    removed_foreman: set[str] = set()
+    added_foreman: set[str] = set()
     if llm_output.outcome == "fixed":
         # Back to the Reviewer for a second pass. Per-episode counter
         # reset: clear all fix-attempt-N labels (and needs-help if
@@ -566,6 +576,8 @@ async def run_fixer(
         if target == "impl_pr":
             current_labels.discard(_LABEL_IMPL_FIX)
             current_labels.add(_LABEL_IMPL_REVIEW)
+            removed_foreman.add(_LABEL_IMPL_FIX)
+            added_foreman.add(_LABEL_IMPL_REVIEW)
         else:
             # v3: spec-side Fixer returns the issue to ``foreman:planning``
             # so the reconciler can re-fire ``dispatch_reviewer_spec`` on
@@ -574,6 +586,8 @@ async def run_fixer(
             # spec-review state.)
             current_labels.discard(_LABEL_SPEC_FIX)
             current_labels.add(_LABEL_PLANNING)
+            removed_foreman.add(_LABEL_SPEC_FIX)
+            added_foreman.add(_LABEL_PLANNING)
         all_known_labels = issue_labels | {attempt_label}
         for label_name in all_known_labels:
             if label_name.startswith("foreman:fix-attempt-") or label_name == _LABEL_NEEDS_HELP:
@@ -583,10 +597,34 @@ async def run_fixer(
         # pass) can re-trigger; flag for help; if last attempt, also
         # add the failed escalation.
         current_labels.add(_LABEL_NEEDS_HELP)
+        added_foreman.add(_LABEL_NEEDS_HELP)
         if attempt == max_fix_attempts:
             current_labels.add(_LABEL_FAILED)
+            added_foreman.add(_LABEL_FAILED)
 
-    issue.set_labels(*sorted(current_labels))
+    # Namespace-scoped merge (Pass 2 HIGH): re-read labels NOW (not
+    # from the pre-LLM snapshot) so any operator-added label
+    # (``priority:high``, ``needs:design``) AND any foreman label the
+    # role isn't touching (e.g., ``foreman:hold``) passes through.
+    # The role's verdict is encoded in ``removed_foreman`` /
+    # ``added_foreman``; everything else survives. Race window shrinks
+    # from minutes (LLM duration) to API round-trip (~hundreds of ms).
+    current_label_names = {label.name for label in issue.labels}
+    if llm_output.outcome == "fixed":
+        # Resolve the "drop all fix-attempt-N + needs-help" rule
+        # against the CURRENT remote label set, not the pre-LLM
+        # snapshot (the semantic is "clean the episode from what's
+        # actually there now").
+        removed_foreman |= {
+            n
+            for n in current_label_names
+            if n.startswith("foreman:fix-attempt-") or n == _LABEL_NEEDS_HELP
+        }
+    final_label_set = (current_label_names - removed_foreman) | added_foreman
+    issue.set_labels(*sorted(final_label_set))
+    # Keep the in-process tracking aligned with what was actually
+    # applied so the FixerRunResult.final_labels matches reality.
+    current_labels = final_label_set
 
     # JSONL stats — write regardless of outcome.
     unaddressed_hist = _unaddressed_by_reason_histogram(llm_output)

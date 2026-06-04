@@ -465,7 +465,21 @@ async def run_reviewer(
     # never sees it again (silent stall). ``set_labels`` replaces the full
     # label set in one API call, so the transition is either fully applied
     # or not applied at all.
-    final_labels = sorted((issue_labels - {in_review_label}) | {add_label})
+    #
+    # Namespace-scoped merge (Pass 2 HIGH): ``set_labels`` REPLACES the
+    # full label set on GitHub, so we must preserve every label the role
+    # is not actively touching. Re-read labels NOW (not from the pre-LLM
+    # snapshot) to minimize the race window for operator-added labels —
+    # the LLM call took minutes, but the re-read → API call window is
+    # only the round-trip (~hundreds of ms). The role declares the
+    # foreman labels it is removing (``removed_foreman``) and adding
+    # (``added_foreman``); everything else — non-foreman labels like
+    # ``priority:high`` AND foreman labels the role isn't touching like
+    # ``foreman:hold`` — passes through.
+    removed_foreman = {in_review_label}
+    added_foreman = {add_label}
+    current_label_names = {label.name for label in issue.labels}
+    final_labels = sorted((current_label_names - removed_foreman) | added_foreman)
     issue.set_labels(*final_labels)
 
     # foreman#91: ``final_labels`` is the authoritative post-transition
