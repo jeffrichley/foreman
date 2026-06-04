@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from foreman.config import Config, load_config
+from foreman.config import Config, ProjectConfig, ReconcilerConfig, load_config
 
 
 def test_load_config_returns_config(tmp_path: Path) -> None:
@@ -568,7 +568,9 @@ def test_daemon_config_accepts_explicit_timeout(tmp_path: Path) -> None:
     assert cfg.daemon.role_dispatch_timeout_seconds == 1800
 
 
-def test_project_config_auto_merge_defaults_to_false(tmp_path: Path) -> None:
+def test_project_config_auto_merge_defaults_to_none(tmp_path: Path) -> None:
+    """When unset in TOML, per-project auto_merge_* read as ``None`` so the
+    resolver can fall back to the global default (Task 4)."""
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         '[admin]\ngithub_token_env = "FOREMAN_ADMIN_TOKEN"\n'
@@ -578,8 +580,8 @@ def test_project_config_auto_merge_defaults_to_false(tmp_path: Path) -> None:
     )
     cfg = load_config(config_path)
     project = cfg.projects["voice"]
-    assert project.auto_merge_spec is False
-    assert project.auto_merge_impl is False
+    assert project.auto_merge_spec is None
+    assert project.auto_merge_impl is None
 
 
 def test_project_config_auto_merge_reads_true_from_toml(tmp_path: Path) -> None:
@@ -596,6 +598,57 @@ def test_project_config_auto_merge_reads_true_from_toml(tmp_path: Path) -> None:
     project = cfg.projects["voice"]
     assert project.auto_merge_spec is True
     assert project.auto_merge_impl is True
+
+
+# ----------------------------------------------------------------------
+# ReconcilerConfig.auto_merge_spec / auto_merge_impl — global defaults
+# with per-project override (Task 4 of v3 state-machine plan)
+# ----------------------------------------------------------------------
+
+
+def test_global_auto_merge_defaults() -> None:
+    """Global defaults: spec auto-merge on, impl auto-merge off.
+
+    Rationale: spec PRs are cheap to revert (just an .md file under
+    docs/superpowers/specs/) so the daemon merges them by default to keep
+    the autonomous loop moving. Impl PRs ship real code, so the daemon
+    parks at ``foreman:ready-for-merge`` for human review unless the
+    project opts in.
+    """
+    cfg = ReconcilerConfig()
+    assert cfg.auto_merge_spec is True
+    assert cfg.auto_merge_impl is False
+
+
+def test_project_auto_merge_inherits_global_when_unset() -> None:
+    """A project with no override inherits the reconciler's defaults via
+    the ``effective_auto_merge_*`` resolvers."""
+    cfg = ReconcilerConfig(auto_merge_spec=True, auto_merge_impl=False)
+    project = ProjectConfig(repo="foo/bar", local_clone_path="/tmp/foo")
+    assert cfg.effective_auto_merge_spec(project) is True
+    assert cfg.effective_auto_merge_impl(project) is False
+
+
+def test_project_auto_merge_override_wins() -> None:
+    """A per-project ``auto_merge_spec=False`` overrides the global True."""
+    cfg = ReconcilerConfig(auto_merge_spec=True, auto_merge_impl=False)
+    project = ProjectConfig(
+        repo="foo/bar",
+        local_clone_path="/tmp/foo",
+        auto_merge_spec=False,
+    )
+    assert cfg.effective_auto_merge_spec(project) is False
+
+
+def test_project_can_enable_impl_auto_merge() -> None:
+    """A per-project ``auto_merge_impl=True`` overrides the global False."""
+    cfg = ReconcilerConfig(auto_merge_spec=True, auto_merge_impl=False)
+    project = ProjectConfig(
+        repo="foo/bar",
+        local_clone_path="/tmp/foo",
+        auto_merge_impl=True,
+    )
+    assert cfg.effective_auto_merge_impl(project) is True
 
 
 def test_dev_base_branch_reads_from_config_file(tmp_path: Path) -> None:
