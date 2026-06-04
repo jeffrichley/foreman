@@ -502,6 +502,8 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
     ``reconciler.shutdown_sentinel_path`` which the tick loop polls and
     consumes — the cross-platform path that actually works on Windows.
     """
+    import logging
+
     from foreman.daemon_lock import DaemonLock, LockAcquisitionError
     from foreman.logging_setup import configure_daemon_logging
     from foreman.reconciler import ExecutionLog, Reconciler, ReconcilerProject
@@ -526,6 +528,26 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
     lock_path = Path(os.path.expanduser(config.reconciler.lock_path))
     try:
         with DaemonLock(lock_path):
+            # Clean up a stale shutdown sentinel from a prior `daemon stop`.
+            # Without this, a sentinel left behind by a no-op stop (or by a
+            # stop that raced ahead of cleanup) would be polled on the very
+            # first tick and shut the new daemon down instantly. We own the
+            # lock at this point, so no other daemon can be writing the
+            # sentinel concurrently — a stale file is unambiguously dead.
+            shutdown_sentinel_path = _resolve_shutdown_sentinel_path(config)
+            if shutdown_sentinel_path.exists():
+                logger = logging.getLogger("foreman")
+                logger.warning(
+                    "removing stale shutdown sentinel from prior daemon stop: %s",
+                    shutdown_sentinel_path,
+                )
+                try:
+                    shutdown_sentinel_path.unlink()
+                except FileNotFoundError:
+                    # Race with another `stop` is harmless — file's gone, which
+                    # is what we wanted.
+                    pass
+
             db_path = Path(os.path.expanduser(config.reconciler.db_path))
             log = ExecutionLog(db_path)
             log.init()
@@ -716,24 +738,13 @@ def daemon_stop() -> None:
     except (FileNotFoundError, OSError):
         config = None
 
-    # Always write the sentinel first — it is the cross-platform channel
-    # and is durable through whatever happens to the SIGTERM-send below.
-    sentinel_path = _resolve_shutdown_sentinel_path(config)
-    try:
-        sentinel_path.parent.mkdir(parents=True, exist_ok=True)
-        sentinel_path.write_text(
-            f"requested by foreman daemon stop at {time.time()}\n",
-            encoding="utf-8",
-        )
-        click.echo(f"shutdown requested via sentinel: {sentinel_path}")
-    except OSError as exc:
-        # Don't bail — the SIGTERM path below may still reach a POSIX
-        # daemon. Surface the failure so the operator knows the v3
-        # cross-platform path was skipped.
-        click.echo(f"warning: could not write shutdown sentinel ({exc})", err=True)
-
     lock_path = _resolve_lock_path(config)
 
+    # Check the lock-file gate BEFORE writing the sentinel. If no daemon
+    # is running, leaving a sentinel on disk would silently kill the
+    # next `daemon v3-start` — the reconciler polls the sentinel on its
+    # first tick and shuts down immediately. The sentinel is only useful
+    # when there's a live daemon to receive it.
     if not lock_path.exists():
         discover = (
             "tasklist | findstr foreman"
@@ -755,6 +766,24 @@ def daemon_stop() -> None:
             f"if you're certain no daemon is running."
         )
         return
+
+    # Lock file exists AND we have a PID — there's a daemon to receive
+    # the sentinel. Write it now. This is the cross-platform shutdown
+    # channel (the only one on Windows, since SIGTERM there maps to
+    # TerminateProcess and skips the daemon's cleanup path).
+    sentinel_path = _resolve_shutdown_sentinel_path(config)
+    try:
+        sentinel_path.parent.mkdir(parents=True, exist_ok=True)
+        sentinel_path.write_text(
+            f"requested by foreman daemon stop at {time.time()}\n",
+            encoding="utf-8",
+        )
+        click.echo(f"shutdown requested via sentinel: {sentinel_path}")
+    except OSError as exc:
+        # Don't bail — the SIGTERM path below may still reach a POSIX
+        # daemon. Surface the failure so the operator knows the v3
+        # cross-platform path was skipped.
+        click.echo(f"warning: could not write shutdown sentinel ({exc})", err=True)
 
     # Windows: skip os.kill(SIGTERM) entirely. On Windows it maps to
     # TerminateProcess — a hard kill that delivers no signal, defeating

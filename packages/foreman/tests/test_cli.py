@@ -1234,23 +1234,33 @@ def test_daemon_stop_works_without_config_file(
 def test_daemon_stop_writes_shutdown_sentinel(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """daemon_stop writes the sentinel file even before any signal logic.
+    """daemon_stop writes the sentinel file when a daemon is running.
 
-    The cross-platform contract: the sentinel write happens first, so a
-    crashing SIGTERM-send or a missing lock file never silently disarms
-    the v3 reconciler's poll-based shutdown path. This is the ONLY way
-    the daemon receives a graceful-shutdown request on Windows.
+    The cross-platform contract: when the lock file exists (i.e., there's
+    a live daemon to receive the signal), the sentinel write happens
+    before any SIGTERM logic, so a crashing SIGTERM-send never silently
+    disarms the v3 reconciler's poll-based shutdown path. This is the
+    ONLY way the daemon receives a graceful-shutdown request on Windows.
+
+    See the no-daemon-running tests below for the opposite case — when
+    there's no lock file, daemon_stop must NOT write a sentinel, because
+    a stale sentinel would silently kill the next `daemon v3-start`.
     """
     sentinel_path = tmp_path / "shutdown-requested"
+    lock_path = tmp_path / "d.lock"
+    lock_path.write_text(str(os.getpid()))
 
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         f'[admin]\ngithub_token_env = "X"\n'
+        f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
         f'[reconciler]\nshutdown_sentinel_path = "{sentinel_path.as_posix()}"\n'
     )
     monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
-    # No lock file → daemon_stop returns after the sentinel write but
-    # before any SIGTERM logic. That is what we want to assert.
+    # No-op os.kill so the test doesn't actually signal anything; we only
+    # care about the sentinel-write happening on the lock-exists path.
+    monkeypatch.setattr("foreman.cli.os.kill", lambda pid, sig: None)
+    monkeypatch.setattr("foreman.cli._STOP_GRACE_SECONDS", 0.0)
 
     result = CliRunner().invoke(cli, ["daemon", "stop"])
 
@@ -1262,24 +1272,53 @@ def test_daemon_stop_writes_shutdown_sentinel(
     assert "shutdown requested via sentinel" in result.output
 
 
-def test_daemon_stop_writes_sentinel_without_config_file(
+def test_daemon_stop_does_not_write_sentinel_when_no_daemon_running(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Even without a config file (FOREMAN_CONFIG unset), the sentinel
-    path resolves to the default and the file is written. Operators on
-    a fresh box must still be able to stop a running daemon."""
+    """daemon_stop must NOT leave a sentinel on disk when there's no
+    daemon to receive it. A stale sentinel would be polled by the
+    next `daemon v3-start`'s first tick and trigger an immediate
+    shutdown — silent failure mode that's hard to diagnose."""
+    sentinel_path = tmp_path / "shutdown-requested"
+    lock_path = tmp_path / "missing.lock"  # never created
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[admin]\ngithub_token_env = "X"\n'
+        f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
+        f'[reconciler]\nshutdown_sentinel_path = "{sentinel_path.as_posix()}"\n'
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+
+    result = CliRunner().invoke(cli, ["daemon", "stop"])
+
+    assert result.exit_code == 0, result.output
+    assert not sentinel_path.exists(), (
+        "sentinel must NOT be written when no daemon is running — "
+        "would kill the next daemon start"
+    )
+    # The no-daemon path should still echo the actionable message.
+    assert "No daemon lock file" in result.output
+
+
+def test_daemon_stop_does_not_write_sentinel_without_config_or_lock(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Even without a config file (FOREMAN_CONFIG unset), the lock-gate
+    check still applies — no lock means no daemon means no sentinel.
+    Otherwise an operator running `daemon stop` on a fresh box would
+    plant a sentinel that mysteriously kills their first daemon start."""
     monkeypatch.delenv("FOREMAN_CONFIG", raising=False)
     sentinel_path = tmp_path / "shutdown-requested"
     monkeypatch.setenv("FOREMAN_SHUTDOWN_SENTINEL_PATH", str(sentinel_path))
 
-    # Point lock to a nonexistent path so we return after the sentinel
-    # write without trying any signal logic.
+    # Point lock to a nonexistent path so we return at the no-lock gate.
     monkeypatch.setenv("FOREMAN_LOCK_PATH", str(tmp_path / "missing.lock"))
 
     result = CliRunner().invoke(cli, ["daemon", "stop"])
 
     assert result.exit_code == 0, result.output
-    assert sentinel_path.exists()
+    assert not sentinel_path.exists()
 
 
 def test_resolve_shutdown_sentinel_path_honors_env_override(
