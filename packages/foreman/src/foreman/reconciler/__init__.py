@@ -14,6 +14,7 @@ from foreman.reconciler.observer import (
 )
 from foreman.reconciler.rules import RULES, PrecedenceTier, Rule, evaluate
 from foreman.reconciler.state import IssueState, ProjectSnapshot, PRState
+from foreman.reconciler.v3_host import V3GitHubHost
 
 __all__ = [
     "Action",
@@ -33,6 +34,7 @@ __all__ = [
     "ReconcilerProject",
     "RULES",
     "Rule",
+    "V3GitHubHost",
     "evaluate",
     "execute_action",
     "fetch_project_state",
