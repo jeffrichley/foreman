@@ -411,6 +411,24 @@ def _resolve_lock_path(config: Config | None) -> Path:
     return Path(config.daemon.lock_path).expanduser()
 
 
+def _resolve_shutdown_sentinel_path(config: Config | None) -> Path:
+    """Return the path ``daemon stop`` writes (and the reconciler polls).
+
+    ``FOREMAN_SHUTDOWN_SENTINEL_PATH`` env var wins over config so tests
+    + operators can redirect without editing the config file. When
+    ``config`` is ``None`` (e.g., ``daemon stop`` called on a host
+    without a config file), falls back to the hardcoded default so the
+    sentinel write still succeeds. An empty-string env value is
+    treated as unset.
+    """
+    env_override = os.environ.get("FOREMAN_SHUTDOWN_SENTINEL_PATH") or None
+    if env_override is not None:
+        return Path(env_override).expanduser()
+    if config is None:
+        return Path("~/.foreman/shutdown-requested").expanduser()
+    return Path(config.reconciler.shutdown_sentinel_path).expanduser()
+
+
 def _read_lock_file_pid(lock_path: Path) -> int | None:
     """Best-effort: parse the PID from a daemon lock file.
 
@@ -475,6 +493,14 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
     GitHub IS the source of truth for ticket + PR state. The reconciler
     derives the right action per ticket from GH + execution log, then
     executes via the host. See docs/superpowers/specs/foreman-issue-106-spec.md.
+
+    Graceful shutdown is requested two ways: (1) Ctrl-C / SIGTERM is
+    caught by the in-loop signal handlers below (POSIX foreground only —
+    on Windows ``os.kill(pid, SIGTERM)`` from ``foreman daemon stop`` maps
+    to ``TerminateProcess``, which delivers no signal, so the handler
+    can't fire); (2) ``foreman daemon stop`` writes a sentinel file at
+    ``reconciler.shutdown_sentinel_path`` which the tick loop polls and
+    consumes — the cross-platform path that actually works on Windows.
     """
     from foreman.daemon_lock import DaemonLock, LockAcquisitionError
     from foreman.logging_setup import configure_daemon_logging
@@ -559,6 +585,7 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
                 dry_run=dry_run,
                 alert_after_n_failures=config.reconciler.alert_after_n_failures,
                 poll_interval_seconds=config.reconciler.poll_interval_seconds,
+                shutdown_sentinel_path=config.reconciler.shutdown_sentinel_path,
             )
 
             async def _shutdown_watcher(
@@ -662,17 +689,49 @@ def _build_v3_gh_and_host(
 def daemon_stop() -> None:
     """Signal a running daemon to stop and wait for clean exit.
 
-    Reads the daemon's PID from the lock file (``DaemonLock`` writes
-    the PID on acquisition), sends SIGTERM, and polls the PID for
-    process death up to ``_STOP_GRACE_SECONDS``. The lock file
-    remains on disk after stop — its content is now stale but the
-    OS lock is released when the daemon's fd closes, so the next
-    ``daemon start`` succeeds and overwrites the PID.
+    Two-channel shutdown request:
+
+    1. Writes ``reconciler.shutdown_sentinel_path`` (default
+       ``~/.foreman/shutdown-requested``). The v3 reconciler polls this
+       file each tick, deletes it on detection, and triggers graceful
+       shutdown. This is the cross-platform channel — on Windows it is
+       the ONLY working mechanism because ``os.kill(pid, SIGTERM)`` maps
+       to ``TerminateProcess`` (a hard kill that delivers no signal),
+       which can't run the daemon's cleanup path.
+    2. On POSIX, also reads the daemon's PID from the lock file
+       (``DaemonLock`` writes the PID on acquisition) and sends SIGTERM
+       as a faster signal — handler fires within milliseconds rather
+       than waiting for the next tick. The lock file remains on disk
+       after stop — its content is now stale but the OS lock is
+       released when the daemon's fd closes, so the next ``daemon
+       start`` succeeds and overwrites the PID.
+
+    Either channel alone is sufficient; running both is belt-and-
+    suspenders on POSIX. The sentinel-only Windows path tolerates up
+    to ``reconciler.poll_interval_seconds`` of latency before the
+    daemon notices.
     """
     try:
         config: Config | None = _load_config_from_env()
     except (FileNotFoundError, OSError):
         config = None
+
+    # Always write the sentinel first — it is the cross-platform channel
+    # and is durable through whatever happens to the SIGTERM-send below.
+    sentinel_path = _resolve_shutdown_sentinel_path(config)
+    try:
+        sentinel_path.parent.mkdir(parents=True, exist_ok=True)
+        sentinel_path.write_text(
+            f"requested by foreman daemon stop at {time.time()}\n",
+            encoding="utf-8",
+        )
+        click.echo(f"shutdown requested via sentinel: {sentinel_path}")
+    except OSError as exc:
+        # Don't bail — the SIGTERM path below may still reach a POSIX
+        # daemon. Surface the failure so the operator knows the v3
+        # cross-platform path was skipped.
+        click.echo(f"warning: could not write shutdown sentinel ({exc})", err=True)
+
     lock_path = _resolve_lock_path(config)
 
     if not lock_path.exists():
@@ -697,17 +756,36 @@ def daemon_stop() -> None:
         )
         return
 
+    # Windows: skip os.kill(SIGTERM) entirely. On Windows it maps to
+    # TerminateProcess — a hard kill that delivers no signal, defeating
+    # the graceful-shutdown path the sentinel exists to enable. The
+    # daemon will pick up the sentinel on its next tick.
+    if sys.platform == "win32":
+        click.echo(
+            f"Windows: relying on sentinel only (pid {pid}). The v3 "
+            f"reconciler will detect the sentinel on its next tick "
+            f"(up to ``reconciler.poll_interval_seconds`` of latency)."
+        )
+        return
+
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         click.echo(f"Pid {pid} not running (stale lock file).")
         return
+    except OSError as exc:
+        # Don't undo the sentinel — surface the failure and let the
+        # tick-poller path complete the shutdown.
+        click.echo(
+            f"sentinel written but failed to send SIGTERM to pid {pid}: "
+            f"{exc}. Daemon will still pick up the sentinel on its next tick.",
+            err=True,
+        )
+        return
     click.echo(f"Sent SIGTERM to daemon pid {pid}; waiting for graceful shutdown.")
 
-    # Poll for process death via os.kill(pid, 0). On POSIX the daemon
-    # catches SIGTERM and runs its cleanup before exiting; on Windows
-    # os.kill(pid, SIGTERM) is TerminateProcess (hard kill) so the
-    # process dies near-instantly. Either way, the OS releases the
+    # Poll for process death via os.kill(pid, 0). The daemon catches
+    # SIGTERM and runs its cleanup before exiting; the OS releases the
     # lock when the daemon process dies — file content stays but the
     # exclusive lock is gone.
     deadline = time.monotonic() + _STOP_GRACE_SECONDS

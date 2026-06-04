@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 
 from foreman.reconciler.actions import Action, ActionContext, execute_action
 from foreman.reconciler.exec_log import ExecutionLog
@@ -116,6 +117,7 @@ class Reconciler:
         dry_run: bool,
         alert_after_n_failures: int = 3,
         poll_interval_seconds: int = 60,
+        shutdown_sentinel_path: Path | str | None = None,
     ) -> None:
         self.projects = projects
         self.log = log
@@ -126,6 +128,15 @@ class Reconciler:
         self.poll_interval_seconds = poll_interval_seconds
         self._stop_event = asyncio.Event()
         self._consecutive_failures: dict[str, int] = {p.name: 0 for p in projects}
+        # Sentinel-file-based graceful-shutdown signal. ``foreman daemon stop``
+        # writes this file; we poll it each tick and trigger shutdown when
+        # present. ``None`` disables the mechanism (used by tests that don't
+        # need it — the existing signal-handler path still works).
+        self._shutdown_sentinel_path: Path | None = (
+            Path(shutdown_sentinel_path).expanduser()
+            if shutdown_sentinel_path is not None
+            else None
+        )
 
     async def tick(self) -> None:
         """Run one reconciliation pass over every project."""
@@ -164,6 +175,52 @@ class Reconciler:
 
             self._consecutive_failures[project.name] = 0
             self._reconcile_project(snapshot, project)
+
+        # Sentinel-file-based shutdown check — runs once per tick after
+        # all projects have been reconciled so an in-flight tick completes
+        # before we set the stop event. On Windows this is the ONLY way
+        # ``foreman daemon stop`` can request graceful shutdown (os.kill
+        # there maps to TerminateProcess, which delivers no signal); on
+        # POSIX it is additive to the SIGTERM-handler path installed by
+        # the CLI.
+        if self._shutdown_sentinel_present():
+            logger.info(
+                "shutdown sentinel detected at %s; initiating graceful shutdown",
+                self._shutdown_sentinel_path,
+            )
+            self._consume_shutdown_sentinel()
+            self._stop_event.set()
+
+    def _shutdown_sentinel_present(self) -> bool:
+        """Return True iff a configured sentinel file exists on disk."""
+        if self._shutdown_sentinel_path is None:
+            return False
+        try:
+            return self._shutdown_sentinel_path.exists()
+        except OSError:
+            # Filesystem hiccup — don't crash the tick over a missing volume.
+            return False
+
+    def _consume_shutdown_sentinel(self) -> None:
+        """Delete the sentinel after detection.
+
+        Cleanup so the next ``daemon start`` does not immediately shut
+        down. ``FileNotFoundError`` is harmless (the file might have been
+        removed externally between presence-check and unlink). Other
+        errors are logged but don't block the shutdown — the stop event
+        is set either way.
+        """
+        if self._shutdown_sentinel_path is None:
+            return
+        try:
+            self._shutdown_sentinel_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.exception(
+                "failed to delete shutdown sentinel at %s; continuing shutdown",
+                self._shutdown_sentinel_path,
+            )
 
     def _reconcile_project(
         self,

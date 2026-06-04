@@ -606,6 +606,29 @@ def test_project_config_auto_merge_reads_true_from_toml(tmp_path: Path) -> None:
 # ----------------------------------------------------------------------
 
 
+def test_shutdown_sentinel_path_default() -> None:
+    """The sentinel path defaults to ``~/.foreman/shutdown-requested``.
+
+    Operators expect the v3 reconciler to look at that path without any
+    extra config; ``daemon stop`` writes there by default. Drifting this
+    default silently breaks the cross-platform graceful-shutdown contract.
+    """
+    cfg = ReconcilerConfig()
+    assert cfg.shutdown_sentinel_path == "~/.foreman/shutdown-requested"
+
+
+def test_shutdown_sentinel_path_override(tmp_path: Path) -> None:
+    """The sentinel path is overridable via TOML for non-standard installs
+    (multi-tenant boxes, per-instance daemons sharing the same home dir)."""
+    config_file = tmp_path / "config.toml"
+    custom_path = (tmp_path / "custom-shutdown").as_posix()
+    config_file.write_text(
+        f'[reconciler]\nshutdown_sentinel_path = "{custom_path}"\n'
+    )
+    cfg = load_config(config_file)
+    assert cfg.reconciler.shutdown_sentinel_path == custom_path
+
+
 def test_global_auto_merge_defaults() -> None:
     """Global defaults: spec auto-merge on, impl auto-merge off.
 

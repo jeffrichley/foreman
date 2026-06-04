@@ -133,6 +133,18 @@ class ReconcilerConfig(BaseModel):
         le=20,
         description="Max concurrent role subprocesses across all tickets (Planner+Worker+Reviewer+Fixer combined).",
     )
+    shutdown_sentinel_path: str = Field(
+        default="~/.foreman/shutdown-requested",
+        description=(
+            "Cross-platform graceful-shutdown signal. ``foreman daemon stop`` "
+            "writes this file; the reconciler polls it each tick and triggers "
+            "graceful shutdown when present (deleting the file on detection). "
+            "On POSIX, ``daemon stop`` ALSO sends SIGTERM for faster response; "
+            "on Windows, the sentinel is the only mechanism — ``os.kill`` "
+            "maps to ``TerminateProcess`` (a hard kill that delivers no signal) "
+            "so the SIGTERM-handler path can't run."
+        ),
+    )
     auto_merge_spec: bool = Field(
         default=True,
         description=(
