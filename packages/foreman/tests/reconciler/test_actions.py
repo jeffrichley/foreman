@@ -127,8 +127,29 @@ class _FakeHost:
     def merge_pr(self, *, owner: str, repo: str, pr_number: int) -> None:
         self.calls.append(("merge_pr", {"owner": owner, "repo": repo, "pr_number": pr_number}))
 
-    def dispatch_role(self, *, role: str, owner: str, repo: str, issue: int, pr_number: int | None) -> int:
-        self.calls.append(("dispatch_role", {"role": role, "owner": owner, "repo": repo, "issue": issue, "pr_number": pr_number}))
+    def dispatch_role(
+        self,
+        *,
+        role: str,
+        owner: str,
+        repo: str,
+        issue: int,
+        pr_number: int | None,
+        start_log_id: int,
+    ) -> int:
+        self.calls.append(
+            (
+                "dispatch_role",
+                {
+                    "role": role,
+                    "owner": owner,
+                    "repo": repo,
+                    "issue": issue,
+                    "pr_number": pr_number,
+                    "start_log_id": start_log_id,
+                },
+            )
+        )
         return 12345  # fake pid
 
 
@@ -157,7 +178,17 @@ def test_execute_dispatch_planner_writes_running_and_calls_host(tmp_path: Path) 
 
     execute_action(Action.DISPATCH_PLANNER, ctx, host=host, rule_name="dispatch_planner", dry_run=False)
 
-    assert ("dispatch_role", {"role": "planner", "owner": "jeffrichley", "repo": "foreman", "issue": 143, "pr_number": None}) in host.calls
+    assert len(host.calls) == 1
+    call_name, call_kwargs = host.calls[0]
+    assert call_name == "dispatch_role"
+    assert call_kwargs["role"] == "planner"
+    assert call_kwargs["owner"] == "jeffrichley"
+    assert call_kwargs["repo"] == "foreman"
+    assert call_kwargs["issue"] == 143
+    assert call_kwargs["pr_number"] is None
+    # The executor must pass the start_log_id it just wrote so the host can
+    # terminate that exact row when the subprocess exits.
+    assert isinstance(call_kwargs["start_log_id"], int) and call_kwargs["start_log_id"] > 0
     assert log.has_unterminated("dispatch_planner", ctx.ticket_id) is True
 
 

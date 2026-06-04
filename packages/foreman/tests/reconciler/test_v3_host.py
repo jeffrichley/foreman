@@ -96,7 +96,8 @@ def test_dispatch_role_spawns_subprocess_and_returns_pid(tmp_path: Path) -> None
         return _FakeProcess(pid=98765)
 
     host = V3GitHubHost(v2_host=v2, log=log, subprocess_runner=_runner)
-    # Pre-create a start row so the background termination task has a parent_log_id to terminate.
+    # Executor writes the start row before calling dispatch_role; we mirror
+    # that contract here so terminate_dispatch has a parent_log_id to point at.
     start_id = log.write_action(
         ticket_id="jeffrichley/foreman#143",
         project="foreman",
@@ -105,10 +106,14 @@ def test_dispatch_role_spawns_subprocess_and_returns_pid(tmp_path: Path) -> None
         outcome="running",
         details={},
     )
-    host._pending_start_log_id_by_pid[98765] = start_id  # type: ignore[attr-defined]
 
     pid = host.dispatch_role(
-        role="planner", owner="jeffrichley", repo="foreman", issue=143, pr_number=None
+        role="planner",
+        owner="jeffrichley",
+        repo="foreman",
+        issue=143,
+        pr_number=None,
+        start_log_id=start_id,
     )
 
     assert pid == 98765
@@ -118,6 +123,91 @@ def test_dispatch_role_spawns_subprocess_and_returns_pid(tmp_path: Path) -> None
     assert "plan" in argv
     assert "--issue-url" in argv
     assert "https://github.com/jeffrichley/foreman/issues/143" in argv
+
+
+def test_dispatch_role_writes_termination_row_on_success(tmp_path: Path) -> None:
+    """Production lifecycle: start row written by executor, dispatch_role
+    returns pid, subprocess exits, termination row is written automatically by
+    the host's background tracking task — no dictionary indirection required.
+    """
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+
+    class _FakeProc:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+
+        async def wait(self) -> int:
+            return 0
+
+    def runner(argv: list[str]) -> _FakeProc:
+        return _FakeProc(pid=12345)
+
+    host = V3GitHubHost(
+        v2_host=_FakeV2Host(),
+        log=log,
+        subprocess_runner=runner,
+    )
+
+    # Executor writes start row first.
+    start_id = log.write_action(
+        ticket_id="foreman/owner/repo#10",
+        project="foreman",
+        rule_name="dispatch_planner",
+        action="dispatch_planner",
+        outcome="running",
+        details={"issue": 10, "pr": None},
+    )
+
+    import asyncio
+
+    async def run() -> None:
+        host.dispatch_role(
+            role="planner",
+            owner="owner",
+            repo="repo",
+            issue=10,
+            pr_number=None,
+            start_log_id=start_id,
+        )
+        # Yield until the background task finishes. Bounded poll so a
+        # regression doesn't hang the suite indefinitely.
+        for _ in range(100):
+            if log.count_completed("dispatch_planner", "foreman/owner/repo#10") > 0:
+                return
+            await asyncio.sleep(0.01)
+
+    asyncio.run(run())
+
+    assert log.count_completed("dispatch_planner", "foreman/owner/repo#10") == 1
+
+
+def test_terminate_dispatch_writes_termination_row_synchronously(tmp_path: Path) -> None:
+    """Tests that drive the host without a running asyncio loop can call
+    terminate_dispatch directly to write the termination row.
+    """
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+
+    host = V3GitHubHost(
+        v2_host=_FakeV2Host(),
+        log=log,
+        subprocess_runner=lambda argv: object(),  # type: ignore[arg-type, return-value]
+    )
+
+    start_id = log.write_action(
+        ticket_id="foreman/owner/repo#10",
+        project="foreman",
+        rule_name="dispatch_reviewer_spec",
+        action="dispatch_reviewer",
+        outcome="running",
+        details={"issue": 10, "pr": 99},
+    )
+
+    host.terminate_dispatch(
+        start_log_id=start_id, outcome="success", details={"role": "reviewer"}
+    )
+    assert log.count_completed("dispatch_reviewer", "foreman/owner/repo#10") == 1
 
 
 def test_concurrency_cap_refuses_dispatch_when_full(tmp_path: Path) -> None:
@@ -143,7 +233,12 @@ def test_concurrency_cap_refuses_dispatch_when_full(tmp_path: Path) -> None:
     # Next dispatch_role should raise — caught by executor in production
     with pytest.raises(RuntimeError, match="concurrency cap reached"):
         host.dispatch_role(
-            role="planner", owner="jeffrichley", repo="foreman", issue=1, pr_number=None
+            role="planner",
+            owner="jeffrichley",
+            repo="foreman",
+            issue=1,
+            pr_number=None,
+            start_log_id=1,
         )
 
 
@@ -170,12 +265,21 @@ def test_dispatch_role_reviewer_uses_positional_pr_url(tmp_path: Path) -> None:
         subprocess_runner=runner,
     )
 
+    start_id = log.write_action(
+        ticket_id="jeffrichley/foreman#63",
+        project="foreman",
+        rule_name="dispatch_reviewer_impl",
+        action="dispatch_reviewer",
+        outcome="running",
+        details={},
+    )
     host.dispatch_role(
         role="reviewer",
         owner="jeffrichley",
         repo="foreman",
         issue=63,
         pr_number=99,
+        start_log_id=start_id,
     )
 
     assert captured, "runner not called"

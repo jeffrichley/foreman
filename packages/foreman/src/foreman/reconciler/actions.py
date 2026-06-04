@@ -145,6 +145,7 @@ def execute_action(
                 repo=ctx.snapshot.repo,
                 issue=ctx.issue.number,
                 pr_number=ctx.pr.number if ctx.pr else None,
+                start_log_id=start_id,
             )
         elif action is Action.MERGE_SPEC_PR or action is Action.MERGE_IMPL_PR:
             if ctx.pr is None:
@@ -194,11 +195,13 @@ def execute_action(
                 label="foreman:done",
             )
 
-        # Some actions complete synchronously (label changes, merges, surface_help).
-        # Subprocess dispatches stay 'running' until the worker sends an
-        # ExecutionLogWrite termination via the bus (handled in Task 10).
+        # Some actions complete synchronously (label changes, merges,
+        # surface_help) and we write the success termination here. Subprocess
+        # dispatches return from this branch already — the host's background
+        # tracker (or terminate_dispatch in synchronous tests) writes the
+        # termination row when the subprocess exits, so we must NOT write a
+        # success row here or count_completed would double-count.
         if action in _DISPATCH_ROLE_FOR_ACTION:
-            # Leave start row 'running' — termination comes via bus.
             return
 
         ctx.log.terminate_action(parent_log_id=start_id, outcome="success", details={})

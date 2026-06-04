@@ -24,6 +24,13 @@ class ReconcilerHost(Protocol):
         repo: str,
         issue: int,
         pr_number: int | None,
+        start_log_id: int,
     ) -> int:
-        """Spawn the role subprocess (planner|reviewer|fixer|worker). Returns the PID."""
+        """Spawn the role subprocess (planner|reviewer|fixer|worker). Returns the PID.
+
+        ``start_log_id`` is the id of the 'running' row the executor wrote
+        immediately before calling this method. The host owns writing the
+        termination row when the subprocess exits — see
+        ``V3GitHubHost._track_subprocess_completion``.
+        """
         ...

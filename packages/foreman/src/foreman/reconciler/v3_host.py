@@ -2,11 +2,20 @@
 
 REST methods (add_label / remove_label / post_comment / merge_pr) delegate
 to v2's GitHubDaemonHost (already battle-tested). dispatch_role() spawns
-`uv run foreman <subcommand>` as a subprocess via asyncio.create_subprocess_exec,
+`uv run foreman <subcommand>` as a subprocess via subprocess.Popen,
 returns the PID immediately, and registers a background asyncio.Task that
 awaits subprocess completion and writes the termination row to ExecutionLog.
 
-The subprocess runner is injectable for testability.
+The executor writes the 'running' start row first and passes its id into
+``dispatch_role`` as ``start_log_id``; the host carries that id straight
+through to the background tracker so the termination row is written even
+when the bus is silent. This avoids the indirection that previously left
+dispatch rows in ``outcome='running'`` until daemon restart.
+
+The subprocess runner is injectable for testability. Tests that drive the
+host synchronously (no running asyncio loop) should call
+``terminate_dispatch(start_log_id=..., outcome=...)`` themselves; the early
+return path keeps that case working without scheduling a background task.
 """
 
 from __future__ import annotations
@@ -100,10 +109,6 @@ class V3GitHubHost:
         self._runner = subprocess_runner if subprocess_runner is not None else _default_subprocess_runner
         self._project_name = project_name
         self._timeout_seconds = role_dispatch_timeout_seconds
-        # Mapping pid -> parent_log_id. Caller (the reconciler or test fixture)
-        # populates this before/after dispatch_role; background termination task
-        # reads it on subprocess exit.
-        self._pending_start_log_id_by_pid: dict[int, int] = {}
         # Global cap on concurrent dispatched role subprocesses. acquired() in
         # dispatch_role (non-blocking — raises when full), released in
         # _track_subprocess_completion's finally so the slot is held for the
@@ -131,8 +136,16 @@ class V3GitHubHost:
         repo: str,
         issue: int,
         pr_number: int | None,
+        start_log_id: int,
     ) -> int:
-        """Spawn `uv run foreman <subcommand>` as a subprocess; return PID."""
+        """Spawn `uv run foreman <subcommand>` as a subprocess; return PID.
+
+        ``start_log_id`` is the id of the 'running' row the executor wrote
+        before calling this method. The background tracker carries it through
+        and writes the termination row when the subprocess exits — so
+        ``count_completed`` advances in production without depending on the
+        worker's bus envelope landing.
+        """
         if not self._dispatch_capacity.acquire(blocking=False):
             raise RuntimeError(
                 f"concurrency cap reached ({self._max_concurrent_dispatches} active "
@@ -140,6 +153,7 @@ class V3GitHubHost:
             )
         subcommand = _ROLE_TO_SUBCOMMAND.get(role)
         if subcommand is None:
+            self._dispatch_capacity.release()
             raise ValueError(f"unknown role for dispatch: {role!r}")
 
         argv: list[str] = ["uv", "run", "foreman", subcommand]
@@ -147,6 +161,7 @@ class V3GitHubHost:
         if role == "reviewer":
             # `foreman review` takes a positional PR URL — no --issue-url flag.
             if pr_number is None:
+                self._dispatch_capacity.release()
                 raise ValueError("dispatch_role(role='reviewer') requires pr_number")
             pr_url = f"https://github.com/{owner}/{repo}/pull/{pr_number}"
             argv.extend([pr_url, "--project", self._project_name])
@@ -161,19 +176,29 @@ class V3GitHubHost:
         logger.info("dispatched role=%s pid=%d argv=%s", role, proc.pid, argv)
 
         # Background task: wait for subprocess, write termination row.
-        # If no running event loop (e.g., unit tests passing _FakeProcess),
-        # caller handles termination synthetically.
+        # If there's no running event loop (e.g., synchronous unit tests), the
+        # caller is responsible for invoking terminate_dispatch directly. We
+        # still need to release the capacity slot in that case to avoid
+        # leaking it.
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
         except RuntimeError:
+            self._dispatch_capacity.release()
             return proc.pid
 
-        if loop.is_running():
-            loop.create_task(self._track_subprocess_completion(proc, role))
+        loop.create_task(
+            self._track_subprocess_completion(proc, role, start_log_id=start_log_id)
+        )
         return proc.pid
 
-    async def _track_subprocess_completion(self, proc: _SubprocessLike, role: str) -> None:
-        """Await subprocess exit, look up its start_log_id, write termination row.
+    async def _track_subprocess_completion(
+        self,
+        proc: _SubprocessLike,
+        role: str,
+        *,
+        start_log_id: int,
+    ) -> None:
+        """Await subprocess exit and write the termination row.
 
         The outer try/finally ensures the dispatch-capacity semaphore is
         released on every exit path (success, returncode!=0, timeout, error)
@@ -197,29 +222,43 @@ class V3GitHubHost:
                         inner.terminate()
                 except Exception:
                     logger.exception("failed to terminate timed-out subprocess pid=%d", proc.pid)
-                self._terminate_pending(
-                    proc.pid,
+                self.terminate_dispatch(
+                    start_log_id=start_log_id,
                     outcome="timeout",
                     details={"timeout_seconds": self._timeout_seconds, "role": role},
                 )
                 return
             except Exception as exc:
                 logger.exception("subprocess for role=%s pid=%d errored awaiting", role, proc.pid)
-                self._terminate_pending(proc.pid, outcome="error", details={"error": str(exc)})
+                self.terminate_dispatch(
+                    start_log_id=start_log_id,
+                    outcome="error",
+                    details={"error": str(exc)},
+                )
                 return
 
             outcome = "success" if returncode == 0 else "error"
-            self._terminate_pending(
-                proc.pid,
+            self.terminate_dispatch(
+                start_log_id=start_log_id,
                 outcome=outcome,
                 details={"returncode": returncode, "role": role},
             )
         finally:
             self._dispatch_capacity.release()
 
-    def _terminate_pending(self, pid: int, *, outcome: str, details: dict[str, Any]) -> None:
-        start_id = self._pending_start_log_id_by_pid.pop(pid, None)
-        if start_id is None:
-            logger.warning("no pending start_log_id for pid=%d; cannot terminate", pid)
-            return
-        self._log.terminate_action(parent_log_id=start_id, outcome=outcome, details=details)
+    def terminate_dispatch(
+        self,
+        *,
+        start_log_id: int,
+        outcome: str,
+        details: dict[str, Any],
+    ) -> None:
+        """Write the termination row for a dispatch_role start row.
+
+        Called automatically by ``_track_subprocess_completion`` in production.
+        Tests that drive the host without a running event loop call this
+        directly to simulate subprocess exit.
+        """
+        self._log.terminate_action(
+            parent_log_id=start_log_id, outcome=outcome, details=details
+        )

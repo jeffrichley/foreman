@@ -56,9 +56,8 @@ async def test_subprocess_timeout_terminates_and_logs(tmp_path: Path) -> None:
         outcome="running",
         details={},
     )
-    host._pending_start_log_id_by_pid[proc.pid] = start_id
 
-    await host._track_subprocess_completion(proc, "planner")
+    await host._track_subprocess_completion(proc, "planner", start_log_id=start_id)
 
     # The subprocess was terminated by the timeout path.
     assert proc._terminated is True
