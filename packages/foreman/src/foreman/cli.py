@@ -16,7 +16,7 @@ import signal
 import sys
 import time
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import click
 from github import Auth, Github
@@ -485,17 +485,7 @@ def _build_v3_gh_and_host(
     # Use the planner App's token for the GraphQL observer (read-only).
     planner_token = registry.get_token("planner")
     gh = HttpxGHGraphQLClient(token=planner_token)
-    # NOTE: v3_host._V2HostLike Protocol declares keyword-only (owner, repo,
-    # issue_number, ...) but the real GitHubDaemonHost methods take a
-    # positional 'owner/name' repo string with no separate 'owner' kwarg.
-    # The fake in tests/reconciler/test_v3_host.py mirrors the Protocol,
-    # not the real shape — so the suite is green but live calls will
-    # raise TypeError. Tracked as a Task 2 design defect for follow-up
-    # before v3 first runs against real infrastructure (Task 4 will
-    # surface it empirically); cast keeps cli.py mypy-clean meanwhile.
-    host = V3GitHubHost(
-        v2_host=cast(Any, v2_host), log=log, project_name=project_name
-    )
+    host = V3GitHubHost(v2_host=v2_host, log=log, project_name=project_name)
     return gh, host
 
 
