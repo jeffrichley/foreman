@@ -31,10 +31,10 @@ _ROLE_TO_SUBCOMMAND = {
 class _V2HostLike(Protocol):
     """The v2 surface V3 needs. Matches foreman.daemon_host.GitHubDaemonHost."""
 
-    def add_issue_label(self, *, owner: str, repo: str, issue_number: int, label: str) -> None: ...
-    def remove_issue_label(self, *, owner: str, repo: str, issue_number: int, label: str) -> None: ...
-    def post_issue_comment(self, *, owner: str, repo: str, issue_number: int, body: str) -> None: ...
-    def merge_pull_request(self, *, owner: str, repo: str, pr_number: int) -> None: ...
+    def add_issue_label(self, repo: str, issue_number: int, label: str) -> None: ...
+    def remove_issue_label(self, repo: str, issue_number: int, label: str) -> None: ...
+    def post_issue_comment(self, repo: str, issue_number: int, body: str) -> None: ...
+    def merge_pull_request(self, repo: str, pr_number: int) -> None: ...
 
 
 class _SubprocessLike(Protocol):
@@ -82,16 +82,16 @@ class V3GitHubHost:
         self._pending_start_log_id_by_pid: dict[int, int] = {}
 
     def add_label(self, *, owner: str, repo: str, issue: int, label: str) -> None:
-        self._v2.add_issue_label(owner=owner, repo=repo, issue_number=issue, label=label)
+        self._v2.add_issue_label(f"{owner}/{repo}", issue, label)
 
     def remove_label(self, *, owner: str, repo: str, issue: int, label: str) -> None:
-        self._v2.remove_issue_label(owner=owner, repo=repo, issue_number=issue, label=label)
+        self._v2.remove_issue_label(f"{owner}/{repo}", issue, label)
 
     def post_comment(self, *, owner: str, repo: str, issue: int, body: str) -> None:
-        self._v2.post_issue_comment(owner=owner, repo=repo, issue_number=issue, body=body)
+        self._v2.post_issue_comment(f"{owner}/{repo}", issue, body)
 
     def merge_pr(self, *, owner: str, repo: str, pr_number: int) -> None:
-        self._v2.merge_pull_request(owner=owner, repo=repo, pr_number=pr_number)
+        self._v2.merge_pull_request(f"{owner}/{repo}", pr_number)
 
     def dispatch_role(
         self,

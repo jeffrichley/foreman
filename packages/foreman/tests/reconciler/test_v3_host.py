@@ -12,21 +12,21 @@ from foreman.reconciler.v3_host import V3GitHubHost
 
 @dataclass
 class _FakeV2Host:
-    """Stands in for v2's GitHubDaemonHost — records calls."""
+    """Stands in for v2's GitHubDaemonHost — records calls. Matches real positional signatures."""
 
-    calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    calls: list[tuple[str, tuple[Any, ...]]] = field(default_factory=list)
 
-    def add_issue_label(self, *, owner: str, repo: str, issue_number: int, label: str) -> None:
-        self.calls.append(("add_issue_label", {"owner": owner, "repo": repo, "issue_number": issue_number, "label": label}))
+    def add_issue_label(self, repo: str, issue_number: int, label: str) -> None:
+        self.calls.append(("add_issue_label", (repo, issue_number, label)))
 
-    def remove_issue_label(self, *, owner: str, repo: str, issue_number: int, label: str) -> None:
-        self.calls.append(("remove_issue_label", {"owner": owner, "repo": repo, "issue_number": issue_number, "label": label}))
+    def remove_issue_label(self, repo: str, issue_number: int, label: str) -> None:
+        self.calls.append(("remove_issue_label", (repo, issue_number, label)))
 
-    def post_issue_comment(self, *, owner: str, repo: str, issue_number: int, body: str) -> None:
-        self.calls.append(("post_issue_comment", {"owner": owner, "repo": repo, "issue_number": issue_number, "body": body}))
+    def post_issue_comment(self, repo: str, issue_number: int, body: str) -> None:
+        self.calls.append(("post_issue_comment", (repo, issue_number, body)))
 
-    def merge_pull_request(self, *, owner: str, repo: str, pr_number: int) -> None:
-        self.calls.append(("merge_pull_request", {"owner": owner, "repo": repo, "pr_number": pr_number}))
+    def merge_pull_request(self, repo: str, pr_number: int) -> None:
+        self.calls.append(("merge_pull_request", (repo, pr_number)))
 
 
 def test_add_label_delegates_to_v2_host(tmp_path: Path) -> None:
@@ -37,9 +37,7 @@ def test_add_label_delegates_to_v2_host(tmp_path: Path) -> None:
 
     host.add_label(owner="jeffrichley", repo="foreman", issue=143, label="foreman:planning")
 
-    assert v2.calls == [
-        ("add_issue_label", {"owner": "jeffrichley", "repo": "foreman", "issue_number": 143, "label": "foreman:planning"})
-    ]
+    assert v2.calls == [("add_issue_label", ("jeffrichley/foreman", 143, "foreman:planning"))]
 
 
 def test_remove_label_delegates_to_v2_host(tmp_path: Path) -> None:
@@ -50,9 +48,7 @@ def test_remove_label_delegates_to_v2_host(tmp_path: Path) -> None:
 
     host.remove_label(owner="jeffrichley", repo="foreman", issue=143, label="foreman:planning")
 
-    assert v2.calls == [
-        ("remove_issue_label", {"owner": "jeffrichley", "repo": "foreman", "issue_number": 143, "label": "foreman:planning"})
-    ]
+    assert v2.calls == [("remove_issue_label", ("jeffrichley/foreman", 143, "foreman:planning"))]
 
 
 def test_post_comment_delegates_to_v2_host(tmp_path: Path) -> None:
@@ -63,9 +59,7 @@ def test_post_comment_delegates_to_v2_host(tmp_path: Path) -> None:
 
     host.post_comment(owner="jeffrichley", repo="foreman", issue=143, body="hi")
 
-    assert v2.calls == [
-        ("post_issue_comment", {"owner": "jeffrichley", "repo": "foreman", "issue_number": 143, "body": "hi"})
-    ]
+    assert v2.calls == [("post_issue_comment", ("jeffrichley/foreman", 143, "hi"))]
 
 
 def test_merge_pr_delegates_to_v2_host(tmp_path: Path) -> None:
@@ -76,9 +70,7 @@ def test_merge_pr_delegates_to_v2_host(tmp_path: Path) -> None:
 
     host.merge_pr(owner="jeffrichley", repo="foreman", pr_number=144)
 
-    assert v2.calls == [
-        ("merge_pull_request", {"owner": "jeffrichley", "repo": "foreman", "pr_number": 144})
-    ]
+    assert v2.calls == [("merge_pull_request", ("jeffrichley/foreman", 144))]
 
 
 def test_dispatch_role_spawns_subprocess_and_returns_pid(tmp_path: Path) -> None:
