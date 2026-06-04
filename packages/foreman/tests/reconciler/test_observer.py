@@ -131,3 +131,42 @@ def test_observer_query_includes_only_foreman_labeled_issues() -> None:
     query, variables = client.calls[0]
     assert "foreman:" in query
     assert variables == {"owner": "jeffrichley", "repo": "foreman"}
+
+
+def test_fetch_project_state_parses_review_decision_approved() -> None:
+    pr_payload = {
+        "number": 42,
+        "headRefName": "feat/x",
+        "body": "",
+        "mergeable": "MERGEABLE",
+        "merged": False,
+        "statusCheckRollup": {"state": "SUCCESS"},
+        "closingIssuesReferences": {"nodes": []},
+        "reviewDecision": "APPROVED",
+    }
+    client = _FakeGHClient(response=_gh_response_with(issues=[], prs=[pr_payload]))
+    snap = fetch_project_state(
+        project="foreman", owner="jeffrichley", repo="foreman", gh=client,
+    )
+    query, _variables = client.calls[0]
+    assert "reviewDecision" in query
+    assert len(snap.prs) == 1
+    assert snap.prs[0].review_decision == "APPROVED"
+
+
+def test_fetch_project_state_handles_null_review_decision() -> None:
+    pr_payload = {
+        "number": 42,
+        "headRefName": "feat/x",
+        "body": "",
+        "mergeable": "MERGEABLE",
+        "merged": False,
+        "statusCheckRollup": {"state": "SUCCESS"},
+        "closingIssuesReferences": {"nodes": []},
+        "reviewDecision": None,
+    }
+    client = _FakeGHClient(response=_gh_response_with(issues=[], prs=[pr_payload]))
+    snap = fetch_project_state(
+        project="foreman", owner="jeffrichley", repo="foreman", gh=client,
+    )
+    assert snap.prs[0].review_decision is None

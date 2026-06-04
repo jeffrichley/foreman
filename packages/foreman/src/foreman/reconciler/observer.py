@@ -66,6 +66,7 @@ query ForemanProjectState($owner: String!, $repo: String!) {
         body
         mergeable
         merged
+        reviewDecision
         statusCheckRollup { state }
         closingIssuesReferences(first: 10) { nodes { number } }
       }
@@ -138,6 +139,7 @@ def _parse_pr(node: dict[str, Any]) -> PRState:
     )
     rollup = node.get("statusCheckRollup")
     ci = rollup["state"] if rollup else None
+    review_decision = node.get("reviewDecision")  # may be None
     return PRState(
         number=int(node["number"]),
         head_ref=str(node.get("headRefName", "")),
@@ -146,6 +148,7 @@ def _parse_pr(node: dict[str, Any]) -> PRState:
         body=str(node.get("body", "") or ""),
         linked_issue_numbers=linked,
         is_merged=bool(node.get("merged", False)),
+        review_decision=review_decision,
     )
 
 
