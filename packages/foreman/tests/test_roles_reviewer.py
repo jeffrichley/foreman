@@ -738,15 +738,22 @@ async def test_run_reviewer_passes_env_with_reviewer_token_and_parent_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The reviewer-bot's installation token flows into the agent
-    subprocess via ``env={"GH_TOKEN": reviewer_token, **os.environ}`` so any
+    subprocess via ``env={**os.environ, "GH_TOKEN": reviewer_token}`` so any
     ``gh`` calls the LLM makes act as the reviewer bot, not the parent.
 
-    Parity with the brief; pin this so we don't accidentally drop env-injection
-    when the Planner's removal pattern is mirrored."""
+    Critically, this exercises the precedence path: the parent process
+    has ``GH_TOKEN`` set to a "leaking daemon" value, and we assert the
+    reviewer-bot's token wins. Without this parent-env setup, the test
+    would pass whether the production code merged dicts in the safe
+    order (parent first, role last) or the leaky order (role first,
+    parent last). Per HIGH #9 adversarial review."""
     clone = tmp_path / "clone"
     head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
     monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
     monkeypatch.setenv("MY_SENTINEL_VAR", "sentinel")
+    # HIGH #9: load-bearing — without this, the test never exercises
+    # the precedence path it claims to test.
+    monkeypatch.setenv("GH_TOKEN", "ghs_PARENT_SHOULD_NOT_WIN_reviewer")
 
     cfg = _make_config(clone)
     repo, _pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
@@ -766,8 +773,91 @@ async def test_run_reviewer_passes_env_with_reviewer_token_and_parent_env(
     )
 
     env = fake_provider.run_agent.call_args.kwargs["env"]
+    # Role token wins over the daemon's inherited GH_TOKEN.
     assert env["GH_TOKEN"] == "ghs_specific_reviewer_token"
     assert env["MY_SENTINEL_VAR"] == "sentinel"  # parent env merged in
+
+
+@pytest.mark.asyncio
+async def test_run_reviewer_git_subprocess_uses_reviewer_token_not_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HIGH #10: git operations issued directly from the Reviewer
+    module must use the reviewer bot's token, not whatever
+    ``GH_TOKEN`` the daemon process inherited.
+
+    Before the fix, ``_get_pr_diff`` ran ``git fetch`` + ``git diff``
+    with no ``env=`` kwarg, so any credential helper inherited the
+    parent process's ``GH_TOKEN``. On CI / GitHub Actions / dev shells
+    that token is the daemon's identity, not the reviewer bot's —
+    network round-trips for fetch attribute to the wrong actor.
+
+    We intercept ``subprocess.run`` on the reviewer module via a
+    namespace-substituted module attribute (so we capture ONLY the
+    reviewer's direct calls, not WorktreeManager's calls inside the
+    same process). Then we assert every captured git call's ``env``
+    carries the reviewer-bot token.
+    """
+    import subprocess as _real_subprocess
+    import types
+
+    from foreman.roles import reviewer as reviewer_mod
+
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
+    # Parent process has a "leaking" GH_TOKEN — the daemon's identity.
+    monkeypatch.setenv("GH_TOKEN", "ghs_PARENT_LEAKING_DAEMON")
+
+    cfg = _make_config(clone)
+    repo, _pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeReviewerClient(repo=repo)
+    registry = _make_registry(client, token="ghs_specific_reviewer_token")
+
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_make_clean_output())
+
+    captured: list[dict[str, Any]] = []
+
+    def capturing_run(*args: Any, **kwargs: Any) -> Any:
+        cmd = args[0] if args else kwargs.get("args")
+        env = kwargs.get("env")
+        captured.append(
+            {
+                "cmd": list(cmd) if isinstance(cmd, list) else cmd,
+                "env_gh_token": (env or {}).get("GH_TOKEN"),
+                "has_env": env is not None,
+            }
+        )
+        return _real_subprocess.run(*args, **kwargs)
+
+    # Substitute a stand-in module so we only intercept what the
+    # reviewer module calls — not WorktreeManager's subprocess.run in
+    # the same process. This is the targeted interception.
+    fake_subprocess = types.SimpleNamespace(run=capturing_run)
+    monkeypatch.setattr(reviewer_mod, "subprocess", fake_subprocess)
+
+    await run_reviewer(
+        pr_url="https://github.com/jeffrichley/voice/pull/77",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    # Every git invocation from the reviewer module must have been
+    # called with an explicit env carrying the reviewer-bot's token.
+    git_calls = [
+        c for c in captured if isinstance(c["cmd"], list) and c["cmd"] and c["cmd"][0] == "git"
+    ]
+    assert git_calls, "expected at least one git subprocess.run call from the reviewer module"
+    for c in git_calls:
+        assert c["has_env"], f"git call missing env=: {c['cmd']}"
+        assert c["env_gh_token"] == "ghs_specific_reviewer_token", (
+            f"git call leaked parent GH_TOKEN: cmd={c['cmd']} "
+            f"GH_TOKEN={c['env_gh_token']!r}"
+        )
 
 
 # ----------------------------------------------------------------------

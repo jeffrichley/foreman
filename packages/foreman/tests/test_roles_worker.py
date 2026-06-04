@@ -437,12 +437,20 @@ def _make_passing_check_command(
 
     Returns a ``calls`` dict the test can inspect to confirm the
     orchestrator ran ``check_command`` twice (baseline + post-Worker).
+    The ``role_token`` kwarg is captured per-call so tests can verify
+    the worker bot's token reaches the check_command subprocess (HIGH
+    #10 — without this, ``gh`` / ``git`` invoked from check_command
+    inherits the daemon's parent ``GH_TOKEN``).
     """
     calls: dict[str, list[Any]] = {"calls": []}
     baseline_set = baseline if baseline is not None else set()
 
-    def fake(check_command: str, cwd: Path) -> tuple[int, set[str], str]:
-        calls["calls"].append({"check_command": check_command, "cwd": cwd})
+    def fake(
+        check_command: str, cwd: Path, role_token: str | None = None
+    ) -> tuple[int, set[str], str]:
+        calls["calls"].append(
+            {"check_command": check_command, "cwd": cwd, "role_token": role_token}
+        )
         return 0, set(baseline_set), ""
 
     monkeypatch.setattr("foreman.roles.worker._run_check_command", fake)
@@ -457,14 +465,22 @@ def _make_check_command_pair(
     post_rc: int = 0,
 ) -> dict[str, list[Any]]:
     """Patch ``_run_check_command`` to return ``baseline`` on call 1 and
-    ``post`` on call 2 — simulating the brief's D4 baseline + post pair."""
+    ``post`` on call 2 — simulating the brief's D4 baseline + post pair.
+
+    Mirrors the real signature including the new ``role_token`` kwarg
+    (HIGH #10) so the fake refuses argument shapes the real wouldn't.
+    """
     calls: dict[str, list[Any]] = {"calls": []}
     rc_sequence = [0, post_rc]
     failures_sequence = [baseline, post]
 
-    def fake(check_command: str, cwd: Path) -> tuple[int, set[str], str]:
+    def fake(
+        check_command: str, cwd: Path, role_token: str | None = None
+    ) -> tuple[int, set[str], str]:
         idx = len(calls["calls"])
-        calls["calls"].append({"check_command": check_command, "cwd": cwd})
+        calls["calls"].append(
+            {"check_command": check_command, "cwd": cwd, "role_token": role_token}
+        )
         if idx < len(rc_sequence):
             return rc_sequence[idx], set(failures_sequence[idx]), ""
         # Defensive: more calls than expected — return passing tail.
@@ -1232,11 +1248,20 @@ async def test_run_worker_uses_project_check_command_override(
 async def test_run_worker_passes_env_with_worker_token_and_parent_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Real precedence test: parent process has ``GH_TOKEN`` set to a
+    "leaking daemon" value; the worker-bot's token must win.
+
+    Without setting parent ``GH_TOKEN``, the test would pass regardless
+    of the production merge order — placebo per HIGH #9 adversarial
+    review.
+    """
     clone = tmp_path / "clone"
     head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
     monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
     monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
     monkeypatch.setenv("MY_SENTINEL_VAR", "sentinel-worker")
+    # HIGH #9: load-bearing — exercises the role-wins precedence.
+    monkeypatch.setenv("GH_TOKEN", "ghs_PARENT_SHOULD_NOT_WIN_worker")
 
     cfg = _make_config(clone)
     repo, _spec_pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
@@ -1256,8 +1281,142 @@ async def test_run_worker_passes_env_with_worker_token_and_parent_env(
     )
 
     env = fake_provider.run_agent.call_args.kwargs["env"]
+    # Role token wins over the daemon's inherited GH_TOKEN.
     assert env["GH_TOKEN"] == "ghs_specific_worker_token"
     assert env["MY_SENTINEL_VAR"] == "sentinel-worker"
+
+
+@pytest.mark.asyncio
+async def test_run_worker_check_command_receives_worker_token_not_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HIGH #10: ``_run_check_command`` must be invoked with the worker
+    bot's ``role_token`` so any ``git`` / ``gh`` the check command runs
+    authenticates as the worker, not the daemon.
+
+    Before the fix, ``_run_check_command`` had no ``role_token`` param
+    and the underlying ``filtered_subprocess_env()`` inherited whatever
+    ``GH_TOKEN`` the parent had (the daemon's identity).
+    """
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+    monkeypatch.setenv("GH_TOKEN", "ghs_PARENT_LEAKING_DAEMON")
+
+    cfg = _make_config(clone)
+    repo, _spec_pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeWorkerClient(repo=repo)
+    registry = _make_registry(client, token="ghs_specific_worker_token")
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    calls = _make_passing_check_command(monkeypatch)
+
+    await run_worker(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    # Both baseline + post-Worker check_command invocations carried the
+    # worker bot's token, not the leaking parent.
+    assert len(calls["calls"]) == 2, "expected baseline + post-Worker check runs"
+    for call in calls["calls"]:
+        assert call["role_token"] == "ghs_specific_worker_token", (
+            "check_command run did not receive the worker bot's role_token; "
+            "would inherit daemon's GH_TOKEN at runtime"
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_worker_git_subprocess_uses_worker_token_not_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HIGH #10: every direct ``subprocess.run`` from the worker module
+    must carry the worker bot's token in ``env``.
+
+    Covers the ``_read_spec_doc_from_branch`` git-show fallback. We
+    force the fallback path by removing the on-disk spec file from the
+    impl worktree post-creation (via a Path.exists patch keyed on the
+    spec-doc filename), then intercept the worker module's subprocess
+    namespace and assert every git call's env carries the worker token
+    rather than the leaking parent ``GH_TOKEN``.
+    """
+    import subprocess as _real_subprocess
+    import types
+
+    from foreman.roles import worker as worker_mod
+
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+    monkeypatch.setenv("GH_TOKEN", "ghs_PARENT_LEAKING_DAEMON")
+
+    cfg = _make_config(clone)
+    repo, _spec_pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeWorkerClient(repo=repo)
+    registry = _make_registry(client, token="ghs_specific_worker_token")
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    _make_passing_check_command(monkeypatch)
+
+    captured: list[dict[str, Any]] = []
+
+    def capturing_run(*args: Any, **kwargs: Any) -> Any:
+        cmd = args[0] if args else kwargs.get("args")
+        env = kwargs.get("env")
+        captured.append(
+            {
+                "cmd": list(cmd) if isinstance(cmd, list) else cmd,
+                "env_gh_token": (env or {}).get("GH_TOKEN"),
+                "has_env": env is not None,
+            }
+        )
+        return _real_subprocess.run(*args, **kwargs)
+
+    # Substitute a stand-in module on the worker module so we only
+    # intercept what the worker module itself calls (not
+    # WorktreeManager's subprocess.run from the same process).
+    fake_subprocess = types.SimpleNamespace(run=capturing_run)
+    monkeypatch.setattr(worker_mod, "subprocess", fake_subprocess)
+
+    # Force the git-show fallback in _read_spec_doc_from_branch by
+    # making the on-disk spec-doc path report as non-existent. We patch
+    # Path.exists in a targeted way: only False for paths ending in the
+    # spec-doc filename, real Path.exists everywhere else.
+    real_exists = Path.exists
+    spec_filename = "foreman-issue-42-spec.md"
+
+    def selective_exists(self: Path) -> bool:
+        if self.name == spec_filename:
+            return False
+        return real_exists(self)
+
+    monkeypatch.setattr(Path, "exists", selective_exists)
+
+    await run_worker(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    git_calls = [
+        c for c in captured if isinstance(c["cmd"], list) and c["cmd"] and c["cmd"][0] == "git"
+    ]
+    assert git_calls, "expected at least one git subprocess.run from the worker module"
+    for c in git_calls:
+        assert c["has_env"], f"git call missing env=: {c['cmd']}"
+        assert c["env_gh_token"] == "ghs_specific_worker_token", (
+            f"git call leaked parent GH_TOKEN: cmd={c['cmd']} "
+            f"GH_TOKEN={c['env_gh_token']!r}"
+        )
 
 
 # ----------------------------------------------------------------------

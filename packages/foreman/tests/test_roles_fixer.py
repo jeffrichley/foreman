@@ -780,11 +780,20 @@ async def test_run_fixer_uses_create_issue_comment_not_create_review(
 async def test_run_fixer_passes_env_with_fixer_token_and_parent_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Real precedence test: parent process has ``GH_TOKEN`` set to a
+    "leaking daemon" value; the fixer-bot's token must win.
+
+    Without setting parent ``GH_TOKEN``, the test would pass regardless
+    of the production merge order — placebo per HIGH #9 adversarial
+    review.
+    """
     clone = tmp_path / "clone"
     head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
     monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
     monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
     monkeypatch.setenv("MY_SENTINEL_VAR", "sentinel-fixer")
+    # HIGH #9: load-bearing — exercises the role-wins precedence.
+    monkeypatch.setenv("GH_TOKEN", "ghs_PARENT_SHOULD_NOT_WIN_fixer")
 
     cfg = _make_config(clone)
     repo, _pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
@@ -803,6 +812,7 @@ async def test_run_fixer_passes_env_with_fixer_token_and_parent_env(
     )
 
     env = fake_provider.run_agent.call_args.kwargs["env"]
+    # Role token wins over the daemon's inherited GH_TOKEN.
     assert env["GH_TOKEN"] == "ghs_specific_fixer_token"
     assert env["MY_SENTINEL_VAR"] == "sentinel-fixer"
 

@@ -249,14 +249,26 @@ def _build_user_prompt(
     )
 
 
-def _get_pr_diff(worktree_path: Path, base_branch: str, head_sha: str) -> str:
+def _get_pr_diff(
+    worktree_path: Path, base_branch: str, head_sha: str, *, role_token: str
+) -> str:
     """Return the unified diff for the PR's head against its base branch.
 
     Uses ``git diff`` in the worktree rather than the GitHub Files API so
     we don't pay round-trips for large PRs and so the diff matches whatever
     the worktree has checked out (which the LLM will read from with Read /
     Grep / Glob).
+
+    ``role_token`` is the reviewer bot's installation token. We inject it
+    into ``GH_TOKEN`` for both git invocations so any credential-helper
+    (e.g., ``gh auth git-credential``) configured in the worktree
+    authenticates as the reviewer bot rather than inheriting whatever
+    ``GH_TOKEN`` the daemon's parent process had set (CI runner or dev
+    shell). Without this, identity attribution leaks (HIGH #10).
     """
+    from foreman._env_filter import filtered_subprocess_env
+
+    role_env = filtered_subprocess_env(role_token=role_token)
     # Ensure we have the base ref locally — the PR's base is typically the
     # repo default (``main``), which the clone already tracks. Tolerate
     # fetch failure; the diff command below will surface a clearer error.
@@ -266,6 +278,7 @@ def _get_pr_diff(worktree_path: Path, base_branch: str, head_sha: str) -> str:
         check=False,
         capture_output=True,
         text=True,
+        env=role_env,
     )
     result = subprocess.run(
         ["git", "diff", f"origin/{base_branch}...{head_sha}"],
@@ -273,6 +286,7 @@ def _get_pr_diff(worktree_path: Path, base_branch: str, head_sha: str) -> str:
         check=True,
         capture_output=True,
         text=True,
+        env=role_env,
     )
     return result.stdout
 
@@ -393,7 +407,9 @@ async def run_reviewer(
             ticket_id=issue_number,
         )
 
-    pr_diff = _get_pr_diff(wt_path, base_branch=base_branch, head_sha=head_sha)
+    pr_diff = _get_pr_diff(
+        wt_path, base_branch=base_branch, head_sha=head_sha, role_token=reviewer_token
+    )
     spec_doc_content = _read_spec_doc(wt_path, issue_number)
     instructions = load_project_instructions(Path(project.local_clone_path))
 

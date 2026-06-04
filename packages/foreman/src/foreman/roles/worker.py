@@ -178,7 +178,9 @@ def _resolve_check_command(project_check_command: str | None) -> str:
     return project_check_command if project_check_command else _DEFAULT_CHECK_COMMAND
 
 
-def _run_check_command(*, check_command: str, cwd: Path) -> tuple[int, set[str], str]:
+def _run_check_command(
+    *, check_command: str, cwd: Path, role_token: str | None = None
+) -> tuple[int, set[str], str]:
     """Run ``check_command`` in ``cwd`` and return ``(exit_code, failing_tests, combined_output)``.
 
     Parses ``FAILED tests/...`` lines from the combined stdout+stderr to
@@ -199,6 +201,13 @@ def _run_check_command(*, check_command: str, cwd: Path) -> tuple[int, set[str],
     check_command would mis-target our venv and tests would fail on
     "module not found" errors that have nothing to do with the
     Worker's changes.
+
+    ``role_token`` is the worker bot's installation token. When provided
+    we inject it into ``GH_TOKEN`` so any ``gh`` / ``git`` invoked from
+    the check_command (some projects' check commands hit the GitHub API
+    for label state, e.g.) authenticates as the worker bot rather than
+    inheriting whatever ``GH_TOKEN`` the daemon's parent process had set
+    (HIGH #10 — identity attribution leakage).
     """
     from foreman._env_filter import filtered_subprocess_env
 
@@ -209,7 +218,7 @@ def _run_check_command(*, check_command: str, cwd: Path) -> tuple[int, set[str],
         capture_output=True,
         text=True,
         check=False,
-        env=filtered_subprocess_env(),
+        env=filtered_subprocess_env(role_token=role_token),
     )
     combined = (result.stdout or "") + (result.stderr or "")
     failing = {m.group("test_id") for m in _PYTEST_FAILED_RE.finditer(combined)}
@@ -232,7 +241,7 @@ def _summarize_failures(failures: set[str], combined_output: str) -> str:
 
 
 def _read_spec_doc_from_branch(
-    *, worktree_path: Path, spec_branch: str, issue_number: int
+    *, worktree_path: Path, spec_branch: str, issue_number: int, role_token: str
 ) -> str | None:
     """Read the spec doc from the spec branch as it exists in origin.
 
@@ -246,7 +255,14 @@ def _read_spec_doc_from_branch(
     Returns ``None`` if both paths fail. The LLM can still find the
     spec via its Read / Grep / Glob tools — inlining is a convenience,
     not a contract.
+
+    ``role_token`` is the worker bot's installation token. We inject it
+    into ``GH_TOKEN`` for the ``git show`` fallback so any credential
+    helper authenticates as the worker bot, not whatever ``GH_TOKEN``
+    the daemon's parent process had set (HIGH #10).
     """
+    from foreman._env_filter import filtered_subprocess_env
+
     spec_relpath = Path("docs") / "superpowers" / "specs" / f"foreman-issue-{issue_number}-spec.md"
     on_disk = worktree_path / spec_relpath
     if on_disk.exists():
@@ -261,6 +277,7 @@ def _read_spec_doc_from_branch(
         check=False,
         capture_output=True,
         text=True,
+        env=filtered_subprocess_env(role_token=role_token),
     )
     if result.returncode == 0:
         return result.stdout
@@ -541,7 +558,10 @@ async def run_worker(
     # Read the spec doc — on-disk first (it's checked out on this
     # branch), git-show fallback to authoritative spec-branch content.
     spec_doc_content = _read_spec_doc_from_branch(
-        worktree_path=wt_path, spec_branch=spec_branch_name, issue_number=issue_number
+        worktree_path=wt_path,
+        spec_branch=spec_branch_name,
+        issue_number=issue_number,
+        role_token=worker_token,
     )
 
     # Baseline preflight (D4): capture the failing-tests set BEFORE the
@@ -549,7 +569,7 @@ async def run_worker(
     # problem" and gets subtracted from post-Worker failures to find
     # what the Worker actually introduced.
     _baseline_rc, baseline_failures, _baseline_output = _run_check_command(
-        check_command=check_command, cwd=wt_path
+        check_command=check_command, cwd=wt_path, role_token=worker_token
     )
 
     # Advance label: clear the entry label so observers see in-flight
@@ -622,7 +642,7 @@ async def run_worker(
     # Post-Worker verification (D4): re-run check_command and diff
     # against baseline to derive ground truth.
     post_rc, post_failures, post_output = _run_check_command(
-        check_command=check_command, cwd=wt_path
+        check_command=check_command, cwd=wt_path, role_token=worker_token
     )
     new_failures = post_failures - baseline_failures
     orchestrator_check_passed = post_rc == 0 and not new_failures
