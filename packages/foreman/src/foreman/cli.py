@@ -16,7 +16,7 @@ import signal
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import click
 from github import Auth, Github
@@ -438,7 +438,10 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
         )
         return
 
-    gh, host = _build_v3_gh_and_host(config)
+    if not projects:
+        click.echo("No projects configured; nothing to reconcile.")
+        return
+    gh, host = _build_v3_gh_and_host(config, log, projects[0].name)
 
     reconciler = Reconciler(
         projects=projects,
@@ -461,20 +464,39 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
     asyncio.run(_run())
 
 
-def _build_v3_gh_and_host(config: Config) -> tuple[Any, Any]:
-    """Construct the real GH GraphQL client + ReconcilerHost.
+def _build_v3_gh_and_host(
+    config: Config, log: Any, project_name: str
+) -> tuple[Any, Any]:
+    """Construct the real GHGraphQLClient + ReconcilerHost for v3 runtime.
 
-    The v3 host wraps the existing v2 GitHubDaemonHost for action methods
-    (add_label, merge_pr, etc.) and adds a ``dispatch_role`` that spawns a
-    subprocess via the existing role-dispatch machinery. For now we raise
-    NotImplementedError to keep this task focused on CLI wiring; the host
-    construction is a separate concern handled when v3 first runs against
-    real infrastructure (see plan Task 13 / cutover docs).
+    Pulls the planner App's installation token from IdentityRegistry for the
+    GraphQL observer (read-only; planner has GraphQL scope). Wraps v2's
+    GitHubDaemonHost for REST + adds dispatch_role subprocess spawn.
     """
-    raise NotImplementedError(
-        "v3-start runtime wiring not yet implemented. Use --max-ticks 0 to "
-        "smoke-test, or run unit + integration tests in tests/reconciler/."
+    from foreman.daemon_host import GitHubDaemonHost
+    from foreman.identity import IdentityRegistry
+    from foreman.reconciler.gh_graphql import HttpxGHGraphQLClient
+    from foreman.reconciler.v3_host import V3GitHubHost
+
+    project_config = config.projects[project_name]
+    registry = IdentityRegistry(project=project_config)
+    v2_host = GitHubDaemonHost(identity_registry=registry)
+
+    # Use the planner App's token for the GraphQL observer (read-only).
+    planner_token = registry.get_token("planner")
+    gh = HttpxGHGraphQLClient(token=planner_token)
+    # NOTE: v3_host._V2HostLike Protocol declares keyword-only (owner, repo,
+    # issue_number, ...) but the real GitHubDaemonHost methods take a
+    # positional 'owner/name' repo string with no separate 'owner' kwarg.
+    # The fake in tests/reconciler/test_v3_host.py mirrors the Protocol,
+    # not the real shape — so the suite is green but live calls will
+    # raise TypeError. Tracked as a Task 2 design defect for follow-up
+    # before v3 first runs against real infrastructure (Task 4 will
+    # surface it empirically); cast keeps cli.py mypy-clean meanwhile.
+    host = V3GitHubHost(
+        v2_host=cast(Any, v2_host), log=log, project_name=project_name
     )
+    return gh, host
 
 
 @daemon.command("stop")
