@@ -421,6 +421,12 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
             log = ExecutionLog(db_path)
             log.init()
 
+            recovered = log.recover_orphaned()
+            if recovered > 0:
+                click.echo(
+                    f"recovered {recovered} orphaned running row(s) from prior daemon"
+                )
+
             # config.projects is dict[name, ProjectConfig]; ProjectConfig.repo
             # is "owner/name" form. Split into the ReconcilerProject shape.
             projects_list: list[ReconcilerProject] = []
