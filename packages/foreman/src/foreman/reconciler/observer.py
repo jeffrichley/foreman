@@ -60,7 +60,23 @@ query ForemanProjectState($owner: String!, $repo: String!) {
         assignees(first: 10) { nodes { login } }
       }
     }
-    pullRequests(first: 100, states: OPEN) {
+    openPRs: pullRequests(first: 100, states: OPEN) {
+      nodes {
+        number
+        headRefName
+        body
+        mergeable
+        merged
+        reviewDecision
+        statusCheckRollup { state }
+        closingIssuesReferences(first: 10) { nodes { number } }
+      }
+    }
+    recentMergedPRs: pullRequests(
+      first: 20,
+      states: MERGED,
+      orderBy: {field: UPDATED_AT, direction: DESC}
+    ) {
       nodes {
         number
         headRefName
@@ -100,10 +116,11 @@ def fetch_project_state(
 
     repository = (response.get("data") or {}).get("repository") or {}
     issue_nodes = ((repository.get("issues") or {}).get("nodes")) or []
-    pr_nodes = ((repository.get("pullRequests") or {}).get("nodes")) or []
+    open_pr_nodes = ((repository.get("openPRs") or {}).get("nodes")) or []
+    merged_pr_nodes = ((repository.get("recentMergedPRs") or {}).get("nodes")) or []
 
     issues = tuple(_parse_issue(node) for node in issue_nodes)
-    prs = tuple(_parse_pr(node) for node in pr_nodes)
+    prs = tuple(_parse_pr(node) for node in (*open_pr_nodes, *merged_pr_nodes))
 
     return ProjectSnapshot(
         project=project,

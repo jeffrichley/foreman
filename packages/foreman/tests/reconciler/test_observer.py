@@ -23,15 +23,29 @@ class _FakeGHClient:
         self.calls.append((query, variables))
         if self.raise_with:
             raise self.raise_with
-        return self.response or {"data": {"repository": {"issues": {"nodes": []}, "pullRequests": {"nodes": []}}}}
+        return self.response or {
+            "data": {
+                "repository": {
+                    "issues": {"nodes": []},
+                    "openPRs": {"nodes": []},
+                    "recentMergedPRs": {"nodes": []},
+                }
+            }
+        }
 
 
-def _gh_response_with(*, issues: list[dict], prs: list[dict]) -> dict[str, Any]:
+def _gh_response_with(
+    *,
+    issues: list[dict],
+    prs: list[dict],
+    merged_prs: list[dict] | None = None,
+) -> dict[str, Any]:
     return {
         "data": {
             "repository": {
                 "issues": {"nodes": issues},
-                "pullRequests": {"nodes": prs},
+                "openPRs": {"nodes": prs},
+                "recentMergedPRs": {"nodes": merged_prs or []},
             }
         }
     }
@@ -177,3 +191,83 @@ def test_observer_query_includes_spec_fix_label() -> None:
     # surface them for human follow-up (no auto-rerun, just visibility).
     from foreman.reconciler.observer import _QUERY
     assert "foreman:spec-fix" in _QUERY
+
+
+def test_observer_fetches_recently_merged_prs_for_lagging_label_recovery() -> None:
+    """Lagging-label safety rules need to see merged PRs. The observer must
+    include recently-merged PRs in the snapshot so those rules can fire in
+    production (not just in synthetic test contexts)."""
+
+    class FakeGH:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+
+        def graphql(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append((query, variables))
+            # Verify the query asks for merged PRs too.
+            assert "MERGED" in query, "observer must fetch merged PRs"
+
+            return {
+                "data": {
+                    "repository": {
+                        "issues": {"nodes": []},
+                        "openPRs": {
+                            "nodes": [
+                                {
+                                    "number": 1,
+                                    "headRefName": "feat/open",
+                                    "body": "",
+                                    "mergeable": "MERGEABLE",
+                                    "merged": False,
+                                    "statusCheckRollup": {"state": "SUCCESS"},
+                                    "closingIssuesReferences": {"nodes": []},
+                                    "reviewDecision": None,
+                                }
+                            ]
+                        },
+                        "recentMergedPRs": {
+                            "nodes": [
+                                {
+                                    "number": 2,
+                                    "headRefName": "feat/merged",
+                                    "body": "",
+                                    # post-merge value isn't meaningful but field is present
+                                    "mergeable": "MERGEABLE",
+                                    "merged": True,
+                                    "statusCheckRollup": {"state": "SUCCESS"},
+                                    "closingIssuesReferences": {"nodes": []},
+                                    "reviewDecision": "APPROVED",
+                                }
+                            ]
+                        },
+                    }
+                }
+            }
+
+    gh = FakeGH()
+    snap = fetch_project_state(
+        project="foreman", owner="jeffrichley", repo="foreman", gh=gh,
+    )
+    # Both PRs should be present.
+    assert len(snap.prs) == 2
+    pr_numbers = {pr.number for pr in snap.prs}
+    assert pr_numbers == {1, 2}
+    # The merged one's is_merged should be True so lagging-label rules fire.
+    merged = next(p for p in snap.prs if p.number == 2)
+    assert merged.is_merged is True
+    # And the open one should remain not-merged.
+    open_pr = next(p for p in snap.prs if p.number == 1)
+    assert open_pr.is_merged is False
+
+
+def test_observer_query_uses_aliased_pr_connections() -> None:
+    """The observer combines two pullRequests connections via GraphQL aliases
+    (openPRs + recentMergedPRs) so the parser can pull both lists out of one
+    request."""
+    from foreman.reconciler.observer import _QUERY
+    assert "openPRs:" in _QUERY
+    assert "recentMergedPRs:" in _QUERY
+    assert "states: OPEN" in _QUERY
+    assert "states: MERGED" in _QUERY
+    # Recent-merged window must be bounded so old PRs don't pollute the snapshot.
+    assert "UPDATED_AT" in _QUERY

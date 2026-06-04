@@ -45,12 +45,17 @@ class _StubHost:
         return 12345
 
 
-def _gh_with(issues: list[dict], prs: list[dict]) -> dict[str, Any]:
+def _gh_with(
+    issues: list[dict],
+    prs: list[dict],
+    merged_prs: list[dict] | None = None,
+) -> dict[str, Any]:
     return {
         "data": {
             "repository": {
                 "issues": {"nodes": issues},
-                "pullRequests": {"nodes": prs},
+                "openPRs": {"nodes": prs},
+                "recentMergedPRs": {"nodes": merged_prs or []},
             }
         }
     }
