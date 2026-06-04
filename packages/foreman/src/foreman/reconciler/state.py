@@ -44,6 +44,7 @@ class PRState:
     body: str
     linked_issue_numbers: tuple[int, ...]
     is_merged: bool
+    review_decision: str | None = None
 
     def closes_issue(self, issue_number: int) -> bool:
         return issue_number in self.linked_issue_numbers

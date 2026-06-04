@@ -99,3 +99,30 @@ def test_ticket_id_format() -> None:
         fetched_at=datetime(2026, 6, 3, tzinfo=UTC),
     )
     assert snap.ticket_id_for(143) == "jeffrichley/foreman#143"
+
+
+def test_pr_state_carries_review_decision() -> None:
+    pr = PRState(
+        number=10,
+        head_ref="feat/x",
+        mergeable="MERGEABLE",
+        ci_status="SUCCESS",
+        body="",
+        linked_issue_numbers=(),
+        is_merged=False,
+        review_decision="APPROVED",
+    )
+    assert pr.review_decision == "APPROVED"
+
+
+def test_pr_state_review_decision_defaults_to_none() -> None:
+    pr = PRState(
+        number=10,
+        head_ref="feat/x",
+        mergeable="MERGEABLE",
+        ci_status="SUCCESS",
+        body="",
+        linked_issue_numbers=(),
+        is_merged=False,
+    )
+    assert pr.review_decision is None
