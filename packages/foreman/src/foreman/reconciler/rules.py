@@ -156,13 +156,33 @@ def _planning_no_pr(ctx: ActionContext) -> bool:
     )
 
 
-def _planning_pr_green(ctx: ActionContext) -> bool:
+def _planning_pr_needs_review(ctx: ActionContext) -> bool:
     return (
         "foreman:planning" in ctx.issue.labels
         and ctx.pr is not None
         and not ctx.pr.is_merged
+        and ctx.pr.review_decision in (None, "REVIEW_REQUIRED")
+        and not ctx.log.has_unterminated("dispatch_reviewer", ctx.ticket_id)
+    )
+
+
+def _planning_pr_approved(ctx: ActionContext) -> bool:
+    return (
+        "foreman:planning" in ctx.issue.labels
+        and ctx.pr is not None
+        and not ctx.pr.is_merged
+        and ctx.pr.review_decision == "APPROVED"
+    )
+
+
+def _plan_approved_pr_green_and_flag(ctx: ActionContext) -> bool:
+    return (
+        "foreman:plan-approved" in ctx.issue.labels
+        and ctx.pr is not None
+        and not ctx.pr.is_merged
         and ctx.pr.mergeable == "MERGEABLE"
         and ctx.pr.ci_status == "SUCCESS"
+        and ctx.auto_merge_spec
     )
 
 
@@ -236,14 +256,28 @@ _PROGRESS_RULES: tuple[Rule, ...] = (
         then=Action.DISPATCH_PLANNER,
     ),
     Rule(
-        name="merge_spec_pr",
+        name="dispatch_reviewer_spec",
         tier=PrecedenceTier.FORWARD_PROGRESS,
-        precedence=110,
-        when=_planning_pr_green,
-        then=Action.MERGE_SPEC_PR,
+        precedence=105,
+        when=_planning_pr_needs_review,
+        then=Action.DISPATCH_REVIEWER,
     ),
     Rule(
         name="advance_label_to_plan_approved",
+        tier=PrecedenceTier.FORWARD_PROGRESS,
+        precedence=110,
+        when=_planning_pr_approved,
+        then=Action.ADVANCE_LABEL_TO_PLAN_APPROVED,
+    ),
+    Rule(
+        name="merge_spec_pr",
+        tier=PrecedenceTier.FORWARD_PROGRESS,
+        precedence=115,
+        when=_plan_approved_pr_green_and_flag,
+        then=Action.MERGE_SPEC_PR,
+    ),
+    Rule(
+        name="advance_label_to_plan_approved_lagging",
         tier=PrecedenceTier.FORWARD_PROGRESS,
         precedence=120,
         when=_spec_pr_merged_label_lagging,

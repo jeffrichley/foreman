@@ -125,6 +125,7 @@ def _pr(
     ci_status: str | None = "SUCCESS",
     is_merged: bool = False,
     linked: tuple[int, ...] = (143,),
+    review_decision: str | None = None,
 ) -> PRState:
     return PRState(
         number=144,
@@ -134,10 +135,18 @@ def _pr(
         body="Implements #143",
         linked_issue_numbers=linked,
         is_merged=is_merged,
+        review_decision=review_decision,
     )
 
 
-def _ctx_with(tmp_path: Path, issue: IssueState, pr=None) -> ActionContext:
+def _ctx_with(
+    tmp_path: Path,
+    issue: IssueState,
+    pr=None,
+    *,
+    auto_merge_spec: bool = True,
+    auto_merge_impl: bool = False,
+) -> ActionContext:
     log = ExecutionLog(tmp_path / "log.sqlite")
     log.init()
     snap = ProjectSnapshot(
@@ -148,7 +157,14 @@ def _ctx_with(tmp_path: Path, issue: IssueState, pr=None) -> ActionContext:
         prs=(pr,) if pr else (),
         fetched_at=datetime(2026, 6, 3, tzinfo=UTC),
     )
-    return ActionContext(snapshot=snap, issue=issue, pr=pr, log=log)
+    return ActionContext(
+        snapshot=snap,
+        issue=issue,
+        pr=pr,
+        log=log,
+        auto_merge_spec=auto_merge_spec,
+        auto_merge_impl=auto_merge_impl,
+    )
 
 
 def test_needs_help_label_fires_surface_help(tmp_path: Path) -> None:
@@ -227,17 +243,126 @@ def test_dispatch_planner_skipped_when_already_running(tmp_path: Path) -> None:
     assert evaluate(ctx, rules=RULES) is Action.NOOP
 
 
-def test_merge_spec_pr_fires_when_planning_pr_green(tmp_path: Path) -> None:
+def test_dispatch_reviewer_spec_fires_when_planning_pr_open_no_review_yet(
+    tmp_path: Path,
+) -> None:
+    """Spec PR sitting open without Reviewer signoff → dispatch Reviewer."""
     from foreman.reconciler.rules import RULES
     ctx = _ctx_with(
         tmp_path,
         _issue(labels=("foreman:planning",)),
-        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", review_decision=None),
+    )
+    assert evaluate(ctx, rules=RULES) is Action.DISPATCH_REVIEWER
+
+
+def test_dispatch_reviewer_spec_fires_on_review_required(tmp_path: Path) -> None:
+    """REVIEW_REQUIRED is the same as "needs a reviewer" — fire dispatch."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:planning",)),
+        _pr(
+            mergeable="MERGEABLE", ci_status="SUCCESS", review_decision="REVIEW_REQUIRED"
+        ),
+    )
+    assert evaluate(ctx, rules=RULES) is Action.DISPATCH_REVIEWER
+
+
+def test_dispatch_reviewer_spec_skipped_when_reviewer_in_flight(tmp_path: Path) -> None:
+    """If a Reviewer dispatch is unterminated, don't re-fire."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:planning",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", review_decision=None),
+    )
+    ctx.log.write_action(
+        ticket_id=ctx.ticket_id,
+        project="foreman",
+        rule_name="dispatch_reviewer_spec",
+        action="dispatch_reviewer",
+        outcome="running",
+        details={},
+    )
+    # No other rule should match this configuration either → NOOP.
+    assert evaluate(ctx, rules=RULES) is Action.NOOP
+
+
+def test_advance_label_to_plan_approved_on_review_approve(tmp_path: Path) -> None:
+    """foreman:planning + PR open + reviewDecision==APPROVED → label swap."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:planning",)),
+        _pr(
+            mergeable="MERGEABLE", ci_status="SUCCESS", review_decision="APPROVED"
+        ),
+    )
+    assert evaluate(ctx, rules=RULES) is Action.ADVANCE_LABEL_TO_PLAN_APPROVED
+
+
+def test_dispatch_reviewer_spec_does_not_refire_after_approve(tmp_path: Path) -> None:
+    """If review_decision==APPROVED, dispatch_reviewer_spec should NOT fire
+    (the label-swap rule takes precedence)."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:planning",)),
+        _pr(
+            mergeable="MERGEABLE", ci_status="SUCCESS", review_decision="APPROVED"
+        ),
+    )
+    # On APPROVED, advance_label rule fires instead of dispatch_reviewer.
+    assert evaluate(ctx, rules=RULES) is Action.ADVANCE_LABEL_TO_PLAN_APPROVED
+
+
+def test_merge_spec_pr_now_requires_plan_approved_label_and_flag(
+    tmp_path: Path,
+) -> None:
+    """merge_spec_pr only fires on plan-approved label + green + flag on."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:plan-approved",)),
+        _pr(
+            mergeable="MERGEABLE", ci_status="SUCCESS", review_decision="APPROVED"
+        ),
+        auto_merge_spec=True,
     )
     assert evaluate(ctx, rules=RULES) is Action.MERGE_SPEC_PR
 
 
+def test_merge_spec_pr_blocked_when_flag_off(tmp_path: Path) -> None:
+    """auto_merge_spec=False parks the PR at plan-approved (no auto-merge)."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:plan-approved",)),
+        _pr(
+            mergeable="MERGEABLE", ci_status="SUCCESS", review_decision="APPROVED"
+        ),
+        auto_merge_spec=False,
+    )
+    assert evaluate(ctx, rules=RULES) is not Action.MERGE_SPEC_PR
+
+
+def test_merge_spec_pr_no_longer_fires_on_planning_label(tmp_path: Path) -> None:
+    """The old behavior — fire on foreman:planning with green CI — is GONE."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:planning",)),
+        _pr(
+            mergeable="MERGEABLE", ci_status="SUCCESS", review_decision=None
+        ),
+        auto_merge_spec=True,
+    )
+    assert evaluate(ctx, rules=RULES) is not Action.MERGE_SPEC_PR
+
+
 def test_advance_label_to_plan_approved_when_spec_pr_merged(tmp_path: Path) -> None:
+    """Safety-net lagging rule still fires when PR merged + label hasn't swapped."""
     from foreman.reconciler.rules import RULES
     ctx = _ctx_with(
         tmp_path,
@@ -258,7 +383,7 @@ def test_advance_label_to_plan_approved_idempotent(tmp_path: Path) -> None:
     ctx.log.write_action(
         ticket_id=ctx.ticket_id,
         project="foreman",
-        rule_name="advance_label_to_plan_approved",
+        rule_name="advance_label_to_plan_approved_lagging",
         action="advance_label_to_plan_approved",
         outcome="success",
         details={"from": "foreman:planning", "to": "foreman:plan-approved"},
