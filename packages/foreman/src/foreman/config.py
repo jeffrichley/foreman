@@ -96,6 +96,30 @@ class DaemonConfig(BaseModel):
         return v
 
 
+class ReconcilerConfig(BaseModel):
+    """v3 reconciler knobs. Lives alongside DaemonConfig (which configures v2)."""
+
+    db_path: str = Field(
+        default="~/.foreman/reconciler.sqlite",
+        description="sqlite path for the v3 execution log",
+    )
+    poll_interval_seconds: int = Field(
+        default=60,
+        ge=10,
+        description="seconds between reconciler ticks",
+    )
+    retention_days: int = Field(
+        default=30,
+        ge=1,
+        description="rows older than this are eligible for archive",
+    )
+    alert_after_n_failures: int = Field(
+        default=3,
+        ge=1,
+        description="consecutive observer failures before yellow alert",
+    )
+
+
 class AppsConfig(BaseModel):
     """Per-role GitHub App credentials.
 
@@ -271,6 +295,7 @@ class Config(BaseModel):
     admin: AdminConfig = Field(default_factory=AdminConfig)
     daemon: DaemonConfig = Field(default_factory=DaemonConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
+    reconciler: ReconcilerConfig = Field(default_factory=ReconcilerConfig)
     projects: dict[str, ProjectConfig] = Field(default_factory=dict)
 
 

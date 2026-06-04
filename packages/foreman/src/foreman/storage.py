@@ -1,4 +1,12 @@
-"""SQLite lifecycle storage for the Foreman daemon.
+"""DEPRECATED: this module is v2 storage (pipelines table).
+
+v3 uses foreman.reconciler.exec_log.ExecutionLog instead. Schema lives at
+~/.foreman/reconciler.sqlite. v2 db at ~/.foreman/foreman.sqlite is
+archived as foreman-v2-archive-2026-06-03.sqlite per the cutover docs.
+
+This module stays importable until the v3-stable follow-up removal.
+
+SQLite lifecycle storage for the Foreman daemon.
 
 Stores pipelines, node runs, label transitions, failures, and last-seen
 label snapshots used by the poller diff. Not load-bearing for correctness
