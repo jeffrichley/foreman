@@ -212,7 +212,17 @@ def _impl_review_green(ctx: ActionContext) -> bool:
         and ctx.pr is not None
         and not ctx.pr.is_merged
         and ctx.pr.ci_status == "SUCCESS"
+        and ctx.pr.review_decision in (None, "REVIEW_REQUIRED")
         and not ctx.log.has_unterminated("dispatch_reviewer", ctx.ticket_id)
+    )
+
+
+def _impl_review_approved_on_gh(ctx: ActionContext) -> bool:
+    return (
+        "foreman:impl-review" in ctx.issue.labels
+        and ctx.pr is not None
+        and not ctx.pr.is_merged
+        and ctx.pr.review_decision == "APPROVED"
     )
 
 
@@ -225,13 +235,14 @@ def _impl_fix_pending(ctx: ActionContext) -> bool:
     )
 
 
-def _impl_approved_pr_green(ctx: ActionContext) -> bool:
+def _impl_approved_pr_green_and_flag(ctx: ActionContext) -> bool:
     return (
         "foreman:impl-approved" in ctx.issue.labels
         and ctx.pr is not None
         and not ctx.pr.is_merged
         and ctx.pr.mergeable == "MERGEABLE"
         and ctx.pr.ci_status == "SUCCESS"
+        and ctx.auto_merge_impl
     )
 
 
@@ -291,6 +302,13 @@ _PROGRESS_RULES: tuple[Rule, ...] = (
         then=Action.DISPATCH_WORKER,
     ),
     Rule(
+        name="advance_label_to_impl_approved",
+        tier=PrecedenceTier.FORWARD_PROGRESS,
+        precedence=138,
+        when=_impl_review_approved_on_gh,
+        then=Action.ADVANCE_LABEL_TO_IMPL_APPROVED,
+    ),
+    Rule(
         name="dispatch_reviewer",
         tier=PrecedenceTier.FORWARD_PROGRESS,
         precedence=140,
@@ -308,7 +326,7 @@ _PROGRESS_RULES: tuple[Rule, ...] = (
         name="merge_impl_pr",
         tier=PrecedenceTier.FORWARD_PROGRESS,
         precedence=160,
-        when=_impl_approved_pr_green,
+        when=_impl_approved_pr_green_and_flag,
         then=Action.MERGE_IMPL_PR,
     ),
     Rule(

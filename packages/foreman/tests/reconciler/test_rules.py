@@ -423,6 +423,62 @@ def test_merge_impl_pr_fires_on_impl_approved(tmp_path: Path) -> None:
         tmp_path,
         _issue(labels=("foreman:impl-approved",)),
         _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
+        auto_merge_impl=True,
+    )
+    assert evaluate(ctx, rules=RULES) is Action.MERGE_IMPL_PR
+
+
+def test_impl_review_advances_to_impl_approved_on_gh_approve(tmp_path: Path) -> None:
+    """foreman:impl-review + impl PR open + reviewDecision==APPROVED → label swap."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-review",)),
+        _pr(
+            mergeable="MERGEABLE", ci_status="SUCCESS", review_decision="APPROVED"
+        ),
+    )
+    assert evaluate(ctx, rules=RULES) is Action.ADVANCE_LABEL_TO_IMPL_APPROVED
+
+
+def test_impl_review_no_advance_without_review_approve(tmp_path: Path) -> None:
+    """Without an APPROVED reviewDecision, no advance — should remain
+    dispatchable to Reviewer (or NOOP if dispatcher already terminated)."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-review",)),
+        _pr(
+            mergeable="MERGEABLE", ci_status="SUCCESS", review_decision=None
+        ),
+    )
+    assert evaluate(ctx, rules=RULES) is not Action.ADVANCE_LABEL_TO_IMPL_APPROVED
+
+
+def test_merge_impl_pr_requires_flag(tmp_path: Path) -> None:
+    """auto_merge_impl=False parks the PR at impl-approved (no auto-merge)."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-approved",)),
+        _pr(
+            mergeable="MERGEABLE", ci_status="SUCCESS", review_decision="APPROVED"
+        ),
+        auto_merge_impl=False,
+    )
+    assert evaluate(ctx, rules=RULES) is not Action.MERGE_IMPL_PR
+
+
+def test_merge_impl_pr_fires_when_flag_on(tmp_path: Path) -> None:
+    """merge_impl_pr fires on impl-approved + green + flag on."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-approved",)),
+        _pr(
+            mergeable="MERGEABLE", ci_status="SUCCESS", review_decision="APPROVED"
+        ),
+        auto_merge_impl=True,
     )
     assert evaluate(ctx, rules=RULES) is Action.MERGE_IMPL_PR
 

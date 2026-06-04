@@ -31,6 +31,7 @@ class Action(enum.Enum):
     DISPATCH_WORKER = "dispatch_worker"
     DISPATCH_REVIEWER = "dispatch_reviewer"
     DISPATCH_FIXER = "dispatch_fixer"
+    ADVANCE_LABEL_TO_IMPL_APPROVED = "advance_label_to_impl_approved"
     MERGE_IMPL_PR = "merge_impl_pr"
     ADVANCE_LABEL_TO_DONE = "advance_label_to_done"
 
@@ -165,6 +166,19 @@ def execute_action(
                 repo=ctx.snapshot.repo,
                 issue=ctx.issue.number,
                 label="foreman:plan-approved",
+            )
+        elif action is Action.ADVANCE_LABEL_TO_IMPL_APPROVED:
+            host.remove_label(
+                owner=ctx.snapshot.owner,
+                repo=ctx.snapshot.repo,
+                issue=ctx.issue.number,
+                label="foreman:impl-review",
+            )
+            host.add_label(
+                owner=ctx.snapshot.owner,
+                repo=ctx.snapshot.repo,
+                issue=ctx.issue.number,
+                label="foreman:impl-approved",
             )
         elif action is Action.ADVANCE_LABEL_TO_DONE:
             host.remove_label(
