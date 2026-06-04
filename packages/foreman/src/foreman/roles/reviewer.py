@@ -393,7 +393,14 @@ async def run_reviewer(
     issue_title = issue.title or ""
     issue_body = issue.body or ""
 
-    wt_mgr = WorktreeManager(worktrees_root=worktrees_root)
+    # WorktreeManager's git subprocesses (fetch / worktree add) must
+    # authenticate as the reviewer bot — without the explicit token they
+    # inherit the daemon's parent ``GH_TOKEN`` (CI runner, dev shell)
+    # and attribute identity to the daemon's identity on private repos.
+    # Same anti-leak motivation as :func:`_get_pr_diff` above; the
+    # ``role_token`` parameter is plumbed all the way down through the
+    # module-level git helpers.
+    wt_mgr = WorktreeManager(worktrees_root=worktrees_root, role_token=reviewer_token)
     if target == "impl_pr":
         wt_path = wt_mgr.attach_impl(
             clone_path=Path(project.local_clone_path),

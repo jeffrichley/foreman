@@ -491,7 +491,13 @@ async def run_fixer(
 
     # Attach to the existing branch — the Planner created it; the
     # Fixer must not branch from main.
-    wt_mgr = WorktreeManager(worktrees_root=worktrees_root)
+    # WorktreeManager's git subprocesses (fetch / worktree add) must
+    # authenticate as the fixer bot — without the explicit token they
+    # inherit the daemon's parent ``GH_TOKEN`` (CI runner, dev shell)
+    # and attribute identity to the daemon's identity on private repos.
+    # Same anti-leak motivation as the Stage 3e role-module subprocess
+    # fix; WorktreeManager was scoped out at the time as a follow-up.
+    wt_mgr = WorktreeManager(worktrees_root=worktrees_root, role_token=fixer_token)
     wt_path = wt_mgr.attach(
         clone_path=Path(project.local_clone_path),
         repo_slug=repo_name,

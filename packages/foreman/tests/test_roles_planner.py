@@ -298,6 +298,11 @@ async def test_run_planner_dispatches_and_advances_label(
     fake_host = _FakeHostProvider()
     fake_registry = MagicMock()
     fake_registry.get_host_provider.return_value = fake_host
+    # Planner role-token (Stage 3e follow-up): WorktreeManager threads
+    # this into git subprocess GH_TOKEN. MagicMock default returns a
+    # Mock object that subprocess rejects with "environment can only
+    # contain strings", so pin it to a string.
+    fake_registry.get_planner_token.return_value = "fake-planner-token"
 
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
@@ -381,6 +386,11 @@ async def test_run_planner_does_not_attempt_legacy_plan_label_removal_on_fresh_v
     )
     fake_registry = MagicMock()
     fake_registry.get_host_provider.return_value = fake_host
+    # Planner role-token (Stage 3e follow-up): WorktreeManager threads
+    # this into git subprocess GH_TOKEN. MagicMock default returns a
+    # Mock object that subprocess rejects with "environment can only
+    # contain strings", so pin it to a string.
+    fake_registry.get_planner_token.return_value = "fake-planner-token"
 
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
@@ -433,6 +443,11 @@ async def test_run_planner_strips_auto_close_keywords_from_pr_body(
     fake_host = _FakeHostProvider()
     fake_registry = MagicMock()
     fake_registry.get_host_provider.return_value = fake_host
+    # Planner role-token (Stage 3e follow-up): WorktreeManager threads
+    # this into git subprocess GH_TOKEN. MagicMock default returns a
+    # Mock object that subprocess rejects with "environment can only
+    # contain strings", so pin it to a string.
+    fake_registry.get_planner_token.return_value = "fake-planner-token"
 
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(
@@ -484,6 +499,11 @@ async def test_run_planner_does_not_inject_env_into_provider(
     fake_host = _FakeHostProvider()
     fake_registry = MagicMock()
     fake_registry.get_host_provider.return_value = fake_host
+    # Planner role-token (Stage 3e follow-up): WorktreeManager threads
+    # this into git subprocess GH_TOKEN. MagicMock default returns a
+    # Mock object that subprocess rejects with "environment can only
+    # contain strings", so pin it to a string.
+    fake_registry.get_planner_token.return_value = "fake-planner-token"
 
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
@@ -532,6 +552,11 @@ async def test_run_planner_embeds_project_instructions_in_user_prompt(
     fake_host = _FakeHostProvider()
     fake_registry = MagicMock()
     fake_registry.get_host_provider.return_value = fake_host
+    # Planner role-token (Stage 3e follow-up): WorktreeManager threads
+    # this into git subprocess GH_TOKEN. MagicMock default returns a
+    # Mock object that subprocess rejects with "environment can only
+    # contain strings", so pin it to a string.
+    fake_registry.get_planner_token.return_value = "fake-planner-token"
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
 
@@ -570,6 +595,11 @@ async def test_run_planner_omits_instructions_section_when_file_absent(
     fake_host = _FakeHostProvider()
     fake_registry = MagicMock()
     fake_registry.get_host_provider.return_value = fake_host
+    # Planner role-token (Stage 3e follow-up): WorktreeManager threads
+    # this into git subprocess GH_TOKEN. MagicMock default returns a
+    # Mock object that subprocess rejects with "environment can only
+    # contain strings", so pin it to a string.
+    fake_registry.get_planner_token.return_value = "fake-planner-token"
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
 
@@ -596,6 +626,11 @@ async def test_run_planner_rejects_url_pointing_at_wrong_project(
     fake_host = _FakeHostProvider()
     fake_registry = MagicMock()
     fake_registry.get_host_provider.return_value = fake_host
+    # Planner role-token (Stage 3e follow-up): WorktreeManager threads
+    # this into git subprocess GH_TOKEN. MagicMock default returns a
+    # Mock object that subprocess rejects with "environment can only
+    # contain strings", so pin it to a string.
+    fake_registry.get_planner_token.return_value = "fake-planner-token"
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
 
@@ -651,6 +686,11 @@ async def test_run_planner_threads_dev_base_branch_when_set(
     fake_host = _FakeHostProvider()
     fake_registry = MagicMock()
     fake_registry.get_host_provider.return_value = fake_host
+    # Planner role-token (Stage 3e follow-up): WorktreeManager threads
+    # this into git subprocess GH_TOKEN. MagicMock default returns a
+    # Mock object that subprocess rejects with "environment can only
+    # contain strings", so pin it to a string.
+    fake_registry.get_planner_token.return_value = "fake-planner-token"
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
 
@@ -702,6 +742,11 @@ async def test_run_planner_passes_none_when_dev_base_branch_unset(
     fake_host = _FakeHostProvider()
     fake_registry = MagicMock()
     fake_registry.get_host_provider.return_value = fake_host
+    # Planner role-token (Stage 3e follow-up): WorktreeManager threads
+    # this into git subprocess GH_TOKEN. MagicMock default returns a
+    # Mock object that subprocess rejects with "environment can only
+    # contain strings", so pin it to a string.
+    fake_registry.get_planner_token.return_value = "fake-planner-token"
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
 
@@ -768,6 +813,11 @@ async def test_run_planner_returns_authoritative_final_labels(
     )
     fake_registry = MagicMock()
     fake_registry.get_host_provider.return_value = fake_host
+    # Planner role-token (Stage 3e follow-up): WorktreeManager threads
+    # this into git subprocess GH_TOKEN. MagicMock default returns a
+    # Mock object that subprocess rejects with "environment can only
+    # contain strings", so pin it to a string.
+    fake_registry.get_planner_token.return_value = "fake-planner-token"
 
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())

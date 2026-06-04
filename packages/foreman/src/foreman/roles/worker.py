@@ -552,7 +552,13 @@ async def run_worker(
     # PR should target — usually the spec branch (D1 stacked PR), or
     # the default branch when the spec branch is gone (issue #48
     # fallback).
-    wt_mgr = WorktreeManager(worktrees_root=worktrees_root)
+    # WorktreeManager's git subprocesses (fetch / worktree add) must
+    # authenticate as the worker bot — without the explicit token they
+    # inherit the daemon's parent ``GH_TOKEN`` (CI runner, dev shell)
+    # and attribute identity to the daemon's identity on private repos.
+    # Same anti-leak motivation as ``_get_pr_diff`` / ``_read_spec_doc_from_branch``;
+    # the role token is plumbed through the worktree module's git helpers.
+    wt_mgr = WorktreeManager(worktrees_root=worktrees_root, role_token=worker_token)
     wt_result = wt_mgr.create_impl(
         clone_path=Path(project.local_clone_path),
         repo_slug=repo_name,

@@ -173,11 +173,18 @@ async def run_planner(
 
     registry = identity_registry if identity_registry is not None else IdentityRegistry(project)
     host: GitHostProvider = registry.get_host_provider("planner")
+    planner_token: str = registry.get_planner_token()
 
     issue = host.get_issue(actual_repo_slug, issue_number)
     default_branch = host.get_default_branch(actual_repo_slug)
 
-    wt_mgr = WorktreeManager(worktrees_root=worktrees_root)
+    # WorktreeManager's git subprocesses (fetch / worktree add) must
+    # authenticate as the planner bot — without the explicit token they
+    # inherit the daemon's parent ``GH_TOKEN`` (CI runner, dev shell)
+    # and attribute identity to the daemon's identity on private repos.
+    # Same anti-leak motivation as the Stage 3e role-module subprocess
+    # fix; WorktreeManager was scoped out at the time as a follow-up.
+    wt_mgr = WorktreeManager(worktrees_root=worktrees_root, role_token=planner_token)
     wt_path = wt_mgr.create(
         clone_path=Path(project.local_clone_path),
         repo_slug=repo_name,
