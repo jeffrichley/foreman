@@ -182,7 +182,16 @@ class V3GitHubHost:
             if target is not None:
                 argv.extend(["--target", target])
 
-        proc = self._runner(argv)
+        # Wrap runner + task creation in try/except so the capacity slot is
+        # released on any spawn-time failure (uv missing → FileNotFoundError,
+        # fork failure → OSError, loop scheduling failure, etc.). Without
+        # this, repeated spawn failures would permanently consume slots until
+        # the daemon restart triggers recover_orphaned + slot reset.
+        try:
+            proc = self._runner(argv)
+        except Exception:
+            self._dispatch_capacity.release()
+            raise
         logger.info("dispatched role=%s pid=%d argv=%s", role, proc.pid, argv)
 
         # Background task: wait for subprocess, write termination row.
@@ -196,9 +205,13 @@ class V3GitHubHost:
             self._dispatch_capacity.release()
             return proc.pid
 
-        loop.create_task(
-            self._track_subprocess_completion(proc, role, start_log_id=start_log_id)
-        )
+        try:
+            loop.create_task(
+                self._track_subprocess_completion(proc, role, start_log_id=start_log_id)
+            )
+        except Exception:
+            self._dispatch_capacity.release()
+            raise
         return proc.pid
 
     async def _track_subprocess_completion(

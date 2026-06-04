@@ -247,6 +247,49 @@ def test_concurrency_cap_refuses_dispatch_when_full(tmp_path: Path) -> None:
         )
 
 
+def test_dispatch_role_releases_slot_when_runner_raises(tmp_path: Path) -> None:
+    """If subprocess_runner raises (uv missing, fork failure), the capacity
+    slot must be released — otherwise repeated spawn failures permanently
+    consume the cap until daemon restart."""
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+
+    def raising_runner(_argv: list[str]) -> object:
+        raise FileNotFoundError("uv: command not found")
+
+    host = V3GitHubHost(
+        v2_host=_FakeV2Host(),
+        log=log,
+        subprocess_runner=raising_runner,
+        max_concurrent_dispatches=1,
+    )
+
+    # First call: runner raises → slot must be released.
+    with pytest.raises(FileNotFoundError):
+        host.dispatch_role(
+            role="planner",
+            target=None,
+            owner="jeffrichley",
+            repo="foreman",
+            issue=1,
+            pr_number=None,
+            start_log_id=1,
+        )
+
+    # Second call: with slot properly released, would-be-cap-reached should NOT fire.
+    # Runner still raises FileNotFoundError, not "concurrency cap reached".
+    with pytest.raises(FileNotFoundError):
+        host.dispatch_role(
+            role="planner",
+            target=None,
+            owner="jeffrichley",
+            repo="foreman",
+            issue=2,
+            pr_number=None,
+            start_log_id=2,
+        )
+
+
 def test_dispatch_role_reviewer_uses_positional_pr_url(tmp_path: Path) -> None:
     """Reviewer's `foreman review` CLI takes positional pr_url, not --issue-url."""
     captured: list[list[str]] = []
