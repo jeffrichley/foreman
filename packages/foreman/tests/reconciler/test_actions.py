@@ -76,6 +76,35 @@ def test_action_context_carries_pr_when_present(tmp_path: Path) -> None:
     assert ctx.pr is pr
 
 
+def test_action_context_carries_merge_flags(tmp_path: Path) -> None:
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    snap = _snapshot()
+    issue = snap.issues[0]
+    ctx = ActionContext(
+        snapshot=snap,
+        issue=issue,
+        pr=None,
+        log=log,
+        auto_merge_spec=True,
+        auto_merge_impl=False,
+    )
+    assert ctx.auto_merge_spec is True
+    assert ctx.auto_merge_impl is False
+
+
+def test_action_context_merge_flags_default() -> None:
+    """Defaults must match global ReconcilerConfig defaults so existing
+    callers (tests, fixtures) that omit the flags don't change behavior:
+    spec auto-merges, impl does not.
+    """
+    import inspect
+
+    sig = inspect.signature(ActionContext)
+    assert sig.parameters["auto_merge_spec"].default is True
+    assert sig.parameters["auto_merge_impl"].default is False
+
+
 # --- Executor tests ---
 
 

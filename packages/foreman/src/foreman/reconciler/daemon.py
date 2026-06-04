@@ -30,11 +30,22 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ReconcilerProject:
-    """One registered project the reconciler watches."""
+    """One registered project the reconciler watches.
+
+    ``auto_merge_spec`` / ``auto_merge_impl`` are the EFFECTIVE flags after
+    resolving per-project overrides against ``ReconcilerConfig`` defaults
+    (via ``ReconcilerConfig.effective_auto_merge_*(project_cfg)``). They
+    travel into each per-tick ``ActionContext`` so the rule catalog can
+    decide between auto-merge and park-for-human transitions. Defaults
+    match the global ``ReconcilerConfig`` defaults so tests that omit them
+    keep the same behavior as production with no project-level overrides.
+    """
 
     name: str
     owner: str
     repo: str
+    auto_merge_spec: bool = True
+    auto_merge_impl: bool = False
 
 
 class Reconciler:
@@ -97,13 +108,24 @@ class Reconciler:
                 continue
 
             self._consecutive_failures[project.name] = 0
-            self._reconcile_project(snapshot)
+            self._reconcile_project(snapshot, project)
 
-    def _reconcile_project(self, snapshot: ProjectSnapshot) -> None:
+    def _reconcile_project(
+        self,
+        snapshot: ProjectSnapshot,
+        project: ReconcilerProject,
+    ) -> None:
         for issue in snapshot.issues:
             linked_prs = snapshot.prs_for_issue(issue.number)
             pr = linked_prs[0] if linked_prs else None
-            ctx = ActionContext(snapshot=snapshot, issue=issue, pr=pr, log=self.log)
+            ctx = ActionContext(
+                snapshot=snapshot,
+                issue=issue,
+                pr=pr,
+                log=self.log,
+                auto_merge_spec=project.auto_merge_spec,
+                auto_merge_impl=project.auto_merge_impl,
+            )
             action = evaluate(ctx, rules=RULES)
             if action is Action.NOOP:
                 continue

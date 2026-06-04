@@ -43,12 +43,22 @@ class ActionContext:
     `pr` is the linked PR if one exists (None for tickets pre-PR or after merge).
     `log` is the execution log — rules consult it for idempotence; executor
     writes through it.
+
+    `auto_merge_spec` and `auto_merge_impl` are the EFFECTIVE per-project
+    auto-merge flags (after global+project resolution via
+    ``ReconcilerConfig.effective_auto_merge_*``). Rules consult these to
+    decide between MERGE_SPEC_PR / MERGE_IMPL_PR and a "park for human
+    review" transition. Defaults match the global ``ReconcilerConfig``
+    defaults (spec=True, impl=False) so legacy callers that omit the flags
+    keep the same behavior.
     """
 
     snapshot: ProjectSnapshot
     issue: IssueState
     pr: PRState | None
     log: ExecutionLog
+    auto_merge_spec: bool = True
+    auto_merge_impl: bool = False
 
     @property
     def ticket_id(self) -> str:

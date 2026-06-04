@@ -441,6 +441,9 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
 
             # config.projects is dict[name, ProjectConfig]; ProjectConfig.repo
             # is "owner/name" form. Split into the ReconcilerProject shape.
+            # Resolve effective auto-merge flags here (global default +
+            # per-project override) so the daemon loop sees a single
+            # authoritative value per project without re-querying config.
             projects_list: list[ReconcilerProject] = []
             for proj_name, proj_cfg in config.projects.items():
                 if "/" not in proj_cfg.repo:
@@ -450,7 +453,17 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
                     )
                 owner, repo = proj_cfg.repo.split("/", 1)
                 projects_list.append(
-                    ReconcilerProject(name=proj_name, owner=owner, repo=repo)
+                    ReconcilerProject(
+                        name=proj_name,
+                        owner=owner,
+                        repo=repo,
+                        auto_merge_spec=config.reconciler.effective_auto_merge_spec(
+                            proj_cfg
+                        ),
+                        auto_merge_impl=config.reconciler.effective_auto_merge_impl(
+                            proj_cfg
+                        ),
+                    )
                 )
             projects = tuple(projects_list)
 
