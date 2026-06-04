@@ -269,3 +269,61 @@ def test_count_completed_counts_terminated_attempts(tmp_path: Path) -> None:
     assert log.count_completed("dispatch_fixer", "jeffrichley/foreman#1") == 2
     assert log.count_completed("dispatch_fixer", "jeffrichley/foreman#2") == 1
     assert log.count_completed("dispatch_fixer", "jeffrichley/foreman#999") == 0
+
+
+def test_count_completed_filters_by_outcome(tmp_path: Path) -> None:
+    """``count_completed`` supports filtering terminated rows by outcome.
+
+    Idempotence gates (one Planner per ticket, one spec-reviewer per spec PR)
+    need success-only counts so a crashed/recovered run doesn't permanently
+    block legitimate re-fire. Budget gates (max-N attempts) want the default
+    all-terminations count so failures DO burn a budget slot.
+    """
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+
+    # Seed: one success termination, one error termination, both for the
+    # same (action, ticket) pair.
+    start_id = log.write_action(
+        ticket_id="jeffrichley/foreman#1",
+        project="foreman",
+        rule_name="dispatch_planner",
+        action="dispatch_planner",
+        outcome="running",
+        details={},
+    )
+    log.terminate_action(parent_log_id=start_id, outcome="success", details={})
+
+    start_id = log.write_action(
+        ticket_id="jeffrichley/foreman#1",
+        project="foreman",
+        rule_name="dispatch_planner",
+        action="dispatch_planner",
+        outcome="running",
+        details={},
+    )
+    log.terminate_action(parent_log_id=start_id, outcome="error", details={})
+
+    # Default (outcome=None): counts all terminations — 2 (1 success + 1 error).
+    assert log.count_completed("dispatch_planner", "jeffrichley/foreman#1") == 2
+    # outcome="success": counts only the successful termination — 1.
+    assert (
+        log.count_completed(
+            "dispatch_planner", "jeffrichley/foreman#1", outcome="success"
+        )
+        == 1
+    )
+    # outcome="error": counts only the error termination — 1.
+    assert (
+        log.count_completed(
+            "dispatch_planner", "jeffrichley/foreman#1", outcome="error"
+        )
+        == 1
+    )
+    # outcome="timeout": no rows match — 0.
+    assert (
+        log.count_completed(
+            "dispatch_planner", "jeffrichley/foreman#1", outcome="timeout"
+        )
+        == 0
+    )

@@ -179,18 +179,29 @@ _SAFETY_RULES: tuple[Rule, ...] = (
 
 
 def _planning_no_pr(ctx: ActionContext) -> bool:
-    # ``count_completed == 0`` gate (adversarial review): if a human closes
+    # ``count_completed(..., outcome="success") == 0`` gate: if a human closes
     # the spec PR without merging, ``ctx.pr`` flips back to None while the
     # issue still carries ``foreman:planning``. Without the count gate, the
     # rule would re-fire dispatch_planner — spawning a second Planner
     # subprocess that opens another spec PR for the same ticket. One Planner
     # run per ticket is the contract; subsequent attempts must surface to
     # a human (eventually via the existing safety-rate-limit path).
+    #
+    # We filter on ``outcome="success"`` (rather than counting all
+    # terminations) because failed Planner runs — ``error`` from an executor
+    # exception, ``timeout`` from the host's tracker, ``errored:recovery``
+    # from a daemon-restart sweep — did NOT open a spec PR. Counting them
+    # toward the gate would permanently block legitimate re-fire after a
+    # transient crash, silently dead-locking the ticket with no escalation.
+    # Budget gates (max-N attempts) intentionally use the all-terminations
+    # default; idempotence gates like this one need success-only.
     return (
         "foreman:planning" in ctx.issue.labels
         and ctx.pr is None
         and not ctx.log.has_unterminated("dispatch_planner", ctx.ticket_id)
-        and ctx.log.count_completed("dispatch_planner", ctx.ticket_id) == 0
+        and ctx.log.count_completed(
+            "dispatch_planner", ctx.ticket_id, outcome="success"
+        ) == 0
     )
 
 

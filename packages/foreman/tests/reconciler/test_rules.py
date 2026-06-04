@@ -274,6 +274,56 @@ def test_dispatch_planner_does_not_re_fire_after_spec_pr_closed_without_merge(
     assert evaluate(ctx, rules=RULES) is Action.NOOP
 
 
+def test_dispatch_planner_re_fires_after_prior_error_termination(
+    tmp_path: Path,
+) -> None:
+    """A prior Planner run that terminated with ``outcome='error'`` (e.g.,
+    semaphore raise, subprocess crash, executor exception) did NOT open a
+    spec PR. A subsequent tick MUST re-fire dispatch_planner — the failure
+    must not count toward the idempotence gate.
+
+    Pre-fix, ``_planning_no_pr`` counted ALL terminated rows, so any error
+    (or ``errored:recovery`` from a daemon-restart sweep, or ``timeout``
+    from the host's tracker) permanently blocked re-fire and silently
+    dead-locked the ticket with no escalation rule.
+    """
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(tmp_path, _issue(labels=("foreman:planning",)))
+    # Seed a prior Planner attempt that errored mid-run (no spec PR opened).
+    start_id = ctx.log.write_action(
+        ticket_id=ctx.ticket_id,
+        project="foreman",
+        rule_name="dispatch_planner",
+        action="dispatch_planner",
+        outcome="running",
+        details={},
+    )
+    ctx.log.terminate_action(parent_log_id=start_id, outcome="error", details={})
+    # Error does NOT count toward the success-based idempotence gate; rule
+    # must re-fire.
+    assert evaluate(ctx, rules=RULES) is Action.DISPATCH_PLANNER
+
+
+def test_dispatch_planner_re_fires_after_errored_recovery(tmp_path: Path) -> None:
+    """A Planner run swept by ``recover_orphaned`` on daemon restart is
+    terminated with ``outcome='errored:recovery'``. That counts as a crash,
+    not a successful Planner run — re-fire must be allowed."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(tmp_path, _issue(labels=("foreman:planning",)))
+    start_id = ctx.log.write_action(
+        ticket_id=ctx.ticket_id,
+        project="foreman",
+        rule_name="dispatch_planner",
+        action="dispatch_planner",
+        outcome="running",
+        details={},
+    )
+    ctx.log.terminate_action(
+        parent_log_id=start_id, outcome="errored:recovery", details={}
+    )
+    assert evaluate(ctx, rules=RULES) is Action.DISPATCH_PLANNER
+
+
 def test_dispatch_reviewer_spec_fires_when_planning_pr_open_no_review_yet(
     tmp_path: Path,
 ) -> None:
