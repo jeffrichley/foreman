@@ -166,6 +166,25 @@ class ExecutionLog:
             ).fetchone()
             return row is not None
 
+    def count_completed(self, action: str, ticket_id: str) -> int:
+        """Count terminated attempts for (action, ticket_id).
+
+        A "completed" attempt is a row whose `parent_log_id` is NOT NULL —
+        i.e., a termination row pointing back at a start row. Unterminated
+        running rows don't count; only completed attempts count toward budget.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) FROM execution_log
+                WHERE action = ?
+                  AND ticket_id = ?
+                  AND parent_log_id IS NOT NULL
+                """,
+                (action, ticket_id),
+            ).fetchone()
+            return int(row[0]) if row else 0
+
     def recover_orphaned(self) -> int:
         """On daemon restart: any outcome='running' row with no termination
         means the daemon crashed mid-action. Mark each as terminated with

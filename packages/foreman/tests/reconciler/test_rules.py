@@ -319,3 +319,54 @@ def test_hold_label_blocks_all_actions(tmp_path: Path) -> None:
     # would fire dispatch_planner. With hold, NOOP.
     ctx = _ctx_with(tmp_path, _issue(labels=("foreman:hold", "foreman:planning")))
     assert evaluate(ctx, rules=RULES) is Action.NOOP
+
+
+def test_dispatch_fixer_blocked_after_3_completed_attempts(tmp_path: Path) -> None:
+    """Once 3 dispatch_fixer attempts have completed, the budget is exhausted
+    and the budget-exhausted safety rule fires (SURFACE_HELP), preempting any
+    further dispatch_fixer."""
+    from foreman.reconciler.rules import RULES
+
+    issue = _issue(labels=("foreman:impl-fix",))
+    pr = _pr(mergeable="MERGEABLE", ci_status="SUCCESS")
+    ctx = _ctx_with(tmp_path, issue, pr)
+    for _ in range(3):
+        start_id = ctx.log.write_action(
+            ticket_id=ctx.ticket_id, project="foreman", rule_name="dispatch_fixer",
+            action="dispatch_fixer", outcome="running", details={},
+        )
+        ctx.log.terminate_action(parent_log_id=start_id, outcome="error", details={})
+
+    assert evaluate(ctx, rules=RULES) is Action.SURFACE_HELP
+
+
+def test_dispatch_fixer_still_fires_under_budget(tmp_path: Path) -> None:
+    from foreman.reconciler.rules import RULES
+
+    issue = _issue(labels=("foreman:impl-fix",))
+    pr = _pr(mergeable="MERGEABLE", ci_status="SUCCESS")
+    ctx = _ctx_with(tmp_path, issue, pr)
+    # 2 completed attempts — under cap of 3
+    for _ in range(2):
+        start_id = ctx.log.write_action(
+            ticket_id=ctx.ticket_id, project="foreman", rule_name="dispatch_fixer",
+            action="dispatch_fixer", outcome="running", details={},
+        )
+        ctx.log.terminate_action(parent_log_id=start_id, outcome="success", details={})
+
+    assert evaluate(ctx, rules=RULES) is Action.DISPATCH_FIXER
+
+
+def test_dispatch_worker_blocked_after_3_completed_attempts(tmp_path: Path) -> None:
+    from foreman.reconciler.rules import RULES
+
+    issue = _issue(labels=("foreman:plan-approved",))
+    ctx = _ctx_with(tmp_path, issue)
+    for _ in range(3):
+        start_id = ctx.log.write_action(
+            ticket_id=ctx.ticket_id, project="foreman", rule_name="dispatch_worker",
+            action="dispatch_worker", outcome="running", details={},
+        )
+        ctx.log.terminate_action(parent_log_id=start_id, outcome="error", details={})
+
+    assert evaluate(ctx, rules=RULES) is Action.SURFACE_HELP

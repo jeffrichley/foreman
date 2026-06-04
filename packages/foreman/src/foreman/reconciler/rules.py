@@ -64,6 +64,24 @@ def _spec_pr_ci_failure(ctx: ActionContext) -> bool:
     return "foreman:planning" in ctx.issue.labels
 
 
+_MAX_FIX_ATTEMPTS = 3
+_MAX_IMPL_ATTEMPTS = 3
+
+
+def _fix_attempts_exhausted(ctx: ActionContext) -> bool:
+    return (
+        "foreman:impl-fix" in ctx.issue.labels
+        and ctx.log.count_completed("dispatch_fixer", ctx.ticket_id) >= _MAX_FIX_ATTEMPTS
+    )
+
+
+def _impl_attempts_exhausted(ctx: ActionContext) -> bool:
+    return (
+        "foreman:plan-approved" in ctx.issue.labels
+        and ctx.log.count_completed("dispatch_worker", ctx.ticket_id) >= _MAX_IMPL_ATTEMPTS
+    )
+
+
 def _safety_with_rate_limit(predicate):
     """Wrap a safety predicate so it stops re-firing if surface_help has been
     emitted for this ticket in the last hour.
@@ -113,6 +131,20 @@ _SAFETY_RULES: tuple[Rule, ...] = (
         when=_safety_with_rate_limit(_spec_pr_ci_failure),
         then=Action.SURFACE_HELP,
     ),
+    Rule(
+        name="fix_attempts_exhausted",
+        tier=PrecedenceTier.SAFETY,
+        precedence=50,
+        when=_safety_with_rate_limit(_fix_attempts_exhausted),
+        then=Action.SURFACE_HELP,
+    ),
+    Rule(
+        name="impl_attempts_exhausted",
+        tier=PrecedenceTier.SAFETY,
+        precedence=60,
+        when=_safety_with_rate_limit(_impl_attempts_exhausted),
+        then=Action.SURFACE_HELP,
+    ),
 )
 
 
@@ -150,6 +182,7 @@ def _plan_approved_no_impl_pr(ctx: ActionContext) -> bool:
     return (
         "foreman:plan-approved" in ctx.issue.labels
         and not ctx.log.has_unterminated("dispatch_worker", ctx.ticket_id)
+        and ctx.log.count_completed("dispatch_worker", ctx.ticket_id) < _MAX_IMPL_ATTEMPTS
     )
 
 
@@ -168,6 +201,7 @@ def _impl_fix_pending(ctx: ActionContext) -> bool:
         "foreman:impl-fix" in ctx.issue.labels
         and ctx.pr is not None
         and not ctx.log.has_unterminated("dispatch_fixer", ctx.ticket_id)
+        and ctx.log.count_completed("dispatch_fixer", ctx.ticket_id) < _MAX_FIX_ATTEMPTS
     )
 
 

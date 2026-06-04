@@ -230,3 +230,42 @@ def test_terminate_action_raises_on_unknown_parent(tmp_path: Path) -> None:
     log.init()
     with pytest.raises(ValueError, match="No log row with id="):
         log.terminate_action(parent_log_id=9999, outcome="success", details={})
+
+
+def test_count_completed_counts_terminated_attempts(tmp_path: Path) -> None:
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    # 2 completed dispatch_fixer attempts for ticket A; 1 unterminated; 1 for ticket B
+    for _ in range(2):
+        start_id = log.write_action(
+            ticket_id="jeffrichley/foreman#1",
+            project="foreman",
+            rule_name="dispatch_fixer",
+            action="dispatch_fixer",
+            outcome="running",
+            details={},
+        )
+        log.terminate_action(parent_log_id=start_id, outcome="success", details={})
+    # Add 1 unterminated row — should NOT count
+    log.write_action(
+        ticket_id="jeffrichley/foreman#1",
+        project="foreman",
+        rule_name="dispatch_fixer",
+        action="dispatch_fixer",
+        outcome="running",
+        details={},
+    )
+    # Different ticket — should NOT count toward #1's total
+    other_start = log.write_action(
+        ticket_id="jeffrichley/foreman#2",
+        project="foreman",
+        rule_name="dispatch_fixer",
+        action="dispatch_fixer",
+        outcome="running",
+        details={},
+    )
+    log.terminate_action(parent_log_id=other_start, outcome="error", details={})
+
+    assert log.count_completed("dispatch_fixer", "jeffrichley/foreman#1") == 2
+    assert log.count_completed("dispatch_fixer", "jeffrichley/foreman#2") == 1
+    assert log.count_completed("dispatch_fixer", "jeffrichley/foreman#999") == 0
