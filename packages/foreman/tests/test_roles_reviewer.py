@@ -122,12 +122,34 @@ class _FakeIssue:
         self.labels = [_FakeLabel(label) for label in labels]
         self.removed: list[str] = []
         self.added: list[str] = []
+        # ``set_labels_calls`` records each atomic ``issue.set_labels(...)``
+        # invocation so tests can assert on the atomicity primitive directly.
+        # Each entry is the sorted label tuple passed to that call.
+        self.set_labels_calls: list[tuple[str, ...]] = []
 
     def remove_from_labels(self, label: str) -> None:
         self.removed.append(label)
+        self.labels = [lbl for lbl in self.labels if lbl.name != label]
 
     def add_to_labels(self, label: str) -> None:
         self.added.append(label)
+        if not any(lbl.name == label for lbl in self.labels):
+            self.labels.append(_FakeLabel(label))
+
+    def set_labels(self, *labels: str) -> None:
+        # Production code (adversarial review MEDIUM #12) uses
+        # ``set_labels`` for atomic transitions. To keep the existing
+        # ``removed`` / ``added`` assertion shape valid for migrated
+        # tests, derive both lists from the diff against the current
+        # label set, then replace the label set in one shot.
+        current = {lbl.name for lbl in self.labels}
+        target = set(labels)
+        for removed in sorted(current - target):
+            self.removed.append(removed)
+        for added in sorted(target - current):
+            self.added.append(added)
+        self.labels = [_FakeLabel(name) for name in labels]
+        self.set_labels_calls.append(tuple(labels))
 
 
 class _FakeRepo:
@@ -415,6 +437,49 @@ async def test_run_reviewer_clean_outcome_advances_to_plan_approved(
     # foreman#91: final_labels is the authoritative post-transition set,
     # computed in-process by the role.
     assert result.final_labels == ["foreman:plan-approved"]
+
+
+@pytest.mark.asyncio
+async def test_run_reviewer_uses_atomic_set_labels_for_transition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Adversarial review MEDIUM #12: the Reviewer must apply the label
+    transition (entry → outcome) via a single ``issue.set_labels(...)``
+    call (atomic PUT /issues/{N}/labels), NOT sequential
+    ``remove_from_labels`` + ``add_to_labels``. The two-step pattern leaves
+    a crash window where the issue carries neither the entry label nor
+    the outcome label — it then falls out of the v3 observer's GraphQL
+    ``filterBy.labels`` filter and silently stalls.
+    """
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
+
+    cfg = _make_config(clone)
+    # Pre-existing unrelated label on the issue — it must survive the
+    # transition. The set_labels call needs the FULL final label set,
+    # not just the delta.
+    repo, _pr, issue = _make_fake_repo(
+        issue_number=42, head_sha=head_sha, labels=["foreman:planning", "area/infra"]
+    )
+    client = _FakeReviewerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_make_clean_output())
+
+    await run_reviewer(
+        pr_url="https://github.com/jeffrichley/voice/pull/77",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    # Exactly one atomic set_labels call carrying the FULL final set —
+    # entry label dropped, outcome label added, unrelated label preserved.
+    assert len(issue.set_labels_calls) == 1
+    assert issue.set_labels_calls[0] == ("area/infra", "foreman:plan-approved")
 
 
 @pytest.mark.asyncio

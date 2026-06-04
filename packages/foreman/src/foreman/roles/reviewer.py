@@ -456,13 +456,21 @@ async def run_reviewer(
     else:
         add_label = fix_label
 
-    issue.remove_from_labels(in_review_label)
-    issue.add_to_labels(add_label)
-
-    # foreman#91: compute final_labels deterministically from the
-    # in-memory pre-mutation set + the role's known transitions, not
-    # via a post-mutation host re-read. The fresh GET against GitHub
-    # raced its own write and produced stale-snapshot dispatches at
-    # the next worker iteration.
+    # Atomic label transition (foreman#? — adversarial review MEDIUM #12):
+    # use ``issue.set_labels(...)`` (single PUT /issues/{N}/labels) instead
+    # of sequential ``remove_from_labels`` + ``add_to_labels``. A subprocess
+    # crash between the two PyGithub calls leaves the issue with neither
+    # the entry label nor the outcome label — it then falls out of the v3
+    # observer's GraphQL ``filterBy.labels`` filter and the reconciler
+    # never sees it again (silent stall). ``set_labels`` replaces the full
+    # label set in one API call, so the transition is either fully applied
+    # or not applied at all.
     final_labels = sorted((issue_labels - {in_review_label}) | {add_label})
+    issue.set_labels(*final_labels)
+
+    # foreman#91: ``final_labels`` is the authoritative post-transition
+    # set, computed in-process from the pre-mutation snapshot + the role's
+    # known transitions — not via a post-mutation host re-read (which
+    # raced its own write and produced stale-snapshot dispatches at the
+    # next worker iteration).
     return ReviewerRunResult(llm_output=llm_output, final_labels=final_labels)

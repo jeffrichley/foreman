@@ -155,6 +155,10 @@ class _FakeIssue:
         self.labels = [_FakeLabel(name) for name in labels]
         self.removed: list[str] = []
         self.added: list[str] = []
+        # ``set_labels_calls`` records each atomic ``issue.set_labels(...)``
+        # invocation so tests can assert on the atomicity primitive directly.
+        # Each entry is the sorted label tuple passed to that call.
+        self.set_labels_calls: list[tuple[str, ...]] = []
 
     def remove_from_labels(self, label: str) -> None:
         self.removed.append(label)
@@ -164,6 +168,21 @@ class _FakeIssue:
         self.added.append(label)
         # Reflect in labels too so subsequent reads see it.
         self.labels.append(_FakeLabel(label))
+
+    def set_labels(self, *labels: str) -> None:
+        # Production code (adversarial review MEDIUM #12) uses
+        # ``set_labels`` for atomic transitions. To keep the existing
+        # ``removed`` / ``added`` assertion shape valid for migrated
+        # tests, derive both lists from the diff against the current
+        # label set, then replace the label set in one shot.
+        current = {lbl.name for lbl in self.labels}
+        target = set(labels)
+        for removed in sorted(current - target):
+            self.removed.append(removed)
+        for added in sorted(target - current):
+            self.added.append(added)
+        self.labels = [_FakeLabel(name) for name in labels]
+        self.set_labels_calls.append(tuple(labels))
 
 
 class _FakeRepo:
@@ -395,6 +414,50 @@ async def test_run_fixer_fixed_outcome_advances_back_to_planning(
     # Return type
     assert result.attempt == 1
     assert result.llm_output.outcome == "fixed"
+
+
+@pytest.mark.asyncio
+async def test_run_fixer_uses_atomic_set_labels_for_outcome_transition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Adversarial review MEDIUM #12: the Fixer's outcome transition must
+    land via a single ``issue.set_labels(...)`` call so a subprocess
+    crash cannot leave the issue with the spec-fix label cleared but
+    the planning label not yet applied (which would drop it out of the
+    v3 observer's GraphQL ``filterBy.labels`` filter, silently stalling
+    the pipeline).
+    """
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    cfg = _make_config(clone)
+    repo, _pr, issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeFixerClient(repo=repo)
+    registry = _make_registry(client)
+
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+
+    await run_fixer(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    # At least one ``set_labels`` call landed (the post-LLM outcome
+    # transition). The final call's argument set is the authoritative
+    # post-transition shape: foreman:planning present, foreman:spec-fix
+    # and foreman:fix-attempt-1 cleared.
+    assert issue.set_labels_calls, "expected at least one atomic set_labels call"
+    final = set(issue.set_labels_calls[-1])
+    assert "foreman:planning" in final
+    assert "foreman:spec-fix" not in final
+    assert "foreman:fix-attempt-1" not in final
 
 
 # ----------------------------------------------------------------------

@@ -169,6 +169,10 @@ class _FakeIssue:
         self.labels = [_FakeLabel(name) for name in labels]
         self.removed: list[str] = []
         self.added: list[str] = []
+        # ``set_labels_calls`` records each atomic ``issue.set_labels(...)``
+        # invocation so tests can assert on the atomicity primitive directly.
+        # Each entry is the sorted label tuple passed to that call.
+        self.set_labels_calls: list[tuple[str, ...]] = []
 
     def remove_from_labels(self, label: str) -> None:
         self.removed.append(label)
@@ -177,6 +181,21 @@ class _FakeIssue:
     def add_to_labels(self, label: str) -> None:
         self.added.append(label)
         self.labels.append(_FakeLabel(label))
+
+    def set_labels(self, *labels: str) -> None:
+        # Production code (adversarial review MEDIUM #12) uses
+        # ``set_labels`` for atomic transitions. To keep the existing
+        # ``removed`` / ``added`` assertion shape valid for migrated
+        # tests, derive both lists from the diff against the current
+        # label set, then replace the label set in one shot.
+        current = {lbl.name for lbl in self.labels}
+        target = set(labels)
+        for removed in sorted(current - target):
+            self.removed.append(removed)
+        for added in sorted(target - current):
+            self.added.append(added)
+        self.labels = [_FakeLabel(name) for name in labels]
+        self.set_labels_calls.append(tuple(labels))
 
 
 class _FakeRepo:
@@ -567,6 +586,57 @@ async def test_run_worker_implemented_opens_impl_pr_and_advances_label(
     assert result.llm_output.outcome == "implemented"
     assert result.pr_url == "https://github.com/jeffrichley/voice/pull/101"
     assert result.final_did_check_pass is True
+
+
+@pytest.mark.asyncio
+async def test_run_worker_uses_atomic_set_labels_for_dispatch_and_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Adversarial review MEDIUM #12: every Worker label transition (the
+    pre-LLM attempt-stamp + entry-clear, and the post-LLM outcome
+    transition) must land via a single ``issue.set_labels(...)`` call so
+    a subprocess crash mid-transition cannot leave the issue with no
+    ``foreman:*`` entry/outcome label — which would silently drop it
+    out of the v3 observer's GraphQL ``filterBy.labels`` filter.
+    """
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    cfg = _make_config(clone)
+    repo, _spec_pr, issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeWorkerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    _make_check_command_pair(monkeypatch, baseline=set(), post=set(), post_rc=0)
+
+    await run_worker(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    # Two atomic set_labels calls: one before LLM dispatch (attempt-stamp
+    # + entry-clear), one after LLM (outcome transition). Both must
+    # carry the FULL final label set — never a partial diff.
+    assert len(issue.set_labels_calls) == 2
+
+    # First call: ``foreman:plan-approved`` cleared, ``foreman:impl-attempt-1``
+    # stamped, atomically.
+    pre_dispatch = set(issue.set_labels_calls[0])
+    assert "foreman:plan-approved" not in pre_dispatch
+    assert "foreman:impl-attempt-1" in pre_dispatch
+
+    # Second call: outcome transition — ``foreman:impl-review`` added,
+    # per-episode reset drops ``foreman:impl-attempt-1``.
+    post_dispatch = set(issue.set_labels_calls[1])
+    assert "foreman:impl-review" in post_dispatch
+    assert "foreman:impl-attempt-1" not in post_dispatch
 
 
 # ----------------------------------------------------------------------

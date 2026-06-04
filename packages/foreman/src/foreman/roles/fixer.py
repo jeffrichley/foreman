@@ -546,6 +546,16 @@ async def run_fixer(
     pr.create_issue_comment(body=llm_output.fix_comment)
 
     # Advance the issue's label deterministically.
+    #
+    # Atomic label transitions (adversarial review MEDIUM #12): every
+    # outcome computes the final ``current_labels`` set in memory, then
+    # applies it via a single ``issue.set_labels(...)`` call (PUT
+    # /issues/{N}/labels — atomic on GitHub's side). Sequential
+    # ``remove_from_labels`` + ``add_to_labels`` were the failure mode:
+    # a subprocess crash between the two PyGithub calls left the issue
+    # with neither the entry label nor the outcome label, falling out
+    # of the v3 observer's GraphQL ``filterBy.labels`` filter — silent
+    # stall.
     if llm_output.outcome == "fixed":
         # Back to the Reviewer for a second pass. Per-episode counter
         # reset: clear all fix-attempt-N labels (and needs-help if
@@ -554,9 +564,7 @@ async def run_fixer(
         # Lifecycle stats JSONL preserves the cumulative audit trail;
         # labels reflect current-cycle state only.
         if target == "impl_pr":
-            issue.remove_from_labels(_LABEL_IMPL_FIX)
             current_labels.discard(_LABEL_IMPL_FIX)
-            issue.add_to_labels(_LABEL_IMPL_REVIEW)
             current_labels.add(_LABEL_IMPL_REVIEW)
         else:
             # v3: spec-side Fixer returns the issue to ``foreman:planning``
@@ -564,27 +572,21 @@ async def run_fixer(
             # the updated PR head. (v2 transitioned to a now-removed
             # ``foreman:spec-review`` label; v3 has no separate
             # spec-review state.)
-            issue.remove_from_labels(_LABEL_SPEC_FIX)
             current_labels.discard(_LABEL_SPEC_FIX)
-            issue.add_to_labels(_LABEL_PLANNING)
             current_labels.add(_LABEL_PLANNING)
         all_known_labels = issue_labels | {attempt_label}
         for label_name in all_known_labels:
             if label_name.startswith("foreman:fix-attempt-") or label_name == _LABEL_NEEDS_HELP:
-                try:
-                    issue.remove_from_labels(label_name)
-                except Exception:
-                    pass  # label may already be absent on the GitHub side
                 current_labels.discard(label_name)
     else:
         # incomplete: keep spec-fix so the human (or a later daemon
         # pass) can re-trigger; flag for help; if last attempt, also
         # add the failed escalation.
-        issue.add_to_labels(_LABEL_NEEDS_HELP)
         current_labels.add(_LABEL_NEEDS_HELP)
         if attempt == max_fix_attempts:
-            issue.add_to_labels(_LABEL_FAILED)
             current_labels.add(_LABEL_FAILED)
+
+    issue.set_labels(*sorted(current_labels))
 
     # JSONL stats — write regardless of outcome.
     unaddressed_hist = _unaddressed_by_reason_histogram(llm_output)

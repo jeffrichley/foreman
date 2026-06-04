@@ -411,27 +411,6 @@ def _label_names(issue_labels: set[str], extra: str | None = None) -> set[str]:
     return issue_labels | {extra}
 
 
-def _clear_impl_attempt_and_help_labels(issue: object, all_known_labels: set[str]) -> None:
-    """Per-episode counter reset on ``implemented`` outcome.
-
-    Drops every ``foreman:impl-attempt-N`` label currently visible on
-    the issue, plus ``foreman:needs-help`` if it was present. Mirrors
-    the Fixer's per-episode reset: lifecycle stats JSONL preserves the
-    cumulative audit trail; labels reflect current-cycle state only.
-
-    Catches every individual remove and swallows — a label may already
-    be gone on the GitHub side if a concurrent process or human
-    interaction removed it. Logging the swallow would just create
-    noise; the next read of the issue's labels is the source of truth.
-    """
-    for label_name in all_known_labels:
-        if label_name.startswith("foreman:impl-attempt-") or label_name == _LABEL_NEEDS_HELP:
-            try:
-                issue.remove_from_labels(label_name)  # type: ignore[attr-defined]
-            except Exception:
-                pass  # label may already be absent on the GitHub side
-
-
 async def run_worker(
     *,
     issue_url: str,
@@ -524,11 +503,23 @@ async def run_worker(
     # the eventual-consistency race of a post-mutation host re-read.
     current_labels: set[str] = set(issue_labels)
 
-    # Stamp the new attempt label IMMEDIATELY so it's visible even if
-    # the LLM dispatch crashes mid-run. Audit-trail before audit-loss.
+    # Stamp the new attempt label + clear the entry label atomically
+    # BEFORE the LLM dispatch. Audit-trail before audit-loss — the
+    # attempt marker must be visible even if the LLM dispatch crashes
+    # mid-run. Adversarial review MEDIUM #12: this is done as a single
+    # ``set_labels(...)`` call (atomic PUT /issues/{N}/labels) so a
+    # crash cannot leave the issue half-transitioned (e.g., entry label
+    # cleared but attempt label not yet applied), which would drop it
+    # out of the v3 observer's GraphQL ``filterBy.labels`` filter and
+    # silently stall the pipeline. v3 does NOT use an explicit
+    # ``implementing`` label — the attempt counter + exec log are the
+    # in-flight signal, and adding a transient label would re-dispatch
+    # on reconciler tick.
     attempt_label = f"foreman:impl-attempt-{attempt}"
-    issue.add_to_labels(attempt_label)
     current_labels.add(attempt_label)
+    for _entry_label in _WORKER_ENTRY_LABELS:
+        current_labels.discard(_entry_label)
+    issue.set_labels(*sorted(current_labels))
 
     # Resolve the spec branch + spec PR (PR may be None — implementation
     # proceeds either way; the impl PR body's spec-PR reference adapts).
@@ -571,18 +562,6 @@ async def run_worker(
     _baseline_rc, baseline_failures, _baseline_output = _run_check_command(
         check_command=check_command, cwd=wt_path, role_token=worker_token
     )
-
-    # Advance label: clear the entry label so observers see in-flight
-    # state via the ``foreman:impl-attempt-N`` marker (set above) and
-    # the execution log. v3 does NOT use an explicit ``implementing``
-    # label — the attempt counter + exec log are the in-flight signal,
-    # and adding a transient label would re-dispatch on reconciler tick.
-    for _entry_label in _WORKER_ENTRY_LABELS:
-        try:
-            issue.remove_from_labels(_entry_label)
-        except Exception:
-            pass
-        current_labels.discard(_entry_label)
 
     instructions = load_project_instructions(Path(project.local_clone_path))
 
@@ -691,10 +670,8 @@ async def run_worker(
         # any future re-trigger starts with a fresh 3-attempt budget.
         # v3: no ``implementing`` label to clear — the entry label
         # ``foreman:plan-approved`` was already removed at dispatch.
-        issue.add_to_labels(_LABEL_IMPL_REVIEW)
         current_labels.add(_LABEL_IMPL_REVIEW)
         all_known_labels = _label_names(issue_labels, attempt_label)
-        _clear_impl_attempt_and_help_labels(issue, all_known_labels)
         for _label_name in all_known_labels:
             if (
                 _label_name.startswith("foreman:impl-attempt-")
@@ -714,29 +691,31 @@ async def run_worker(
                 "Worker emitted spec_invalid but no open spec PR was found; rationale: %s",
                 llm_output.spec_invalid_reason,
             )
-        # Entry label was removed at dispatch time; idempotent re-remove
-        # so the ticket cleanly enters spec-fix regardless of how the
-        # Worker came in (manual CLI vs daemon).
+        # Entry label was already cleared at dispatch time; idempotent
+        # re-clear in the in-memory set so the final ``set_labels`` call
+        # below cleanly enters spec-fix regardless of how the Worker
+        # came in (manual CLI vs daemon).
         for _entry_label in _WORKER_ENTRY_LABELS:
-            try:
-                issue.remove_from_labels(_entry_label)
-            except Exception:
-                pass
             current_labels.discard(_entry_label)
-        issue.add_to_labels(_LABEL_SPEC_FIX)
         current_labels.add(_LABEL_SPEC_FIX)
-        issue.add_to_labels(_LABEL_NEEDS_HELP)
         current_labels.add(_LABEL_NEEDS_HELP)
     else:
         # incomplete: add needs-help so observers know to look. v3 does
         # not use an in-flight ``implementing`` label — the impl-attempt-N
         # marker carries cycle state. On the last attempt, also stamp
         # foreman:failed so the queue surfaces it for human triage.
-        issue.add_to_labels(_LABEL_NEEDS_HELP)
         current_labels.add(_LABEL_NEEDS_HELP)
         if attempt == max_impl_attempts:
-            issue.add_to_labels(_LABEL_FAILED)
             current_labels.add(_LABEL_FAILED)
+
+    # Atomic label transition (adversarial review MEDIUM #12): apply the
+    # full final ``current_labels`` set in one ``issue.set_labels(...)``
+    # call (PUT /issues/{N}/labels). Replaces sequential
+    # ``remove_from_labels`` + ``add_to_labels`` calls that could leave
+    # the issue half-transitioned on a subprocess crash — silently
+    # dropping it out of the v3 observer's GraphQL ``filterBy.labels``
+    # filter.
+    issue.set_labels(*sorted(current_labels))
 
     # Stats logging — write regardless of outcome. The orchestrator's
     # post-verification truth is what we persist (final_outcome +
