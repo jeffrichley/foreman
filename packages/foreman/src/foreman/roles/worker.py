@@ -1,6 +1,6 @@
 """Worker role dispatcher — 4th pipeline node, the implementer stage.
 
-The Worker LLM consumes a spec-ready issue + spec doc and implements the
+The Worker LLM consumes a plan-approved issue + spec doc and implements the
 described code change. It commits + pushes to a stacked impl branch
 (``foreman/impl-<N>``, based on ``foreman/issue-<N>``) and returns a
 :class:`~foreman.schemas.worker.WorkerOutput`. Foreman core then:
@@ -14,9 +14,9 @@ described code change. It commits + pushes to a stacked impl branch
      - ``implemented`` → opens the impl PR via PyGithub with
        ``base=wt_result.base_branch`` — either the spec branch (D1,
        stacked PR) or the default branch (fallback when the spec
-       branch is gone, issue #48). Advances issue label: remove
-       ``implementing``, add
-       ``impl-review``. Per-episode counter reset: drops all
+       branch is gone, issue #48). Advances issue label: clears
+       ``foreman:plan-approved`` (the entry label), adds
+       ``foreman:impl-review``. Per-episode counter reset: drops all
        ``foreman:impl-attempt-N`` labels (the implementation episode
        closed cleanly; a future re-trigger gets a fresh 3-attempt
        budget). Clears ``needs-help`` if it was present.
@@ -27,9 +27,9 @@ described code change. It commits + pushes to a stacked impl branch
      - ``spec_invalid`` → no impl PR opened. Posts the LLM's
        ``spec_invalid_reason`` as a comment on the SPEC PR (NOT the
        issue — per D6). Relabels the issue: remove
-       ``implementing`` + ``spec-ready``, add ``spec-fix`` +
-       ``needs-help``. This forces the spec back through a Fixer +
-       Reviewer cycle.
+       ``foreman:plan-approved``, add ``foreman:spec-fix`` +
+       ``foreman:needs-help``. This forces the spec back through a
+       Fixer + Reviewer cycle.
 
   3. Appends a JSONL line to
      ``~/.foreman/stats/<owner>__<repo>/worker.jsonl`` for the
@@ -47,7 +47,7 @@ so the LLM can run ``check_command`` itself, ``git add`` / ``git commit``
 the second role in the walking skeleton that mutates the worktree
 directly.
 
-Pre-flight guards: if the issue is missing ``foreman:spec-ready`` we
+Pre-flight guards: if the issue is missing ``foreman:plan-approved`` we
 refuse to run; if the issue already has 3 ``foreman:impl-attempt-*``
 labels, we refuse with a clear "needs human intervention" RuntimeError.
 Both raise before any LLM dispatch — cheap deterministic checks.
@@ -59,7 +59,7 @@ Reserved (NOT yet honored, documented for the next ticket):
 - ``ProjectConfig.auto_merge_spec`` field — same purpose, project-wide
   default for the above label.
 
-v1 Worker triggers on ``foreman:spec-ready`` regardless of spec PR
+v3 Worker triggers on ``foreman:plan-approved`` regardless of spec PR
 merge state. The stacked PR shape (D1) handles the dependency; a
 follow-up ticket retargets the impl PR's base to the repo default
 when the spec PR merges.
@@ -103,11 +103,12 @@ _PYTEST_FAILED_RE = re.compile(r"^FAILED\s+(?P<test_id>\S+)", flags=re.MULTILINE
 # the worktree. Read / Grep / Glob for navigation and verification.
 WORKER_ALLOWED_TOOLS = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]
 
-# Labels the Worker touches on the originating issue.
-_LABEL_SPEC_READY = "foreman:spec-ready"
-_LABEL_IMPLEMENTING_READY = "foreman:implementing-ready"
-_LABEL_IMPLEMENTING = "foreman:implementing"
-_WORKER_ENTRY_LABELS = frozenset({_LABEL_SPEC_READY, _LABEL_IMPLEMENTING_READY})
+# Labels the Worker touches on the originating issue. v3 vocabulary:
+# the Worker entry label is ``foreman:plan-approved`` (Reviewer signoff
+# on the spec PR sets it). There is no in-flight ``implementing`` label
+# in v3 — execution-log + impl-attempt-N labels carry that state.
+_LABEL_PLAN_APPROVED = "foreman:plan-approved"
+_WORKER_ENTRY_LABELS = frozenset({_LABEL_PLAN_APPROVED})
 _LABEL_IMPL_REVIEW = "foreman:impl-review"
 _LABEL_SPEC_FIX = "foreman:spec-fix"
 _LABEL_NEEDS_HELP = "foreman:needs-help"
@@ -429,7 +430,7 @@ async def run_worker(
         issue_url: Full GitHub ISSUE URL
             (``https://github.com/owner/repo/issues/N``) — NOT the spec
             PR URL. The Worker is triggered by the
-            ``foreman:spec-ready`` label on the issue and derives the
+            ``foreman:plan-approved`` label on the issue and derives the
             spec PR from the issue's ``foreman/issue-<N>`` branch.
         config: Loaded foreman config.
         project_name: Key into ``config.projects``.
@@ -450,7 +451,7 @@ async def run_worker(
 
     Raises:
         ValueError: Issue URL malformed or repo mismatch.
-        RuntimeError: Issue missing ``foreman:spec-ready``, or max
+        RuntimeError: Issue missing ``foreman:plan-approved``, or max
             attempts (3) already reached.
     """
     owner, repo_name, issue_number = parse_issue_url(issue_url)
@@ -471,20 +472,18 @@ async def run_worker(
     issue = repo.get_issue(issue_number)
     issue_labels = {label.name for label in issue.labels}
 
-    # Pre-flight: refuse to run without one of the Worker entry-condition
-    # labels. ``foreman:spec-ready`` is the historical entry condition for
-    # manual CLI runs (``foreman implement``); ``foreman:implementing-ready``
-    # is the daemon-set sentinel that the orchestrator places after merging
-    # the spec PR (since the spec PR's merge already cleared spec-ready).
-    # Accepting either keeps both invocation paths working.
+    # Pre-flight: refuse to run without the v3 Worker entry label.
+    # ``foreman:plan-approved`` is the post-Reviewer-signoff queue marker;
+    # the v3 reconciler dispatches the Worker once this label is on the
+    # issue and the spec PR is merged (or stacked).
     if not (issue_labels & _WORKER_ENTRY_LABELS):
         raise RuntimeError(
-            f"Issue #{issue_number} does not carry a Worker entry label "
-            f"({_LABEL_SPEC_READY!r} or {_LABEL_IMPLEMENTING_READY!r}); "
+            f"Issue #{issue_number} does not carry the Worker entry label "
+            f"({_LABEL_PLAN_APPROVED!r}); "
             f"labels: "
             + ", ".join(sorted(issue_labels) or ["<none>"])
             + ". The Worker only acts on issues queued by the Reviewer "
-            "(spec-ready) or the daemon's spec-merge step (implementing-ready)."
+            "(plan-approved set after spec-PR signoff)."
         )
 
     # Pre-flight: max-attempts gate. If max impl-attempt labels already
@@ -553,19 +552,17 @@ async def run_worker(
         check_command=check_command, cwd=wt_path
     )
 
-    # Advance label: entry → implementing (clear whichever entry label
-    # was present so observers see in-flight state; an observer that
-    # scans for the next ready issue won't double-pick this one). We
-    # remove BOTH possible entry labels — one will exist, the other is
-    # a no-op via the swallowed not-found error.
+    # Advance label: clear the entry label so observers see in-flight
+    # state via the ``foreman:impl-attempt-N`` marker (set above) and
+    # the execution log. v3 does NOT use an explicit ``implementing``
+    # label — the attempt counter + exec log are the in-flight signal,
+    # and adding a transient label would re-dispatch on reconciler tick.
     for _entry_label in _WORKER_ENTRY_LABELS:
         try:
             issue.remove_from_labels(_entry_label)
         except Exception:
             pass
         current_labels.discard(_entry_label)
-    issue.add_to_labels(_LABEL_IMPLEMENTING)
-    current_labels.add(_LABEL_IMPLEMENTING)
 
     instructions = load_project_instructions(Path(project.local_clone_path))
 
@@ -672,8 +669,8 @@ async def run_worker(
         # Label transitions for the implemented outcome. Per-episode
         # counter reset: drop all impl-attempt-N labels + needs-help so
         # any future re-trigger starts with a fresh 3-attempt budget.
-        issue.remove_from_labels(_LABEL_IMPLEMENTING)
-        current_labels.discard(_LABEL_IMPLEMENTING)
+        # v3: no ``implementing`` label to clear — the entry label
+        # ``foreman:plan-approved`` was already removed at dispatch.
         issue.add_to_labels(_LABEL_IMPL_REVIEW)
         current_labels.add(_LABEL_IMPL_REVIEW)
         all_known_labels = _label_names(issue_labels, attempt_label)
@@ -697,11 +694,9 @@ async def run_worker(
                 "Worker emitted spec_invalid but no open spec PR was found; rationale: %s",
                 llm_output.spec_invalid_reason,
             )
-        issue.remove_from_labels(_LABEL_IMPLEMENTING)
-        current_labels.discard(_LABEL_IMPLEMENTING)
-        # Entry labels were removed at dispatch time; idempotent re-remove
-        # of BOTH so the ticket cleanly enters spec-fix regardless of which
-        # entry path the Worker came in through (manual CLI vs daemon).
+        # Entry label was removed at dispatch time; idempotent re-remove
+        # so the ticket cleanly enters spec-fix regardless of how the
+        # Worker came in (manual CLI vs daemon).
         for _entry_label in _WORKER_ENTRY_LABELS:
             try:
                 issue.remove_from_labels(_entry_label)
@@ -713,10 +708,10 @@ async def run_worker(
         issue.add_to_labels(_LABEL_NEEDS_HELP)
         current_labels.add(_LABEL_NEEDS_HELP)
     else:
-        # incomplete: keep implementing so a re-trigger doesn't lose the
-        # cycle indicator; add needs-help so observers know to look. On
-        # the third attempt, also stamp foreman:failed so the queue
-        # surfaces it for human triage.
+        # incomplete: add needs-help so observers know to look. v3 does
+        # not use an in-flight ``implementing`` label — the impl-attempt-N
+        # marker carries cycle state. On the last attempt, also stamp
+        # foreman:failed so the queue surfaces it for human triage.
         issue.add_to_labels(_LABEL_NEEDS_HELP)
         current_labels.add(_LABEL_NEEDS_HELP)
         if attempt == max_impl_attempts:

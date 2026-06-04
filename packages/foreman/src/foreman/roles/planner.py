@@ -16,8 +16,10 @@ host-platform operations through the
   8. Commit the spec doc (``host.commit_files_to_worktree``)
   9. Push the branch (``host.push_branch``)
   10. Open the spec PR (``host.open_pull_request``)
-  11. Advance the label: ``foreman:plan`` → ``foreman:spec-review``
-       (``host.update_issue_labels``)
+  11. Best-effort cleanup of the legacy ``foreman:plan`` entry label;
+       the issue stays at ``foreman:planning`` so v3's reconciler
+       (``dispatch_reviewer_spec``) can fire on ``foreman:planning`` +
+       open spec PR (``host.update_issue_labels``)
   12. Return :class:`~foreman.schemas.planner.PlannerRunResult`
 
 Decoupling rationale (Foreman issue #8 — the "Looper pattern"):
@@ -218,21 +220,25 @@ async def run_planner(
         base=default_branch,
         head=branch,
     )
+    # v3 label vocabulary: Planner writes ZERO new labels. The issue
+    # stays at ``foreman:planning`` (the entry label) after the spec PR
+    # opens; v3's reconciler ``dispatch_reviewer_spec`` rule then fires
+    # on ``foreman:planning`` + an open spec PR. We DO remove the legacy
+    # ``foreman:plan`` entry label if a v2-era ticket still carries it,
+    # so the issue doesn't end up with both ``foreman:plan`` and
+    # ``foreman:planning`` simultaneously.
     host.update_issue_labels(
         repo_slug=actual_repo_slug,
         issue_number=issue_number,
-        add=["foreman:spec-review"],
+        add=[],
         remove=["foreman:plan"],
     )
 
     # foreman#91: compute final_labels deterministically from the
     # pre-mutation set (``issue.labels`` is the snapshot taken by
-    # ``host.get_issue`` above) + the role's known transitions
-    # (remove ``foreman:plan``, add ``foreman:spec-review``). Avoids
-    # the post-mutation host re-read race that produced stale-
-    # snapshot re-dispatches at the next worker iteration.
-    final_labels = sorted(
-        (set(issue.labels) - {"foreman:plan", "foreman:planning"}) | {"foreman:spec-review"}
-    )
+    # ``host.get_issue`` above) + the role's known transitions.
+    # v3: only the legacy ``foreman:plan`` is dropped; ``foreman:planning``
+    # is preserved so the reconciler can fire on it next tick.
+    final_labels = sorted(set(issue.labels) - {"foreman:plan"})
 
     return PlannerRunResult(llm_output=llm_output, pr=pr, final_labels=final_labels)

@@ -337,7 +337,7 @@ def _make_registry(client: _FakeFixerClient, token: str = "ghs_fixer_token") -> 
 
 
 @pytest.mark.asyncio
-async def test_run_fixer_fixed_outcome_advances_back_to_spec_review(
+async def test_run_fixer_fixed_outcome_advances_back_to_planning(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clone = tmp_path / "clone"
@@ -382,9 +382,11 @@ async def test_run_fixer_fixed_outcome_advances_back_to_spec_review(
     assert pr.issue_comments_posted == ["fixed — addressed AC bullet 3."]
     assert pr.reviews_posted == []
 
-    # First-attempt label stamped at entry; outcome advanced to spec-review
+    # First-attempt label stamped at entry; v3 spec-side outcome advances
+    # to ``foreman:planning`` (the planning umbrella) so the reconciler
+    # re-fires ``dispatch_reviewer_spec`` on the updated PR head.
     assert "foreman:fix-attempt-1" in issue.added
-    assert "foreman:spec-review" in issue.added
+    assert "foreman:planning" in issue.added
     # Per-episode counter reset: on outcome=fixed, the fix-attempt-N label
     # is also dropped so the next fix-episode (if any) gets a fresh budget.
     assert "foreman:spec-fix" in issue.removed
@@ -1366,12 +1368,13 @@ def test_load_fixer_prompt_impl_target_loads_impl_composition() -> None:
 @pytest.mark.parametrize(
     ("output_factory", "starting_labels", "expected_final"),
     [
-        # fixed outcome: spec-fix removed, spec-review added,
+        # fixed outcome (spec target): spec-fix removed, planning added
+        # (v3: reconciler re-fires on planning + open spec PR),
         # fix-attempt-1 cleared (per-episode reset).
         (
             _fixed_output,
             ["foreman:spec-fix"],
-            ["foreman:spec-review"],
+            ["foreman:planning"],
         ),
         # incomplete: spec-fix kept, fix-attempt-1 retained, needs-help added.
         (

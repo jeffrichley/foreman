@@ -65,7 +65,7 @@ def test_count_impl_attempts_zero_with_no_labels() -> None:
 
 
 def test_count_impl_attempts_zero_with_only_unrelated_labels() -> None:
-    assert _count_impl_attempts({"foreman:spec-ready", "bug"}) == 0
+    assert _count_impl_attempts({"foreman:plan-approved", "bug"}) == 0
 
 
 def test_count_impl_attempts_returns_max_existing() -> None:
@@ -407,7 +407,7 @@ def _make_fake_repo(
     labels: list[str] | None = None,
     include_spec_pr: bool = True,
 ) -> tuple[_FakeRepo, _FakeSpecPR | None, _FakeIssue]:
-    labels = labels if labels is not None else ["foreman:spec-ready"]
+    labels = labels if labels is not None else ["foreman:plan-approved"]
     spec_pr: _FakeSpecPR | None = None
     if include_spec_pr:
         spec_pr = _FakeSpecPR(
@@ -537,12 +537,13 @@ async def test_run_worker_implemented_opens_impl_pr_and_advances_label(
     assert spec_pr is not None
     assert spec_pr.issue_comments_posted == []
 
-    # Label transitions: implementing → impl-review; per-episode reset
+    # v3 label transitions: plan-approved cleared at dispatch, impl-review
+    # added on implemented; per-episode reset drops impl-attempt-1.
+    # v3 has no in-flight ``foreman:implementing`` label.
     assert "foreman:impl-attempt-1" in issue.added
-    assert "foreman:implementing" in issue.added
+    assert "foreman:implementing" not in issue.added
     assert "foreman:impl-review" in issue.added
-    assert "foreman:spec-ready" in issue.removed  # cleared at dispatch
-    assert "foreman:implementing" in issue.removed  # cleared on implemented
+    assert "foreman:plan-approved" in issue.removed  # cleared at dispatch
     assert "foreman:impl-attempt-1" in issue.removed  # per-episode reset
 
     # WorkerRunResult populated
@@ -620,7 +621,7 @@ async def test_run_worker_incomplete_at_attempt_3_also_adds_failed(
         issue_number=42,
         head_sha=head_sha,
         labels=[
-            "foreman:spec-ready",
+            "foreman:plan-approved",
             "foreman:impl-attempt-1",
             "foreman:impl-attempt-2",
         ],
@@ -694,12 +695,14 @@ async def test_run_worker_spec_invalid_posts_comment_on_spec_pr_not_issue(
     assert len(spec_pr.issue_comments_posted) == 1
     assert "contradict" in spec_pr.issue_comments_posted[0]
 
-    # Labels: spec-ready removed (twice — once at dispatch, once on outcome),
-    # spec-fix + needs-help added, implementing removed
-    assert "foreman:spec-ready" in issue.removed
+    # v3 labels: plan-approved removed at dispatch (and idempotently
+    # re-removed on spec_invalid); spec-fix + needs-help added. No
+    # in-flight ``implementing`` label in v3.
+    assert "foreman:plan-approved" in issue.removed
     assert "foreman:spec-fix" in issue.added
     assert "foreman:needs-help" in issue.added
-    assert "foreman:implementing" in issue.removed
+    assert "foreman:implementing" not in issue.added
+    assert "foreman:implementing" not in issue.removed
 
     assert result.llm_output.outcome == "spec_invalid"
     assert result.pr_url is None
@@ -832,7 +835,7 @@ async def test_run_worker_attempt_counter_increments_with_existing_labels(
         issue_number=42,
         head_sha=head_sha,
         labels=[
-            "foreman:spec-ready",
+            "foreman:plan-approved",
             "foreman:impl-attempt-1",
             "foreman:impl-attempt-2",
         ],
@@ -862,7 +865,7 @@ async def test_run_worker_attempt_counter_increments_with_existing_labels(
 
 
 @pytest.mark.asyncio
-async def test_run_worker_missing_spec_ready_label_raises(
+async def test_run_worker_missing_plan_approved_label_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clone = tmp_path / "clone"
@@ -880,10 +883,7 @@ async def test_run_worker_missing_spec_ready_label_raises(
     fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
     _make_passing_check_command(monkeypatch)
 
-    with pytest.raises(
-        RuntimeError,
-        match=r"foreman:spec-ready.*foreman:implementing-ready",
-    ):
+    with pytest.raises(RuntimeError, match=r"foreman:plan-approved"):
         await run_worker(
             issue_url="https://github.com/jeffrichley/voice/issues/42",
             config=cfg,
@@ -901,15 +901,13 @@ async def test_run_worker_missing_spec_ready_label_raises(
 
 
 @pytest.mark.asyncio
-async def test_run_worker_accepts_implementing_ready_entry_label(
+async def test_run_worker_accepts_plan_approved_entry_label(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``foreman:implementing-ready`` is the daemon's post-spec-merge sentinel.
-    When the orchestrator merges a spec PR via auto_merge_spec, it removes
-    foreman:spec-ready and applies foreman:implementing-ready — so the
-    Worker MUST accept implementing-ready as a valid entry condition,
-    otherwise every daemon-driven impl attempt fails the pre-flight check
-    (caught 2026-06-01 on foreman#30 dogfood)."""
+    """``foreman:plan-approved`` is the v3 post-Reviewer-signoff entry
+    label the reconciler sets to queue the Worker. The role MUST accept
+    it as the sole valid entry condition (v2's ``foreman:spec-ready`` /
+    ``foreman:implementing-ready`` labels were removed in v3)."""
     clone = tmp_path / "clone"
     head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
     monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
@@ -919,7 +917,7 @@ async def test_run_worker_accepts_implementing_ready_entry_label(
     repo, _spec_pr, issue = _make_fake_repo(
         issue_number=42,
         head_sha=head_sha,
-        labels=["foreman:implementing-ready"],
+        labels=["foreman:plan-approved"],
     )
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client)
@@ -936,12 +934,12 @@ async def test_run_worker_accepts_implementing_ready_entry_label(
         identity_registry=registry,
     )
 
-    # LLM dispatched, attempt label stamped, in-flight label flipped on.
+    # LLM dispatched, attempt label stamped; entry label cleared at dispatch.
     fake_provider.run_agent.assert_called_once()
     assert "foreman:impl-attempt-1" in issue.added
-    assert "foreman:implementing" in issue.added
-    # Both possible entry labels are removed — idempotent on the absent one.
-    assert "foreman:implementing-ready" in issue.removed
+    # v3 has no in-flight ``implementing`` label.
+    assert "foreman:implementing" not in issue.added
+    assert "foreman:plan-approved" in issue.removed
 
 
 @pytest.mark.asyncio
@@ -960,7 +958,7 @@ async def test_run_worker_max_attempts_gate_raises_before_llm(
         issue_number=42,
         head_sha=head_sha,
         labels=[
-            "foreman:spec-ready",
+            "foreman:plan-approved",
             "foreman:impl-attempt-1",
             "foreman:impl-attempt-2",
             "foreman:impl-attempt-3",
@@ -1008,7 +1006,7 @@ async def test_run_worker_honors_project_max_impl_attempts_override(
     repo, _spec_pr, issue = _make_fake_repo(
         issue_number=42,
         head_sha=head_sha,
-        labels=["foreman:spec-ready", "foreman:impl-attempt-1"],
+        labels=["foreman:plan-approved", "foreman:impl-attempt-1"],
     )
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client)
@@ -1553,27 +1551,28 @@ async def test_worker_opens_impl_pr_with_base_from_create_impl_result(
 @pytest.mark.parametrize(
     ("output_factory", "starting_labels", "expected_final", "check_setup"),
     [
-        # implemented: spec-ready / implementing cleared, impl-review added,
+        # implemented: plan-approved cleared at dispatch, impl-review added,
         # impl-attempt-1 dropped (per-episode reset), needs-help dropped.
-        ("implemented", ["foreman:spec-ready"], ["foreman:impl-review"], "pass"),
-        # incomplete: implementing kept; impl-attempt-1 + needs-help added.
+        # v3: no in-flight ``implementing`` label.
+        ("implemented", ["foreman:plan-approved"], ["foreman:impl-review"], "pass"),
+        # incomplete: plan-approved cleared at dispatch; impl-attempt-1
+        # + needs-help added. v3: no ``implementing`` label.
         (
             "incomplete",
-            ["foreman:spec-ready"],
+            ["foreman:plan-approved"],
             sorted(
                 [
                     "foreman:impl-attempt-1",
-                    "foreman:implementing",
                     "foreman:needs-help",
                 ]
             ),
             "fail",
         ),
-        # spec_invalid: implementing cleared, spec-fix + needs-help added,
+        # spec_invalid: plan-approved cleared, spec-fix + needs-help added,
         # impl-attempt-1 retained (no per-episode reset on invalid).
         (
             "spec_invalid",
-            ["foreman:spec-ready"],
+            ["foreman:plan-approved"],
             sorted(
                 [
                     "foreman:impl-attempt-1",

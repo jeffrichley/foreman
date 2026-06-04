@@ -331,9 +331,12 @@ async def test_run_planner_dispatches_and_advances_label(
     assert fake_host.commit_message == "spec: add SSML support"
     assert fake_host.pushed_branch == "foreman/issue-42"
 
-    # Label advanced
+    # v3 label vocabulary: Planner adds nothing; only the legacy
+    # ``foreman:plan`` entry label is dropped for back-compat. The
+    # issue stays at ``foreman:planning`` so v3's reconciler can fire
+    # ``dispatch_reviewer_spec`` on the open spec PR.
     assert fake_host.label_calls == [
-        ("jeffrichley/voice", 42, ["foreman:spec-review"], ["foreman:plan"])
+        ("jeffrichley/voice", 42, [], ["foreman:plan"])
     ]
 
     # PlannerRunResult populated end-to-end
@@ -678,19 +681,21 @@ async def test_run_planner_passes_none_when_dev_base_branch_unset(
 async def test_run_planner_returns_authoritative_final_labels(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """foreman#91: ``PlannerRunResult.final_labels`` is the sorted list
-    of ``(initial_issue_labels - {plan, planning}) | {spec-review}`` —
-    computed in-process from the role's known transitions, not via a
-    post-mutation host re-read."""
+    """foreman#91 + v3: ``PlannerRunResult.final_labels`` is the sorted
+    list of ``initial_issue_labels - {foreman:plan}`` — computed
+    in-process from the role's known transitions, not via a post-mutation
+    host re-read. In v3 the Planner adds zero labels; the issue stays
+    at ``foreman:planning`` (the entry label) so the reconciler can
+    fire ``dispatch_reviewer_spec`` on the open spec PR."""
     clone = tmp_path / "clone"
     _seed_clone(clone, origin_path=tmp_path / "origin.git")
     monkeypatch.setenv("FOREMAN_PLANNER_APP_ID", "123456")
 
     cfg = _make_config(clone)
     fake_host = _FakeHostProvider()
-    # Pre-mutation snapshot the host returns includes the in-flight
-    # planning sentinel plus an external label that must survive the
-    # transition unchanged.
+    # Pre-mutation snapshot the host returns includes the planning
+    # umbrella label, a legacy ``foreman:plan`` entry, plus an external
+    # label that must survive the transition unchanged.
     fake_host.issue_to_return = IssueRef(
         number=42,
         title="SSML",
@@ -713,8 +718,9 @@ async def test_run_planner_returns_authoritative_final_labels(
         identity_registry=fake_registry,
     )
 
-    # Deterministic: drop foreman:plan + foreman:planning, add
-    # foreman:spec-review, keep external-tag.
+    # v3 deterministic: drop legacy ``foreman:plan``; keep
+    # ``foreman:planning`` (the in-flight reconciler trigger) and
+    # ``external-tag``.
     assert result.final_labels == sorted(
-        ["external-tag", "foreman:spec-review"]
+        ["external-tag", "foreman:planning"]
     )

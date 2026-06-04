@@ -8,11 +8,14 @@ addressable edits to the spec doc, commits + pushes, and returns a
      :meth:`PullRequest.create_issue_comment` — the Fixer is not
      re-reviewing.
   2. Advances the originating issue's label deterministically:
-     - ``fixed``      → remove ``foreman:spec-fix``, add
-       ``foreman:spec-review`` (back to Reviewer)
-     - ``incomplete`` → keep ``foreman:spec-fix``, add
-       ``foreman:needs-help``; if attempt == 3, ALSO add
-       ``foreman:failed``
+     - ``fixed`` (spec target) → remove ``foreman:spec-fix``, add
+       ``foreman:planning`` (back to the planning umbrella state so
+       v3's reconciler re-fires ``dispatch_reviewer_spec`` on the
+       updated PR)
+     - ``fixed`` (impl target) → remove ``foreman:impl-fix``, add
+       ``foreman:impl-review`` (back to Reviewer-on-impl)
+     - ``incomplete`` → keep entry label, add ``foreman:needs-help``;
+       if attempt == 3, ALSO add ``foreman:failed``
   3. Appends a JSONL line to ``~/.foreman/stats/<repo>/fixer.jsonl``
      for lifecycle stats (proto for foreman#11).
   4. Returns :class:`~foreman.schemas.fixer.FixerOutput` to the caller.
@@ -92,7 +95,10 @@ FIXER_ALLOWED_TOOLS = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]
 
 # Labels the Fixer touches on the originating issue.
 _LABEL_SPEC_FIX = "foreman:spec-fix"
-_LABEL_SPEC_REVIEW = "foreman:spec-review"
+# v3: a successful spec-side fix transitions the issue back to the
+# planning umbrella state; the reconciler then re-fires
+# ``dispatch_reviewer_spec`` once the PR head moves.
+_LABEL_PLANNING = "foreman:planning"
 _LABEL_NEEDS_HELP = "foreman:needs-help"
 _LABEL_FAILED = "foreman:failed"
 
@@ -553,10 +559,15 @@ async def run_fixer(
             issue.add_to_labels(_LABEL_IMPL_REVIEW)
             current_labels.add(_LABEL_IMPL_REVIEW)
         else:
+            # v3: spec-side Fixer returns the issue to ``foreman:planning``
+            # so the reconciler can re-fire ``dispatch_reviewer_spec`` on
+            # the updated PR head. (v2 transitioned to a now-removed
+            # ``foreman:spec-review`` label; v3 has no separate
+            # spec-review state.)
             issue.remove_from_labels(_LABEL_SPEC_FIX)
             current_labels.discard(_LABEL_SPEC_FIX)
-            issue.add_to_labels(_LABEL_SPEC_REVIEW)
-            current_labels.add(_LABEL_SPEC_REVIEW)
+            issue.add_to_labels(_LABEL_PLANNING)
+            current_labels.add(_LABEL_PLANNING)
         all_known_labels = issue_labels | {attempt_label}
         for label_name in all_known_labels:
             if label_name.startswith("foreman:fix-attempt-") or label_name == _LABEL_NEEDS_HELP:
