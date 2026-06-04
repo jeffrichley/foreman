@@ -568,22 +568,43 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
                 await reconciler.shutdown()
 
             async def _run() -> None:
+                """Daemon main coroutine.
+
+                Installs SIGTERM/SIGINT handlers for graceful shutdown.
+                On POSIX, ``loop.add_signal_handler`` is preferred — handlers
+                run inside the asyncio loop thread.  On Windows, that call
+                raises ``NotImplementedError``; we fall back to
+                ``signal.signal``, which fires the handler in the main thread
+                from outside the loop, then bridge into the loop via
+                ``loop.call_soon_threadsafe``.  Either way, Ctrl-C and a
+                SIGTERM from ``foreman daemon stop`` complete in-flight ticks
+                before exiting.
+                """
                 loop = asyncio.get_event_loop()
                 stop_event = asyncio.Event()
 
                 def _signal_handler() -> None:
                     stop_event.set()
 
-                # add_signal_handler is POSIX-only; Windows raises
-                # NotImplementedError. Fall through there — Ctrl-C still
-                # raises KeyboardInterrupt which asyncio.run handles
-                # natively, and `foreman daemon stop` (v2) signals via
-                # process termination.
-                try:
-                    loop.add_signal_handler(signal.SIGTERM, _signal_handler)
-                    loop.add_signal_handler(signal.SIGINT, _signal_handler)
-                except (NotImplementedError, RuntimeError):
-                    pass
+                if sys.platform == "win32":
+                    # Windows: loop.add_signal_handler raises
+                    # NotImplementedError. signal.signal works but invokes the
+                    # handler from a different context, so bridge back into
+                    # the loop with call_soon_threadsafe.
+                    def _windows_handler(signum: int, frame: Any) -> None:
+                        loop.call_soon_threadsafe(_signal_handler)
+
+                    signal.signal(signal.SIGINT, _windows_handler)
+                    signal.signal(signal.SIGTERM, _windows_handler)
+                else:
+                    try:
+                        loop.add_signal_handler(signal.SIGTERM, _signal_handler)
+                        loop.add_signal_handler(signal.SIGINT, _signal_handler)
+                    except (NotImplementedError, RuntimeError):
+                        # Embedded loops (e.g. some test harnesses) may not
+                        # support signal handlers; degrade to KeyboardInterrupt
+                        # delivered by asyncio.run.
+                        pass
 
                 watcher = asyncio.create_task(_shutdown_watcher(stop_event))
                 try:

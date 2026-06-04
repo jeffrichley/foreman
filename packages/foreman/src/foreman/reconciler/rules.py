@@ -179,10 +179,18 @@ _SAFETY_RULES: tuple[Rule, ...] = (
 
 
 def _planning_no_pr(ctx: ActionContext) -> bool:
+    # ``count_completed == 0`` gate (adversarial review): if a human closes
+    # the spec PR without merging, ``ctx.pr`` flips back to None while the
+    # issue still carries ``foreman:planning``. Without the count gate, the
+    # rule would re-fire dispatch_planner — spawning a second Planner
+    # subprocess that opens another spec PR for the same ticket. One Planner
+    # run per ticket is the contract; subsequent attempts must surface to
+    # a human (eventually via the existing safety-rate-limit path).
     return (
         "foreman:planning" in ctx.issue.labels
         and ctx.pr is None
         and not ctx.log.has_unterminated("dispatch_planner", ctx.ticket_id)
+        and ctx.log.count_completed("dispatch_planner", ctx.ticket_id) == 0
     )
 
 
@@ -410,9 +418,17 @@ _PROGRESS_RULES: tuple[Rule, ...] = (
 RULES = _SAFETY_RULES + _PROGRESS_RULES
 
 
-def evaluate(ctx: ActionContext, *, rules: tuple[Rule, ...] | None = None) -> Action:
-    """Run the catalog over the context. Returns the first matching rule's
-    action, or Action.NOOP if no rule matches.
+def evaluate_with_rule(
+    ctx: ActionContext, *, rules: tuple[Rule, ...] | None = None
+) -> tuple[Action, str | None]:
+    """Run the catalog over the context. Returns ``(action, rule_name)`` for
+    the first matching rule, or ``(Action.NOOP, None)`` if no rule matches.
+
+    This is the preferred entry point for the daemon: by returning the
+    matching rule's name alongside the action, callers avoid a second walk
+    of ``RULES`` to recover the attribution (each predicate may hit SQLite
+    via ``count_completed`` / ``has_unterminated`` / ``has_recent``, so
+    re-evaluating doubles that cost).
 
     A predicate that raises is treated as "did not match" — the evaluator
     logs the exception and continues. Rationale: a broken predicate must not
@@ -422,7 +438,7 @@ def evaluate(ctx: ActionContext, *, rules: tuple[Rule, ...] | None = None) -> Ac
     for rule in catalog:
         try:
             if rule.when(ctx):
-                return rule.then
+                return rule.then, rule.name
         except Exception:
             logger.exception(
                 "rule %r raised during evaluation for ticket %s; treating as no-match",
@@ -430,4 +446,16 @@ def evaluate(ctx: ActionContext, *, rules: tuple[Rule, ...] | None = None) -> Ac
                 ctx.ticket_id,
             )
             continue
-    return Action.NOOP
+    return Action.NOOP, None
+
+
+def evaluate(ctx: ActionContext, *, rules: tuple[Rule, ...] | None = None) -> Action:
+    """Thin wrapper over ``evaluate_with_rule`` that drops the rule name.
+
+    Kept for backwards-compatibility with tests + callers that only care
+    about the resulting action.  Production code (the reconciler daemon)
+    should call ``evaluate_with_rule`` directly to avoid losing the
+    attribution.
+    """
+    action, _ = evaluate_with_rule(ctx, rules=rules)
+    return action

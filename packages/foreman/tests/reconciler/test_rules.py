@@ -248,6 +248,32 @@ def test_dispatch_planner_skipped_when_already_running(tmp_path: Path) -> None:
     assert evaluate(ctx, rules=RULES) is Action.NOOP
 
 
+def test_dispatch_planner_does_not_re_fire_after_spec_pr_closed_without_merge(
+    tmp_path: Path,
+) -> None:
+    """If a human closes the spec PR without merging, ``ctx.pr`` flips back
+    to None while the issue still carries ``foreman:planning``.  Without a
+    ``count_completed == 0`` gate, the rule would re-fire dispatch_planner
+    and spawn a second Planner subprocess that opens another spec PR
+    (adversarial review).
+    """
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(tmp_path, _issue(labels=("foreman:planning",)))
+    # Simulate a prior Planner run that has completed (success outcome).
+    start_id = ctx.log.write_action(
+        ticket_id=ctx.ticket_id,
+        project="foreman",
+        rule_name="dispatch_planner",
+        action="dispatch_planner",
+        outcome="running",
+        details={},
+    )
+    ctx.log.terminate_action(parent_log_id=start_id, outcome="success", details={})
+    # PR is now None (closed without merge) but label is still planning.
+    # Rule must NOT re-fire.
+    assert evaluate(ctx, rules=RULES) is Action.NOOP
+
+
 def test_dispatch_reviewer_spec_fires_when_planning_pr_open_no_review_yet(
     tmp_path: Path,
 ) -> None:

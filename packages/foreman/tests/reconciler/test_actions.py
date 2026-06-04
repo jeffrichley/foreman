@@ -46,7 +46,6 @@ def test_action_enum_covers_spec_catalog() -> None:
         "DISPATCH_REVIEWER_IMPL",
         "DISPATCH_FIXER_SPEC",
         "DISPATCH_FIXER_IMPL",
-        "ADVANCE_LABEL_TO_IMPL_APPROVED",
         "MERGE_IMPL_PR",
         "ADVANCE_LABEL_TO_DONE",
     }

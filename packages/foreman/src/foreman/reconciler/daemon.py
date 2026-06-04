@@ -22,7 +22,7 @@ from foreman.reconciler.observer import (
     ObserverUnreachable,
     fetch_project_state,
 )
-from foreman.reconciler.rules import RULES, evaluate
+from foreman.reconciler.rules import evaluate_with_rule
 from foreman.reconciler.state import IssueState, ProjectSnapshot, PRState
 
 logger = logging.getLogger(__name__)
@@ -181,15 +181,17 @@ class Reconciler:
                 auto_merge_spec=project.auto_merge_spec,
                 auto_merge_impl=project.auto_merge_impl,
             )
-            action = evaluate(ctx, rules=RULES)
+            action, rule_name = evaluate_with_rule(ctx)
             if action is Action.NOOP:
                 continue
-            rule_name = _rule_that_fired(ctx, action)
+            # ``evaluate_with_rule`` returns a non-None rule name whenever
+            # action is not NOOP; the ``or "unknown"`` is a defensive fallback
+            # mypy can verify against the union without runtime-narrowing logic.
             execute_action(
                 action,
                 ctx,
                 host=self.host,
-                rule_name=rule_name,
+                rule_name=rule_name or "unknown",
                 dry_run=self.dry_run,
             )
 
@@ -210,14 +212,3 @@ class Reconciler:
 
     async def shutdown(self) -> None:
         self._stop_event.set()
-
-
-def _rule_that_fired(ctx: ActionContext, action: Action) -> str:
-    """Reverse-lookup which rule emitted this action — for log attribution."""
-    for rule in RULES:
-        try:
-            if rule.when(ctx) and rule.then is action:
-                return rule.name
-        except Exception:
-            continue
-    return "unknown"

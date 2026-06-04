@@ -12,7 +12,13 @@ from foreman.reconciler.observer import (
     ObserverUnreachable,
     fetch_project_state,
 )
-from foreman.reconciler.rules import RULES, PrecedenceTier, Rule, evaluate
+from foreman.reconciler.rules import (
+    RULES,
+    PrecedenceTier,
+    Rule,
+    evaluate,
+    evaluate_with_rule,
+)
 from foreman.reconciler.state import IssueState, ProjectSnapshot, PRState
 from foreman.reconciler.v3_host import V3GitHubHost
 
@@ -36,6 +42,7 @@ __all__ = [
     "Rule",
     "V3GitHubHost",
     "evaluate",
+    "evaluate_with_rule",
     "execute_action",
     "fetch_project_state",
 ]
