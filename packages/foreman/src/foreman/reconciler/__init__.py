@@ -3,6 +3,7 @@
 from foreman.reconciler.actions import Action, ActionContext, execute_action
 from foreman.reconciler.daemon import Reconciler, ReconcilerProject
 from foreman.reconciler.exec_log import ExecutionLog
+from foreman.reconciler.gh_graphql import HttpxGHGraphQLClient
 from foreman.reconciler.host import ReconcilerHost
 from foreman.reconciler.observer import (
     GHGraphQLClient,
@@ -19,6 +20,7 @@ __all__ = [
     "ActionContext",
     "ExecutionLog",
     "GHGraphQLClient",
+    "HttpxGHGraphQLClient",
     "IssueState",
     "ObserverError",
     "ObserverRateLimited",
