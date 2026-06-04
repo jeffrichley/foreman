@@ -148,40 +148,83 @@ class _FakePR:
 
 
 class _FakeIssue:
+    """Fake mirroring PyGithub's ``Issue`` caching semantics.
+
+    PyGithub's ``Issue.labels`` is a property that fetches via
+    ``_completeIfNotSet`` on FIRST access and caches the result; subsequent
+    accesses return the same snapshot. ``issue.update()`` is the documented
+    refresh primitive (conditional GET) that invalidates the cache so the
+    next ``labels`` access re-fetches. ``set_labels`` mutates the remote
+    state but does NOT invalidate the local cache.
+
+    Without this mirroring, a plain mutable ``labels`` list would let the
+    role's "re-read at WRITE site" code path appear to work in tests even
+    though it silently uses a stale snapshot in production. Mirror the
+    real lib's pickier surface here so the fakes refuse what the real lib
+    would refuse.
+    """
+
     def __init__(self, *, number: int, title: str, body: str, labels: list[str]) -> None:
         self.number = number
         self.title = title
         self.body = body
-        self.labels = [_FakeLabel(name) for name in labels]
+        # The "actual GitHub state" — tests mutate this to simulate
+        # operator changes during the LLM call.
+        self._remote_labels: list[str] = list(labels)
+        # Lazy cache, mirrors PyGithub's ``_completeIfNotSet`` pattern.
+        self._labels_cache: list[_FakeLabel] | None = None
         self.removed: list[str] = []
         self.added: list[str] = []
         # ``set_labels_calls`` records each atomic ``issue.set_labels(...)``
         # invocation so tests can assert on the atomicity primitive directly.
         # Each entry is the sorted label tuple passed to that call.
         self.set_labels_calls: list[tuple[str, ...]] = []
+        # Audit trail for cache-busting assertions.
+        self.update_calls: int = 0
+
+    @property
+    def labels(self) -> list[_FakeLabel]:
+        # Mirrors PyGithub: cache populated on first access from "remote"
+        # state, never auto-refreshed. ``update()`` is the only way to
+        # invalidate.
+        if self._labels_cache is None:
+            self._labels_cache = [_FakeLabel(n) for n in self._remote_labels]
+        return self._labels_cache
+
+    def update(self) -> None:
+        # PyGithub's ``update()`` issues a conditional GET and re-stores
+        # attributes — effectively invalidating the cached label list.
+        self._labels_cache = None
+        self.update_calls += 1
 
     def remove_from_labels(self, label: str) -> None:
         self.removed.append(label)
-        self.labels = [lbl for lbl in self.labels if lbl.name != label]
+        self._remote_labels = [n for n in self._remote_labels if n != label]
 
     def add_to_labels(self, label: str) -> None:
         self.added.append(label)
-        # Reflect in labels too so subsequent reads see it.
-        self.labels.append(_FakeLabel(label))
+        if label not in self._remote_labels:
+            self._remote_labels.append(label)
 
     def set_labels(self, *labels: str) -> None:
         # Production code (adversarial review MEDIUM #12) uses
         # ``set_labels`` for atomic transitions. To keep the existing
         # ``removed`` / ``added`` assertion shape valid for migrated
         # tests, derive both lists from the diff against the current
-        # label set, then replace the label set in one shot.
-        current = {lbl.name for lbl in self.labels}
+        # remote label set, then replace the remote state in one shot.
+        #
+        # Real PyGithub: ``set_labels`` PUTs the full list but does NOT
+        # refresh the cached attribute. Mirror that — the cache is left
+        # stale until the next ``update()``. Tests that read ``labels``
+        # after ``set_labels`` must call ``update()`` first to see the
+        # change (same discipline production code now follows).
+        current = set(self._remote_labels)
         target = set(labels)
         for removed in sorted(current - target):
             self.removed.append(removed)
         for added in sorted(target - current):
             self.added.append(added)
-        self.labels = [_FakeLabel(name) for name in labels]
+        self._remote_labels = list(labels)
         self.set_labels_calls.append(tuple(labels))
 
 
@@ -1532,9 +1575,13 @@ async def test_run_fixer_preserves_non_foreman_labels_added_during_window(
         # Operator adds two non-foreman labels + one foreman label NOT
         # under the Fixer's control during the LLM call. All three
         # must be preserved by the transition.
-        issue.labels.append(_FakeLabel("priority:high"))
-        issue.labels.append(_FakeLabel("team:backend"))
-        issue.labels.append(_FakeLabel("foreman:hold"))
+        # Mutate ``_remote_labels`` (simulated GitHub state) — NOT the
+        # cached ``labels`` property — so the role's ``issue.update()``
+        # at the WRITE site re-reads the operator changes from "GitHub",
+        # matching PyGithub's real caching shape.
+        issue._remote_labels.append("priority:high")
+        issue._remote_labels.append("team:backend")
+        issue._remote_labels.append("foreman:hold")
         return _fixed_output()
 
     fake_provider = MagicMock()
@@ -1565,3 +1612,70 @@ async def test_run_fixer_preserves_non_foreman_labels_added_during_window(
     assert "team:backend" in final
     # Foreman label NOT under the role's control also preserved.
     assert "foreman:hold" in final
+
+
+@pytest.mark.asyncio
+async def test_run_fixer_calls_update_before_write_site_label_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pass 3 CRITICAL: Stage 4's "re-read labels at WRITE site" is
+    illusory without ``issue.update()`` because PyGithub's
+    ``Issue.labels`` is a cached property — the first access materializes
+    the list, subsequent accesses return the same snapshot. Operator
+    labels added during the minute-long LLM call would be silently
+    dropped without an explicit cache refresh.
+
+    This test simulates the timing precisely: the operator's label
+    arrives during the LLM call. Without ``issue.update()`` at the
+    WRITE site, the labels cache still holds the pre-LLM snapshot and
+    the operator label disappears from the final set.
+    """
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    cfg = _make_config(clone)
+    repo, _pr, issue = _make_fake_repo(
+        issue_number=42, head_sha=head_sha, labels=["foreman:spec-fix"]
+    )
+    client = _FakeFixerClient(repo=repo)
+    registry = _make_registry(client)
+
+    # Operator's label arrives during the LLM call. If the role doesn't
+    # call ``issue.update()`` before reading labels at the WRITE site,
+    # the cached snapshot from the top of ``run_fixer`` is reused and
+    # ``priority:high`` is silently dropped.
+    async def _operator_adds_label_during_llm(*args: Any, **kwargs: Any) -> FixerOutput:
+        issue._remote_labels.append("priority:high")
+        return _fixed_output()
+
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(side_effect=_operator_adds_label_during_llm)
+
+    await run_fixer(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    # Assertion 1: ``update()`` was called at least once at the WRITE
+    # site. Without this call, the cached snapshot from the top of
+    # ``run_fixer`` would be reused and the operator label silently
+    # dropped.
+    assert issue.update_calls >= 1, (
+        "Fixer must call issue.update() before WRITE-site label read; "
+        "PyGithub's Issue.labels is cached and stale snapshots silently "
+        "drop operator-added labels"
+    )
+
+    # Assertion 2: the operator's label survived the transition.
+    assert issue.set_labels_calls
+    final = set(issue.set_labels_calls[-1])
+    assert "priority:high" in final
+    # And the role's verdict still landed.
+    assert "foreman:spec-fix" not in final
+    assert "foreman:planning" in final

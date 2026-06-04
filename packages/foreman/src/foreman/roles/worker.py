@@ -529,6 +529,16 @@ async def run_worker(
         current_labels.discard(_entry_label)
     removed_foreman_pre = set(_WORKER_ENTRY_LABELS)
     added_foreman_pre = {attempt_label}
+    # Pass 3 CRITICAL: PyGithub's ``Issue.labels`` is a cached property —
+    # the snapshot taken at the top of ``run_worker`` (when we read
+    # ``issue_labels`` for the pre-flight gate) would otherwise be reused
+    # here. Call ``issue.update()`` (PyGithub's documented conditional
+    # GET, see ``.venv/Lib/site-packages/github/GithubObject.py:638``)
+    # to invalidate the cache so this read reflects the real remote
+    # state. The pre-LLM site's race window is short, but the rule
+    # — refresh BEFORE every namespace-scoped merge — is what makes the
+    # post-LLM site below correct, and uniformity catches future drift.
+    issue.update()
     current_label_names_pre = {label.name for label in issue.labels}
     pre_dispatch_labels = sorted(
         (current_label_names_pre - removed_foreman_pre) | added_foreman_pre
@@ -769,6 +779,16 @@ async def run_worker(
     # role's verdict is encoded in ``removed_foreman_post`` /
     # ``added_foreman_post``; everything else survives. Race window
     # shrinks from minutes (LLM duration) to API round-trip.
+    #
+    # Pass 3 CRITICAL: ``issue.labels`` is a cached property in PyGithub
+    # — without ``issue.update()`` (conditional GET, see
+    # ``.venv/Lib/site-packages/github/GithubObject.py:638``) the read
+    # below returns the SAME snapshot we took at the top of
+    # ``run_worker`` minutes ago. The minute-long LLM call would silently
+    # drop any operator-added label (``priority:high`` etc.) — the very
+    # bug this namespace-scoped merge exists to prevent. ``update()``
+    # invalidates the labels cache so the next access re-fetches.
+    issue.update()
     current_label_names_post = {label.name for label in issue.labels}
     if final_outcome == "implemented":
         # Resolve the "drop all impl-attempt-N + needs-help + failed"

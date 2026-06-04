@@ -483,8 +483,19 @@ async def run_reviewer(
     # (``added_foreman``); everything else — non-foreman labels like
     # ``priority:high`` AND foreman labels the role isn't touching like
     # ``foreman:hold`` — passes through.
+    #
+    # Pass 3 CRITICAL: PyGithub's ``Issue.labels`` is a cached property
+    # — ``_completeIfNotSet(self._labels)`` only fetches on FIRST access
+    # (see ``.venv/Lib/site-packages/github/Issue.py:266`` +
+    # ``GithubObject.py:618``). Subsequent reads return the same snapshot
+    # taken at the top of ``run_reviewer`` — operator-added labels during
+    # the LLM call would be silently dropped. ``issue.update()`` issues a
+    # conditional GET and re-stores the attributes (see
+    # ``GithubObject.py:638``), invalidating the cache so the next
+    # ``issue.labels`` access reflects the real remote state.
     removed_foreman = {in_review_label}
     added_foreman = {add_label}
+    issue.update()
     current_label_names = {label.name for label in issue.labels}
     final_labels = sorted((current_label_names - removed_foreman) | added_foreman)
     issue.set_labels(*final_labels)

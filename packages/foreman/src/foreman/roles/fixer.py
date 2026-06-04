@@ -615,6 +615,16 @@ async def run_fixer(
     # The role's verdict is encoded in ``removed_foreman`` /
     # ``added_foreman``; everything else survives. Race window shrinks
     # from minutes (LLM duration) to API round-trip (~hundreds of ms).
+    #
+    # Pass 3 CRITICAL: ``issue.labels`` is a cached property in PyGithub
+    # — without ``issue.update()`` (conditional GET, see
+    # ``.venv/Lib/site-packages/github/GithubObject.py:638``) the read
+    # below returns the SAME snapshot we took at the top of
+    # ``run_fixer`` minutes ago. The minute-long LLM call would silently
+    # drop any operator-added label (``priority:high`` etc.) — the very
+    # bug this namespace-scoped merge exists to prevent. ``update()``
+    # invalidates the labels cache so the next access re-fetches.
+    issue.update()
     current_label_names = {label.name for label in issue.labels}
     if llm_output.outcome == "fixed":
         # Resolve the "drop all fix-attempt-N + needs-help" rule
