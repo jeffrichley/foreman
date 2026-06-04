@@ -142,20 +142,20 @@ class V3GitHubHost:
         if subcommand is None:
             raise ValueError(f"unknown role for dispatch: {role!r}")
 
-        issue_url = f"https://github.com/{owner}/{repo}/issues/{issue}"
-        argv = [
-            "uv",
-            "run",
-            "foreman",
-            subcommand,
-            "--issue-url",
-            issue_url,
-            "--project",
-            self._project_name,
-        ]
-        if pr_number is not None:
+        argv: list[str] = ["uv", "run", "foreman", subcommand]
+
+        if role == "reviewer":
+            # `foreman review` takes a positional PR URL — no --issue-url flag.
+            if pr_number is None:
+                raise ValueError("dispatch_role(role='reviewer') requires pr_number")
             pr_url = f"https://github.com/{owner}/{repo}/pull/{pr_number}"
-            argv.extend(["--pr-url", pr_url])
+            argv.extend([pr_url, "--project", self._project_name])
+        else:
+            issue_url = f"https://github.com/{owner}/{repo}/issues/{issue}"
+            argv.extend(["--issue-url", issue_url, "--project", self._project_name])
+            if pr_number is not None:
+                pr_url = f"https://github.com/{owner}/{repo}/pull/{pr_number}"
+                argv.extend(["--pr-url", pr_url])
 
         proc = self._runner(argv)
         logger.info("dispatched role=%s pid=%d argv=%s", role, proc.pid, argv)

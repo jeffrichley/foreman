@@ -145,3 +145,41 @@ def test_concurrency_cap_refuses_dispatch_when_full(tmp_path: Path) -> None:
         host.dispatch_role(
             role="planner", owner="jeffrichley", repo="foreman", issue=1, pr_number=None
         )
+
+
+def test_dispatch_role_reviewer_uses_positional_pr_url(tmp_path: Path) -> None:
+    """Reviewer's `foreman review` CLI takes positional pr_url, not --issue-url."""
+    captured: list[list[str]] = []
+
+    class _FakeProc:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+
+        async def wait(self) -> int:
+            return 0
+
+    def runner(argv: list[str]) -> _FakeProc:
+        captured.append(argv)
+        return _FakeProc(pid=42)
+
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    host = V3GitHubHost(
+        v2_host=_FakeV2Host(),
+        log=log,
+        subprocess_runner=runner,
+    )
+
+    host.dispatch_role(
+        role="reviewer",
+        owner="jeffrichley",
+        repo="foreman",
+        issue=63,
+        pr_number=99,
+    )
+
+    assert captured, "runner not called"
+    argv = captured[0]
+    assert "review" in argv
+    assert "--issue-url" not in argv
+    assert "https://github.com/jeffrichley/foreman/pull/99" in argv
