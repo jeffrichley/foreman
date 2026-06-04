@@ -211,10 +211,16 @@ def _planning_pr_needs_review(ctx: ActionContext) -> bool:
 
 
 def _plan_approved_pr_green_and_flag(ctx: ActionContext) -> bool:
+    # Head-ref filter (MEDIUM #11): refuse to merge a non-spec-shaped PR even
+    # when the daemon picked one for this ticket (transient stacked-PR
+    # window where both spec and impl PRs are linked to the same issue).
+    # Without this filter, ``merge_spec_pr`` could call ``host.merge_pr`` on
+    # an impl PR while logging the rule name as "merge_spec_pr".
     return (
         "foreman:plan-approved" in ctx.issue.labels
         and ctx.pr is not None
         and not ctx.pr.is_merged
+        and ctx.pr.head_ref.startswith("foreman/issue-")
         and ctx.pr.mergeable == "MERGEABLE"
         and ctx.pr.ci_status == "SUCCESS"
         and ctx.auto_merge_spec
@@ -223,6 +229,12 @@ def _plan_approved_pr_green_and_flag(ctx: ActionContext) -> bool:
 
 def _spec_pr_merged_label_lagging(ctx: ActionContext) -> bool:
     if ctx.pr is None or not ctx.pr.is_merged:
+        return False
+    # Head-ref filter (MEDIUM #11): the lagging-label rule must refuse to
+    # advance ``planning → plan-approved`` when ``ctx.pr`` is an impl-shaped
+    # PR even if the spec PR with the same number happened to be merged
+    # earlier — only spec-shape merges should drive this transition.
+    if not ctx.pr.head_ref.startswith("foreman/issue-"):
         return False
     if "foreman:planning" not in ctx.issue.labels:
         return False
@@ -291,10 +303,14 @@ def _spec_fix_pending(ctx: ActionContext) -> bool:
 
 
 def _impl_approved_pr_green_and_flag(ctx: ActionContext) -> bool:
+    # Head-ref filter (MEDIUM #11): symmetric to ``_plan_approved_pr_green_and_flag``.
+    # Refuse to fire on a spec-shaped PR even when the daemon picked one for
+    # this ticket — ``merge_impl_pr`` must only merge impl-shaped branches.
     return (
         "foreman:impl-approved" in ctx.issue.labels
         and ctx.pr is not None
         and not ctx.pr.is_merged
+        and ctx.pr.head_ref.startswith("foreman/impl-")
         and ctx.pr.mergeable == "MERGEABLE"
         and ctx.pr.ci_status == "SUCCESS"
         and ctx.auto_merge_impl
@@ -303,6 +319,10 @@ def _impl_approved_pr_green_and_flag(ctx: ActionContext) -> bool:
 
 def _impl_pr_merged_label_lagging(ctx: ActionContext) -> bool:
     if ctx.pr is None or not ctx.pr.is_merged:
+        return False
+    # Head-ref filter (MEDIUM #11): the lagging-label rule must refuse to
+    # advance ``impl-approved → done`` when ``ctx.pr`` is a spec-shaped PR.
+    if not ctx.pr.head_ref.startswith("foreman/impl-"):
         return False
     if "foreman:impl-approved" not in ctx.issue.labels:
         return False

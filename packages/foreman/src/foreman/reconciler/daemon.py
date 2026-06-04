@@ -23,9 +23,64 @@ from foreman.reconciler.observer import (
     fetch_project_state,
 )
 from foreman.reconciler.rules import RULES, evaluate
-from foreman.reconciler.state import ProjectSnapshot
+from foreman.reconciler.state import IssueState, ProjectSnapshot, PRState
 
 logger = logging.getLogger(__name__)
+
+
+def _pick_pr_for_ticket(
+    issue: IssueState, linked_prs: list[PRState]
+) -> PRState | None:
+    """Pick the right linked PR for this ticket based on the issue's current
+    label state.
+
+    During the brief stacked-PR window where both a spec PR
+    (``foreman/issue-N``) and an impl PR (``foreman/impl-N``) carry
+    ``closingIssuesReferences`` pointing to the same issue, GraphQL result
+    ordering is undefined. ``linked_prs[0]`` would arbitrarily pick one,
+    which can land the wrong PR into ``ctx.pr`` and let
+    ``merge_spec_pr`` / ``merge_impl_pr`` fire on a shape-mismatched PR
+    (adversarial review MEDIUM #11).
+
+    Routing by label phase:
+
+    - ``foreman:planning`` / ``foreman:plan-approved`` / ``foreman:spec-fix``
+      → spec PR (``foreman/issue-N``)
+    - ``foreman:impl-review`` / ``foreman:impl-approved`` /
+      ``foreman:impl-fix`` → impl PR (``foreman/impl-N``)
+
+    If the label set spans both phases (transient state during a label
+    swap), prefer the impl PR — the later stage wins. Falls back to
+    ``linked_prs[0]`` when no shape filter matches (legacy or
+    operator-created PRs not following the foreman branch conventions).
+    """
+    if not linked_prs:
+        return None
+
+    spec_phase = {"foreman:planning", "foreman:plan-approved", "foreman:spec-fix"}
+    impl_phase = {"foreman:impl-review", "foreman:impl-approved", "foreman:impl-fix"}
+
+    labels = set(issue.labels)
+    prefer_spec = bool(labels & spec_phase)
+    prefer_impl = bool(labels & impl_phase)
+
+    if prefer_spec and not prefer_impl:
+        for pr in linked_prs:
+            if pr.head_ref.startswith("foreman/issue-"):
+                return pr
+    if prefer_impl and not prefer_spec:
+        for pr in linked_prs:
+            if pr.head_ref.startswith("foreman/impl-"):
+                return pr
+    if prefer_spec and prefer_impl:
+        # Transient state spans both phases — later stage wins.
+        for pr in linked_prs:
+            if pr.head_ref.startswith("foreman/impl-"):
+                return pr
+        for pr in linked_prs:
+            if pr.head_ref.startswith("foreman/issue-"):
+                return pr
+    return linked_prs[0]
 
 
 @dataclass(frozen=True)
@@ -117,7 +172,7 @@ class Reconciler:
     ) -> None:
         for issue in snapshot.issues:
             linked_prs = snapshot.prs_for_issue(issue.number)
-            pr = linked_prs[0] if linked_prs else None
+            pr = _pick_pr_for_ticket(issue, list(linked_prs))
             ctx = ActionContext(
                 snapshot=snapshot,
                 issue=issue,

@@ -414,7 +414,7 @@ def test_merge_impl_pr_fires_on_impl_approved(tmp_path: Path) -> None:
     ctx = _ctx_with(
         tmp_path,
         _issue(labels=("foreman:impl-approved",)),
-        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143"),
         auto_merge_impl=True,
     )
     assert evaluate(ctx, rules=RULES) is Action.MERGE_IMPL_PR
@@ -426,7 +426,7 @@ def test_merge_impl_pr_requires_flag(tmp_path: Path) -> None:
     ctx = _ctx_with(
         tmp_path,
         _issue(labels=("foreman:impl-approved",)),
-        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143"),
         auto_merge_impl=False,
     )
     assert evaluate(ctx, rules=RULES) is not Action.MERGE_IMPL_PR
@@ -438,7 +438,7 @@ def test_merge_impl_pr_fires_when_flag_on(tmp_path: Path) -> None:
     ctx = _ctx_with(
         tmp_path,
         _issue(labels=("foreman:impl-approved",)),
-        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143"),
         auto_merge_impl=True,
     )
     assert evaluate(ctx, rules=RULES) is Action.MERGE_IMPL_PR
@@ -449,7 +449,7 @@ def test_advance_label_to_done_when_impl_pr_merged(tmp_path: Path) -> None:
     ctx = _ctx_with(
         tmp_path,
         _issue(labels=("foreman:impl-approved",)),
-        _pr(is_merged=True),
+        _pr(is_merged=True, head_ref="foreman/impl-143"),
     )
     assert evaluate(ctx, rules=RULES) is Action.ADVANCE_LABEL_TO_DONE
 
@@ -685,3 +685,77 @@ def test_impl_pr_ci_failure_ignores_spec_shaped_pr(tmp_path: Path) -> None:
     # head_ref isn't impl-shaped. spec-side safety rule also won't match
     # (no foreman:planning label). End result: no SURFACE_HELP.
     assert evaluate(ctx, rules=RULES) is not Action.SURFACE_HELP
+
+
+# --- MEDIUM #11: merge_*_pr + lagging-label rules filter by head_ref ---
+
+
+def test_merge_spec_pr_does_not_fire_against_impl_pr(tmp_path: Path) -> None:
+    """Defense in depth: even if the daemon's picker handed an impl PR into
+    ``ctx.pr`` for a plan-approved issue (transient stacked-PR window or
+    legacy state), ``merge_spec_pr`` must refuse to fire because the PR's
+    head_ref isn't spec-shaped. Otherwise the executor would call
+    ``host.merge_pr(pr_number=<impl_pr>)`` while logging the rule name as
+    "merge_spec_pr"."""
+    from foreman.reconciler.rules import RULES
+
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:plan-approved",)),
+        _pr(
+            mergeable="MERGEABLE",
+            ci_status="SUCCESS",
+            head_ref="foreman/impl-143",
+        ),
+        auto_merge_spec=True,
+    )
+    assert evaluate(ctx, rules=RULES) is not Action.MERGE_SPEC_PR
+
+
+def test_merge_impl_pr_does_not_fire_against_spec_pr(tmp_path: Path) -> None:
+    """Symmetric to ``test_merge_spec_pr_does_not_fire_against_impl_pr``:
+    even with ``foreman:impl-approved`` + green CI + auto_merge_impl=True,
+    a spec-shaped PR must not be merged by ``merge_impl_pr``."""
+    from foreman.reconciler.rules import RULES
+
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-approved",)),
+        _pr(
+            mergeable="MERGEABLE",
+            ci_status="SUCCESS",
+            head_ref="foreman/issue-143",
+        ),
+        auto_merge_impl=True,
+    )
+    assert evaluate(ctx, rules=RULES) is not Action.MERGE_IMPL_PR
+
+
+def test_advance_label_to_plan_approved_ignores_impl_shaped_pr(
+    tmp_path: Path,
+) -> None:
+    """A merged impl-shaped PR sitting on a planning-labeled ticket
+    (very transient) must NOT drive ``advance_label_to_plan_approved`` —
+    only a spec merge should transition planning → plan-approved."""
+    from foreman.reconciler.rules import RULES
+
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:planning",)),
+        _pr(is_merged=True, head_ref="foreman/impl-143"),
+    )
+    assert evaluate(ctx, rules=RULES) is not Action.ADVANCE_LABEL_TO_PLAN_APPROVED
+
+
+def test_advance_label_to_done_ignores_spec_shaped_pr(tmp_path: Path) -> None:
+    """A merged spec-shaped PR sitting on an impl-approved-labeled ticket
+    (transient) must NOT drive ``advance_label_to_done`` — only an impl
+    merge should transition impl-approved → done."""
+    from foreman.reconciler.rules import RULES
+
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-approved",)),
+        _pr(is_merged=True, head_ref="foreman/issue-143"),
+    )
+    assert evaluate(ctx, rules=RULES) is not Action.ADVANCE_LABEL_TO_DONE
