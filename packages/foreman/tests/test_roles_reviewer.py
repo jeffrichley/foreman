@@ -295,7 +295,7 @@ def _make_fake_repo(
     head_sha: str,
     labels: list[str] | None = None,
 ) -> tuple[_FakeRepo, _FakePR, _FakeIssue]:
-    labels = labels if labels is not None else ["foreman:spec-review"]
+    labels = labels if labels is not None else ["foreman:planning"]
     pr = _FakePR(
         number=77,
         title="spec: SSML",
@@ -345,7 +345,7 @@ def _make_registry(client: _FakeReviewerClient, token: str = "ghs_reviewer_token
 
 
 @pytest.mark.asyncio
-async def test_run_reviewer_clean_outcome_advances_to_spec_ready(
+async def test_run_reviewer_clean_outcome_advances_to_plan_approved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clone = tmp_path / "clone"
@@ -398,9 +398,9 @@ async def test_run_reviewer_clean_outcome_advances_to_spec_ready(
     assert FINDINGS_BEGIN_MARKER in body
     assert FINDINGS_END_MARKER in body
 
-    # Issue label advanced: spec-review → spec-ready
-    assert issue.removed == ["foreman:spec-review"]
-    assert issue.added == ["foreman:spec-ready"]
+    # Issue label advanced: planning → plan-approved
+    assert issue.removed == ["foreman:planning"]
+    assert issue.added == ["foreman:plan-approved"]
 
     # PR's labels NOT touched (label transition is on the issue)
     # (The fake PR's `add_to_labels` / `remove_from_labels` don't exist;
@@ -414,7 +414,7 @@ async def test_run_reviewer_clean_outcome_advances_to_spec_ready(
     assert result.llm_output.confidence == "high"
     # foreman#91: final_labels is the authoritative post-transition set,
     # computed in-process by the role.
-    assert result.final_labels == ["foreman:spec-ready"]
+    assert result.final_labels == ["foreman:plan-approved"]
 
 
 @pytest.mark.asyncio
@@ -540,8 +540,8 @@ async def test_run_reviewer_needs_fix_outcome_advances_to_spec_fix(
     assert "needs_fix" in body
     assert event == "COMMENT"
 
-    # Issue label advanced: spec-review → spec-fix
-    assert issue.removed == ["foreman:spec-review"]
+    # Issue label advanced: planning → spec-fix
+    assert issue.removed == ["foreman:planning"]
     assert issue.added == ["foreman:spec-fix"]
 
     assert result.llm_output.outcome == "needs_fix"
@@ -603,17 +603,17 @@ async def test_run_reviewer_reuses_existing_branch_does_not_create_new(
 
 
 @pytest.mark.asyncio
-async def test_run_reviewer_missing_spec_review_label_raises(
+async def test_run_reviewer_missing_planning_label_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Pre-flight guard: source issue without ``foreman:spec-review`` is
+    """Pre-flight guard: source issue without ``foreman:planning`` is
     not advanced — we refuse to act on issues not queued by the Planner."""
     clone = tmp_path / "clone"
     head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
     monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
 
     cfg = _make_config(clone)
-    # Issue has a random unrelated label, NOT foreman:spec-review
+    # Issue has a random unrelated label, NOT foreman:planning
     repo, pr, issue = _make_fake_repo(issue_number=42, head_sha=head_sha, labels=["random-label"])
     client = _FakeReviewerClient(repo=repo)
     registry = _make_registry(client)
@@ -621,7 +621,7 @@ async def test_run_reviewer_missing_spec_review_label_raises(
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(return_value=_make_clean_output())
 
-    with pytest.raises(RuntimeError, match="foreman:spec-review"):
+    with pytest.raises(RuntimeError, match="foreman:planning"):
         await run_reviewer(
             pr_url="https://github.com/jeffrichley/voice/pull/77",
             config=cfg,
@@ -775,14 +775,14 @@ async def test_run_reviewer_passes_env_with_reviewer_token_and_parent_env(
 #
 # Mirrors the spec-PR tests above but exercises the
 # ``foreman/impl-<N>`` branch shape and the impl-side label triple
-# (``foreman:impl-review`` → ``foreman:ready-for-merge`` /
+# (``foreman:impl-review`` → ``foreman:impl-approved`` /
 # ``foreman:impl-fix``). The daemon's ``RUN_REVIEWER_IMPL`` dispatch
 # routes here once the Worker has opened the impl PR.
 # ----------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_run_reviewer_impl_clean_outcome_advances_to_ready_for_merge(
+async def test_run_reviewer_impl_clean_outcome_advances_to_impl_approved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clone = tmp_path / "clone"
@@ -824,14 +824,14 @@ async def test_run_reviewer_impl_clean_outcome_advances_to_ready_for_merge(
     assert event == "COMMENT"
     assert body.startswith("Clean — traced ACs 1-4 against the spec.")
 
-    # Issue label advanced: impl-review → ready-for-merge
+    # Issue label advanced: impl-review → impl-approved
     assert issue.removed == ["foreman:impl-review"]
-    assert issue.added == ["foreman:ready-for-merge"]
+    assert issue.added == ["foreman:impl-approved"]
 
     assert isinstance(result, ReviewerRunResult)
     assert isinstance(result.llm_output, ReviewerOutput)
     assert result.llm_output.outcome == "clean"
-    assert result.final_labels == ["foreman:ready-for-merge"]
+    assert result.final_labels == ["foreman:impl-approved"]
 
 
 @pytest.mark.asyncio
@@ -930,7 +930,7 @@ def test_reviewer_entry_label_by_target_mapping_is_complete() -> None:
     from foreman.roles.reviewer import _REVIEWER_ENTRY_LABEL_BY_TARGET
 
     assert _REVIEWER_ENTRY_LABEL_BY_TARGET == {
-        "spec_pr": "foreman:spec-review",
+        "spec_pr": "foreman:planning",
         "impl_pr": "foreman:impl-review",
     }
 
@@ -1008,12 +1008,12 @@ def test_load_reviewer_prompt_impl_target_loads_impl_composition() -> None:
 @pytest.mark.parametrize(
     ("seed_with_impl", "labels", "outcome", "expected_final"),
     [
-        # spec_pr + clean → spec-review removed, spec-ready added
-        (False, ["foreman:spec-review"], "clean", ["foreman:spec-ready"]),
-        # spec_pr + needs_fix → spec-review removed, spec-fix added
-        (False, ["foreman:spec-review"], "needs_fix", ["foreman:spec-fix"]),
-        # impl_pr + clean → impl-review removed, ready-for-merge added
-        (True, ["foreman:impl-review"], "clean", ["foreman:ready-for-merge"]),
+        # spec_pr + clean → planning removed, plan-approved added
+        (False, ["foreman:planning"], "clean", ["foreman:plan-approved"]),
+        # spec_pr + needs_fix → planning removed, spec-fix added
+        (False, ["foreman:planning"], "needs_fix", ["foreman:spec-fix"]),
+        # impl_pr + clean → impl-review removed, impl-approved added
+        (True, ["foreman:impl-review"], "clean", ["foreman:impl-approved"]),
         # impl_pr + needs_fix → impl-review removed, impl-fix added
         (True, ["foreman:impl-review"], "needs_fix", ["foreman:impl-fix"]),
     ],

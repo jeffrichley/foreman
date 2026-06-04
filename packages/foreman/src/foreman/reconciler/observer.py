@@ -43,6 +43,7 @@ query ForemanProjectState($owner: String!, $repo: String!) {
       filterBy: { labels: [
         "foreman:planning",
         "foreman:plan-approved",
+        "foreman:spec-fix",
         "foreman:impl-review",
         "foreman:impl-approved",
         "foreman:impl-fix",

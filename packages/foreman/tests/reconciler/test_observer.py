@@ -170,3 +170,10 @@ def test_fetch_project_state_handles_null_review_decision() -> None:
         project="foreman", owner="jeffrichley", repo="foreman", gh=client,
     )
     assert snap.prs[0].review_decision is None
+
+
+def test_observer_query_includes_spec_fix_label() -> None:
+    # spec-fix issues should appear in the observer poll so the daemon can
+    # surface them for human follow-up (no auto-rerun, just visibility).
+    from foreman.reconciler.observer import _QUERY
+    assert "foreman:spec-fix" in _QUERY

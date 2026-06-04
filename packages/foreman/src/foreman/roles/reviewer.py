@@ -6,15 +6,15 @@ then:
 
   1. Posts the ``review_comment`` as a PR review (``event="COMMENT"``)
   2. Advances the **issue's** label deterministically:
-     - ``clean``     → ``foreman:spec-review`` → ``foreman:spec-ready``
-     - ``needs_fix`` → ``foreman:spec-review`` → ``foreman:spec-fix``
+     - ``clean``     → ``foreman:planning`` → ``foreman:plan-approved``
+     - ``needs_fix`` → ``foreman:planning`` → ``foreman:spec-fix``
   3. Returns :class:`~foreman.schemas.reviewer.ReviewerOutput` to the caller
      for display / persistence
 
 The label transition is on the originating ISSUE, not the PR — same
 pattern the Planner uses. The Reviewer derives the issue number and
 the review target (spec PR vs impl PR) from the PR's head branch:
-- ``foreman/issue-<N>`` → spec PR (label ``foreman:spec-review``)
+- ``foreman/issue-<N>`` → spec PR (label ``foreman:planning``)
 - ``foreman/impl-<N>``  → impl PR (label ``foreman:impl-review``)
 
 Pre-flight guard: if the source issue does not carry the
@@ -62,11 +62,11 @@ REVIEWER_ALLOWED_TOOLS = ["Read", "Grep", "Glob", "Bash"]
 # Labels the Reviewer touches on the originating issue. The spec-PR labels
 # and impl-PR labels form parallel triples; ``run_reviewer`` picks one
 # triple based on the PR's head-branch shape.
-_LABEL_SPEC_REVIEW = "foreman:spec-review"
-_LABEL_SPEC_READY = "foreman:spec-ready"
+_LABEL_SPEC_REVIEW = "foreman:planning"
+_LABEL_SPEC_READY = "foreman:plan-approved"
 _LABEL_SPEC_FIX = "foreman:spec-fix"
 _LABEL_IMPL_REVIEW = "foreman:impl-review"
-_LABEL_READY_FOR_MERGE = "foreman:ready-for-merge"
+_LABEL_READY_FOR_MERGE = "foreman:impl-approved"
 _LABEL_IMPL_FIX = "foreman:impl-fix"
 
 # foreman#78: per-target routing for the Reviewer. The role accepts
@@ -332,7 +332,7 @@ async def run_reviewer(
             not a Foreman review branch (``foreman/issue-<N>`` or
             ``foreman/impl-<N>``).
         RuntimeError: Source issue is missing the target-appropriate
-            review label (``foreman:spec-review`` for spec PRs,
+            review label (``foreman:planning`` for spec PRs,
             ``foreman:impl-review`` for impl PRs) — we refuse to advance
             PRs whose source issue was not queued for review.
     """
