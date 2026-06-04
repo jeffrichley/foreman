@@ -404,6 +404,7 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
     derives the right action per ticket from GH + execution log, then
     executes via the host. See docs/superpowers/specs/foreman-issue-106-spec.md.
     """
+    from foreman.daemon_lock import DaemonLock, LockAcquisitionError
     from foreman.reconciler import ExecutionLog, Reconciler, ReconcilerProject
 
     # FOREMAN_CONFIG_PATH (v3) wins; falls back to FOREMAN_CONFIG (v2)
@@ -413,55 +414,62 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
         cfg_path = str(Path("~/.foreman/config.toml").expanduser())
     config = load_config(cfg_path)
 
-    db_path = Path(os.path.expanduser(config.reconciler.db_path))
-    log = ExecutionLog(db_path)
-    log.init()
+    lock_path = Path(os.path.expanduser(config.reconciler.lock_path))
+    try:
+        with DaemonLock(lock_path):
+            db_path = Path(os.path.expanduser(config.reconciler.db_path))
+            log = ExecutionLog(db_path)
+            log.init()
 
-    # config.projects is dict[name, ProjectConfig]; ProjectConfig.repo
-    # is "owner/name" form. Split into the ReconcilerProject shape.
-    projects_list: list[ReconcilerProject] = []
-    for proj_name, proj_cfg in config.projects.items():
-        if "/" not in proj_cfg.repo:
-            raise click.ClickException(
-                f"project {proj_name!r} has malformed repo {proj_cfg.repo!r} "
-                "(expected 'owner/name')"
+            # config.projects is dict[name, ProjectConfig]; ProjectConfig.repo
+            # is "owner/name" form. Split into the ReconcilerProject shape.
+            projects_list: list[ReconcilerProject] = []
+            for proj_name, proj_cfg in config.projects.items():
+                if "/" not in proj_cfg.repo:
+                    raise click.ClickException(
+                        f"project {proj_name!r} has malformed repo {proj_cfg.repo!r} "
+                        "(expected 'owner/name')"
+                    )
+                owner, repo = proj_cfg.repo.split("/", 1)
+                projects_list.append(
+                    ReconcilerProject(name=proj_name, owner=owner, repo=repo)
+                )
+            projects = tuple(projects_list)
+
+            if max_ticks == 0:
+                # Smoke-test wiring without spinning the loop.
+                click.echo(
+                    f"v3-start wired: {len(projects)} projects, "
+                    f"db={db_path}, dry_run={dry_run}"
+                )
+                return
+
+            if not projects:
+                click.echo("No projects configured; nothing to reconcile.")
+                return
+            gh, host = _build_v3_gh_and_host(config, log, projects[0].name)
+
+            reconciler = Reconciler(
+                projects=projects,
+                log=log,
+                gh=gh,
+                host=host,
+                dry_run=dry_run,
+                alert_after_n_failures=config.reconciler.alert_after_n_failures,
+                poll_interval_seconds=config.reconciler.poll_interval_seconds,
             )
-        owner, repo = proj_cfg.repo.split("/", 1)
-        projects_list.append(ReconcilerProject(name=proj_name, owner=owner, repo=repo))
-    projects = tuple(projects_list)
 
-    if max_ticks == 0:
-        # Smoke-test wiring without spinning the loop.
-        click.echo(
-            f"v3-start wired: {len(projects)} projects, "
-            f"db={db_path}, dry_run={dry_run}"
-        )
-        return
+            async def _run() -> None:
+                if max_ticks is None:
+                    await reconciler.run()
+                else:
+                    for _ in range(max_ticks):
+                        await reconciler.tick()
+                        await asyncio.sleep(reconciler.poll_interval_seconds)
 
-    if not projects:
-        click.echo("No projects configured; nothing to reconcile.")
-        return
-    gh, host = _build_v3_gh_and_host(config, log, projects[0].name)
-
-    reconciler = Reconciler(
-        projects=projects,
-        log=log,
-        gh=gh,
-        host=host,
-        dry_run=dry_run,
-        alert_after_n_failures=config.reconciler.alert_after_n_failures,
-        poll_interval_seconds=config.reconciler.poll_interval_seconds,
-    )
-
-    async def _run() -> None:
-        if max_ticks is None:
-            await reconciler.run()
-        else:
-            for _ in range(max_ticks):
-                await reconciler.tick()
-                await asyncio.sleep(reconciler.poll_interval_seconds)
-
-    asyncio.run(_run())
+            asyncio.run(_run())
+    except LockAcquisitionError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _build_v3_gh_and_host(

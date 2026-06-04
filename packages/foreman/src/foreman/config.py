@@ -118,6 +118,10 @@ class ReconcilerConfig(BaseModel):
         ge=1,
         description="consecutive observer failures before yellow alert",
     )
+    lock_path: str = Field(
+        default="~/.foreman/reconciler.lock",
+        description="File-based PID lock to prevent two reconciler daemons concurrently",
+    )
 
 
 class AppsConfig(BaseModel):
