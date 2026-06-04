@@ -446,10 +446,10 @@ def test_run_init_creates_all_v3_labels_on_empty_repo(tmp_path: Path) -> None:
 
     result = run_init(init_config, admin_client=admin)
 
-    # v3 label vocabulary: 9 state/modifier labels + 3 impl-attempt
-    # counters = 12 total. v2's plan/spec-review/spec-ready/
-    # implementing/implementing-ready/ready-for-merge labels + the
-    # fix-attempt-N counters were removed.
+    # v3 label vocabulary: 10 state/modifier labels (incl. failed terminal)
+    # + 3 impl-attempt + 3 fix-attempt counters = 16 total. v2's plan/
+    # spec-review/spec-ready/implementing/implementing-ready/ready-for-merge
+    # labels were removed.
     expected_names = [name for name, _color, _desc in _FOREMAN_LABELS]
     assert len(result.labels_created) == len(expected_names)
     assert len(result.labels_existing) == 0
@@ -467,9 +467,13 @@ def test_run_init_creates_all_v3_labels_on_empty_repo(tmp_path: Path) -> None:
         "foreman:needs-help",
         "foreman:hold",
         "foreman:done",
+        "foreman:failed",
         "foreman:impl-attempt-1",
         "foreman:impl-attempt-2",
         "foreman:impl-attempt-3",
+        "foreman:fix-attempt-1",
+        "foreman:fix-attempt-2",
+        "foreman:fix-attempt-3",
     }
 
 

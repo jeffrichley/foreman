@@ -98,9 +98,13 @@ _FOREMAN_LABELS: list[tuple[str, str, str]] = [
     ),
     ("foreman:hold", "BFD4F2", "Foreman: manual pause (blocks all rules)"),
     ("foreman:done", "6F42C1", "Foreman: ticket complete"),
+    ("foreman:failed", "B60205", "Foreman: ticket exhausted retries (terminal)"),
     ("foreman:impl-attempt-1", "BFD4F2", "Foreman: impl cycle attempt 1 of 3"),
     ("foreman:impl-attempt-2", "BFD4F2", "Foreman: impl cycle attempt 2 of 3"),
     ("foreman:impl-attempt-3", "BFD4F2", "Foreman: impl cycle attempt 3 of 3"),
+    ("foreman:fix-attempt-1", "BFD4F2", "Foreman: fix cycle attempt 1 of 3"),
+    ("foreman:fix-attempt-2", "BFD4F2", "Foreman: fix cycle attempt 2 of 3"),
+    ("foreman:fix-attempt-3", "BFD4F2", "Foreman: fix cycle attempt 3 of 3"),
 ]
 
 # The four role names init knows about; mirrors :mod:`foreman.identity`.
