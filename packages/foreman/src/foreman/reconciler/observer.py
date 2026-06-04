@@ -6,10 +6,22 @@ typed exceptions so the daemon loop can fail-stop with appropriate alerts.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from foreman.reconciler.state import IssueState, ProjectSnapshot, PRState
+
+# Foreman branches follow ``foreman/issue-<N>`` for spec PRs and
+# ``foreman/impl-<N>`` for impl PRs (see ``foreman.branches``). The Planner
+# deliberately strips "Closes/Fixes/Resolves" from spec PR bodies so the spec
+# PR's merge doesn't auto-close the issue, and the Worker uses
+# ``Implements #N`` (not a GitHub auto-link keyword). As a result GitHub's
+# ``closingIssuesReferences`` is empty for every real foreman PR in
+# production — so the observer also derives the linkage from the head-ref
+# convention. ``closingIssuesReferences`` is retained as defense in depth for
+# non-foreman PRs that DO use a Closes keyword.
+_FOREMAN_BRANCH_RE = re.compile(r"^foreman/(?:issue|impl)-(\d+)$")
 
 
 class GHGraphQLClient(Protocol):
@@ -150,17 +162,43 @@ def _parse_issue(node: dict[str, Any]) -> IssueState:
     )
 
 
+def _derive_linked_issue_from_head_ref(head_ref: str) -> int | None:
+    """Return the issue number encoded in a foreman branch name, else None.
+
+    ``foreman/issue-42`` → 42 (spec PR head)
+    ``foreman/impl-42``  → 42 (impl PR head, stacked on spec PR)
+    anything else        → None
+
+    Pairs with ``foreman.branches.spec_branch`` and ``impl_branch`` — those
+    are the only two shapes foreman roles ever produce, so anything that
+    matches is authoritatively linked to that issue.
+    """
+    match = _FOREMAN_BRANCH_RE.match(head_ref)
+    return int(match.group(1)) if match else None
+
+
 def _parse_pr(node: dict[str, Any]) -> PRState:
-    linked = tuple(
+    closing_refs = tuple(
         int(n["number"])
         for n in (node.get("closingIssuesReferences") or {}).get("nodes", [])
     )
+    head_ref = str(node.get("headRefName", ""))
+    head_ref_issue = _derive_linked_issue_from_head_ref(head_ref)
+
+    # Combine both sources, deduping. Head-ref linking is what makes foreman
+    # PRs link at all (Planner strips Closes keywords from spec PRs);
+    # closingIssuesReferences catches non-foreman PRs that use Closes/Fixes.
+    if head_ref_issue is not None and head_ref_issue not in closing_refs:
+        linked: tuple[int, ...] = closing_refs + (head_ref_issue,)
+    else:
+        linked = closing_refs
+
     rollup = node.get("statusCheckRollup")
     ci = rollup["state"] if rollup else None
     review_decision = node.get("reviewDecision")  # may be None
     return PRState(
         number=int(node["number"]),
-        head_ref=str(node.get("headRefName", "")),
+        head_ref=head_ref,
         mergeable=str(node.get("mergeable", "UNKNOWN")),
         ci_status=ci,
         body=str(node.get("body", "") or ""),

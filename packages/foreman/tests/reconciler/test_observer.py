@@ -271,3 +271,94 @@ def test_observer_query_uses_aliased_pr_connections() -> None:
     assert "states: MERGED" in _QUERY
     # Recent-merged window must be bounded so old PRs don't pollute the snapshot.
     assert "UPDATED_AT" in _QUERY
+
+
+def test_observer_links_spec_pr_to_issue_via_head_ref_when_closing_refs_empty() -> None:
+    """Foreman spec PRs strip Closes keywords; observer must link via head-ref.
+
+    Planner deliberately removes "Closes/Fixes/Resolves" from spec PR bodies
+    (roles/planner.py) so the spec PR's merge doesn't auto-close the issue.
+    That makes ``closingIssuesReferences`` empty in production. The observer
+    must derive the linkage from the ``foreman/issue-<N>`` head-ref
+    convention instead.
+    """
+    pr_payload = {
+        "number": 99,
+        "headRefName": "foreman/issue-42",
+        "body": "Implements #42",
+        "mergeable": "MERGEABLE",
+        "merged": False,
+        "statusCheckRollup": {"state": "SUCCESS"},
+        "closingIssuesReferences": {"nodes": []},  # EMPTY — Planner stripped
+        "reviewDecision": None,
+    }
+    client = _FakeGHClient(response=_gh_response_with(issues=[], prs=[pr_payload]))
+    snap = fetch_project_state(
+        project="foreman", owner="jeffrichley", repo="foreman", gh=client,
+    )
+    assert len(snap.prs) == 1
+    assert 42 in snap.prs[0].linked_issue_numbers
+
+
+def test_observer_links_impl_pr_to_issue_via_head_ref_when_closing_refs_empty() -> None:
+    """Foreman impl PRs use ``Implements #N`` (not a GH auto-link keyword);
+    observer must link via the ``foreman/impl-<N>`` head-ref convention."""
+    pr_payload = {
+        "number": 100,
+        "headRefName": "foreman/impl-42",
+        "body": "Implements #42",
+        "mergeable": "MERGEABLE",
+        "merged": False,
+        "statusCheckRollup": {"state": "SUCCESS"},
+        "closingIssuesReferences": {"nodes": []},
+        "reviewDecision": None,
+    }
+    client = _FakeGHClient(response=_gh_response_with(issues=[], prs=[pr_payload]))
+    snap = fetch_project_state(
+        project="foreman", owner="jeffrichley", repo="foreman", gh=client,
+    )
+    assert len(snap.prs) == 1
+    assert 42 in snap.prs[0].linked_issue_numbers
+
+
+def test_observer_combines_head_ref_and_closing_refs() -> None:
+    """A non-foreman PR using a Closes keyword still links via
+    closingIssuesReferences — head-ref linking is defense in depth, not a
+    replacement."""
+    pr_payload = {
+        "number": 101,
+        "headRefName": "feature/manual-pr",
+        "body": "Closes #99",
+        "mergeable": "MERGEABLE",
+        "merged": False,
+        "statusCheckRollup": {"state": "SUCCESS"},
+        "closingIssuesReferences": {"nodes": [{"number": 99}]},
+        "reviewDecision": None,
+    }
+    client = _FakeGHClient(response=_gh_response_with(issues=[], prs=[pr_payload]))
+    snap = fetch_project_state(
+        project="foreman", owner="jeffrichley", repo="foreman", gh=client,
+    )
+    assert 99 in snap.prs[0].linked_issue_numbers
+
+
+def test_observer_does_not_double_link_when_both_sources_agree() -> None:
+    """If head-ref points to N AND closingIssuesReferences contains N (e.g.,
+    an operator manually appended ``Closes #N`` to a foreman-shaped branch),
+    N appears exactly once in linked_issue_numbers."""
+    pr_payload = {
+        "number": 99,
+        "headRefName": "foreman/issue-42",
+        "body": "Closes #42",
+        "mergeable": "MERGEABLE",
+        "merged": False,
+        "statusCheckRollup": {"state": "SUCCESS"},
+        "closingIssuesReferences": {"nodes": [{"number": 42}]},
+        "reviewDecision": None,
+    }
+    client = _FakeGHClient(response=_gh_response_with(issues=[], prs=[pr_payload]))
+    snap = fetch_project_state(
+        project="foreman", owner="jeffrichley", repo="foreman", gh=client,
+    )
+    linked = snap.prs[0].linked_issue_numbers
+    assert linked.count(42) == 1
