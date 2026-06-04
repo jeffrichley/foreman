@@ -558,3 +558,60 @@ def test_spec_reviewer_completed_blocks_further_spec_dispatch(tmp_path: Path) ->
 
     # Once the spec-side reviewer has run, the spec-side rule must NOT re-fire.
     assert evaluate(ctx, rules=RULES) is not Action.DISPATCH_REVIEWER_SPEC
+
+
+# --- CRITICAL #3: dispatch_fixer_spec (spec-side fix loop) ---
+
+
+def test_dispatch_fixer_spec_fires_on_spec_fix_label(tmp_path: Path) -> None:
+    """Spec-fix label + open spec PR + no Fixer in-flight → dispatch Fixer (spec)."""
+    from foreman.reconciler.rules import RULES
+
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:spec-fix",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
+    )
+    assert evaluate(ctx, rules=RULES) is Action.DISPATCH_FIXER_SPEC
+
+
+def test_dispatch_fixer_spec_blocked_when_in_flight(tmp_path: Path) -> None:
+    """An unterminated dispatch_fixer_spec row prevents re-fire."""
+    from foreman.reconciler.rules import RULES
+
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:spec-fix",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
+    )
+    ctx.log.write_action(
+        ticket_id=ctx.ticket_id,
+        project="foreman",
+        rule_name="dispatch_fixer_spec",
+        action="dispatch_fixer_spec",
+        outcome="running",
+        details={},
+    )
+    assert evaluate(ctx, rules=RULES) is not Action.DISPATCH_FIXER_SPEC
+
+
+def test_dispatch_fixer_spec_attempts_exhausted_surfaces_help(tmp_path: Path) -> None:
+    """After _MAX_FIX_ATTEMPTS completed Fixer-spec runs, surface_help fires."""
+    from foreman.reconciler.rules import RULES
+
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:spec-fix",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
+    )
+    for _ in range(3):  # _MAX_FIX_ATTEMPTS = 3
+        start_id = ctx.log.write_action(
+            ticket_id=ctx.ticket_id,
+            project="foreman",
+            rule_name="dispatch_fixer_spec",
+            action="dispatch_fixer_spec",
+            outcome="running",
+            details={},
+        )
+        ctx.log.terminate_action(parent_log_id=start_id, outcome="success", details={})
+    assert evaluate(ctx, rules=RULES) is Action.SURFACE_HELP

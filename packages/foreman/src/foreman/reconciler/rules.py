@@ -77,6 +77,16 @@ def _fix_attempts_exhausted(ctx: ActionContext) -> bool:
     )
 
 
+def _spec_fix_attempts_exhausted(ctx: ActionContext) -> bool:
+    # Symmetric spec-side budget: only ``dispatch_fixer_spec`` dispatches count.
+    # Pairs with ``_spec_fix_pending`` below — both scope to the spec-side
+    # action key so the spec retry budget is independent of impl-side.
+    return (
+        "foreman:spec-fix" in ctx.issue.labels
+        and ctx.log.count_completed("dispatch_fixer_spec", ctx.ticket_id) >= _MAX_FIX_ATTEMPTS
+    )
+
+
 def _impl_attempts_exhausted(ctx: ActionContext) -> bool:
     return (
         "foreman:plan-approved" in ctx.issue.labels
@@ -138,6 +148,13 @@ _SAFETY_RULES: tuple[Rule, ...] = (
         tier=PrecedenceTier.SAFETY,
         precedence=50,
         when=_safety_with_rate_limit(_fix_attempts_exhausted),
+        then=Action.SURFACE_HELP,
+    ),
+    Rule(
+        name="spec_fix_attempts_exhausted",
+        tier=PrecedenceTier.SAFETY,
+        precedence=55,
+        when=_safety_with_rate_limit(_spec_fix_attempts_exhausted),
         then=Action.SURFACE_HELP,
     ),
     Rule(
@@ -230,6 +247,21 @@ def _impl_fix_pending(ctx: ActionContext) -> bool:
     )
 
 
+def _spec_fix_pending(ctx: ActionContext) -> bool:
+    # Spec-side Fixer flow. Symmetric to ``_impl_fix_pending`` above but scoped
+    # to the spec-side label + action key. Reviewer writes ``foreman:spec-fix``
+    # when a spec PR is rejected; this rule consumes it. Without this rule the
+    # label would be observed but no forward-progress action would fire — the
+    # spec-side fix loop would be dead (adversarial review CRITICAL #3).
+    return (
+        "foreman:spec-fix" in ctx.issue.labels
+        and ctx.pr is not None
+        and not ctx.pr.is_merged
+        and not ctx.log.has_unterminated("dispatch_fixer_spec", ctx.ticket_id)
+        and ctx.log.count_completed("dispatch_fixer_spec", ctx.ticket_id) < _MAX_FIX_ATTEMPTS
+    )
+
+
 def _impl_approved_pr_green_and_flag(ctx: ActionContext) -> bool:
     return (
         "foreman:impl-approved" in ctx.issue.labels
@@ -295,6 +327,13 @@ _PROGRESS_RULES: tuple[Rule, ...] = (
         precedence=140,
         when=_impl_review_green,
         then=Action.DISPATCH_REVIEWER_IMPL,
+    ),
+    Rule(
+        name="dispatch_fixer_spec",
+        tier=PrecedenceTier.FORWARD_PROGRESS,
+        precedence=145,
+        when=_spec_fix_pending,
+        then=Action.DISPATCH_FIXER_SPEC,
     ),
     Rule(
         name="dispatch_fixer_impl",
