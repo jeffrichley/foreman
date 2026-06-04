@@ -406,6 +406,7 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
     executes via the host. See docs/superpowers/specs/foreman-issue-106-spec.md.
     """
     from foreman.daemon_lock import DaemonLock, LockAcquisitionError
+    from foreman.logging_setup import configure_daemon_logging
     from foreman.reconciler import ExecutionLog, Reconciler, ReconcilerProject
 
     # FOREMAN_CONFIG_PATH (v3) wins; falls back to FOREMAN_CONFIG (v2)
@@ -414,6 +415,16 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
     if cfg_path is None:
         cfg_path = str(Path("~/.foreman/config.toml").expanduser())
     config = load_config(cfg_path)
+
+    # v3 writes to its own log file so v2 vs v3 daemons can run side-by-
+    # side during the cutover window without clobbering each other's
+    # JSON-lines stream. Level reuses config.daemon.log_level — there's
+    # no separate v3 knob yet; if one is needed, add ReconcilerConfig.log_level.
+    v3_log_path = Path(os.path.expanduser("~/.foreman/v3-daemon.log"))
+    configure_daemon_logging(
+        log_path=v3_log_path,
+        level=config.daemon.log_level,
+    )
 
     lock_path = Path(os.path.expanduser(config.reconciler.lock_path))
     try:
