@@ -82,7 +82,11 @@ COPY docker/claude/plugins /root/.claude/plugins
 # --- Foreman config + entrypoint --------------------------------------
 COPY docker/foreman/config.toml.container /etc/foreman/config.toml
 COPY docker/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+# Strip CRLF defensively: .gitattributes locks LF on .sh files going forward,
+# but a developer with an existing working tree (autocrlf=true) may COPY a
+# CRLF-tainted entrypoint into the image. The shebang then reads `#!/bin/bash\r`
+# and exec fails with `bash\r: No such file or directory`. Belt + suspenders.
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
 # Ensure /foreman volume mount points exist (volumes mount over these)
 RUN mkdir -p /foreman/repos /foreman/state /foreman/logs

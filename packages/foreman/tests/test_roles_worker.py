@@ -1938,7 +1938,12 @@ async def test_worker_opens_impl_pr_with_base_from_create_impl_result(
     )
 
     def fake_create_impl(
-        self: Any, *, clone_path: Path, repo_slug: str, ticket_id: int
+        self: Any,
+        *,
+        clone_path: Path,
+        repo_slug: str,
+        ticket_id: int,
+        repo_url: str | None = None,
     ) -> ImplWorktreeResult:
         return ImplWorktreeResult(path=fake_worktree, base_branch="main")
 
@@ -2255,3 +2260,82 @@ async def test_run_worker_calls_update_before_post_llm_write_site_label_read(
     # And the role's verdict still landed.
     assert "foreman:impl-review" in final
     assert "foreman:impl-attempt-1" not in final
+
+
+# ----------------------------------------------------------------------
+# Container first-run: Worker must pass repo_url so ensure_clone fires
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_worker_passes_repo_url_to_create_impl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the configured clone path is empty (container first boot,
+    foreman-repos volume fresh), the Worker must pass ``repo_url`` to
+    ``create_impl`` so that ``ensure_clone`` populates the clone before
+    ``_resolve_default_branch`` runs subprocess in a missing directory.
+
+    Symmetric with planner.py / fixer.py / reviewer.py, which all pass
+    ``repo_url=f"https://github.com/{project.repo}.git"``. The bug we are
+    locking against: the Worker was the only role that omitted the kwarg,
+    so first-run Worker dispatch inside the container died with
+    ``FileNotFoundError: '/foreman/repos/<project>'`` even after the
+    ensure_clone plumbing existed.
+    """
+    from foreman.worktree import ImplWorktreeResult
+
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    fake_worktree = tmp_path / "fake-impl-wt"
+    spec_dir = fake_worktree / "docs" / "superpowers" / "specs"
+    spec_dir.mkdir(parents=True)
+    (spec_dir / "foreman-issue-42-spec.md").write_text(
+        "# Spec for issue #42\n\n## Sub-requests\n1. Add X.\n"
+    )
+
+    captured_kwargs: dict[str, Any] = {}
+
+    def fake_create_impl(
+        self: Any,
+        *,
+        clone_path: Path,
+        repo_slug: str,
+        ticket_id: int,
+        repo_url: str | None = None,
+    ) -> ImplWorktreeResult:
+        captured_kwargs["clone_path"] = clone_path
+        captured_kwargs["repo_slug"] = repo_slug
+        captured_kwargs["ticket_id"] = ticket_id
+        captured_kwargs["repo_url"] = repo_url
+        return ImplWorktreeResult(path=fake_worktree, base_branch="main")
+
+    monkeypatch.setattr(
+        "foreman.roles.worker.WorktreeManager.create_impl", fake_create_impl
+    )
+
+    cfg = _make_config(clone)
+    repo, _spec_pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeWorkerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    _make_passing_check_command(monkeypatch)
+
+    await run_worker(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    assert captured_kwargs["repo_url"] == "https://github.com/jeffrichley/voice.git", (
+        "Worker must pass repo_url=f'https://github.com/{project.repo}.git' "
+        "to create_impl so ensure_clone can populate the clone on container "
+        f"first boot; got repo_url={captured_kwargs.get('repo_url')!r}"
+    )

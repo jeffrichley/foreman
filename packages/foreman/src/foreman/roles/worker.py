@@ -638,6 +638,7 @@ async def run_worker(
         clone_path=Path(project.local_clone_path),
         repo_slug=repo_name,
         ticket_id=issue_number,
+        repo_url=f"https://github.com/{project.repo}.git",
     )
     wt_path = wt_result.path
 
