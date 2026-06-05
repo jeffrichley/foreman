@@ -545,13 +545,43 @@ def _fetch_origin_branch(
         text=True,
         env=filtered_subprocess_env(role_token=role_token),
     )
-    if result.returncode != 0:
+    if result.returncode == 0:
+        return
+    # foreman#122: rc=128 with stderr "couldn't find remote ref" means
+    # the branch was deleted on origin (e.g., spec PR merged + GitHub
+    # auto-deleted the head branch). The local
+    # ``refs/remotes/origin/<branch>`` ref still points at the last
+    # fetched tip, so ``_origin_branch_exists`` reads the stale cache
+    # and lies — which breaks WorktreeManager's fallback gate to the
+    # default branch and Worker.create_pull faceplants on base=invalid
+    # 422. Prune the stale ref so subsequent checks see the truth.
+    stderr = result.stderr or ""
+    if result.returncode == 128 and "couldn't find remote ref" in stderr.lower():
+        subprocess.run(
+            ["git", "update-ref", "-d", f"refs/remotes/origin/{branch}"],
+            cwd=clone_path,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=filtered_subprocess_env(role_token=role_token),
+        )
         print(
-            f"[foreman.worktree] warning: git fetch origin {branch} failed in "
-            f"{clone_path} (rc={result.returncode}); proceeding with cached "
-            f"origin ref. stderr:\n{result.stderr.strip()}",
+            f"[foreman.worktree] note: remote branch origin/{branch} no "
+            f"longer exists (likely PR merged + auto-deleted); pruned "
+            f"stale local ref so the fallback gate fires.",
             file=sys.stderr,
         )
+        return
+    # Other failures (transient network, auth, etc.): keep the original
+    # best-effort tolerance — the cached origin ref may still be usable
+    # for the subsequent worktree-add or rev-parse, and hard-failing
+    # here would block ticket execution on transient issues.
+    print(
+        f"[foreman.worktree] warning: git fetch origin {branch} failed in "
+        f"{clone_path} (rc={result.returncode}); proceeding with cached "
+        f"origin ref. stderr:\n{stderr.strip()}",
+        file=sys.stderr,
+    )
 
 
 def _local_branch_exists(

@@ -10,7 +10,11 @@ from unittest.mock import patch
 
 import pytest
 
-from foreman.worktree import WorktreeManager
+from foreman.worktree import (
+    WorktreeManager,
+    _fetch_origin_branch,
+    _origin_branch_exists,
+)
 
 
 def _init_git_repo(
@@ -80,6 +84,73 @@ def _wire_origin(*, clone: Path, origin: Path) -> None:
         check=True,
         capture_output=True,
     )
+
+
+def test_fetch_origin_branch_prunes_stale_ref_when_remote_branch_is_gone(
+    tmp_path: Path,
+) -> None:
+    """foreman#122: when a spec branch was deleted on origin (e.g.,
+    spec PR merged + GitHub auto-delete), the local
+    ``refs/remotes/origin/<branch>`` ref still points at the prior tip
+    until something prunes it. Without the prune, the WorktreeManager
+    base-branch fallback reads the cached ref, returns ``foreman/
+    issue-N`` as the base, and ``create_pull`` faceplants on 422
+    "base invalid." This test pins the prune-on-couldnt-find-remote-ref
+    behavior in ``_fetch_origin_branch``.
+    """
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    origin_path = tmp_path / "origin.git"
+    _init_git_repo(clone, origin_path=origin_path)
+
+    branch = "foreman/issue-122"
+    # Create the spec branch locally + push to origin so the local
+    # `refs/remotes/origin/foreman/issue-122` ref exists.
+    subprocess.run(
+        ["git", "checkout", "-b", branch],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    (clone / "spec.md").write_text("# stub spec\n")
+    subprocess.run(
+        ["git", "add", "spec.md"], cwd=clone, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "stub spec"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "push", "origin", branch], cwd=clone, check=True, capture_output=True
+    )
+    # Confirm the precondition: local origin ref resolves.
+    assert _origin_branch_exists(clone, branch) is True
+
+    # Simulate GitHub auto-deleting the branch on origin AFTER PR merge.
+    # The deletion happens server-side, NOT via `git push origin --delete`
+    # from this client — so the client's local refs/remotes/origin/<branch>
+    # stays stale until the next fetch fails. We replicate that by
+    # mutating the bare origin repo directly.
+    subprocess.run(
+        ["git", "update-ref", "-d", f"refs/heads/{branch}"],
+        cwd=origin_path,
+        check=True,
+        capture_output=True,
+    )
+    # The client's local cache STILL says the branch exists — that's
+    # the precondition for the bug.
+    assert _origin_branch_exists(clone, branch) is True
+
+    # The fix: `_fetch_origin_branch` now detects "couldn't find remote
+    # ref" in the fetch's stderr and prunes the stale local ref.
+    _fetch_origin_branch(clone, branch)
+
+    # Postcondition: the stale local ref is gone, so the WorktreeManager's
+    # `_origin_branch_exists` check returns False and the fallback gate
+    # to the default branch can fire.
+    assert _origin_branch_exists(clone, branch) is False
 
 
 def test_create_worktree_creates_dir_with_branch(tmp_path: Path) -> None:

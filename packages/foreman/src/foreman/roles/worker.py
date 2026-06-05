@@ -75,6 +75,7 @@ import time
 from pathlib import Path
 
 from github import Github
+from github.GithubException import GithubException
 from github.PullRequest import PullRequest
 from github.Repository import Repository
 
@@ -303,6 +304,70 @@ def _find_spec_pr(repo: Repository, owner: str, branch: str) -> PullRequest | No
     if not pulls:
         return None
     return pulls[0]
+
+
+def _is_invalid_base_422(exc: GithubException) -> bool:
+    """Did ``repo.create_pull`` reject the ``base`` param as invalid?
+
+    foreman#122 signal: when a spec branch was deleted on origin (auto-
+    delete after spec PR merge) but the WorktreeManager's fallback gate
+    didn't catch it, ``create_pull`` returns 422 with
+    ``{"resource": "PullRequest", "field": "base", "code": "invalid"}``.
+    That's the cue to retry against the repo's default branch.
+    """
+    if exc.status != 422:
+        return False
+    data = exc.data if isinstance(exc.data, dict) else {}
+    errors = data.get("errors") or []
+    for err in errors:
+        if (
+            isinstance(err, dict)
+            and err.get("field") == "base"
+            and err.get("code") == "invalid"
+        ):
+            return True
+    return False
+
+
+def _create_pull_with_base_fallback(
+    repo: Repository,
+    *,
+    title: str,
+    body: str,
+    base: str,
+    head: str,
+) -> PullRequest:
+    """Open a PR; on a 422 "base invalid" error, retry against the
+    repo's default branch.
+
+    foreman#122 belt-and-suspenders: the WorktreeManager fetch-and-prune
+    fix in :func:`foreman.worktree._fetch_origin_branch` is the principled
+    place to detect a deleted-on-origin spec branch and select the
+    default branch as base BEFORE we get here. This wrapper exists for
+    the cases that slip through — races, cache mismatches, or future
+    fallback-gate misses on unanticipated shapes. Without it, a single
+    Worker run that loses to a deleted-base condition crashes at the
+    last step and leaves committed+pushed impl work without a PR.
+
+    The retry refuses to loop: if ``base`` is already the default
+    branch, the original exception re-raises (whatever GitHub didn't
+    like is not the deleted-spec-branch case).
+    """
+    try:
+        return repo.create_pull(title=title, body=body, base=base, head=head)
+    except GithubException as exc:
+        if not _is_invalid_base_422(exc):
+            raise
+        fallback = repo.default_branch
+        if fallback == base:
+            raise
+        _log.warning(
+            "create_pull base=%r rejected as invalid; retrying against "
+            "default branch %r (foreman#122 fallback)",
+            base,
+            fallback,
+        )
+        return repo.create_pull(title=title, body=body, base=fallback, head=head)
 
 
 def _build_user_prompt(
@@ -698,7 +763,8 @@ async def run_worker(
         # `implemented` → `incomplete`, never the reverse.
         assert llm_output.pr_title is not None
         assert llm_output.pr_body is not None
-        impl_pr = repo.create_pull(
+        impl_pr = _create_pull_with_base_fallback(
+            repo,
             title=llm_output.pr_title,
             body=llm_output.pr_body,
             base=wt_result.base_branch,
