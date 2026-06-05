@@ -40,6 +40,35 @@ from foreman._env_filter import filtered_subprocess_env
 from foreman.branches import impl_branch, spec_branch
 
 
+def ensure_clone(*, repo_url: str, clone_path: Path) -> None:
+    """Ensure ``clone_path`` is a valid git clone of ``repo_url``.
+
+    First-run helper for the container: when the ``foreman-repos`` Docker
+    volume is empty, ``clone_path`` doesn't exist yet, and the daemon
+    must clone the project from origin before any worktree-add can
+    happen. Idempotent: if ``clone_path`` already contains a ``.git``
+    directory, this is a no-op so existing host-side clones aren't
+    re-fetched on every daemon restart.
+
+    Args:
+        repo_url: Remote URL (HTTPS or SSH). Authentication via
+            PATH-resolved credentials / ssh agent / app-token URL
+            rewriting as per the caller's existing convention.
+        clone_path: Local filesystem path where the clone should live.
+
+    Raises:
+        subprocess.CalledProcessError: if ``git clone`` fails.
+    """
+    if (clone_path / ".git").exists():
+        return
+    clone_path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "clone", repo_url, str(clone_path)],
+        check=True,
+        capture_output=True,
+    )
+
+
 @dataclass(frozen=True)
 class ImplWorktreeResult:
     """Outcome of :meth:`WorktreeManager.create_impl`.
