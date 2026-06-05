@@ -777,6 +777,12 @@ def _build_v3_gh_and_host(config: Config, log: Any) -> tuple[Any, Any]:
         log=log,
         role_dispatch_timeout_seconds=config.reconciler.role_dispatch_timeout_seconds,
         max_concurrent_dispatches=config.reconciler.max_concurrent_dispatches,
+        # foreman#119: capture per-dispatch subprocess output under
+        # ~/.foreman/logs/<role>/<issue>__<ts>Z.log so a failed Planner/
+        # Worker/Fixer/Reviewer can be diagnosed without manually
+        # replaying the dispatch. Path is also recorded in the
+        # execution log's `details` so post-mortem is one command.
+        log_dir=Path.home() / ".foreman" / "logs",
     )
     return gh, host
 

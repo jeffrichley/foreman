@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import sqlite3
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -9,7 +13,7 @@ from typing import Any
 import pytest
 
 from foreman.reconciler.exec_log import ExecutionLog
-from foreman.reconciler.v3_host import V3GitHubHost
+from foreman.reconciler.v3_host import V3GitHubHost, _default_subprocess_runner
 
 
 @dataclass
@@ -540,3 +544,201 @@ def test_dispatch_role_worker_uses_positional_issue_url(tmp_path: Path) -> None:
     assert "--target" not in argv
     # `foreman implement` does not accept --pr-url either.
     assert "--pr-url" not in argv
+
+
+# ----------------------------------------------------------------------
+# foreman#119 — per-dispatch subprocess output capture
+# ----------------------------------------------------------------------
+
+
+def _read_termination_details(db_path: Path, action: str) -> dict[str, Any]:
+    """Pull the `details` JSON off the most recent terminated row for
+    ``action`` from the execution log so the test can assert on
+    log_path. The exec_log table stores details as a JSON string."""
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT details FROM execution_log "
+            "WHERE action = ? AND outcome != 'running' "
+            "ORDER BY id DESC LIMIT 1",
+            (action,),
+        ).fetchone()
+    assert row is not None, f"no terminated row for action={action!r}"
+    return json.loads(row[0])  # type: ignore[no-any-return]
+
+
+def test_dispatch_role_records_log_path_in_details_when_log_dir_set(
+    tmp_path: Path,
+) -> None:
+    """foreman#119: when ``log_dir`` is configured at construction, every
+    dispatch_role termination row carries a ``log_path`` entry in
+    ``details`` so post-mortem is ``cat <path>`` without grepping the
+    daemon log to find which file to read."""
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    log_dir = tmp_path / "dispatch-logs"
+    captured_log_paths: list[Path] = []
+
+    class _FakeProc:
+        def __init__(self, pid: int, log_path: Path) -> None:
+            self.pid = pid
+            self.log_path = log_path
+
+        async def wait(self) -> int:
+            return 0
+
+    def runner(argv: list[str], *, log_path: Path | None = None) -> _FakeProc:
+        assert log_path is not None, "host should pass log_path when log_dir set"
+        captured_log_paths.append(log_path)
+        return _FakeProc(pid=4242, log_path=log_path)
+
+    host = V3GitHubHost(
+        v2_host=_FakeV2Host(),
+        log=log,
+        subprocess_runner=runner,
+        log_dir=log_dir,
+    )
+
+    start_id = log.write_action(
+        ticket_id="foreman/owner/repo#119",
+        project="foreman",
+        rule_name="dispatch_planner",
+        action="dispatch_planner",
+        outcome="running",
+        details={},
+    )
+
+    async def run() -> None:
+        host.dispatch_role(
+            role="planner",
+            target=None,
+            owner="owner",
+            repo="repo",
+            issue=119,
+            pr_number=None,
+            start_log_id=start_id,
+            project="foreman",
+        )
+        for _ in range(100):
+            if log.count_completed("dispatch_planner", "foreman/owner/repo#119") > 0:
+                return
+            await asyncio.sleep(0.01)
+
+    asyncio.run(run())
+
+    assert len(captured_log_paths) == 1
+    expected_log_path = captured_log_paths[0]
+    # Path lives under <log_dir>/<role>/ — issue and role both surface
+    # in the path components so operators can ls the role's directory.
+    assert expected_log_path.parent == log_dir / "planner"
+    assert expected_log_path.name.startswith("119__")
+    assert expected_log_path.suffix == ".log"
+
+    details = _read_termination_details(tmp_path / "log.sqlite", "dispatch_planner")
+    assert details["log_path"] == str(expected_log_path)
+    assert details["returncode"] == 0
+    assert details["role"] == "planner"
+
+
+def test_dispatch_role_omits_log_path_when_log_dir_not_set(tmp_path: Path) -> None:
+    """When ``log_dir`` is ``None`` (the test default), the termination
+    row's ``details`` must NOT carry a ``log_path`` key — the existing
+    no-capture path is preserved verbatim."""
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    captured_kwargs: list[dict[str, Any]] = []
+
+    class _FakeProc:
+        pid = 4242
+
+        async def wait(self) -> int:
+            return 0
+
+    def runner(argv: list[str], **kwargs: Any) -> _FakeProc:
+        captured_kwargs.append(kwargs)
+        return _FakeProc()
+
+    host = V3GitHubHost(
+        v2_host=_FakeV2Host(),
+        log=log,
+        subprocess_runner=runner,
+        # NB: no log_dir — default None
+    )
+
+    start_id = log.write_action(
+        ticket_id="foreman/owner/repo#119",
+        project="foreman",
+        rule_name="dispatch_planner",
+        action="dispatch_planner",
+        outcome="running",
+        details={},
+    )
+
+    async def run() -> None:
+        host.dispatch_role(
+            role="planner",
+            target=None,
+            owner="owner",
+            repo="repo",
+            issue=119,
+            pr_number=None,
+            start_log_id=start_id,
+            project="foreman",
+        )
+        for _ in range(100):
+            if log.count_completed("dispatch_planner", "foreman/owner/repo#119") > 0:
+                return
+            await asyncio.sleep(0.01)
+
+    asyncio.run(run())
+
+    # Runner was called WITHOUT log_path kwarg (only positional argv).
+    assert captured_kwargs == [{}]
+    details = _read_termination_details(tmp_path / "log.sqlite", "dispatch_planner")
+    assert "log_path" not in details
+    assert details["returncode"] == 0
+
+
+def test_default_runner_captures_subprocess_output_to_log_path(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: ``_default_subprocess_runner`` with a real subprocess
+    writes the child's stdout AND stderr into the log file, interleaved
+    like a terminal. The file is created if missing (parent dirs too)
+    and the parent-side handle is closed after ``wait()`` so no FD leaks.
+    """
+    log_path = tmp_path / "nested" / "dir" / "out.log"
+    argv = [
+        sys.executable,
+        "-c",
+        "import sys; print('stdout-line'); print('stderr-line', file=sys.stderr); sys.exit(7)",
+    ]
+
+    proc = _default_subprocess_runner(argv, log_path=log_path)
+
+    async def wait() -> int:
+        return await proc.wait()
+
+    returncode = asyncio.run(wait())
+
+    assert returncode == 7
+    assert log_path.exists()
+    contents = log_path.read_text(encoding="utf-8", errors="replace")
+    assert "stdout-line" in contents
+    assert "stderr-line" in contents
+    # Parent-side handle should be closed after wait() (no second handle
+    # held; opening for write should succeed even on Windows which would
+    # refuse if the file were still locked).
+    log_path.unlink()  # would raise PermissionError if any handle stuck
+
+
+def test_default_runner_without_log_path_uses_devnull(tmp_path: Path) -> None:
+    """No-capture path: ``log_path=None`` (default) preserves the
+    existing DEVNULL behavior — no file is created, subprocess output
+    is dropped."""
+    argv = [sys.executable, "-c", "print('would-go-to-devnull')"]
+    proc = _default_subprocess_runner(argv)
+
+    returncode = asyncio.run(proc.wait())
+    assert returncode == 0
+    # No log file written — nothing in tmp_path.
+    assert not any(tmp_path.iterdir())
