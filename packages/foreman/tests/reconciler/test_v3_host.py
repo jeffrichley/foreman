@@ -123,7 +123,8 @@ def test_dispatch_role_spawns_subprocess_and_returns_pid(tmp_path: Path) -> None
     argv = captured_argv[0]
     # CLI subcommand for planner role is "plan"
     assert "plan" in argv
-    assert "--issue-url" in argv
+    # `foreman plan` takes positional ISSUE_URL — no --issue-url flag.
+    assert "--issue-url" not in argv
     assert "https://github.com/jeffrichley/foreman/issues/143" in argv
     # Planner is not target-ambiguous — no --target should be emitted.
     assert "--target" not in argv
@@ -401,3 +402,141 @@ def test_dispatch_role_fixer_impl_passes_target_argv(tmp_path: Path) -> None:
     assert "https://github.com/jeffrichley/foreman/pull/99" in argv
     assert "--target" in argv
     assert "impl_pr" in argv
+
+
+def test_dispatch_role_planner_uses_positional_issue_url(tmp_path: Path) -> None:
+    """`foreman plan` CLI takes positional ISSUE_URL — no --issue-url flag.
+
+    Regression test for the first autonomous-dogfood failure after PR #113/#114
+    merged: Planner subprocesses exited returncode 2 (Click usage error)
+    because v3_host built argv with --issue-url, which `foreman plan` does
+    not accept.
+    """
+    captured: list[list[str]] = []
+
+    class _FakeProc:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+
+        async def wait(self) -> int:
+            return 0
+
+    def runner(argv: list[str]) -> _FakeProc:
+        captured.append(argv)
+        return _FakeProc(pid=42)
+
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    host = V3GitHubHost(
+        v2_host=_FakeV2Host(),
+        log=log,
+        subprocess_runner=runner,
+    )
+
+    start_id = log.write_action(
+        ticket_id="jeffrichley/foreman#100",
+        project="foreman",
+        rule_name="dispatch_planner",
+        action="dispatch_planner",
+        outcome="running",
+        details={},
+    )
+    host.dispatch_role(
+        role="planner",
+        target=None,
+        owner="jeffrichley",
+        repo="foreman",
+        issue=100,
+        pr_number=None,
+        start_log_id=start_id,
+        project="foreman",
+    )
+
+    assert captured, "runner not called"
+    argv = captured[0]
+    assert "plan" in argv
+    # The bug we're fixing: --issue-url is not a valid flag for `foreman plan`.
+    assert "--issue-url" not in argv
+    # The URL must be present, positional.
+    url = "https://github.com/jeffrichley/foreman/issues/100"
+    assert url in argv
+    # Verify positional: the URL is not immediately preceded by an unknown
+    # option flag (only "plan" subcommand or "--project" value can precede).
+    url_idx = argv.index(url)
+    if url_idx > 0:
+        prev = argv[url_idx - 1]
+        assert prev == "plan" or prev == "--project" or not prev.startswith("--"), (
+            f"URL preceded by flag {prev!r} — must be positional"
+        )
+    # Planner is not target-ambiguous — no --target should be emitted.
+    assert "--target" not in argv
+    # `foreman plan` does not accept --pr-url either.
+    assert "--pr-url" not in argv
+
+
+def test_dispatch_role_worker_uses_positional_issue_url(tmp_path: Path) -> None:
+    """`foreman implement` CLI takes positional ISSUE_URL — no --issue-url flag.
+
+    Same shape bug as the Planner: v3_host built argv with --issue-url, which
+    `foreman implement` does not accept. Worker also opens its own PR, so it
+    must not receive --pr-url either.
+    """
+    captured: list[list[str]] = []
+
+    class _FakeProc:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+
+        async def wait(self) -> int:
+            return 0
+
+    def runner(argv: list[str]) -> _FakeProc:
+        captured.append(argv)
+        return _FakeProc(pid=43)
+
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    host = V3GitHubHost(
+        v2_host=_FakeV2Host(),
+        log=log,
+        subprocess_runner=runner,
+    )
+
+    start_id = log.write_action(
+        ticket_id="jeffrichley/foreman#101",
+        project="foreman",
+        rule_name="dispatch_worker",
+        action="dispatch_worker",
+        outcome="running",
+        details={},
+    )
+    host.dispatch_role(
+        role="worker",
+        target=None,
+        owner="jeffrichley",
+        repo="foreman",
+        issue=101,
+        pr_number=None,
+        start_log_id=start_id,
+        project="foreman",
+    )
+
+    assert captured, "runner not called"
+    argv = captured[0]
+    # CLI subcommand for worker role is "implement"
+    assert "implement" in argv
+    # The bug we're fixing: --issue-url is not a valid flag for `foreman implement`.
+    assert "--issue-url" not in argv
+    # The URL must be present, positional.
+    url = "https://github.com/jeffrichley/foreman/issues/101"
+    assert url in argv
+    url_idx = argv.index(url)
+    if url_idx > 0:
+        prev = argv[url_idx - 1]
+        assert prev == "implement" or prev == "--project" or not prev.startswith("--"), (
+            f"URL preceded by flag {prev!r} — must be positional"
+        )
+    # Worker is not target-ambiguous — no --target should be emitted.
+    assert "--target" not in argv
+    # `foreman implement` does not accept --pr-url either.
+    assert "--pr-url" not in argv
