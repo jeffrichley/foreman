@@ -55,8 +55,14 @@ RUN npm install -g @upstash/context7-mcp
 # the manifest, then `uv pip install -r` it. This avoids needing the
 # source package present in the dep layer (would fail `uv pip install .`).
 # This is pattern (a) from the design's Image build IMPLEMENTATION NOTE.
+#
+# Foreman is a uv workspace: the lockfile + workspace declaration live
+# at the repo ROOT (pyproject.toml + uv.lock), and per-package manifests
+# live under packages/<name>/pyproject.toml. We need ALL THREE for
+# `uv export` to resolve workspace members correctly.
 WORKDIR /tmp/build
-COPY packages/foreman/pyproject.toml packages/foreman/uv.lock ./
+COPY pyproject.toml uv.lock ./
+COPY packages/foreman/pyproject.toml ./packages/foreman/
 RUN uv export --no-hashes --format requirements-txt --no-emit-project > requirements.txt \
     && uv pip install --system --no-cache -r requirements.txt
 
