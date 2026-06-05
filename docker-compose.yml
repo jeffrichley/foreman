@@ -20,25 +20,21 @@ services:
     # See Docker design spec, Architecture section, "PID 1 / signal forwarding."
     init: true
 
-    # Env file (gitignored) holds the App IDs. Marked required:false so
-    # `docker compose config` and the compose-config smoke test can run
-    # without it; production deploys MUST have it (see RUNBOOK).
+    # Env file (gitignored) holds the GitHub App IDs. Required for
+    # production — without it the daemon starts but auth fails at first
+    # GraphQL fetch (no FOREMAN_*_APP_ID env vars). Copy `.env.example`
+    # to `.env` and fill in the App IDs from your GitHub Apps' settings
+    # pages before `docker compose up`.
     env_file:
-      - path: .env
-        required: false
+      - .env
 
-    # Compose secrets — Max credentials + 4 GitHub App pem keys.
+    # Compose secrets — Max credentials + 5 GitHub App pem keys.
     # tmpfs-mounted at /run/secrets/<name>, read-only, never persisted in image.
-    #
-    # NOTE: worker_pem is intentionally absent. The Worker bot's PEM is
-    # not yet set up on the host (~/.foreman/keys/worker.pem missing as of
-    # 2026-06-05). Worker dispatch will fail until a follow-up ticket adds
-    # both the PEM file on host AND a worker_pem entry here. The daemon
-    # otherwise starts and serves Planner/Reviewer/Fixer roles normally.
     secrets:
       - planner_pem
       - reviewer_pem
       - fixer_pem
+      - worker_pem
       - orchestrator_pem
       - claude_credentials
 
@@ -71,6 +67,8 @@ secrets:
     file: ${HOME}/.foreman/keys/reviewer.pem
   fixer_pem:
     file: ${HOME}/.foreman/keys/fixer.pem
+  worker_pem:
+    file: ${HOME}/.foreman/keys/worker.pem
   orchestrator_pem:
     file: ${HOME}/.foreman/keys/orchestrator.pem
   claude_credentials:

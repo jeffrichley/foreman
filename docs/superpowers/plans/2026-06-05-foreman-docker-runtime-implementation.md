@@ -186,11 +186,11 @@ Create `.env.example`:
 # (the 4 PEMs mounted as Compose secrets), not via a PAT.
 
 # GitHub Apps — numeric IDs of the role bots
-FOREMAN_ORCHESTRATOR_APP_ID=3934489
-FOREMAN_PLANNER_APP_ID=3922445
-FOREMAN_REVIEWER_APP_ID=3922454
-FOREMAN_FIXER_APP_ID=3922458
-FOREMAN_WORKER_APP_ID=3922460
+FOREMAN_ORCHESTRATOR_APP_ID=<your-orchestrator-app-id>
+FOREMAN_PLANNER_APP_ID=<your-planner-app-id>
+FOREMAN_REVIEWER_APP_ID=<your-reviewer-app-id>
+FOREMAN_FIXER_APP_ID=<your-fixer-app-id>
+FOREMAN_WORKER_APP_ID=<your-worker-app-id>
 
 # Container-internal paths (compose sets these; rarely need to change)
 FOREMAN_CONFIG_PATH=/etc/foreman/config.toml
