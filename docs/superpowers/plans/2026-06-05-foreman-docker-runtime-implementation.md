@@ -331,9 +331,13 @@ Create `tests/docker/test_entrypoint.sh`:
 
 ```bash
 #!/usr/bin/env bash
-# Host-side smoke for entrypoint.sh's credential copy logic.
-# We run only the credential-copy + banner block; we skip the
-# `exec foreman` line by stubbing $PATH.
+# Host-side smoke for entrypoint.sh's credential-copy logic.
+#
+# We don't run the whole entrypoint here — the trailing `exec foreman
+# daemon v3-start` would fail on the host (no /run/secrets, no real
+# daemon needed for THIS check). Instead we run the credential-copy
+# block (the only thing that mutates real filesystem state) against
+# fake paths and assert the resulting file shape.
 set -euo pipefail
 
 tmp=$(mktemp -d)
@@ -342,31 +346,39 @@ trap 'rm -rf "$tmp"' EXIT
 # Stub the secret file
 echo '{"oauth":"stub-token"}' > "$tmp/secret"
 
-# Run only the cred-copy block by extracting it from entrypoint.sh
-# and sourcing with our env overrides.
-CLAUDE_DIR="$tmp/claude" \
-CLAUDE_SECRET="$tmp/secret" \
-IMAGE_SHA=stub \
-ALLOW_DIRTY=false \
-FOREMAN_CONFIG_PATH=/stub \
-FOREMAN_LOG_DIR=/stub \
+# Run the cred-copy block in a subshell with stub paths. The inner
+# script mirrors lines 30-37 of docker/entrypoint.sh.
 bash -c '
     set -euo pipefail
     CLAUDE_DIR="$1"
     CLAUDE_SECRET="$2"
     mkdir -p "$CLAUDE_DIR"
     install -m 0600 "$CLAUDE_SECRET" "$CLAUDE_DIR/.credentials.json"
-' _ "$CLAUDE_DIR" "$CLAUDE_SECRET"
+' _ "$tmp/claude" "$tmp/secret"
 
 # Verify
-test -f "$tmp/claude/.credentials.json" || { echo FAIL: credential file missing; exit 1; }
-perms=$(stat -c '%a' "$tmp/claude/.credentials.json" 2>/dev/null || stat -f '%Lp' "$tmp/claude/.credentials.json")
-[[ "$perms" == "600" ]] || { echo "FAIL: perms=$perms (expected 600)"; exit 1; }
+test -f "$tmp/claude/.credentials.json" || { echo "FAIL: credential file missing"; exit 1; }
 contents=$(cat "$tmp/claude/.credentials.json")
 [[ "$contents" == '{"oauth":"stub-token"}' ]] || { echo "FAIL: contents wrong"; exit 1; }
 
-echo "PASS: entrypoint credential copy smoke"
+# Perms check only enforced on Linux. Windows/MSYS does not preserve
+# POSIX mode bits on NTFS so `install -m 0600` still reports 644 via
+# stat. The actual container runtime IS Linux, where the install -m
+# 0600 enforces correctly — verified again at Task 14 (container start
+# smoke) by docker exec stat.
+case "$(uname -s)" in
+    Linux*)
+        perms=$(stat -c '%a' "$tmp/claude/.credentials.json")
+        [[ "$perms" == "600" ]] || { echo "FAIL: perms=$perms (expected 600)"; exit 1; }
+        echo "PASS: entrypoint credential copy smoke (perms verified)"
+        ;;
+    *)
+        echo "PASS: entrypoint credential copy smoke (perms check skipped on $(uname -s))"
+        ;;
+esac
 ```
+
+**Implementation note (caught during execution):** the plan's original test passed `"$CLAUDE_DIR"` / `"$CLAUDE_SECRET"` as positional args to `bash -c`, but those variables existed only as the env-var prefix for the bash-c subshell — not in the outer shell. `set -u` then tripped on the outer shell's unbound-variable check. Fixed by passing `"$tmp/claude"` / `"$tmp/secret"` (which ARE set in the outer shell) instead. Also added the Linux-only perms guard for the same reason: MSYS on Windows doesn't preserve `install -m 0600` mode bits, so the host smoke would falsely fail on Wren's box. Real container-side enforcement is verified at Task 14 instead.
 
 - [ ] **Step 4: Run the smoke test**
 
