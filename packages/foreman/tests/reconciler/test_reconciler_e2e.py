@@ -328,3 +328,240 @@ async def test_tick_without_sentinel_path_configured_works(tmp_path: Path) -> No
 
     await reconciler.tick()
     assert not reconciler._stop_event.is_set()
+
+
+# --- Sentinel-file config reload (foreman#100) ---
+#
+# The reconciler polls a configured reload sentinel file at the TOP of
+# each tick (before the per-project loop). When present, it consumes
+# the sentinel, calls the reload callback to obtain a fresh project
+# tuple, diffs against current, and updates ``self.projects``. Newly-
+# added projects are reconciled in the SAME tick. The callback raising
+# (e.g., TOML parse error during operator edit) is non-fatal — the
+# daemon keeps running with the prior project set and the operator's
+# next reload command is the canonical retry.
+
+
+@pytest.mark.asyncio
+async def test_reconciler_reload_adds_project_on_next_tick(tmp_path: Path) -> None:
+    """A reload that adds a project: ``self.projects`` carries the
+    addition AND the failure counter is initialized for it AND the
+    sentinel is consumed."""
+    sentinel = tmp_path / "reload-requested"
+    sentinel.write_text("requested by test", encoding="utf-8")
+
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    gh = _StubGHClient(_gh_with([], []))
+    host = _StubHost()
+
+    initial = (
+        ReconcilerProject(name="foreman", owner="jeffrichley", repo="foreman"),
+    )
+    expanded = (
+        ReconcilerProject(name="foreman", owner="jeffrichley", repo="foreman"),
+        ReconcilerProject(name="voice", owner="jeffrichley", repo="voice"),
+    )
+
+    def _callback() -> tuple[ReconcilerProject, ...]:
+        return expanded
+
+    reconciler = Reconciler(
+        projects=initial,
+        log=log,
+        gh=gh,
+        host=host,
+        dry_run=False,
+        reload_callback=_callback,
+        reload_sentinel_path=sentinel,
+    )
+
+    assert sentinel.exists()
+    await reconciler.tick()
+
+    assert not sentinel.exists(), "sentinel must be consumed after reload"
+    names = sorted(p.name for p in reconciler.projects)
+    assert names == ["foreman", "voice"]
+    assert "voice" in reconciler._consecutive_failures
+    assert reconciler._consecutive_failures["voice"] == 0
+    assert "foreman" in reconciler._consecutive_failures
+
+
+@pytest.mark.asyncio
+async def test_reconciler_reload_removes_project_and_cleans_failures(
+    tmp_path: Path,
+) -> None:
+    """A reload that removes a project: the removed project is dropped
+    from ``self.projects`` AND its failure counter is deleted."""
+    sentinel = tmp_path / "reload-requested"
+    sentinel.write_text("requested by test", encoding="utf-8")
+
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    gh = _StubGHClient(_gh_with([], []))
+    host = _StubHost()
+
+    initial = (
+        ReconcilerProject(name="surviving", owner="o", repo="surviving"),
+        ReconcilerProject(name="going-away", owner="o", repo="going-away"),
+    )
+
+    def _callback() -> tuple[ReconcilerProject, ...]:
+        return (ReconcilerProject(name="surviving", owner="o", repo="surviving"),)
+
+    reconciler = Reconciler(
+        projects=initial,
+        log=log,
+        gh=gh,
+        host=host,
+        dry_run=False,
+        reload_callback=_callback,
+        reload_sentinel_path=sentinel,
+    )
+    # Seed a failure counter on the project that's about to be removed —
+    # the reload must clean it up to avoid leaking stale state.
+    reconciler._consecutive_failures["going-away"] = 2
+
+    await reconciler.tick()
+
+    names = [p.name for p in reconciler.projects]
+    assert names == ["surviving"]
+    assert "going-away" not in reconciler._consecutive_failures
+    assert "surviving" in reconciler._consecutive_failures
+
+
+@pytest.mark.asyncio
+async def test_reconciler_reload_idempotent_when_unchanged_logs_info(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A reload that returns the same project tuple: logs INFO
+    "config reload: no changes" AND writes no exec_log row."""
+    import logging as _logging
+
+    sentinel = tmp_path / "reload-requested"
+    sentinel.write_text("requested by test", encoding="utf-8")
+
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    gh = _StubGHClient(_gh_with([], []))
+    host = _StubHost()
+
+    initial = (
+        ReconcilerProject(name="foreman", owner="jeffrichley", repo="foreman"),
+    )
+
+    def _callback() -> tuple[ReconcilerProject, ...]:
+        # Same name, owner, repo, and resolved flags — no change.
+        return (
+            ReconcilerProject(name="foreman", owner="jeffrichley", repo="foreman"),
+        )
+
+    reconciler = Reconciler(
+        projects=initial,
+        log=log,
+        gh=gh,
+        host=host,
+        dry_run=False,
+        reload_callback=_callback,
+        reload_sentinel_path=sentinel,
+    )
+
+    with caplog.at_level(_logging.INFO, logger="foreman.reconciler.daemon"):
+        await reconciler.tick()
+
+    assert any(
+        "config reload: no changes" in record.getMessage() for record in caplog.records
+    )
+    # No exec_log row should have been written for the no-change case.
+    import sqlite3
+
+    with sqlite3.connect(tmp_path / "log.sqlite") as conn:
+        rows = conn.execute(
+            "SELECT COUNT(*) FROM execution_log WHERE action='config_reload'"
+        ).fetchone()
+    assert rows[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_reconciler_reload_failure_keeps_running_and_logs(
+    tmp_path: Path,
+) -> None:
+    """A reload callback that raises (e.g., TOML parse error) must NOT
+    crash the daemon. The sentinel is consumed, an exec_log row is
+    written with outcome='failed', and ``self.projects`` is unchanged."""
+    sentinel = tmp_path / "reload-requested"
+    sentinel.write_text("requested by test", encoding="utf-8")
+
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    gh = _StubGHClient(_gh_with([], []))
+    host = _StubHost()
+
+    initial = (
+        ReconcilerProject(name="foreman", owner="jeffrichley", repo="foreman"),
+    )
+
+    def _broken_callback() -> tuple[ReconcilerProject, ...]:
+        raise ValueError("config.toml parse error: unexpected token at line 12")
+
+    reconciler = Reconciler(
+        projects=initial,
+        log=log,
+        gh=gh,
+        host=host,
+        dry_run=False,
+        reload_callback=_broken_callback,
+        reload_sentinel_path=sentinel,
+    )
+
+    await reconciler.tick()
+
+    # Sentinel must be consumed regardless of success/failure.
+    assert not sentinel.exists()
+    # Projects unchanged.
+    assert reconciler.projects == initial
+    # Daemon NOT stopped.
+    assert not reconciler._stop_event.is_set()
+    # exec_log row written with outcome='failed' and the error details.
+    import sqlite3
+
+    with sqlite3.connect(tmp_path / "log.sqlite") as conn:
+        rows = conn.execute(
+            "SELECT outcome, details FROM execution_log WHERE action='config_reload'"
+        ).fetchall()
+    assert len(rows) == 1
+    outcome, details_json = rows[0]
+    assert outcome == "failed"
+    import json as _json
+
+    details = _json.loads(details_json)
+    assert details["error_class"] == "ValueError"
+    assert "parse error" in details["error_message"]
+
+
+@pytest.mark.asyncio
+async def test_reconciler_reload_inert_when_no_callback(tmp_path: Path) -> None:
+    """When ``reload_callback=None`` (test default), the reload mechanism
+    is inert: ``tick()`` runs cleanly and no AttributeError surfaces
+    even if a sentinel-shaped file exists on disk where the path WOULD
+    point. Construct without either kwarg so the path-only-no-callback
+    case is also exercised — the present-check short-circuits on
+    ``self._reload_callback is None``."""
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    gh = _StubGHClient(_gh_with([], []))
+    host = _StubHost()
+
+    reconciler = Reconciler(
+        projects=(
+            ReconcilerProject(name="foreman", owner="jeffrichley", repo="foreman"),
+        ),
+        log=log,
+        gh=gh,
+        host=host,
+        dry_run=False,
+        # reload_callback + reload_sentinel_path both omitted → inert.
+    )
+
+    await reconciler.tick()  # Must not raise
+    assert not reconciler._stop_event.is_set()

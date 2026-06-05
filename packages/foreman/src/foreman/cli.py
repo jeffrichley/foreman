@@ -429,6 +429,59 @@ def _resolve_shutdown_sentinel_path(config: Config | None) -> Path:
     return Path(config.reconciler.shutdown_sentinel_path).expanduser()
 
 
+def _resolve_reload_sentinel_path(config: Config | None) -> Path:
+    """Return the path ``daemon reload`` writes (and the reconciler polls).
+
+    ``FOREMAN_RELOAD_SENTINEL_PATH`` env var wins over config so tests
+    + operators can redirect without editing the config file. When
+    ``config`` is ``None`` (e.g., ``daemon reload`` called on a host
+    without a config file), falls back to the hardcoded default so the
+    sentinel write still succeeds. An empty-string env value is
+    treated as unset.
+    """
+    env_override = os.environ.get("FOREMAN_RELOAD_SENTINEL_PATH") or None
+    if env_override is not None:
+        return Path(env_override).expanduser()
+    if config is None:
+        return Path("~/.foreman/reload-requested").expanduser()
+    return Path(config.reconciler.reload_sentinel_path).expanduser()
+
+
+def _build_reconciler_projects(config: Config) -> tuple[Any, ...]:
+    """Build the ``ReconcilerProject`` tuple from ``config.projects``.
+
+    Splits each ``ProjectConfig.repo`` ("owner/name") into owner + repo and
+    resolves the effective auto-merge flags (global default + per-project
+    override). Both ``daemon_v3_start`` and the reload-callback closure go
+    through this helper so the project-resolution logic cannot drift across
+    the startup path and the reload path.
+
+    Raises ``click.ClickException`` when any project's ``repo`` is malformed
+    (missing the ``/`` separator), surfacing the bad config to the operator
+    rather than crashing the daemon mid-tick.
+    """
+    from foreman.reconciler import ReconcilerProject
+
+    projects_list: list[ReconcilerProject] = []
+    for proj_name, proj_cfg in config.projects.items():
+        if "/" not in proj_cfg.repo:
+            raise click.ClickException(
+                f"project {proj_name!r} has malformed repo {proj_cfg.repo!r} "
+                "(expected 'owner/name')"
+            )
+        owner, repo = proj_cfg.repo.split("/", 1)
+        projects_list.append(
+            ReconcilerProject(
+                name=proj_name,
+                owner=owner,
+                repo=repo,
+                auto_merge_spec=config.reconciler.effective_auto_merge_spec(proj_cfg),
+                auto_merge_impl=config.reconciler.effective_auto_merge_impl(proj_cfg),
+            )
+        )
+    return tuple(projects_list)
+
+
 def _read_lock_file_pid(lock_path: Path) -> int | None:
     """Best-effort: parse the PID from a daemon lock file.
 
@@ -506,7 +559,7 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
 
     from foreman.daemon_lock import DaemonLock, LockAcquisitionError
     from foreman.logging_setup import configure_daemon_logging
-    from foreman.reconciler import ExecutionLog, Reconciler, ReconcilerProject
+    from foreman.reconciler import ExecutionLog, Reconciler
 
     # FOREMAN_CONFIG_PATH (v3) wins; falls back to FOREMAN_CONFIG (v2)
     # for parity with the v2 daemon's env-var convention.
@@ -548,6 +601,27 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
                     # is what we wanted.
                     pass
 
+            # Clean up a stale reload sentinel from a prior `daemon reload`.
+            # Same rationale as the shutdown-sentinel cleanup above: a sentinel
+            # left behind by a no-op reload (or by a prior edge case) would be
+            # polled on the very first tick and trigger a config_reload of an
+            # already-fresh config. Reloading a fresh config is a harmless
+            # no-op, but the audit-log row would confuse anyone tracing daemon
+            # activity. Cleanup runs INSIDE the DaemonLock block so no second
+            # `daemon reload` can race the unlink.
+            reload_sentinel_path = _resolve_reload_sentinel_path(config)
+            if reload_sentinel_path.exists():
+                logger = logging.getLogger("foreman")
+                logger.warning(
+                    "removing stale reload sentinel from prior daemon reload: %s",
+                    reload_sentinel_path,
+                )
+                try:
+                    reload_sentinel_path.unlink()
+                except FileNotFoundError:
+                    # Race with another `reload` is harmless — file's gone.
+                    pass
+
             db_path = Path(os.path.expanduser(config.reconciler.db_path))
             log = ExecutionLog(db_path)
             log.init()
@@ -558,33 +632,11 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
                     f"recovered {recovered} orphaned running row(s) from prior daemon"
                 )
 
-            # config.projects is dict[name, ProjectConfig]; ProjectConfig.repo
-            # is "owner/name" form. Split into the ReconcilerProject shape.
-            # Resolve effective auto-merge flags here (global default +
-            # per-project override) so the daemon loop sees a single
-            # authoritative value per project without re-querying config.
-            projects_list: list[ReconcilerProject] = []
-            for proj_name, proj_cfg in config.projects.items():
-                if "/" not in proj_cfg.repo:
-                    raise click.ClickException(
-                        f"project {proj_name!r} has malformed repo {proj_cfg.repo!r} "
-                        "(expected 'owner/name')"
-                    )
-                owner, repo = proj_cfg.repo.split("/", 1)
-                projects_list.append(
-                    ReconcilerProject(
-                        name=proj_name,
-                        owner=owner,
-                        repo=repo,
-                        auto_merge_spec=config.reconciler.effective_auto_merge_spec(
-                            proj_cfg
-                        ),
-                        auto_merge_impl=config.reconciler.effective_auto_merge_impl(
-                            proj_cfg
-                        ),
-                    )
-                )
-            projects = tuple(projects_list)
+            # Project tuple is resolved by the module-level helper so the
+            # reload-callback path (below) goes through the same code, and
+            # malformed ``owner/name`` repos raise the same ClickException
+            # whether they're surfaced at startup or on a later reload.
+            projects = _build_reconciler_projects(config)
 
             if max_ticks == 0:
                 # Smoke-test wiring without spinning the loop.
@@ -599,6 +651,18 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
                 return
             gh, host = _build_v3_gh_and_host(config, log)
 
+            # Reload callback: when ``foreman daemon reload`` writes the
+            # sentinel, the reconciler invokes this closure at the top of
+            # its next tick to obtain a fresh project tuple. The closure
+            # re-reads ``cfg_path`` from disk every call (no caching) so
+            # operator edits to ``~/.foreman/config.toml`` show up the
+            # next time reload is requested. Bubbling exceptions are
+            # caught by the reconciler's failure-tolerance contract — see
+            # ``Reconciler._apply_reload``.
+            def _reload_callback() -> tuple[Any, ...]:
+                fresh_config = load_config(cfg_path)
+                return _build_reconciler_projects(fresh_config)
+
             reconciler = Reconciler(
                 projects=projects,
                 log=log,
@@ -608,6 +672,8 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
                 alert_after_n_failures=config.reconciler.alert_after_n_failures,
                 poll_interval_seconds=config.reconciler.poll_interval_seconds,
                 shutdown_sentinel_path=config.reconciler.shutdown_sentinel_path,
+                reload_callback=_reload_callback,
+                reload_sentinel_path=config.reconciler.reload_sentinel_path,
             )
 
             async def _shutdown_watcher(
@@ -838,6 +904,75 @@ def daemon_stop() -> None:
         f"It may still be running; investigate via the discovery "
         f"command before force-killing."
     )
+
+
+@daemon.command("reload")
+def daemon_reload() -> None:
+    """Signal a running v3 daemon to re-read its config and update the
+    project registry without restarting.
+
+    Writes a sentinel file at ``reconciler.reload_sentinel_path`` (default
+    ``~/.foreman/reload-requested``). The v3 reconciler polls the file at
+    the top of each tick — when present, it re-reads
+    ``~/.foreman/config.toml``, diffs the project registry, and starts
+    reconciling newly-added projects + stops reconciling removed ones.
+    In-flight role subprocesses for removed projects complete naturally.
+
+    Latency: up to ``reconciler.poll_interval_seconds`` (default 60s).
+    Sentinel-only on every platform — no SIGHUP — to keep the latency
+    profile symmetric and the failure mode auditable (one channel).
+
+    Gates on the lock file BEFORE writing the sentinel: if no daemon is
+    running, the sentinel would silently fire on the next
+    ``daemon v3-start``, which would log a confusing reload-of-an-already-
+    fresh-config row. Same defense-in-depth pattern as ``daemon stop``.
+    """
+    try:
+        config: Config | None = _load_config_from_env()
+    except (FileNotFoundError, OSError):
+        config = None
+
+    lock_path = _resolve_lock_path(config)
+
+    # Check the lock-file gate BEFORE writing the sentinel. If no daemon
+    # is running, leaving a sentinel on disk would silently fire on the
+    # next `daemon v3-start` — the reconciler polls the sentinel on its
+    # first tick and would log a config_reload row for a fresh config.
+    if not lock_path.exists():
+        discover = (
+            "tasklist | findstr foreman"
+            if sys.platform == "win32"
+            else "ps aux | grep foreman"
+        )
+        click.echo(
+            f"No daemon lock file at {lock_path}. Either the daemon "
+            f"was never started, or the lock file was removed. To find "
+            f"a stray process: `{discover}`."
+        )
+        return
+
+    pid = _read_lock_file_pid(lock_path)
+    if pid is None:
+        click.echo(
+            f"Lock file at {lock_path} has unreadable content. "
+            f"Cannot identify the daemon PID; remove the file manually "
+            f"if you're certain no daemon is running."
+        )
+        return
+
+    # Lock file exists AND we have a PID — there's a daemon to receive
+    # the sentinel. Write it now.
+    sentinel_path = _resolve_reload_sentinel_path(config)
+    try:
+        sentinel_path.parent.mkdir(parents=True, exist_ok=True)
+        sentinel_path.write_text(
+            f"requested by foreman daemon reload at {time.time()}\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        click.echo(f"warning: could not write reload sentinel ({exc})", err=True)
+        return
+    click.echo(f"reload requested via sentinel: {sentinel_path}")
 
 
 @daemon.command("status")

@@ -629,6 +629,31 @@ def test_shutdown_sentinel_path_override(tmp_path: Path) -> None:
     assert cfg.reconciler.shutdown_sentinel_path == custom_path
 
 
+def test_reconciler_reload_sentinel_path_default() -> None:
+    """The reload sentinel defaults to ``~/.foreman/reload-requested``.
+
+    Operators expect the v3 reconciler to look at that path without any
+    extra config; ``daemon reload`` writes there by default. Drifting
+    this default silently breaks the reload contract — the daemon would
+    wait forever and the operator would see no config-reload row.
+    """
+    cfg = ReconcilerConfig()
+    assert cfg.reload_sentinel_path == "~/.foreman/reload-requested"
+
+
+def test_reconciler_reload_sentinel_path_override(tmp_path: Path) -> None:
+    """The reload sentinel path is overridable via TOML for non-standard
+    installs (multi-tenant boxes, per-instance daemons sharing the same
+    home dir)."""
+    config_file = tmp_path / "config.toml"
+    custom_path = (tmp_path / "custom-reload").as_posix()
+    config_file.write_text(
+        f'[reconciler]\nreload_sentinel_path = "{custom_path}"\n'
+    )
+    cfg = load_config(config_file)
+    assert cfg.reconciler.reload_sentinel_path == custom_path
+
+
 def test_global_auto_merge_defaults() -> None:
     """Global defaults: spec auto-merge on, impl auto-merge off.
 

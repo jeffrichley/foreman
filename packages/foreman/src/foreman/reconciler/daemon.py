@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -124,6 +125,8 @@ class Reconciler:
         alert_after_n_failures: int = 3,
         poll_interval_seconds: int = 60,
         shutdown_sentinel_path: Path | str | None = None,
+        reload_callback: Callable[[], tuple[ReconcilerProject, ...]] | None = None,
+        reload_sentinel_path: Path | str | None = None,
     ) -> None:
         self.projects = projects
         self.log = log
@@ -143,9 +146,30 @@ class Reconciler:
             if shutdown_sentinel_path is not None
             else None
         )
+        # Sentinel-file-based config-reload signal. ``foreman daemon reload``
+        # writes this file; we poll it at the TOP of each tick (before the
+        # per-project loop) so a newly-added project is reconciled in the
+        # SAME tick. ``None`` callback disables the mechanism — tests that
+        # don't exercise reload omit both kwargs.
+        self._reload_callback = reload_callback
+        self._reload_sentinel_path: Path | None = (
+            Path(reload_sentinel_path).expanduser()
+            if reload_sentinel_path is not None
+            else None
+        )
 
     async def tick(self) -> None:
         """Run one reconciliation pass over every project."""
+        # Config-reload sentinel runs BEFORE the project loop so an
+        # operator's ``foreman daemon reload`` applied moments before
+        # this tick lets the newly-added project be reconciled in the
+        # SAME tick rather than waiting a full poll cycle. Shutdown
+        # sentinel still runs AFTER the loop (graceful: in-flight tick
+        # completes first).
+        if self._reload_sentinel_present():
+            self._consume_reload_sentinel()
+            self._apply_reload()
+
         for project in self.projects:
             try:
                 snapshot = fetch_project_state(
@@ -227,6 +251,127 @@ class Reconciler:
                 "failed to delete shutdown sentinel at %s; continuing shutdown",
                 self._shutdown_sentinel_path,
             )
+
+    def _reload_sentinel_present(self) -> bool:
+        """Return True iff a configured reload sentinel file exists on disk.
+
+        Disabled (returns False) when ``reload_callback`` was not provided
+        OR ``reload_sentinel_path`` is None — the reload mechanism only
+        activates when both are wired by the CLI.
+        """
+        if self._reload_callback is None:
+            return False
+        if self._reload_sentinel_path is None:
+            return False
+        try:
+            return self._reload_sentinel_path.exists()
+        except OSError:
+            # Filesystem hiccup — don't crash the tick over a missing volume.
+            return False
+
+    def _consume_reload_sentinel(self) -> None:
+        """Delete the reload sentinel after detection.
+
+        Always called regardless of whether the reload itself succeeds —
+        a broken-config reload is the operator's bug, and we don't want a
+        retry loop on every tick. ``FileNotFoundError`` is harmless (the
+        file may have been removed externally between presence-check and
+        unlink). Other errors are logged but don't block the apply step.
+        """
+        if self._reload_sentinel_path is None:
+            return
+        try:
+            self._reload_sentinel_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.exception(
+                "failed to delete reload sentinel at %s; continuing reload",
+                self._reload_sentinel_path,
+            )
+
+    def _apply_reload(self) -> None:
+        """Re-read the project tuple from the callback and diff against current.
+
+        Idempotent: when the callback returns a tuple identical to
+        ``self.projects`` (same names, same resolved auto-merge flags,
+        same owner/repo), logs INFO and returns without writing an
+        exec_log row. Otherwise installs the new tuple, initializes
+        failure counters for added projects, drops counters for removed
+        projects, logs INFO with the diff, and writes one
+        ``config_reload`` exec_log row.
+
+        Failure-tolerant: if the callback raises (e.g., TOML parse error
+        from the operator mid-editing the file, or pydantic validation
+        error from a missing required field), logs an ERROR, writes one
+        ``config_reload`` row with outcome ``failed``, and leaves
+        ``self.projects`` + ``self._consecutive_failures`` unchanged. The
+        daemon keeps running. The sentinel is consumed regardless (see
+        ``_consume_reload_sentinel``) so the operator's next reload
+        attempt is the canonical retry.
+        """
+        # Type narrowing: we only reach here when both the callback and
+        # the sentinel path were provided (see ``_reload_sentinel_present``).
+        assert self._reload_callback is not None
+
+        try:
+            new_projects = self._reload_callback()
+        except Exception as exc:
+            logger.error(
+                "config reload failed: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            self.log.write_action(
+                ticket_id="daemon:reload",
+                project="",
+                rule_name=None,
+                action="config_reload",
+                outcome="failed",
+                details={
+                    "error_class": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+            )
+            return
+
+        # Compare by name — auto_merge flags may have been edited on a
+        # surviving project without renaming it.
+        current_by_name = {p.name: p for p in self.projects}
+        new_by_name = {p.name: p for p in new_projects}
+        added = sorted(new_by_name.keys() - current_by_name.keys())
+        removed = sorted(current_by_name.keys() - new_by_name.keys())
+
+        # No-change check: every surviving project's resolved fields
+        # must also match (auto_merge_*, owner, repo). If any field
+        # changed on a surviving project, treat as a change.
+        survivors_unchanged = all(
+            new_by_name[name] == current_by_name[name]
+            for name in new_by_name.keys() & current_by_name.keys()
+        )
+        if not added and not removed and survivors_unchanged:
+            logger.info("config reload: no changes")
+            return
+
+        self.projects = tuple(new_projects)
+        for name in added:
+            self._consecutive_failures[name] = 0
+        for name in removed:
+            self._consecutive_failures.pop(name, None)
+        logger.info(
+            "config reload: %d added, %d removed",
+            len(added),
+            len(removed),
+            extra={"added": added, "removed": removed},
+        )
+        self.log.write_action(
+            ticket_id="daemon:reload",
+            project="",
+            rule_name=None,
+            action="config_reload",
+            outcome="executed",
+            details={"added": added, "removed": removed},
+        )
 
     def _reconcile_project(
         self,

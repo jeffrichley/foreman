@@ -1356,6 +1356,151 @@ def test_resolve_shutdown_sentinel_path_falls_back_to_default_without_config(
     )
 
 
+# --- daemon reload (foreman#100): sentinel-only IPC ---
+
+
+def test_daemon_reload_writes_sentinel_when_lock_present(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """daemon_reload writes the reload sentinel when a daemon is running.
+
+    Cross-platform contract: when the lock file exists with a parseable
+    PID, the sentinel write happens unconditionally — the v3 reconciler
+    polls the file at the top of its next tick.
+    """
+    sentinel_path = tmp_path / "reload-requested"
+    lock_path = tmp_path / "d.lock"
+    lock_path.write_text(str(os.getpid()))
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[admin]\ngithub_token_env = "X"\n'
+        f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
+        f'[reconciler]\nreload_sentinel_path = "{sentinel_path.as_posix()}"\n'
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+    monkeypatch.setenv("FOREMAN_LOCK_PATH", str(lock_path))
+    monkeypatch.setenv("FOREMAN_RELOAD_SENTINEL_PATH", str(sentinel_path))
+    # Defensive: ensure the shutdown-sentinel default is also redirected
+    # so an accidental write doesn't pollute ~/.foreman/.
+    monkeypatch.setenv(
+        "FOREMAN_SHUTDOWN_SENTINEL_PATH", str(tmp_path / "shutdown-requested")
+    )
+
+    result = CliRunner().invoke(cli, ["daemon", "reload"])
+
+    assert result.exit_code == 0, result.output
+    assert sentinel_path.exists(), "sentinel file must be written by daemon_reload"
+    assert "requested by foreman daemon reload" in sentinel_path.read_text(
+        encoding="utf-8"
+    )
+    assert "reload requested via sentinel" in result.output
+
+
+def test_daemon_reload_refuses_when_no_lock_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """daemon_reload must NOT leave a sentinel on disk when there's no
+    daemon to receive it. A stale sentinel would be polled by the
+    next `daemon v3-start`'s first tick and trigger a confusing
+    config_reload audit row for an already-fresh config — silent
+    failure mode that's hard to diagnose."""
+    sentinel_path = tmp_path / "reload-requested"
+    lock_path = tmp_path / "missing.lock"  # never created
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[admin]\ngithub_token_env = "X"\n'
+        f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
+        f'[reconciler]\nreload_sentinel_path = "{sentinel_path.as_posix()}"\n'
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+    monkeypatch.setenv("FOREMAN_LOCK_PATH", str(lock_path))
+    monkeypatch.setenv("FOREMAN_RELOAD_SENTINEL_PATH", str(sentinel_path))
+    monkeypatch.setenv(
+        "FOREMAN_SHUTDOWN_SENTINEL_PATH", str(tmp_path / "shutdown-requested")
+    )
+
+    result = CliRunner().invoke(cli, ["daemon", "reload"])
+
+    assert result.exit_code == 0, result.output
+    assert not sentinel_path.exists(), (
+        "sentinel must NOT be written when no daemon is running — "
+        "would fire on the next daemon start"
+    )
+    # The no-daemon path must echo the resolved lock path so the operator
+    # knows where to look.
+    assert "No daemon lock file" in result.output
+    assert str(lock_path) in result.output
+
+
+def test_daemon_reload_refuses_when_lock_pid_unreadable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When the lock file exists but its content is unparseable,
+    `reload` reports clearly without writing the sentinel."""
+    sentinel_path = tmp_path / "reload-requested"
+    lock_path = tmp_path / "d.lock"
+    lock_path.write_text("not a pid")
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[admin]\ngithub_token_env = "X"\n'
+        f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
+        f'[reconciler]\nreload_sentinel_path = "{sentinel_path.as_posix()}"\n'
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+    monkeypatch.setenv("FOREMAN_LOCK_PATH", str(lock_path))
+    monkeypatch.setenv("FOREMAN_RELOAD_SENTINEL_PATH", str(sentinel_path))
+    monkeypatch.setenv(
+        "FOREMAN_SHUTDOWN_SENTINEL_PATH", str(tmp_path / "shutdown-requested")
+    )
+
+    result = CliRunner().invoke(cli, ["daemon", "reload"])
+
+    assert result.exit_code == 0, result.output
+    assert not sentinel_path.exists(), (
+        "sentinel must NOT be written when the lock PID is unparseable"
+    )
+    assert "unreadable" in result.output.lower()
+    assert str(lock_path) in result.output
+
+
+def test_resolve_reload_sentinel_path_honors_env_override(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """FOREMAN_RELOAD_SENTINEL_PATH overrides config + the hardcoded
+    default, mirroring FOREMAN_SHUTDOWN_SENTINEL_PATH's resolution order
+    so tests + operators can redirect without editing the config file."""
+    from foreman.cli import _resolve_reload_sentinel_path
+    from foreman.config import ReconcilerConfig
+
+    env_sentinel = tmp_path / "env.sentinel"
+    config_sentinel = tmp_path / "config.sentinel"
+
+    cfg = type(
+        "FakeConfig",
+        (),
+        {"reconciler": ReconcilerConfig(reload_sentinel_path=str(config_sentinel))},
+    )()
+    monkeypatch.setenv("FOREMAN_RELOAD_SENTINEL_PATH", str(env_sentinel))
+
+    assert _resolve_reload_sentinel_path(cfg) == env_sentinel
+
+
+def test_resolve_reload_sentinel_path_falls_back_to_default_without_config(
+    monkeypatch,
+) -> None:
+    from foreman.cli import _resolve_reload_sentinel_path
+
+    monkeypatch.delenv("FOREMAN_RELOAD_SENTINEL_PATH", raising=False)
+
+    assert (
+        _resolve_reload_sentinel_path(None)
+        == Path("~/.foreman/reload-requested").expanduser()
+    )
+
+
 def test_daemon_status_reports_running_when_lock_pid_alive(
     tmp_path: Path, monkeypatch
 ) -> None:

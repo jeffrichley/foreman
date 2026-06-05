@@ -145,6 +145,20 @@ class ReconcilerConfig(BaseModel):
             "so the SIGTERM-handler path can't run."
         ),
     )
+    reload_sentinel_path: str = Field(
+        default="~/.foreman/reload-requested",
+        description=(
+            "Cross-platform config-reload signal. ``foreman daemon reload`` "
+            "writes this file; the reconciler polls it at the TOP of each "
+            "tick and re-reads ``~/.foreman/config.toml`` when present "
+            "(deleting the file on detection). Newly-added projects begin "
+            "reconciling on the same tick; removed projects stop emitting "
+            "actions while any in-flight role subprocesses complete naturally. "
+            "Sentinel-only by design (no SIGHUP on POSIX) so the latency "
+            "profile is symmetric across platforms — operators see up to "
+            "``poll_interval_seconds`` of latency before the reload lands."
+        ),
+    )
     auto_merge_spec: bool = Field(
         default=True,
         description=(
