@@ -178,7 +178,15 @@ class V3GitHubHost:
             argv.extend([pr_url, "--project", project])
             if target is not None:
                 argv.extend(["--target", target])
-        else:
+        elif role in ("planner", "worker"):
+            # `foreman plan` and `foreman implement` take positional ISSUE_URL.
+            # They do not accept --pr-url; both roles OPEN the PR rather than
+            # consume an existing one. Don't pass --target either — only the
+            # target-ambiguous roles (reviewer, fixer) use it.
+            issue_url = f"https://github.com/{owner}/{repo}/issues/{issue}"
+            argv.extend([issue_url, "--project", project])
+        elif role == "fixer":
+            # `foreman fix` uses --issue-url + (optional) --pr-url + --target.
             issue_url = f"https://github.com/{owner}/{repo}/issues/{issue}"
             argv.extend(["--issue-url", issue_url, "--project", project])
             if pr_number is not None:
@@ -186,6 +194,13 @@ class V3GitHubHost:
                 argv.extend(["--pr-url", pr_url])
             if target is not None:
                 argv.extend(["--target", target])
+        else:
+            # Defense-in-depth: the _ROLE_TO_SUBCOMMAND lookup above already
+            # raises for unknown roles, but if a future role is added to the
+            # map without a corresponding argv branch here, fail loudly rather
+            # than spawn a malformed subprocess.
+            self._dispatch_capacity.release()
+            raise ValueError(f"unknown role for dispatch: {role!r}")
 
         # Wrap runner + task creation in try/except so the capacity slot is
         # released on any spawn-time failure (uv missing → FileNotFoundError,
