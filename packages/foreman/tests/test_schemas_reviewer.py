@@ -92,6 +92,60 @@ def test_reviewer_output_rejects_bad_confidence() -> None:
         ReviewerOutput.model_validate(bad)
 
 
+def test_reviewer_output_rejects_minor_finding() -> None:
+    """The model_validator enforces the prompt contract: minor
+    observations belong in review_comment prose, not in structured
+    findings.
+    """
+    data = {
+        "outcome": "needs_fix",
+        "review_comment": "needs_fix",
+        "findings": [
+            {**_minimal_finding_dict(), "severity": "minor"},
+        ],
+    }
+    with pytest.raises(ValidationError, match="minor"):
+        ReviewerOutput.model_validate(data)
+
+
+def test_reviewer_output_rejects_clean_with_findings() -> None:
+    """outcome=clean with non-empty findings is a self-contradiction
+    the schema rejects — clean means no structured findings."""
+    data = {
+        "outcome": "clean",
+        "review_comment": "clean",
+        "findings": [_minimal_finding_dict()],
+    }
+    with pytest.raises(ValidationError, match="clean"):
+        ReviewerOutput.model_validate(data)
+
+
+def test_reviewer_output_rejects_needs_fix_with_empty_findings() -> None:
+    """outcome=needs_fix with an empty findings list leaves the Fixer
+    with nothing to act on — schema rejects."""
+    data = {
+        "outcome": "needs_fix",
+        "review_comment": "needs_fix",
+        "findings": [],
+    }
+    with pytest.raises(ValidationError, match="needs_fix"):
+        ReviewerOutput.model_validate(data)
+
+
+def test_reviewer_output_accepts_needs_fix_with_important_only() -> None:
+    """A single important finding now blocks (changed from 'two+
+    important' — any important now drives needs_fix)."""
+    data = {
+        "outcome": "needs_fix",
+        "review_comment": "needs_fix — one important finding.",
+        "findings": [_minimal_finding_dict()],  # severity="important"
+    }
+    obj = ReviewerOutput.model_validate(data)
+    assert obj.outcome == "needs_fix"
+    assert len(obj.findings) == 1
+    assert obj.findings[0].severity == "important"
+
+
 def test_reviewer_output_json_schema_is_serializable() -> None:
     schema = ReviewerOutput.model_json_schema()
     assert isinstance(schema, dict)

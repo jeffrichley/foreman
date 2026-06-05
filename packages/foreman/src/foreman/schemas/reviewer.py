@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class Finding(BaseModel):
@@ -30,7 +30,10 @@ class Finding(BaseModel):
         description=(
             "Severity bucket per the prompt's severity rubric. critical: "
             "Worker cannot execute. important: Worker probably mis-builds. "
-            "minor: spec is rough but executable."
+            "minor is accepted by the Literal for legacy compatibility, "
+            "but ReviewerOutput's model_validator rejects minor entries — "
+            "minor observations belong in review_comment prose, not in "
+            "structured findings."
         ),
     )
     target: str = Field(
@@ -63,28 +66,72 @@ class ReviewerOutput(BaseModel):
         ...,
         description=(
             "Derived mechanically from severity counts: any critical OR "
-            "two+ important findings → needs_fix; otherwise clean."
+            "any important finding → needs_fix; otherwise clean. (Changed "
+            "from 'two+ important' — any important now blocks, because "
+            "'important but clean' accumulates spec-vs-impl drift.)"
         ),
     )
     review_comment: str = Field(
         ...,
         description=(
             "Human-readable review prose Foreman posts as the PR review "
-            "comment. Opens with the outcome; cites specific evidence."
+            "comment. Opens with the outcome; cites specific evidence. "
+            "Minor observations live here in prose, not in findings."
         ),
     )
     findings: list[Finding] = Field(
         default_factory=list,
         description=(
-            "Structured findings. MAY be non-empty when outcome is clean "
-            "(minor-only findings don't block). MUST be non-empty when "
-            "outcome is needs_fix."
+            "Structured findings. MUST contain ONLY critical and important "
+            "entries (no minor — those go in review_comment prose). MUST be "
+            "empty when outcome is clean. MUST be non-empty when outcome is "
+            "needs_fix. The model_validator enforces all three rules."
         ),
     )
     confidence: Literal["high", "medium", "low"] = Field(
         default="medium",
         description="Reviewer's self-rated confidence in the outcome.",
     )
+
+    @model_validator(mode="after")
+    def _enforce_finding_contract(self) -> ReviewerOutput:
+        """Reject shapes that contradict the Reviewer prompt contract.
+
+        Three rules, all derived from the prompt's outcome rubric:
+
+        1. No `minor` findings in the structured list — they belong in
+           `review_comment` prose. Filing them creates unbounded
+           per-ticket nit accumulation with no draining mechanism.
+        2. `outcome: clean` ⇔ `findings` empty. A `clean` outcome with
+           findings is a self-contradiction; an empty findings list with
+           `needs_fix` leaves the Fixer with nothing to work on.
+        3. `outcome: needs_fix` ⇔ `findings` non-empty (same axis).
+
+        Raises ``ValueError`` (Pydantic re-raises as
+        ``ValidationError``) so the SDK round-trips the LLM and asks it
+        to fix the shape, rather than dispatching a contradictory
+        review to the Fixer or the label transition.
+        """
+        bad_severities = [f.severity for f in self.findings if f.severity == "minor"]
+        if bad_severities:
+            raise ValueError(
+                f"findings contains {len(bad_severities)} minor entry/entries; "
+                "minor observations belong in review_comment prose, not "
+                "structured findings"
+            )
+        if self.outcome == "clean" and self.findings:
+            raise ValueError(
+                f"outcome is 'clean' but findings is non-empty "
+                f"({len(self.findings)} entries); a clean review has no "
+                "structured findings — move them to review_comment or "
+                "set outcome to 'needs_fix'"
+            )
+        if self.outcome == "needs_fix" and not self.findings:
+            raise ValueError(
+                "outcome is 'needs_fix' but findings is empty; the Fixer "
+                "needs at least one structured finding to act on"
+            )
+        return self
 
 
 class ReviewerRunResult(BaseModel):
