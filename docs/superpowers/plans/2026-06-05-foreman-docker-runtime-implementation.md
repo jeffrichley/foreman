@@ -423,13 +423,18 @@ SCRIPT="$REPO_ROOT/scripts/build-docker.sh"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-# Set up a stub git repo that pretends to be both local and origin
-cd "$tmp"
+# Set up a stub git repo that pretends to be both local and origin.
+# IMPORTANT: keep the bare-origin clone OUTSIDE the working tree, else
+# `git status --porcelain` would see the origin.git/ subdir as
+# untracked content and gate-2 (working-tree-clean) would always trip.
+work="$tmp/work"
+mkdir -p "$work"
+cd "$work"
 git init --quiet -b main
 git config user.email "test@example.com"
 git config user.name "Test"
 git commit --allow-empty -m "seed" --quiet
-git clone --bare . origin.git --quiet >/dev/null
+git clone --bare "$work" "$tmp/origin.git" --quiet >/dev/null
 git remote add origin "$tmp/origin.git"
 
 # Override docker compose to a no-op so we can isolate the gates
