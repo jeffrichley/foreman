@@ -1,0 +1,97 @@
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "WebSearch",
+      "WebFetch(domain:mcpmarket.com)",
+      "WebFetch(domain:developers.etsy.com)",
+      "WebFetch(domain:community.make.com)",
+      "WebFetch(domain:pypi.org)",
+      "WebFetch(domain:www.etsy.com)",
+      "WebFetch(domain:blog.marmalead.com)",
+      "WebFetch(domain:listybox.com)",
+      "WebFetch(domain:merchtitans.com)",
+      "Skill(browse)",
+      "Skill(browse:*)",
+      "WebFetch(domain:developers.printify.com)",
+      "WebFetch(domain:gist.github.com)",
+      "WebFetch(domain:www.comfortcolors.com)",
+      "WebFetch(domain:d1l2kcmc130e06.cloudfront.net)",
+      "WebFetch(domain:raccoontransfers.com)",
+      "WebFetch(domain:paulgraham.com)",
+      "WebFetch(domain:superframeworks.com)",
+      "WebFetch(domain:www.indiehackers.com)",
+      "WebFetch(domain:bulk-pod-product-creator.com)",
+      "WebFetch(domain:ai.google.dev)",
+      "WebFetch(domain:blog.laozhang.ai)",
+      "WebFetch(domain:help.placeit.net)",
+      "Edit(/.claude/skills/discover/**)",
+      "WebFetch(domain:www.gptcleanup.com)",
+      "WebFetch(domain:reel.money)",
+      "WebFetch(domain:nanobananas.site)",
+      "Edit(/.claude/skills/score/**)",
+      "Edit(/.claude/skills/pitch/**)",
+      "WebFetch(domain:printify.com)",
+      "WebFetch(domain:www.a2zclothing.com)",
+      "WebFetch(domain:craftrecordings.com)",
+      "WebFetch(domain:www.reddit.com)",
+      "Bash(mkdir -p \"E:/workspaces/tools/cli-me/.claude/skills/cli-me-meta/references/meta-wiki\")",
+      "Bash(mkdir -p \"E:/workspaces/tools/cli-me/.claude/skills/cli-me-meta/references/source-analysis\")"
+    ],
+    "defaultMode": "dontAsk",
+    "additionalDirectories": [
+      "e:\\workspaces\\businesses\\47tabs",
+      "e:\\workspaces\\businesses\\47tabs\\.claude\\skills",
+      "e:\\workspaces\\businesses\\47tabs\\.git\\hooks",
+      "e:\\workspaces\\businesses\\47tabs\\tools\\.git"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash C:/Users/jeffr/.claude/skills/gstack/bin/gstack-session-update"
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "node ~/.claude/statusline.js"
+  },
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": true,
+    "elements-of-style@superpowers-marketplace": true
+  },
+  "extraKnownMarketplaces": {
+    "superpowers-marketplace": {
+      "source": {
+        "source": "github",
+        "repo": "obra/superpowers-marketplace"
+      }
+    },
+    "anthropic-agent-skills": {
+      "source": {
+        "source": "github",
+        "repo": "anthropics/skills"
+      }
+    }
+  },
+  "effortLevel": "xhigh",
+  "fastMode": true,
+  "autoUpdatesChannel": "latest",
+  "skipDangerousModePermissionPrompt": true,
+  "agentPushNotifEnabled": true,
+  "voiceEnabled": true
+}

@@ -590,6 +590,10 @@ git commit -m "feat(docker): add build script with pre-build clean-check"
 
 **Canonicality rule:** Once committed, `docker/claude/` IS canonical for the daemon. The Dockerfile copies from this tree, NOT from `~/.claude/`. The host machine's `~/.claude/` is the human operator's interactive Claude Code config — it can drift freely without affecting the daemon. The daemon's behavior is pinned to whatever git SHA the image was built from. To update the vendored tree, run `scripts/refresh-claude-vendor.sh` and commit the diff as a deliberate change — not a side-effect of `claude plugin update`.
 
+**User-scope skills are intentionally NOT vendored** (deviation from earlier draft of this plan). At first-vendor time, the host's `~/.claude/skills/` was 948 MB — dominated by gstack's `browse/` (222 MB) and `gstack/` (1.4 GB) trees with browser binaries and model caches. None of the 59 user-scope skills are referenced by foreman role prompts (Planner/Reviewer/Fixer/Worker each load their own `*.md` from `packages/foreman/src/foreman/prompts/`). If a future role needs a specific skill, vendor it explicitly into `docker/claude/skills/<skill-name>/` with a commit that names the skill and why. The refresh script enforces this: it never copies the user-scope skills tree wholesale.
+
+**`.mcp.json` is also intentionally not refreshed from host.** The host's MCP config (in `~/.claude.json`, not `~/.claude/.mcp.json` as earlier drafted) wraps commands with `cmd /c` for Windows compatibility. The container is Linux and needs the bare `npx` form. The vendored `docker/claude/.mcp.json` is hand-maintained to keep the trimmed-to-context7 config in the right shape.
+
 The initial seeding below is a one-time bootstrap. After this task lands, the host plugin cache is no longer load-bearing for foreman.
 
 - [ ] **Step 1: Identify the superpowers plugin version on host**
