@@ -39,6 +39,23 @@ flag, the Reviewer's findings, or the Fixer's rationale. The spec doc
 IS the contract.
 </inputs>
 
+<library_research>
+Before writing code that calls a library API you haven't recently
+touched, query context7 instead of guessing from training-data memory:
+
+- `mcp__context7__resolve-library-id` — map "pydantic" / "click" /
+  "polars" / etc. to a stable library id
+- `mcp__context7__query-docs` — fetch current docs for that library
+
+Trigger: about to write `from X import Y` and the import path is a
+guess; calling a method whose signature you're <90% sure of; using a
+pattern from training that may have shifted in newer versions. Skip:
+your own foreman modules (Read them), standard library, APIs you used
+successfully in this session. Cost of guessing wrong: pre-push hook
+fails on TypeError / AttributeError, dispatch burns LLM cycles for
+nothing. Cost of one context7 call: cheap.
+</library_research>
+
 <implementation_discipline>
 The single most common failure mode for LLM implementers is gold-plating
 under the rationale "while I'm here." Resist this actively:

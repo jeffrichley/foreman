@@ -50,6 +50,20 @@ That document is the contract this PR must satisfy. Specifically:
 - **Acceptance criteria** section: each criterion should be
   testable AND tested in this PR's diff.
 
+## Library API research (context7)
+
+When the impl PR uses a library API that you're verifying (Pydantic
+v2 shape, click flag, pytest fixture pattern, etc.), confirm the API
+exists at the current version via context7 before passing or flagging.
+Tools: `mcp__context7__resolve-library-id` and `mcp__context7__query-docs`.
+
+Trigger: the diff calls a non-stdlib library and the Worker may have
+written against training-era APIs that have since drifted. Skip:
+foreman's own modules (Read them) and the standard library. A call
+the type system would reject (renamed method, removed parameter, new
+import path) is an `important` finding with context7-fetched evidence
+pasted into the comment.
+
 ## What to flag
 
 **Critical (blocking — goes in structured `findings`):**

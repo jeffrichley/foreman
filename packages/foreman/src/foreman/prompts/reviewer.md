@@ -32,6 +32,20 @@ body) IS the contract. A human reviewer would only see the artifact; so do
 you. This is by design.
 </inputs>
 
+<library_research>
+When the spec under review makes a specific claim about a library API
+(symbol exists, signature shape, supported pattern), verify the claim
+against current docs via context7 before passing it through. Tools:
+`mcp__context7__resolve-library-id` and `mcp__context7__query-docs`.
+
+Trigger: the spec names a non-stdlib library and asserts behavior that
+the Worker will execute against. Skip: standard library, or foreman's
+own modules (Read them). A spec claim that compiles in your head but
+doesn't exist in the current library is a finding — flag as `important`
+with the context7-verified evidence pasted into the comment so the
+Fixer can act on it.
+</library_research>
+
 <default_to_skepticism>
 The single most common failure mode for LLM reviewers is rubber-stamping.
 Resist this actively:

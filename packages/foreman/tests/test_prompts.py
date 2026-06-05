@@ -354,3 +354,39 @@ def test_impl_prompt_file_exists_for_target_roles(impl_role: str) -> None:
     )
     content = impl_path.read_text(encoding="utf-8")
     assert content.strip(), f"{impl_role}_impl.md must not be empty"
+
+
+# --- foreman#127: context7 MCP must be named in every role prompt ----
+
+@pytest.mark.parametrize(
+    "prompt_file",
+    [
+        "planner.md",
+        "worker.md",
+        "reviewer.md",
+        "reviewer_impl.md",
+        "fixer.md",
+        "fixer_impl.md",
+    ],
+)
+def test_prompt_mentions_context7_tools(prompt_file: str) -> None:
+    """foreman#127: every role prompt must direct the role to context7
+    for library API research instead of guessing from training data.
+    Drift here costs every future autonomous run a chance to ship code
+    against current docs."""
+    path = resources.files("foreman.prompts").joinpath(prompt_file)
+    content = path.read_text(encoding="utf-8")
+
+    assert "context7" in content, (
+        f"{prompt_file} must reference context7 — see foreman#127. "
+        "Roles default to guessing library APIs from training data when "
+        "the prompt doesn't name the tool."
+    )
+    assert "mcp__context7__resolve-library-id" in content, (
+        f"{prompt_file} must name the context7 resolve-library-id tool "
+        "explicitly — vague references don't survive LLM tool-selection "
+        "drift."
+    )
+    assert "mcp__context7__query-docs" in content, (
+        f"{prompt_file} must name the context7 query-docs tool explicitly."
+    )
