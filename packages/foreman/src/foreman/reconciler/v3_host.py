@@ -100,14 +100,12 @@ class V3GitHubHost:
         v2_host: _V2HostLike,
         log: ExecutionLog,
         subprocess_runner: SubprocessRunner | None = None,
-        project_name: str = "foreman",
         role_dispatch_timeout_seconds: int = 3600,
         max_concurrent_dispatches: int = 2,
     ) -> None:
         self._v2 = v2_host
         self._log = log
         self._runner = subprocess_runner if subprocess_runner is not None else _default_subprocess_runner
-        self._project_name = project_name
         self._timeout_seconds = role_dispatch_timeout_seconds
         # Global cap on concurrent dispatched role subprocesses. acquired() in
         # dispatch_role (non-blocking — raises when full), released in
@@ -138,6 +136,7 @@ class V3GitHubHost:
         issue: int,
         pr_number: int | None,
         start_log_id: int,
+        project: str,
     ) -> int:
         """Spawn `uv run foreman <subcommand>` as a subprocess; return PID.
 
@@ -151,6 +150,12 @@ class V3GitHubHost:
         and writes the termination row when the subprocess exits — so
         ``count_completed`` advances in production without depending on the
         worker's bus envelope landing.
+
+        ``project`` is the project name the action is for. One V3GitHubHost
+        instance is shared across all registered projects, so the project
+        cannot be baked into ``__init__``; the executor passes
+        ``ctx.snapshot.project`` per call. Plumbed into the subprocess via
+        ``--project`` so the role CLI loads the right project config.
         """
         if not self._dispatch_capacity.acquire(blocking=False):
             raise RuntimeError(
@@ -170,12 +175,12 @@ class V3GitHubHost:
                 self._dispatch_capacity.release()
                 raise ValueError("dispatch_role(role='reviewer') requires pr_number")
             pr_url = f"https://github.com/{owner}/{repo}/pull/{pr_number}"
-            argv.extend([pr_url, "--project", self._project_name])
+            argv.extend([pr_url, "--project", project])
             if target is not None:
                 argv.extend(["--target", target])
         else:
             issue_url = f"https://github.com/{owner}/{repo}/issues/{issue}"
-            argv.extend(["--issue-url", issue_url, "--project", self._project_name])
+            argv.extend(["--issue-url", issue_url, "--project", project])
             if pr_number is not None:
                 pr_url = f"https://github.com/{owner}/{repo}/pull/{pr_number}"
                 argv.extend(["--pr-url", pr_url])

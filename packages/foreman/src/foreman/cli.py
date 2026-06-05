@@ -597,7 +597,7 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
             if not projects:
                 click.echo("No projects configured; nothing to reconcile.")
                 return
-            gh, host = _build_v3_gh_and_host(config, log, projects[0].name)
+            gh, host = _build_v3_gh_and_host(config, log)
 
             reconciler = Reconciler(
                 projects=projects,
@@ -673,21 +673,30 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
         raise click.ClickException(str(exc)) from exc
 
 
-def _build_v3_gh_and_host(
-    config: Config, log: Any, project_name: str
-) -> tuple[Any, Any]:
+def _build_v3_gh_and_host(config: Config, log: Any) -> tuple[Any, Any]:
     """Construct the real GHGraphQLClient + ReconcilerHost for v3 runtime.
 
     Pulls the planner App's installation token from IdentityRegistry for the
     GraphQL observer (read-only; planner has GraphQL scope). Wraps v2's
     GitHubDaemonHost for REST + adds dispatch_role subprocess spawn.
+
+    The host is shared across all registered projects — V3GitHubHost is now
+    project-agnostic; the executor passes ``project=ctx.snapshot.project``
+    per call to ``dispatch_role``. IdentityRegistry + orchestrator wiring
+    only need *some* project to bootstrap the installation token (the
+    orchestrator App's token spans every repo the App is installed on), so
+    we use the first registered project as the bootstrap seed.
     """
     from foreman.daemon_host import GitHubDaemonHost
     from foreman.identity import IdentityRegistry
     from foreman.reconciler.gh_graphql import HttpxGHGraphQLClient
     from foreman.reconciler.v3_host import V3GitHubHost
 
-    project_config = config.projects[project_name]
+    # Pick any registered project as the orchestrator-token bootstrap seed —
+    # the orchestrator App's installation token spans every repo it's
+    # installed on, so this is not a per-project decision.
+    bootstrap_project_name = next(iter(config.projects))
+    project_config = config.projects[bootstrap_project_name]
     # IdentityRegistry needs orchestrator config — GitHubDaemonHost's REST
     # methods call get_orchestrator_client() on every call. Mirrors the v2
     # daemon construction path elsewhere in this file.
@@ -700,7 +709,6 @@ def _build_v3_gh_and_host(
     host = V3GitHubHost(
         v2_host=v2_host,
         log=log,
-        project_name=project_name,
         role_dispatch_timeout_seconds=config.reconciler.role_dispatch_timeout_seconds,
         max_concurrent_dispatches=config.reconciler.max_concurrent_dispatches,
     )

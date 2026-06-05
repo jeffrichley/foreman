@@ -115,6 +115,7 @@ def test_dispatch_role_spawns_subprocess_and_returns_pid(tmp_path: Path) -> None
         issue=143,
         pr_number=None,
         start_log_id=start_id,
+        project="foreman",
     )
 
     assert pid == 98765
@@ -173,6 +174,7 @@ def test_dispatch_role_writes_termination_row_on_success(tmp_path: Path) -> None
             issue=10,
             pr_number=None,
             start_log_id=start_id,
+            project="foreman",
         )
         # Yield until the background task finishes. Bounded poll so a
         # regression doesn't hang the suite indefinitely.
@@ -244,6 +246,7 @@ def test_concurrency_cap_refuses_dispatch_when_full(tmp_path: Path) -> None:
             issue=1,
             pr_number=None,
             start_log_id=1,
+            project="foreman",
         )
 
 
@@ -274,6 +277,7 @@ def test_dispatch_role_releases_slot_when_runner_raises(tmp_path: Path) -> None:
             issue=1,
             pr_number=None,
             start_log_id=1,
+            project="foreman",
         )
 
     # Second call: with slot properly released, would-be-cap-reached should NOT fire.
@@ -287,6 +291,7 @@ def test_dispatch_role_releases_slot_when_runner_raises(tmp_path: Path) -> None:
             issue=2,
             pr_number=None,
             start_log_id=2,
+            project="foreman",
         )
 
 
@@ -329,6 +334,7 @@ def test_dispatch_role_reviewer_uses_positional_pr_url(tmp_path: Path) -> None:
         issue=63,
         pr_number=99,
         start_log_id=start_id,
+        project="foreman",
     )
 
     assert captured, "runner not called"
@@ -383,6 +389,7 @@ def test_dispatch_role_fixer_impl_passes_target_argv(tmp_path: Path) -> None:
         issue=63,
         pr_number=99,
         start_log_id=start_id,
+        project="foreman",
     )
 
     assert captured, "runner not called"

@@ -26,6 +26,7 @@ class ReconcilerHost(Protocol):
         issue: int,
         pr_number: int | None,
         start_log_id: int,
+        project: str,
     ) -> int:
         """Spawn the role subprocess (planner|reviewer|fixer|worker). Returns the PID.
 
@@ -39,5 +40,12 @@ class ReconcilerHost(Protocol):
         immediately before calling this method. The host owns writing the
         termination row when the subprocess exits — see
         ``V3GitHubHost._track_subprocess_completion``.
+
+        ``project`` is the project name the dispatched action belongs to —
+        callers MUST pass the project of the snapshot that fired the rule,
+        not a host-wide default. One host instance serves all registered
+        projects; baking a single project_name into the host produces
+        cross-project mis-dispatch (foreman v3 dogfood bug, 2026-06-04).
+        Plumbed into the subprocess via ``--project``.
         """
         ...

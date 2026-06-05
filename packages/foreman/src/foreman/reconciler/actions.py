@@ -158,6 +158,7 @@ def execute_action(
                 issue=ctx.issue.number,
                 pr_number=ctx.pr.number if ctx.pr else None,
                 start_log_id=start_id,
+                project=ctx.snapshot.project,
             )
         elif action is Action.MERGE_SPEC_PR or action is Action.MERGE_IMPL_PR:
             if ctx.pr is None:
