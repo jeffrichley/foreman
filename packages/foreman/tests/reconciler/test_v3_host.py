@@ -742,3 +742,52 @@ def test_default_runner_without_log_path_uses_devnull(tmp_path: Path) -> None:
     assert returncode == 0
     # No log file written — nothing in tmp_path.
     assert not any(tmp_path.iterdir())
+
+
+def test_dispatch_role_argv_does_not_use_uv_run(tmp_path: Path) -> None:
+    """The container-runtime daemon dispatches via PATH-resolved `foreman`,
+    NOT `uv run foreman`. The `uv run` form re-syncs the editable install
+    on every invocation, which fails on Windows when the daemon's own
+    `foreman.exe` is file-locked (the failure mode this whole design
+    eliminates)."""
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+
+    captured_argv: list[list[str]] = []
+
+    class _FakeProc:
+        pid = 4242
+
+        async def wait(self) -> int:
+            return 0
+
+    def runner(argv: list[str], **kwargs: Any) -> _FakeProc:
+        captured_argv.append(argv)
+        return _FakeProc()
+
+    host = V3GitHubHost(v2_host=_FakeV2Host(), log=log, subprocess_runner=runner)
+    start_id = log.write_action(
+        ticket_id="foreman/owner/repo#143",
+        project="foreman",
+        rule_name="dispatch_planner",
+        action="dispatch_planner",
+        outcome="running",
+        details={},
+    )
+    host.dispatch_role(
+        role="planner",
+        target=None,
+        owner="owner",
+        repo="repo",
+        issue=143,
+        pr_number=None,
+        start_log_id=start_id,
+        project="foreman",
+    )
+    assert len(captured_argv) == 1
+    argv = captured_argv[0]
+    assert argv[0] == "foreman", f"expected argv[0]='foreman', got {argv[0]!r}"
+    assert "uv" not in argv[:2], (
+        f"`uv run` wrapper still in argv — this re-introduces the Windows "
+        f"file-lock bug the Docker runtime exists to eliminate. argv={argv}"
+    )

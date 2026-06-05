@@ -251,7 +251,7 @@ class V3GitHubHost:
             self._dispatch_capacity.release()
             raise ValueError(f"unknown role for dispatch: {role!r}")
 
-        argv: list[str] = ["uv", "run", "foreman", subcommand]
+        argv: list[str] = ["foreman", subcommand]
 
         if role == "reviewer":
             # `foreman review` takes a positional PR URL — no --issue-url flag.
