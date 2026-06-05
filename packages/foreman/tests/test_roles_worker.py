@@ -2339,3 +2339,97 @@ async def test_run_worker_passes_repo_url_to_create_impl(
         "to create_impl so ensure_clone can populate the clone on container "
         f"first boot; got repo_url={captured_kwargs.get('repo_url')!r}"
     )
+
+
+# ----------------------------------------------------------------------
+# Entry-label revert on Worker crash before outcome
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_worker_reverts_entry_labels_when_create_impl_crashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the Worker crashes after the entry-label transition has been
+    written (``plan-approved`` cleared, ``impl-attempt-N`` added) but
+    before the final outcome ``set_labels`` runs, the entry transition
+    must be reverted so the v3 reconciler can re-dispatch via the
+    normal ``_plan_approved_no_impl_pr`` rule.
+
+    Without this, the issue is left with ``foreman:impl-attempt-N`` but
+    without ``foreman:plan-approved`` — and no rule in the v3 catalog
+    matches that state, so the ticket becomes a stuck zombie even though
+    the execution log's ``count_completed`` is well below the safety
+    cap.
+
+    Symmetric verification: the original exception must still propagate
+    so the parent v3_host can write the termination row via
+    ``_track_subprocess_completion``.
+    """
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    def crashing_create_impl(
+        self: Any,
+        *,
+        clone_path: Path,
+        repo_slug: str,
+        ticket_id: int,
+        repo_url: str | None = None,
+    ) -> Any:
+        raise FileNotFoundError(
+            "[Errno 2] No such file or directory: "
+            f"PosixPath('{clone_path}')"
+        )
+
+    monkeypatch.setattr(
+        "foreman.roles.worker.WorktreeManager.create_impl", crashing_create_impl
+    )
+
+    cfg = _make_config(clone)
+    repo, _spec_pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeWorkerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    _make_passing_check_command(monkeypatch)
+
+    issue = repo.get_issue(42)
+
+    # Run and expect the original FileNotFoundError to propagate.
+    with pytest.raises(FileNotFoundError):
+        await run_worker(
+            issue_url="https://github.com/jeffrichley/voice/issues/42",
+            config=cfg,
+            project_name="voice",
+            worktrees_root=tmp_path / "worktrees",
+            provider=fake_provider,
+            identity_registry=registry,
+        )
+
+    # Assertion 1: exactly two set_labels calls — entry transition, then
+    # revert. The outcome set_labels at the end of run_worker never ran
+    # (we crashed in create_impl before it).
+    assert len(issue.set_labels_calls) == 2, (
+        "Expected entry transition + revert (2 set_labels calls); got "
+        f"{len(issue.set_labels_calls)}: {issue.set_labels_calls}"
+    )
+
+    # Assertion 2: entry transition removed plan-approved + added impl-attempt-1.
+    entry_labels = set(issue.set_labels_calls[0])
+    assert "foreman:impl-attempt-1" in entry_labels
+    assert "foreman:plan-approved" not in entry_labels
+
+    # Assertion 3: revert call restored plan-approved + dropped impl-attempt-1,
+    # leaving the ticket in the exact state the reconciler can re-dispatch from.
+    revert_labels = set(issue.set_labels_calls[1])
+    assert "foreman:plan-approved" in revert_labels, (
+        "Revert must restore foreman:plan-approved so the v3 reconciler's "
+        f"_plan_approved_no_impl_pr rule can re-dispatch; got {revert_labels!r}"
+    )
+    assert "foreman:impl-attempt-1" not in revert_labels, (
+        "Revert must drop the foreman:impl-attempt-N that the entry "
+        f"transition just added; got {revert_labels!r}"
+    )
