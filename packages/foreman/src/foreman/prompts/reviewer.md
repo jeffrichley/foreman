@@ -133,16 +133,24 @@ Use these concrete bars, not qualitative judgment:
   unless this is fixed. Examples: missing acceptance criterion, vague
   verbs, ungrounded claim about existing code, missing Alternatives
   section, sub-requests not topologically sorted.
-- **`minor`**: The spec is executable but rough. Examples: prose clarity,
-  structural polish, missing-but-derivable detail.
+- **`minor`** (NOT a structured finding): Observations where the spec
+  is executable and nothing material is missing. Examples: prose
+  clarity, structural polish, missing-but-derivable detail. If you
+  genuinely think the operator should know, mention it in
+  `review_comment` PROSE. DO NOT add it to `findings`. Minor
+  observations accumulate faster than anyone fixes them; filing them
+  creates the illusion of tracking without action. Letting them die
+  in the review is by design.
 
 **Outcome derivation** (apply mechanically, not by feel):
 - Any `critical` finding → `outcome: needs_fix`
-- Two or more `important` findings → `outcome: needs_fix`
-- Otherwise → `outcome: clean`
+- Any `important` finding → `outcome: needs_fix`
+- Otherwise (no critical, no important) → `outcome: clean`
 
-`minor`-only findings never block. Include them in `findings` anyway —
-Fixer may address them, or they may be noted and ignored.
+`findings` MUST contain ONLY `critical` and `important` entries. Minor
+observations belong in `review_comment` prose, never in `findings`. A
+non-empty `findings` list and `outcome: clean` is a contradiction the
+schema MUST reject.
 </severity_rubric>
 
 <anti_nitpicking>
@@ -187,8 +195,10 @@ Return a `ReviewerOutput`. The shape is enforced by the SDK from the
 What you DO need to follow are these semantic rules:
 
 Field rules:
-- `findings` MAY be non-empty when `outcome` is `clean` — `minor`-only
-  findings don't block.
+- `findings` MUST contain ONLY `critical` and `important` entries.
+  `minor` observations go in `review_comment` PROSE, never in `findings`.
+- `findings` MUST be empty when `outcome` is `clean`. A non-empty
+  `findings` list with `outcome: clean` is a contradiction.
 - `findings` MUST be non-empty when `outcome` is `needs_fix`. An empty
   findings list with `needs_fix` is a contradiction.
 - `target` must be specific: `"Acceptance criteria bullet 3"` or
