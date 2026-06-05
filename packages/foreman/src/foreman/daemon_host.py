@@ -17,8 +17,28 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from foreman.identity import IdentityRegistry
+
+if TYPE_CHECKING:
+    from github import GithubException
+
+
+def _is_merge_method_disallowed(exc: GithubException) -> bool:
+    """Return True iff ``exc`` is GitHub's 405 for a disabled merge method.
+
+    GitHub returns 405 with messages like ``"Merge commits are not
+    allowed on this repository."`` / ``"Squash merging is not allowed
+    on this repository."`` / ``"Rebase merging is not allowed on this
+    repository."`` when the operator-requested merge method is disabled
+    in repo settings. Other 405 responses (e.g. PR not in a mergeable
+    state) should NOT be caught — they need to bubble up.
+    """
+    if exc.status != 405:
+        return False
+    message = (exc.data or {}).get("message", "") if hasattr(exc, "data") else ""
+    return "is not allowed on this repository" in message or "are not allowed on this repository" in message
 
 
 @dataclass(frozen=True)
@@ -108,11 +128,44 @@ class GitHubDaemonHost:
         Default strategy: merge commit. Squash and rebase are options;
         v1 uses merge commits to preserve the agent's commit history
         for audit trail.
+
+        Fallback chain (issue #130): if the target repo disables a merge
+        method via its GitHub settings, GitHub returns a 405 with a
+        message identifying the disallowed method. We fall through to
+        the next allowed method (merge -> squash -> rebase) rather than
+        crashing the dispatch loop. This matters because foreman has no
+        out-of-band knowledge of each target repo's settings; the API
+        is the source of truth and the fallback degrades gracefully.
+
+        Raises the original exception if ALL three methods are
+        disallowed (an unusual repo configuration that needs operator
+        attention) or if the failure isn't a 405-merge-method error.
         """
+        from github import GithubException
+
         gh = self._registry.get_orchestrator_client()
         repo_obj = gh.get_repo(repo)
         pr = repo_obj.get_pull(pr_number)
-        pr.merge(merge_method=merge_method)
+
+        # Ordered chain: try the operator-requested method first, then
+        # the others as fallbacks. Removing the requested method from
+        # the tail avoids retrying it.
+        chain = [merge_method] + [m for m in ("merge", "squash", "rebase") if m != merge_method]
+        last_exc: GithubException | None = None
+        for method in chain:
+            try:
+                pr.merge(merge_method=method)
+                return
+            except GithubException as exc:
+                if not _is_merge_method_disallowed(exc):
+                    raise
+                last_exc = exc
+                continue
+        # All methods refused. Re-raise the last exception so the
+        # operator sees a real GitHub error message rather than a
+        # synthesized one.
+        if last_exc is not None:
+            raise last_exc
 
     def get_pr_base_ref(self, repo: str, pr_number: int) -> str:
         """Return the PR's current ``base.ref`` (the branch it merges into)."""
