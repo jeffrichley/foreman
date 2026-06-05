@@ -59,10 +59,31 @@ fi
 # paths) and would mis-bias the role subprocess. Edit
 # docker/claude/CLAUDE.md by hand if the daemon contract changes.
 
-# settings.json (optional)
+# settings.json (optional) — strip mcpServers before vendoring.
+# Why: host ~/.claude/settings.json regularly contains operator-personal
+# secrets in `mcpServers.<name>.env` (e.g. GITHUB_PERSONAL_ACCESS_TOKEN
+# for the github MCP server, OAuth tokens for misc MCP integrations).
+# These are runtime credentials of the human operator's interactive
+# Claude Code, NOT the daemon container's MCP needs. The container's
+# MCP config is the hand-maintained docker/claude/.mcp.json (context7
+# only). Stripping mcpServers here prevents a leak class first surfaced
+# 2026-06-05 when GitHub's push protection caught a gho_ token in this
+# file at vendor time.
 if [[ -f ~/.claude/settings.json ]]; then
     cp ~/.claude/settings.json "$VENDOR_DIR/settings.json"
-    echo "  refreshed: settings.json"
+    # Mutate in place via Python. Convert MSYS path → Windows form for
+    # python.exe on Git Bash; fall through unchanged on Linux/macOS.
+    dst_path=$(cygpath -w "$VENDOR_DIR/settings.json" 2>/dev/null || echo "$VENDOR_DIR/settings.json")
+    python -c "
+import json, sys
+p = sys.argv[1]
+with open(p) as f:
+    d = json.load(f)
+d.pop('mcpServers', None)
+with open(p, 'w') as f:
+    json.dump(d, f, indent=2)
+" "$dst_path"
+    echo "  refreshed: settings.json (mcpServers stripped)"
 fi
 
 # .mcp.json is intentionally NOT refreshed from host. The host's MCP
