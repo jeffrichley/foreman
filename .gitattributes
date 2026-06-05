@@ -1,0 +1,5 @@
+# Force LF endings on shell scripts so Linux containers can execute them
+# even when checked out on Windows with core.autocrlf=true.
+# Without this, COPY into a Linux image preserves CRLF and the shebang
+# becomes `#!/bin/bash\r`, which the kernel can't resolve.
+*.sh text eol=lf
