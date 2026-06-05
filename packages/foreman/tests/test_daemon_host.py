@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from github import GithubException
+
 from foreman.daemon_host import GitHubDaemonHost
 
 
@@ -189,6 +191,128 @@ def test_merge_pull_request_calls_pygithub_merge() -> None:
     host.merge_pull_request("jeffrichley/voice", 18)
 
     fake_pr.merge.assert_called_once()
+
+
+# --- foreman#130: merge-method fallback chain ----------------------
+
+def _merge_disallowed_405(method_label: str) -> GithubException:
+    """Build a GithubException matching the shape GitHub returns when a
+    merge method is disabled in repo settings."""
+    return GithubException(
+        status=405,
+        data={
+            "message": f"{method_label} are not allowed on this repository.",
+            "status": "405",
+        },
+        headers=None,
+    )
+
+
+def test_merge_pull_request_falls_back_to_squash_when_merge_disabled() -> None:
+    """foreman#130: when the target repo disables merge commits, the
+    daemon must fall back to squash rather than crashing the dispatch."""
+    fake_repo = MagicMock()
+    fake_pr = MagicMock()
+    fake_pr.merge.side_effect = [
+        _merge_disallowed_405("Merge commits"),  # first attempt (merge) fails
+        None,  # second attempt (squash) succeeds
+    ]
+    fake_repo.get_pull = MagicMock(return_value=fake_pr)
+
+    host = _make_host_with_repo(fake_repo)
+    host.merge_pull_request("jeffrichley/voice", 18)
+
+    assert fake_pr.merge.call_count == 2
+    methods = [call.kwargs["merge_method"] for call in fake_pr.merge.call_args_list]
+    assert methods == ["merge", "squash"]
+
+
+def test_merge_pull_request_falls_back_to_rebase_when_merge_and_squash_disabled() -> None:
+    """Cascading fallback: merge -> squash -> rebase."""
+    fake_repo = MagicMock()
+    fake_pr = MagicMock()
+    fake_pr.merge.side_effect = [
+        _merge_disallowed_405("Merge commits"),
+        _merge_disallowed_405("Squash merging"),
+        None,  # rebase succeeds
+    ]
+    fake_repo.get_pull = MagicMock(return_value=fake_pr)
+
+    host = _make_host_with_repo(fake_repo)
+    host.merge_pull_request("jeffrichley/voice", 18)
+
+    methods = [call.kwargs["merge_method"] for call in fake_pr.merge.call_args_list]
+    assert methods == ["merge", "squash", "rebase"]
+
+
+def test_merge_pull_request_reraises_when_all_methods_disabled() -> None:
+    """If repo disables ALL three merge methods, foreman re-raises the
+    last 405 so the operator sees a real error rather than a swallowed
+    one. This is an unusual repo configuration that needs attention."""
+    import pytest
+    from github import GithubException
+
+    fake_repo = MagicMock()
+    fake_pr = MagicMock()
+    fake_pr.merge.side_effect = [
+        _merge_disallowed_405("Merge commits"),
+        _merge_disallowed_405("Squash merging"),
+        _merge_disallowed_405("Rebase merging"),
+    ]
+    fake_repo.get_pull = MagicMock(return_value=fake_pr)
+
+    host = _make_host_with_repo(fake_repo)
+    with pytest.raises(GithubException) as exc_info:
+        host.merge_pull_request("jeffrichley/voice", 18)
+    assert exc_info.value.status == 405
+    assert "Rebase merging" in str(exc_info.value)
+    assert fake_pr.merge.call_count == 3
+
+
+def test_merge_pull_request_does_not_swallow_non_405_errors() -> None:
+    """A 404 / 409 / 422 must propagate immediately — those mean the PR
+    isn't mergeable (deleted branch, conflict, etc.), not a merge-method
+    config mismatch. The fallback chain doesn't apply."""
+    import pytest
+    from github import GithubException
+
+    fake_repo = MagicMock()
+    fake_pr = MagicMock()
+    fake_pr.merge.side_effect = GithubException(
+        status=409,
+        data={"message": "Head branch was modified. Review and try the merge again."},
+        headers=None,
+    )
+    fake_repo.get_pull = MagicMock(return_value=fake_pr)
+
+    host = _make_host_with_repo(fake_repo)
+    with pytest.raises(GithubException) as exc_info:
+        host.merge_pull_request("jeffrichley/voice", 18)
+    assert exc_info.value.status == 409
+    # Should NOT have tried fallback methods.
+    assert fake_pr.merge.call_count == 1
+
+
+def test_merge_pull_request_does_not_swallow_405_for_other_reasons() -> None:
+    """A 405 that doesn't match the merge-method-disabled pattern
+    (e.g. PR not mergeable due to checks) must propagate, not retry."""
+    import pytest
+    from github import GithubException
+
+    fake_repo = MagicMock()
+    fake_pr = MagicMock()
+    fake_pr.merge.side_effect = GithubException(
+        status=405,
+        data={"message": "Pull Request is not mergeable"},
+        headers=None,
+    )
+    fake_repo.get_pull = MagicMock(return_value=fake_pr)
+
+    host = _make_host_with_repo(fake_repo)
+    with pytest.raises(GithubException) as exc_info:
+        host.merge_pull_request("jeffrichley/voice", 18)
+    assert exc_info.value.status == 405
+    assert fake_pr.merge.call_count == 1
 
 
 def test_get_pr_base_ref_returns_base_ref() -> None:
