@@ -18,16 +18,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # Windows runner removed 2026-06-04 — pre-existing pytest/pathlib
+        # KeyboardInterrupt flake caused every PR to require admin-override
+        # merge. Restore once the flake is root-caused. Tracked separately.
+        os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
-    # Windows CI Server 2025 has an accumulated-state hang affecting
-    # async/subprocess tests that doesn't reproduce on local Windows 11
-    # with the identical Python / uv / shell. Marking Windows non-blocking
-    # while foreman#99 investigates and restores it as a required gate.
-    # Linux remains the required CI signal. See also foreman#98 (the
-    # subprocess-specific hang first observed) and foreman#97 (daemon
-    # SIGTERM responsiveness).
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
