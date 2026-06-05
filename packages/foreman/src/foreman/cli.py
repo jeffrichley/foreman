@@ -33,7 +33,10 @@ from foreman.storage import Storage
 
 
 def _default_config_path() -> Path:
-    return Path(os.environ.get("FOREMAN_CONFIG", str(Path.home() / ".foreman" / "config.toml")))
+    # Delegates to foreman.config.resolve_config_path which honors
+    # FOREMAN_CONFIG_PATH (container compose) AND legacy FOREMAN_CONFIG.
+    from foreman.config import resolve_config_path
+    return resolve_config_path()
 
 
 def _default_worktrees_root() -> Path:
@@ -1010,9 +1013,10 @@ def daemon_status() -> None:
 
 
 def _load_config_from_env() -> Config:
-    """Load config from FOREMAN_CONFIG env var or default ~/.foreman/config.toml."""
-    path = os.environ.get("FOREMAN_CONFIG", str(Path("~/.foreman/config.toml").expanduser()))
-    return load_config(path)
+    """Load config from FOREMAN_CONFIG_PATH (container) / FOREMAN_CONFIG
+    (host legacy) env var or default ~/.foreman/config.toml."""
+    from foreman.config import resolve_config_path
+    return load_config(resolve_config_path())
 
 
 async def _daemon_run(*, config: Config, max_iterations: int | None) -> None:

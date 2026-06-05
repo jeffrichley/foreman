@@ -868,3 +868,39 @@ def test_orchestrator_resolve_private_key_path_raises_when_unset(tmp_path: Path)
     cfg = load_config(config_file)
     with pytest.raises(RuntimeError, match="orchestrator.private_key_path"):
         cfg.orchestrator.resolve_private_key_path()
+
+
+def test_foreman_config_path_env_var_overrides(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """FOREMAN_CONFIG_PATH overrides the default host location."""
+    custom = tmp_path / "custom-config.toml"
+    custom.write_text(
+        "[admin]\n"
+        "github_token_env = \"FOREMAN_ADMIN_TOKEN\"\n"
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG_PATH", str(custom))
+    from foreman.config import resolve_config_path
+    assert resolve_config_path() == custom
+
+
+def test_foreman_config_path_falls_back_to_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When FOREMAN_CONFIG_PATH is unset, fall back to ~/.foreman/config.toml."""
+    monkeypatch.delenv("FOREMAN_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("FOREMAN_CONFIG", raising=False)
+    from foreman.config import resolve_config_path
+    assert resolve_config_path() == Path.home() / ".foreman" / "config.toml"
+
+
+def test_foreman_config_path_honors_legacy_foreman_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Legacy FOREMAN_CONFIG env var is still honored as a fallback so
+    existing operator workflows don't break. FOREMAN_CONFIG_PATH wins
+    when both are set."""
+    legacy = tmp_path / "legacy.toml"
+    legacy.write_text("")
+    monkeypatch.delenv("FOREMAN_CONFIG_PATH", raising=False)
+    monkeypatch.setenv("FOREMAN_CONFIG", str(legacy))
+    from foreman.config import resolve_config_path
+    assert resolve_config_path() == legacy
