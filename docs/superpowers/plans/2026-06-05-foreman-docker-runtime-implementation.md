@@ -987,7 +987,15 @@ Create `docker-compose.yml`:
 
 ```yaml
 # Foreman daemon container orchestration.
-# Per the Docker design spec; see docs/superpowers/specs/2026-06-05-...
+# Per the Docker design spec; see docs/superpowers/specs/2026-06-05-foreman-docker-runtime-design.md
+#
+# IMPLEMENTATION NOTES (caught during execution):
+#  - `worker_pem` is intentionally absent. Host had no `worker.pem`
+#    at first-vendor time; Worker bot setup is a separate follow-up
+#    ticket. Daemon serves Planner/Reviewer/Fixer without it.
+#  - `env_file` uses Compose v2.18+ `required: false` so the smoke
+#    test (and any operator who skips .env) resolves cleanly. Real
+#    deploys still need .env populated from .env.example.
 #
 # Lifecycle:
 #   docker compose up -d daemon       # start (detached)
