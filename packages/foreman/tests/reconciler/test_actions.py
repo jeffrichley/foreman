@@ -139,6 +139,7 @@ class _FakeHost:
         issue: int,
         pr_number: int | None,
         start_log_id: int,
+        project: str,
     ) -> int:
         self.calls.append(
             (
@@ -151,6 +152,7 @@ class _FakeHost:
                     "issue": issue,
                     "pr_number": pr_number,
                     "start_log_id": start_log_id,
+                    "project": project,
                 },
             )
         )
@@ -196,6 +198,65 @@ def test_execute_dispatch_planner_writes_running_and_calls_host(tmp_path: Path) 
     # terminate that exact row when the subprocess exits.
     assert isinstance(call_kwargs["start_log_id"], int) and call_kwargs["start_log_id"] > 0
     assert log.has_unterminated("dispatch_planner", ctx.ticket_id) is True
+
+
+def test_dispatch_role_uses_snapshot_project_not_host_default(tmp_path: Path) -> None:
+    """Executor must pass ``ctx.snapshot.project`` to ``host.dispatch_role``
+    so each dispatch uses the right project name regardless of host
+    construction order.
+
+    Regression for the v3 dogfood bug (2026-06-04): pre-fix, V3GitHubHost was
+    constructed once with ``projects[0].name`` baked into ``self._project_name``
+    and reused for all projects. Every dispatched subprocess got
+    ``--project <first_registered>`` regardless of which project's ticket
+    fired the rule. The fix moves ``project`` to a per-call kwarg on
+    ``dispatch_role`` and has the executor pass ``ctx.snapshot.project``.
+    """
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    # Snapshot belongs to project "foreman" — the executor must plumb that
+    # exact value through to dispatch_role, not whatever the host might
+    # internally default to.
+    snap = _snapshot()  # project="foreman"
+    ctx = ActionContext(snapshot=snap, issue=snap.issues[0], pr=None, log=log)
+
+    captured_dispatch_kwargs: dict[str, Any] = {}
+
+    class _ProjectCapturingHost:
+        """Test double that captures the ``project`` kwarg specifically — and
+        defaults that kwarg to ``"voice"`` (the wrong project) if the executor
+        forgets to pass it, so the assertion fails loudly in either bug shape.
+        """
+
+        def add_label(self, **k: Any) -> None: ...
+        def remove_label(self, **k: Any) -> None: ...
+        def post_comment(self, **k: Any) -> None: ...
+        def merge_pr(self, **k: Any) -> None: ...
+
+        def dispatch_role(
+            self,
+            *,
+            role: str,
+            target: str | None,
+            owner: str,
+            repo: str,
+            issue: int,
+            pr_number: int | None,
+            start_log_id: int,
+            project: str,
+        ) -> int:
+            captured_dispatch_kwargs["project"] = project
+            return 42
+
+    execute_action(
+        Action.DISPATCH_PLANNER,
+        ctx,
+        host=_ProjectCapturingHost(),
+        rule_name="dispatch_planner",
+        dry_run=False,
+    )
+
+    assert captured_dispatch_kwargs["project"] == "foreman"
 
 
 def test_execute_advance_label_writes_running_then_success(tmp_path: Path) -> None:
