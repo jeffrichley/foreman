@@ -143,6 +143,50 @@ intentionally skipped.
 
 ---
 
+## Pre-commit hooks (one-time setup per clone)
+
+The repo uses the `pre-commit` framework (config: `.pre-commit-config.yaml`).
+Two hooks are configured:
+
+- **gitleaks** (at commit time) — scans staged content for secrets:
+  PEM bodies, ghp_-prefixed PATs, anthropic OAuth tokens, etc.
+- **just check** (at push time) — runs the same pytest + lint gate
+  CI runs. Mirrors what was previously in `.githooks/pre-push`.
+
+One-time install per fresh clone:
+
+```bash
+# If you previously had `core.hooksPath = .githooks` set, unset it
+# first so the framework can install to .git/hooks/ where git looks
+# by default. Without this, `pre-commit install` refuses with
+# "cowardly refusing to install hooks with `core.hooksPath` set."
+git config --unset core.hooksPath || true
+
+uv run pre-commit install --hook-type pre-commit --hook-type pre-push
+```
+
+After that, hooks run automatically. Manual invocation:
+
+```bash
+uv run pre-commit run gitleaks --all-files    # full-repo secret scan
+uv run pre-commit run --all-files             # run every configured hook
+```
+
+If gitleaks blocks a commit:
+
+1. Read the finding — what file, what line, what rule fired
+2. If it's a real secret, **rotate it immediately** (the PAT/key is
+   compromised even though the commit was blocked — the value was
+   typed/pasted into a working tree)
+3. Remove the secret from the staged file and re-commit
+4. If it's a false positive, add the pattern to `.gitleaks.toml`
+   (not yet present) in a separate commit
+
+**Never** pass `--no-verify` to bypass gitleaks. The hook exists
+because operator error is the dominant secret-leak vector.
+
+---
+
 ## What survives what
 
 | Action                         | Container | foreman-repos | foreman-state | foreman-logs | image |
