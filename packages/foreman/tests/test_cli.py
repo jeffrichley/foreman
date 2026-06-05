@@ -147,6 +147,8 @@ reviewer_private_key_path = "/tmp/reviewer.pem"
                 "https://github.com/jeffrichley/voice/pull/77",
                 "--project",
                 "voice",
+                "--target",
+                "spec_pr",
                 "--config",
                 str(config_file),
             ],
@@ -157,6 +159,49 @@ reviewer_private_key_path = "/tmp/reviewer.pem"
     assert "1 findings" in result.output
     assert "confidence=medium" in result.output
     mock_run.assert_called_once()
+
+
+def test_cli_review_target_flag_optional(tmp_path: Path) -> None:
+    """``foreman review`` accepts ``--target`` but does not require it; legacy
+    callers (and pre-Stage-2 dispatchers) still work without the flag."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[projects.voice]
+repo = "jeffrichley/voice"
+local_clone_path = "/tmp/voice"
+
+[projects.voice.apps]
+planner_app_id_env = "FOREMAN_PLANNER_APP_ID"
+planner_app_id = 123456
+planner_private_key_path = "/tmp/planner.pem"
+"""
+    )
+
+    fake_result = ReviewerRunResult(
+        llm_output=ReviewerOutput(
+            outcome="clean",
+            review_comment="clean",
+            findings=[],
+            confidence="high",
+        ),
+        final_labels=["foreman:plan-approved"],
+    )
+
+    runner = CliRunner()
+    with patch("foreman.cli.run_reviewer", new=AsyncMock(return_value=fake_result)):
+        result = runner.invoke(
+            cli,
+            [
+                "review",
+                "https://github.com/jeffrichley/voice/pull/77",
+                "--project",
+                "voice",
+                "--config",
+                str(config_file),
+            ],
+        )
+    assert result.exit_code == 0, result.output
 
 
 def test_cli_help_lists_fix_subcommand() -> None:
@@ -213,6 +258,7 @@ fixer_private_key_path = "/tmp/fixer.pem"
             cli,
             [
                 "fix",
+                "--issue-url",
                 "https://github.com/jeffrichley/voice/issues/42",
                 "--project",
                 "voice",
@@ -226,6 +272,67 @@ fixer_private_key_path = "/tmp/fixer.pem"
     assert "2/3 attempt" in result.output
     assert "2 fixed" in result.output
     assert "1 unaddressed" in result.output
+    # ``--target`` defaults to ``spec_pr`` — the CLI plumbs that through.
+    mock_run.assert_called_once()
+    assert mock_run.call_args.kwargs.get("target") == "spec_pr"
+
+
+def test_cli_fix_with_target_impl_pr_plumbs_through(tmp_path: Path) -> None:
+    """CRITICAL #4 wire-up: ``foreman fix --target impl_pr`` forwards
+    ``target='impl_pr'`` to ``run_fixer``. Pre-rescue the flag did not
+    exist and v3 dispatches landed on the spec-side default."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[projects.voice]
+repo = "jeffrichley/voice"
+local_clone_path = "/tmp/voice"
+
+[projects.voice.apps]
+planner_app_id_env = "FOREMAN_PLANNER_APP_ID"
+planner_app_id = 123456
+planner_private_key_path = "/tmp/planner.pem"
+fixer_app_id_env = "FOREMAN_FIXER_APP_ID"
+fixer_app_id = 777777
+fixer_private_key_path = "/tmp/fixer.pem"
+"""
+    )
+
+    fake_result = FixerRunResult(
+        llm_output=FixerOutput(
+            outcome="fixed",
+            fix_comment="fixed",
+            commits_made=[],
+            addressed_findings=[],
+            unaddressed_findings=[],
+            confidence="medium",
+        ),
+        attempt=1,
+        final_labels=["foreman:impl-review"],
+    )
+
+    runner = CliRunner()
+    with patch("foreman.cli.run_fixer", new=AsyncMock(return_value=fake_result)) as mock_run:
+        result = runner.invoke(
+            cli,
+            [
+                "fix",
+                "--issue-url",
+                "https://github.com/jeffrichley/voice/issues/42",
+                "--pr-url",
+                "https://github.com/jeffrichley/voice/pull/77",
+                "--project",
+                "voice",
+                "--target",
+                "impl_pr",
+                "--config",
+                str(config_file),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    mock_run.assert_called_once()
+    assert mock_run.call_args.kwargs.get("target") == "impl_pr"
     mock_run.assert_called_once()
 
 
@@ -885,6 +992,16 @@ def test_resolve_lock_path_falls_back_to_default_without_config(
     assert _resolve_lock_path(None) == Path("~/.foreman/daemon.lock").expanduser()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "Windows daemon_stop intentionally skips os.kill(SIGTERM) — there it "
+        "maps to TerminateProcess (a hard kill that delivers no signal), so "
+        "the daemon's graceful-shutdown handlers never run. Windows uses "
+        "the sentinel-file path only; that path is covered by "
+        "test_daemon_stop_writes_shutdown_sentinel below."
+    ),
+)
 def test_daemon_stop_reads_lock_file_pid_and_sends_sigterm(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -898,6 +1015,11 @@ def test_daemon_stop_reads_lock_file_pid_and_sends_sigterm(
         f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
     )
     monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+    # Redirect sentinel write into tmp_path so the test doesn't pollute
+    # ~/.foreman/shutdown-requested on the dev's box.
+    monkeypatch.setenv(
+        "FOREMAN_SHUTDOWN_SENTINEL_PATH", str(tmp_path / "shutdown-requested")
+    )
 
     kill_calls: list[tuple[int, int]] = []
 
@@ -919,6 +1041,14 @@ def test_daemon_stop_reads_lock_file_pid_and_sends_sigterm(
     assert "Daemon stopped cleanly." in result.output
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "Windows daemon_stop skips os.kill(SIGTERM) and the grace-period "
+        "polling that follows it (TerminateProcess can't run the daemon's "
+        "cleanup path); shutdown is sentinel-only on Windows."
+    ),
+)
 def test_daemon_stop_reports_when_daemon_does_not_exit(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -934,6 +1064,9 @@ def test_daemon_stop_reports_when_daemon_does_not_exit(
         f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
     )
     monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+    monkeypatch.setenv(
+        "FOREMAN_SHUTDOWN_SENTINEL_PATH", str(tmp_path / "shutdown-requested")
+    )
 
     # SIGTERM is a no-op AND liveness probes succeed (process refuses
     # to die during the grace period).
@@ -962,6 +1095,9 @@ def test_daemon_stop_with_missing_lock_file_gives_actionable_message(
         f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
     )
     monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+    monkeypatch.setenv(
+        "FOREMAN_SHUTDOWN_SENTINEL_PATH", str(tmp_path / "shutdown-requested")
+    )
 
     result = CliRunner().invoke(cli, ["daemon", "stop"])
 
@@ -972,6 +1108,15 @@ def test_daemon_stop_with_missing_lock_file_gives_actionable_message(
     assert ("tasklist" in result.output) or ("ps aux" in result.output)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "Windows daemon_stop skips os.kill entirely; stale-PID detection "
+        "relies on os.kill(pid, SIGTERM) raising ProcessLookupError, which "
+        "the Windows code path doesn't reach. Stale lock files on Windows "
+        "are detected lazily by the next `daemon start`."
+    ),
+)
 def test_daemon_stop_with_dead_pid_reports_stale(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -988,6 +1133,9 @@ def test_daemon_stop_with_dead_pid_reports_stale(
         f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
     )
     monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+    monkeypatch.setenv(
+        "FOREMAN_SHUTDOWN_SENTINEL_PATH", str(tmp_path / "shutdown-requested")
+    )
 
     def _fake_kill(pid: int, sig: int) -> None:
         raise ProcessLookupError
@@ -1015,6 +1163,9 @@ def test_daemon_stop_with_unreadable_lock_content_reports(
         f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
     )
     monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+    monkeypatch.setenv(
+        "FOREMAN_SHUTDOWN_SENTINEL_PATH", str(tmp_path / "shutdown-requested")
+    )
 
     kill_called = []
     monkeypatch.setattr(
@@ -1029,6 +1180,14 @@ def test_daemon_stop_with_unreadable_lock_content_reports(
     assert kill_called == []  # never tried to signal an unknown PID
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "Windows daemon_stop skips os.kill(SIGTERM); SIGTERM-assertion "
+        "tests don't apply there. The cross-platform sentinel write is "
+        "still exercised in test_daemon_stop_writes_shutdown_sentinel."
+    ),
+)
 def test_daemon_stop_works_without_config_file(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1040,6 +1199,9 @@ def test_daemon_stop_works_without_config_file(
     default_lock_path = tmp_path / "default.lock"
     default_lock_path.write_text(str(os.getpid()))
     monkeypatch.setenv("FOREMAN_LOCK_PATH", str(default_lock_path))
+    monkeypatch.setenv(
+        "FOREMAN_SHUTDOWN_SENTINEL_PATH", str(tmp_path / "shutdown-requested")
+    )
 
     kill_calls: list[tuple[int, int]] = []
 
@@ -1056,6 +1218,142 @@ def test_daemon_stop_works_without_config_file(
     assert result.exit_code == 0, result.output
     assert (os.getpid(), signal.SIGTERM) in kill_calls
     assert "Daemon stopped cleanly." in result.output
+
+
+# --- Sentinel-file shutdown mechanism (cross-platform graceful stop) ---
+#
+# Pass-2 adversarial review HIGH: ``os.kill(pid, SIGTERM)`` on Windows
+# maps to ``TerminateProcess`` — a hard kill that delivers no signal,
+# so the daemon's SIGTERM handler never runs and the graceful-shutdown
+# promise is broken. The sentinel file is the cross-platform IPC
+# primitive that actually works everywhere: ``daemon stop`` writes it,
+# the reconciler polls it each tick. POSIX still gets the SIGTERM as a
+# faster signal; Windows relies on the sentinel alone.
+
+
+def test_daemon_stop_writes_shutdown_sentinel(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """daemon_stop writes the sentinel file when a daemon is running.
+
+    The cross-platform contract: when the lock file exists (i.e., there's
+    a live daemon to receive the signal), the sentinel write happens
+    before any SIGTERM logic, so a crashing SIGTERM-send never silently
+    disarms the v3 reconciler's poll-based shutdown path. This is the
+    ONLY way the daemon receives a graceful-shutdown request on Windows.
+
+    See the no-daemon-running tests below for the opposite case — when
+    there's no lock file, daemon_stop must NOT write a sentinel, because
+    a stale sentinel would silently kill the next `daemon v3-start`.
+    """
+    sentinel_path = tmp_path / "shutdown-requested"
+    lock_path = tmp_path / "d.lock"
+    lock_path.write_text(str(os.getpid()))
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[admin]\ngithub_token_env = "X"\n'
+        f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
+        f'[reconciler]\nshutdown_sentinel_path = "{sentinel_path.as_posix()}"\n'
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+    # No-op os.kill so the test doesn't actually signal anything; we only
+    # care about the sentinel-write happening on the lock-exists path.
+    monkeypatch.setattr("foreman.cli.os.kill", lambda pid, sig: None)
+    monkeypatch.setattr("foreman.cli._STOP_GRACE_SECONDS", 0.0)
+
+    result = CliRunner().invoke(cli, ["daemon", "stop"])
+
+    assert result.exit_code == 0, result.output
+    assert sentinel_path.exists(), "sentinel file must be written by daemon_stop"
+    assert "requested by foreman daemon stop" in sentinel_path.read_text(
+        encoding="utf-8"
+    )
+    assert "shutdown requested via sentinel" in result.output
+
+
+def test_daemon_stop_does_not_write_sentinel_when_no_daemon_running(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """daemon_stop must NOT leave a sentinel on disk when there's no
+    daemon to receive it. A stale sentinel would be polled by the
+    next `daemon v3-start`'s first tick and trigger an immediate
+    shutdown — silent failure mode that's hard to diagnose."""
+    sentinel_path = tmp_path / "shutdown-requested"
+    lock_path = tmp_path / "missing.lock"  # never created
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[admin]\ngithub_token_env = "X"\n'
+        f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
+        f'[reconciler]\nshutdown_sentinel_path = "{sentinel_path.as_posix()}"\n'
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
+
+    result = CliRunner().invoke(cli, ["daemon", "stop"])
+
+    assert result.exit_code == 0, result.output
+    assert not sentinel_path.exists(), (
+        "sentinel must NOT be written when no daemon is running — "
+        "would kill the next daemon start"
+    )
+    # The no-daemon path should still echo the actionable message.
+    assert "No daemon lock file" in result.output
+
+
+def test_daemon_stop_does_not_write_sentinel_without_config_or_lock(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Even without a config file (FOREMAN_CONFIG unset), the lock-gate
+    check still applies — no lock means no daemon means no sentinel.
+    Otherwise an operator running `daemon stop` on a fresh box would
+    plant a sentinel that mysteriously kills their first daemon start."""
+    monkeypatch.delenv("FOREMAN_CONFIG", raising=False)
+    sentinel_path = tmp_path / "shutdown-requested"
+    monkeypatch.setenv("FOREMAN_SHUTDOWN_SENTINEL_PATH", str(sentinel_path))
+
+    # Point lock to a nonexistent path so we return at the no-lock gate.
+    monkeypatch.setenv("FOREMAN_LOCK_PATH", str(tmp_path / "missing.lock"))
+
+    result = CliRunner().invoke(cli, ["daemon", "stop"])
+
+    assert result.exit_code == 0, result.output
+    assert not sentinel_path.exists()
+
+
+def test_resolve_shutdown_sentinel_path_honors_env_override(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """FOREMAN_SHUTDOWN_SENTINEL_PATH overrides config + the
+    hardcoded default, mirroring FOREMAN_LOCK_PATH's resolution order
+    so tests + operators can redirect without editing the config file."""
+    from foreman.cli import _resolve_shutdown_sentinel_path
+    from foreman.config import ReconcilerConfig
+
+    env_sentinel = tmp_path / "env.sentinel"
+    config_sentinel = tmp_path / "config.sentinel"
+
+    cfg = type(
+        "FakeConfig",
+        (),
+        {"reconciler": ReconcilerConfig(shutdown_sentinel_path=str(config_sentinel))},
+    )()
+    monkeypatch.setenv("FOREMAN_SHUTDOWN_SENTINEL_PATH", str(env_sentinel))
+
+    assert _resolve_shutdown_sentinel_path(cfg) == env_sentinel
+
+
+def test_resolve_shutdown_sentinel_path_falls_back_to_default_without_config(
+    monkeypatch,
+) -> None:
+    from foreman.cli import _resolve_shutdown_sentinel_path
+
+    monkeypatch.delenv("FOREMAN_SHUTDOWN_SENTINEL_PATH", raising=False)
+
+    assert (
+        _resolve_shutdown_sentinel_path(None)
+        == Path("~/.foreman/shutdown-requested").expanduser()
+    )
 
 
 def test_daemon_status_reports_running_when_lock_pid_alive(

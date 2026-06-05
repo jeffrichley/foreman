@@ -1,4 +1,16 @@
-"""Foreman daemon — poller + worker as concurrent async tasks.
+"""DEPRECATED: this module is v2. v3 lives in foreman.reconciler.
+
+The v2 daemon (this module) holds a `pipelines` state table alongside
+GitHub's actual state. That parallel-state pattern caused the foreman#101
+zombie-pipeline class of failures. v3 derives state from GitHub directly;
+the daemon db is an append-only execution log only.
+
+See docs/superpowers/specs/foreman-issue-106-spec.md for the migration
+path. v2 stays in tree (and importable) until v3 is proven stable for ~2
+weeks post-cutover; then this module + foreman.storage will be removed in
+a follow-up PR.
+
+Foreman daemon — poller + worker as concurrent async tasks.
 
 Composes the queue, locks, poller, and worker iteration into a long-running
 asyncio service. ``start()`` returns immediately; ``shutdown()`` cancels

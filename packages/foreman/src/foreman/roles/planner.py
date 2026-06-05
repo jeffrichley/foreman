@@ -15,10 +15,11 @@ host-platform operations through the
   7. Parse the ``PlannerOutput``
   8. Commit the spec doc (``host.commit_files_to_worktree``)
   9. Push the branch (``host.push_branch``)
-  10. Open the spec PR (``host.open_pull_request``)
-  11. Advance the label: ``foreman:plan`` → ``foreman:spec-review``
-       (``host.update_issue_labels``)
-  12. Return :class:`~foreman.schemas.planner.PlannerRunResult`
+  10. Open the spec PR (``host.open_pull_request``). The issue stays at
+       ``foreman:planning`` so v3's reconciler (``dispatch_reviewer_spec``)
+       fires on ``foreman:planning`` + the open spec PR — no label mutation
+       needed here.
+  11. Return :class:`~foreman.schemas.planner.PlannerRunResult`
 
 Decoupling rationale (Foreman issue #8 — the "Looper pattern"):
 the LLM is non-deterministic and host-agnostic; deterministic operations
@@ -172,11 +173,18 @@ async def run_planner(
 
     registry = identity_registry if identity_registry is not None else IdentityRegistry(project)
     host: GitHostProvider = registry.get_host_provider("planner")
+    planner_token: str = registry.get_planner_token()
 
     issue = host.get_issue(actual_repo_slug, issue_number)
     default_branch = host.get_default_branch(actual_repo_slug)
 
-    wt_mgr = WorktreeManager(worktrees_root=worktrees_root)
+    # WorktreeManager's git subprocesses (fetch / worktree add) must
+    # authenticate as the planner bot — without the explicit token they
+    # inherit the daemon's parent ``GH_TOKEN`` (CI runner, dev shell)
+    # and attribute identity to the daemon's identity on private repos.
+    # Same anti-leak motivation as the Stage 3e role-module subprocess
+    # fix; WorktreeManager was scoped out at the time as a follow-up.
+    wt_mgr = WorktreeManager(worktrees_root=worktrees_root, role_token=planner_token)
     wt_path = wt_mgr.create(
         clone_path=Path(project.local_clone_path),
         repo_slug=repo_name,
@@ -218,21 +226,27 @@ async def run_planner(
         base=default_branch,
         head=branch,
     )
-    host.update_issue_labels(
-        repo_slug=actual_repo_slug,
-        issue_number=issue_number,
-        add=["foreman:spec-review"],
-        remove=["foreman:plan"],
-    )
+    # v3 label vocabulary: Planner writes ZERO labels. The issue stays
+    # at ``foreman:planning`` (the entry label) after the spec PR opens;
+    # v3's reconciler ``dispatch_reviewer_spec`` rule then fires on
+    # ``foreman:planning`` + an open spec PR. No host label mutation
+    # happens here.
+    #
+    # Historical note: a prior revision attempted a best-effort cleanup
+    # of the legacy ``foreman:plan`` entry label on v2-era tickets. That
+    # cleanup raised PyGithub ``GithubException(404)`` on every fresh v3
+    # ticket (which never carries ``foreman:plan``) because
+    # ``issue.remove_from_labels`` 404s when the label is absent. Since
+    # ``foreman init`` no longer creates ``foreman:plan`` (PR #111), the
+    # cleanup is a back-compat tail that's no longer worth its crash
+    # surface. v2-era tickets that still carry the label must be
+    # cleaned up manually.
 
     # foreman#91: compute final_labels deterministically from the
     # pre-mutation set (``issue.labels`` is the snapshot taken by
-    # ``host.get_issue`` above) + the role's known transitions
-    # (remove ``foreman:plan``, add ``foreman:spec-review``). Avoids
-    # the post-mutation host re-read race that produced stale-
-    # snapshot re-dispatches at the next worker iteration.
-    final_labels = sorted(
-        (set(issue.labels) - {"foreman:plan", "foreman:planning"}) | {"foreman:spec-review"}
-    )
+    # ``host.get_issue`` above) + the role's known transitions.
+    # v3: the Planner makes no label changes, so the final set is just
+    # the pre-mutation set (sorted for stability).
+    final_labels = sorted(set(issue.labels))
 
     return PlannerRunResult(llm_output=llm_output, pr=pr, final_labels=final_labels)

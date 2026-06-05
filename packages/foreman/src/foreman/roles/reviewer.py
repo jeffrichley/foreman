@@ -6,15 +6,15 @@ then:
 
   1. Posts the ``review_comment`` as a PR review (``event="COMMENT"``)
   2. Advances the **issue's** label deterministically:
-     - ``clean``     → ``foreman:spec-review`` → ``foreman:spec-ready``
-     - ``needs_fix`` → ``foreman:spec-review`` → ``foreman:spec-fix``
+     - ``clean``     → ``foreman:planning`` → ``foreman:plan-approved``
+     - ``needs_fix`` → ``foreman:planning`` → ``foreman:spec-fix``
   3. Returns :class:`~foreman.schemas.reviewer.ReviewerOutput` to the caller
      for display / persistence
 
 The label transition is on the originating ISSUE, not the PR — same
 pattern the Planner uses. The Reviewer derives the issue number and
 the review target (spec PR vs impl PR) from the PR's head branch:
-- ``foreman/issue-<N>`` → spec PR (label ``foreman:spec-review``)
+- ``foreman/issue-<N>`` → spec PR (label ``foreman:planning``)
 - ``foreman/impl-<N>``  → impl PR (label ``foreman:impl-review``)
 
 Pre-flight guard: if the source issue does not carry the
@@ -62,11 +62,11 @@ REVIEWER_ALLOWED_TOOLS = ["Read", "Grep", "Glob", "Bash"]
 # Labels the Reviewer touches on the originating issue. The spec-PR labels
 # and impl-PR labels form parallel triples; ``run_reviewer`` picks one
 # triple based on the PR's head-branch shape.
-_LABEL_SPEC_REVIEW = "foreman:spec-review"
-_LABEL_SPEC_READY = "foreman:spec-ready"
+_LABEL_SPEC_REVIEW = "foreman:planning"
+_LABEL_SPEC_READY = "foreman:plan-approved"
 _LABEL_SPEC_FIX = "foreman:spec-fix"
 _LABEL_IMPL_REVIEW = "foreman:impl-review"
-_LABEL_READY_FOR_MERGE = "foreman:ready-for-merge"
+_LABEL_READY_FOR_MERGE = "foreman:impl-approved"
 _LABEL_IMPL_FIX = "foreman:impl-fix"
 
 # foreman#78: per-target routing for the Reviewer. The role accepts
@@ -249,14 +249,26 @@ def _build_user_prompt(
     )
 
 
-def _get_pr_diff(worktree_path: Path, base_branch: str, head_sha: str) -> str:
+def _get_pr_diff(
+    worktree_path: Path, base_branch: str, head_sha: str, *, role_token: str
+) -> str:
     """Return the unified diff for the PR's head against its base branch.
 
     Uses ``git diff`` in the worktree rather than the GitHub Files API so
     we don't pay round-trips for large PRs and so the diff matches whatever
     the worktree has checked out (which the LLM will read from with Read /
     Grep / Glob).
+
+    ``role_token`` is the reviewer bot's installation token. We inject it
+    into ``GH_TOKEN`` for both git invocations so any credential-helper
+    (e.g., ``gh auth git-credential``) configured in the worktree
+    authenticates as the reviewer bot rather than inheriting whatever
+    ``GH_TOKEN`` the daemon's parent process had set (CI runner or dev
+    shell). Without this, identity attribution leaks (HIGH #10).
     """
+    from foreman._env_filter import filtered_subprocess_env
+
+    role_env = filtered_subprocess_env(role_token=role_token)
     # Ensure we have the base ref locally — the PR's base is typically the
     # repo default (``main``), which the clone already tracks. Tolerate
     # fetch failure; the diff command below will surface a clearer error.
@@ -266,6 +278,7 @@ def _get_pr_diff(worktree_path: Path, base_branch: str, head_sha: str) -> str:
         check=False,
         capture_output=True,
         text=True,
+        env=role_env,
     )
     result = subprocess.run(
         ["git", "diff", f"origin/{base_branch}...{head_sha}"],
@@ -273,6 +286,7 @@ def _get_pr_diff(worktree_path: Path, base_branch: str, head_sha: str) -> str:
         check=True,
         capture_output=True,
         text=True,
+        env=role_env,
     )
     return result.stdout
 
@@ -332,7 +346,7 @@ async def run_reviewer(
             not a Foreman review branch (``foreman/issue-<N>`` or
             ``foreman/impl-<N>``).
         RuntimeError: Source issue is missing the target-appropriate
-            review label (``foreman:spec-review`` for spec PRs,
+            review label (``foreman:planning`` for spec PRs,
             ``foreman:impl-review`` for impl PRs) — we refuse to advance
             PRs whose source issue was not queued for review.
     """
@@ -379,7 +393,14 @@ async def run_reviewer(
     issue_title = issue.title or ""
     issue_body = issue.body or ""
 
-    wt_mgr = WorktreeManager(worktrees_root=worktrees_root)
+    # WorktreeManager's git subprocesses (fetch / worktree add) must
+    # authenticate as the reviewer bot — without the explicit token they
+    # inherit the daemon's parent ``GH_TOKEN`` (CI runner, dev shell)
+    # and attribute identity to the daemon's identity on private repos.
+    # Same anti-leak motivation as :func:`_get_pr_diff` above; the
+    # ``role_token`` parameter is plumbed all the way down through the
+    # module-level git helpers.
+    wt_mgr = WorktreeManager(worktrees_root=worktrees_root, role_token=reviewer_token)
     if target == "impl_pr":
         wt_path = wt_mgr.attach_impl(
             clone_path=Path(project.local_clone_path),
@@ -393,7 +414,9 @@ async def run_reviewer(
             ticket_id=issue_number,
         )
 
-    pr_diff = _get_pr_diff(wt_path, base_branch=base_branch, head_sha=head_sha)
+    pr_diff = _get_pr_diff(
+        wt_path, base_branch=base_branch, head_sha=head_sha, role_token=reviewer_token
+    )
     spec_doc_content = _read_spec_doc(wt_path, issue_number)
     instructions = load_project_instructions(Path(project.local_clone_path))
 
@@ -414,7 +437,7 @@ async def run_reviewer(
         allowed_tools=REVIEWER_ALLOWED_TOOLS,
         output_model=ReviewerOutput,
         cwd=wt_path,
-        env={"GH_TOKEN": reviewer_token, **os.environ},
+        env={**os.environ, "GH_TOKEN": reviewer_token},
     )
 
     # Post the review comment as the reviewer bot. ``event="COMMENT"``
@@ -440,13 +463,46 @@ async def run_reviewer(
     else:
         add_label = fix_label
 
-    issue.remove_from_labels(in_review_label)
-    issue.add_to_labels(add_label)
+    # Atomic label transition (foreman#? — adversarial review MEDIUM #12):
+    # use ``issue.set_labels(...)`` (single PUT /issues/{N}/labels) instead
+    # of sequential ``remove_from_labels`` + ``add_to_labels``. A subprocess
+    # crash between the two PyGithub calls leaves the issue with neither
+    # the entry label nor the outcome label — it then falls out of the v3
+    # observer's GraphQL ``filterBy.labels`` filter and the reconciler
+    # never sees it again (silent stall). ``set_labels`` replaces the full
+    # label set in one API call, so the transition is either fully applied
+    # or not applied at all.
+    #
+    # Namespace-scoped merge (Pass 2 HIGH): ``set_labels`` REPLACES the
+    # full label set on GitHub, so we must preserve every label the role
+    # is not actively touching. Re-read labels NOW (not from the pre-LLM
+    # snapshot) to minimize the race window for operator-added labels —
+    # the LLM call took minutes, but the re-read → API call window is
+    # only the round-trip (~hundreds of ms). The role declares the
+    # foreman labels it is removing (``removed_foreman``) and adding
+    # (``added_foreman``); everything else — non-foreman labels like
+    # ``priority:high`` AND foreman labels the role isn't touching like
+    # ``foreman:hold`` — passes through.
+    #
+    # Pass 3 CRITICAL: PyGithub's ``Issue.labels`` is a cached property
+    # — ``_completeIfNotSet(self._labels)`` only fetches on FIRST access
+    # (see ``.venv/Lib/site-packages/github/Issue.py:266`` +
+    # ``GithubObject.py:618``). Subsequent reads return the same snapshot
+    # taken at the top of ``run_reviewer`` — operator-added labels during
+    # the LLM call would be silently dropped. ``issue.update()`` issues a
+    # conditional GET and re-stores the attributes (see
+    # ``GithubObject.py:638``), invalidating the cache so the next
+    # ``issue.labels`` access reflects the real remote state.
+    removed_foreman = {in_review_label}
+    added_foreman = {add_label}
+    issue.update()
+    current_label_names = {label.name for label in issue.labels}
+    final_labels = sorted((current_label_names - removed_foreman) | added_foreman)
+    issue.set_labels(*final_labels)
 
-    # foreman#91: compute final_labels deterministically from the
-    # in-memory pre-mutation set + the role's known transitions, not
-    # via a post-mutation host re-read. The fresh GET against GitHub
-    # raced its own write and produced stale-snapshot dispatches at
-    # the next worker iteration.
-    final_labels = sorted((issue_labels - {in_review_label}) | {add_label})
+    # foreman#91: ``final_labels`` is the authoritative post-transition
+    # set, computed in-process from the pre-mutation snapshot + the role's
+    # known transitions — not via a post-mutation host re-read (which
+    # raced its own write and produced stale-snapshot dispatches at the
+    # next worker iteration).
     return ReviewerRunResult(llm_output=llm_output, final_labels=final_labels)
