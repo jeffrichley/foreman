@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 
 from foreman.reconciler.actions import Action, ActionContext, execute_action
 from foreman.reconciler.exec_log import ExecutionLog
@@ -22,19 +23,91 @@ from foreman.reconciler.observer import (
     ObserverUnreachable,
     fetch_project_state,
 )
-from foreman.reconciler.rules import RULES, evaluate
-from foreman.reconciler.state import ProjectSnapshot
+from foreman.reconciler.rules import evaluate_with_rule
+from foreman.reconciler.state import IssueState, ProjectSnapshot, PRState
 
 logger = logging.getLogger(__name__)
 
 
+def _pick_pr_for_ticket(
+    issue: IssueState, linked_prs: list[PRState]
+) -> PRState | None:
+    """Pick the right linked PR for this ticket based on the issue's current
+    label state.
+
+    During the brief stacked-PR window where both a spec PR
+    (``foreman/issue-N``) and an impl PR (``foreman/impl-N``) carry
+    ``closingIssuesReferences`` pointing to the same issue, GraphQL result
+    ordering is undefined. ``linked_prs[0]`` would arbitrarily pick one,
+    which can land the wrong PR into ``ctx.pr`` and let
+    ``merge_spec_pr`` / ``merge_impl_pr`` fire on a shape-mismatched PR
+    (adversarial review MEDIUM #11).
+
+    Routing by label phase:
+
+    - ``foreman:planning`` / ``foreman:plan-approved`` / ``foreman:spec-fix``
+      → spec PR (``foreman/issue-N``)
+    - ``foreman:impl-review`` / ``foreman:impl-approved`` /
+      ``foreman:impl-fix`` → impl PR (``foreman/impl-N``)
+
+    If the label set spans both phases (transient state during a label
+    swap), prefer the impl PR — the later stage wins.
+
+    Returns ``None`` when no shape filter matches (Pass 2 MEDIUM): the issue
+    carries no foreman phase label (e.g., only ``foreman:hold`` or
+    ``foreman:needs-help``) or the linked PR's head_ref doesn't follow the
+    foreman branch convention. Some safety rules don't filter by shape and
+    would otherwise fire against an arbitrarily-picked off-shape PR;
+    returning None makes those rules safely no-op via the existing
+    ``ctx.pr is None`` guards.
+    """
+    if not linked_prs:
+        return None
+
+    spec_phase = {"foreman:planning", "foreman:plan-approved", "foreman:spec-fix"}
+    impl_phase = {"foreman:impl-review", "foreman:impl-approved", "foreman:impl-fix"}
+
+    labels = set(issue.labels)
+    prefer_spec = bool(labels & spec_phase)
+    prefer_impl = bool(labels & impl_phase)
+
+    if prefer_spec and not prefer_impl:
+        for pr in linked_prs:
+            if pr.head_ref.startswith("foreman/issue-"):
+                return pr
+    if prefer_impl and not prefer_spec:
+        for pr in linked_prs:
+            if pr.head_ref.startswith("foreman/impl-"):
+                return pr
+    if prefer_spec and prefer_impl:
+        # Transient state spans both phases — later stage wins.
+        for pr in linked_prs:
+            if pr.head_ref.startswith("foreman/impl-"):
+                return pr
+        for pr in linked_prs:
+            if pr.head_ref.startswith("foreman/issue-"):
+                return pr
+    return None
+
+
 @dataclass(frozen=True)
 class ReconcilerProject:
-    """One registered project the reconciler watches."""
+    """One registered project the reconciler watches.
+
+    ``auto_merge_spec`` / ``auto_merge_impl`` are the EFFECTIVE flags after
+    resolving per-project overrides against ``ReconcilerConfig`` defaults
+    (via ``ReconcilerConfig.effective_auto_merge_*(project_cfg)``). They
+    travel into each per-tick ``ActionContext`` so the rule catalog can
+    decide between auto-merge and park-for-human transitions. Defaults
+    match the global ``ReconcilerConfig`` defaults so tests that omit them
+    keep the same behavior as production with no project-level overrides.
+    """
 
     name: str
     owner: str
     repo: str
+    auto_merge_spec: bool = True
+    auto_merge_impl: bool = False
 
 
 class Reconciler:
@@ -50,6 +123,7 @@ class Reconciler:
         dry_run: bool,
         alert_after_n_failures: int = 3,
         poll_interval_seconds: int = 60,
+        shutdown_sentinel_path: Path | str | None = None,
     ) -> None:
         self.projects = projects
         self.log = log
@@ -60,6 +134,15 @@ class Reconciler:
         self.poll_interval_seconds = poll_interval_seconds
         self._stop_event = asyncio.Event()
         self._consecutive_failures: dict[str, int] = {p.name: 0 for p in projects}
+        # Sentinel-file-based graceful-shutdown signal. ``foreman daemon stop``
+        # writes this file; we poll it each tick and trigger shutdown when
+        # present. ``None`` disables the mechanism (used by tests that don't
+        # need it — the existing signal-handler path still works).
+        self._shutdown_sentinel_path: Path | None = (
+            Path(shutdown_sentinel_path).expanduser()
+            if shutdown_sentinel_path is not None
+            else None
+        )
 
     async def tick(self) -> None:
         """Run one reconciliation pass over every project."""
@@ -97,22 +180,81 @@ class Reconciler:
                 continue
 
             self._consecutive_failures[project.name] = 0
-            self._reconcile_project(snapshot)
+            self._reconcile_project(snapshot, project)
 
-    def _reconcile_project(self, snapshot: ProjectSnapshot) -> None:
+        # Sentinel-file-based shutdown check — runs once per tick after
+        # all projects have been reconciled so an in-flight tick completes
+        # before we set the stop event. On Windows this is the ONLY way
+        # ``foreman daemon stop`` can request graceful shutdown (os.kill
+        # there maps to TerminateProcess, which delivers no signal); on
+        # POSIX it is additive to the SIGTERM-handler path installed by
+        # the CLI.
+        if self._shutdown_sentinel_present():
+            logger.info(
+                "shutdown sentinel detected at %s; initiating graceful shutdown",
+                self._shutdown_sentinel_path,
+            )
+            self._consume_shutdown_sentinel()
+            self._stop_event.set()
+
+    def _shutdown_sentinel_present(self) -> bool:
+        """Return True iff a configured sentinel file exists on disk."""
+        if self._shutdown_sentinel_path is None:
+            return False
+        try:
+            return self._shutdown_sentinel_path.exists()
+        except OSError:
+            # Filesystem hiccup — don't crash the tick over a missing volume.
+            return False
+
+    def _consume_shutdown_sentinel(self) -> None:
+        """Delete the sentinel after detection.
+
+        Cleanup so the next ``daemon start`` does not immediately shut
+        down. ``FileNotFoundError`` is harmless (the file might have been
+        removed externally between presence-check and unlink). Other
+        errors are logged but don't block the shutdown — the stop event
+        is set either way.
+        """
+        if self._shutdown_sentinel_path is None:
+            return
+        try:
+            self._shutdown_sentinel_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.exception(
+                "failed to delete shutdown sentinel at %s; continuing shutdown",
+                self._shutdown_sentinel_path,
+            )
+
+    def _reconcile_project(
+        self,
+        snapshot: ProjectSnapshot,
+        project: ReconcilerProject,
+    ) -> None:
         for issue in snapshot.issues:
             linked_prs = snapshot.prs_for_issue(issue.number)
-            pr = linked_prs[0] if linked_prs else None
-            ctx = ActionContext(snapshot=snapshot, issue=issue, pr=pr, log=self.log)
-            action = evaluate(ctx, rules=RULES)
+            pr = _pick_pr_for_ticket(issue, list(linked_prs))
+            ctx = ActionContext(
+                snapshot=snapshot,
+                issue=issue,
+                pr=pr,
+                log=self.log,
+                auto_merge_spec=project.auto_merge_spec,
+                auto_merge_impl=project.auto_merge_impl,
+            )
+            action, rule_name = evaluate_with_rule(ctx)
             if action is Action.NOOP:
                 continue
-            rule_name = _rule_that_fired(ctx, action)
+            # ``evaluate_with_rule`` returns a non-None rule name whenever
+            # action is not NOOP; the ``or "unknown"`` is a defensive fallback
+            # mypy can verify against the union without runtime-narrowing logic.
             execute_action(
                 action,
                 ctx,
                 host=self.host,
-                rule_name=rule_name,
+                rule_name=rule_name or "unknown",
                 dry_run=self.dry_run,
             )
 
@@ -133,14 +275,3 @@ class Reconciler:
 
     async def shutdown(self) -> None:
         self._stop_event.set()
-
-
-def _rule_that_fired(ctx: ActionContext, action: Action) -> str:
-    """Reverse-lookup which rule emitted this action — for log attribution."""
-    for rule in RULES:
-        try:
-            if rule.when(ctx) and rule.then is action:
-                return rule.name
-        except Exception:
-            continue
-    return "unknown"

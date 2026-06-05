@@ -20,10 +20,24 @@ class ReconcilerHost(Protocol):
         self,
         *,
         role: str,
+        target: str | None,
         owner: str,
         repo: str,
         issue: int,
         pr_number: int | None,
+        start_log_id: int,
     ) -> int:
-        """Spawn the role subprocess (planner|reviewer|fixer|worker). Returns the PID."""
+        """Spawn the role subprocess (planner|reviewer|fixer|worker). Returns the PID.
+
+        ``target`` is the per-dispatch target for roles that act on more than
+        one artifact shape — ``"spec_pr"`` or ``"impl_pr"`` for the Reviewer
+        and Fixer. Planner and Worker pass ``None``. The host plumbs ``target``
+        into the subprocess argv via ``--target`` so the role's CLI dispatches
+        the right prompt + entry-label check (foreman v3 rescue Stage 2).
+
+        ``start_log_id`` is the id of the 'running' row the executor wrote
+        immediately before calling this method. The host owns writing the
+        termination row when the subprocess exits — see
+        ``V3GitHubHost._track_subprocess_completion``.
+        """
         ...

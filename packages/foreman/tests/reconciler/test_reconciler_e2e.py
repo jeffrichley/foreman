@@ -45,12 +45,17 @@ class _StubHost:
         return 12345
 
 
-def _gh_with(issues: list[dict], prs: list[dict]) -> dict[str, Any]:
+def _gh_with(
+    issues: list[dict],
+    prs: list[dict],
+    merged_prs: list[dict] | None = None,
+) -> dict[str, Any]:
     return {
         "data": {
             "repository": {
                 "issues": {"nodes": issues},
-                "pullRequests": {"nodes": prs},
+                "openPRs": {"nodes": prs},
+                "recentMergedPRs": {"nodes": merged_prs or []},
             }
         }
     }
@@ -75,10 +80,17 @@ def _pr_payload(
     mergeable: str = "MERGEABLE",
     ci: str | None = "SUCCESS",
     merged: bool = False,
+    head_ref: str | None = None,
 ) -> dict[str, Any]:
+    # Default head_ref is v3 spec-shaped (``foreman/issue-<linked-issue>``) so
+    # rule predicates with head-ref filters (adversarial review 4c) still match
+    # for spec-PR cases by default. Tests exercising impl-PR rules must pass
+    # ``head_ref="foreman/impl-<N>"`` explicitly.
+    if head_ref is None:
+        head_ref = f"foreman/issue-{closes[0]}" if closes else f"foreman/issue-{number}"
     return {
         "number": number,
-        "headRefName": f"branch-{number}",
+        "headRefName": head_ref,
         "body": "",
         "mergeable": mergeable,
         "merged": merged,
@@ -144,7 +156,7 @@ async def test_tick_safety_preempts_progress_when_ci_failed(tmp_path: Path) -> N
     gh = _StubGHClient(
         _gh_with(
             [_issue_payload(143, ["foreman:impl-review"])],
-            [_pr_payload(number=144, closes=[143], ci="FAILURE")],
+            [_pr_payload(number=144, closes=[143], ci="FAILURE", head_ref="foreman/impl-143")],
         )
     )
     host = _StubHost()
@@ -218,3 +230,101 @@ async def test_tick_observer_rate_limited_alerts_after_n_failures(tmp_path: Path
             "SELECT action, outcome FROM execution_log WHERE action='observer_failure_alert'"
         ).fetchall()
     assert len(rows) == 1
+
+
+# --- Sentinel-file graceful shutdown ---
+#
+# The reconciler polls a configured sentinel file at the end of each tick.
+# When present, it triggers graceful shutdown (sets the internal stop event)
+# AND deletes the file so the next ``daemon start`` doesn't immediately
+# shut down. This is the cross-platform shutdown path — on Windows it's the
+# only mechanism that works because ``os.kill(pid, SIGTERM)`` there maps to
+# ``TerminateProcess`` (a hard kill that delivers no signal).
+
+
+@pytest.mark.asyncio
+async def test_tick_consumes_shutdown_sentinel(tmp_path: Path) -> None:
+    """When the sentinel file exists at tick end, the reconciler deletes
+    it and sets the stop event so the next ``run`` loop iteration exits.
+    """
+    sentinel = tmp_path / "shutdown-requested"
+    sentinel.write_text("requested by test", encoding="utf-8")
+
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    # Empty snapshot — no issues to reconcile; the sentinel check runs
+    # at the end of the per-tick loop body regardless.
+    gh = _StubGHClient(_gh_with([], []))
+    host = _StubHost()
+
+    reconciler = Reconciler(
+        projects=(
+            ReconcilerProject(name="foreman", owner="jeffrichley", repo="foreman"),
+        ),
+        log=log,
+        gh=gh,
+        host=host,
+        dry_run=False,
+        shutdown_sentinel_path=sentinel,
+    )
+
+    assert sentinel.exists()  # pre-check
+    assert not reconciler._stop_event.is_set()
+
+    await reconciler.tick()
+
+    assert not sentinel.exists(), "sentinel must be consumed (deleted) on detection"
+    assert reconciler._stop_event.is_set(), "stop event must fire after sentinel detection"
+
+
+@pytest.mark.asyncio
+async def test_tick_without_sentinel_does_not_shut_down(tmp_path: Path) -> None:
+    """When no sentinel exists, the reconciler keeps running — sentinel
+    polling must not introduce a regression that exits the daemon on
+    every tick when the sentinel-path knob is configured but the file
+    isn't present."""
+    sentinel = tmp_path / "shutdown-requested"  # never created
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    gh = _StubGHClient(_gh_with([], []))
+    host = _StubHost()
+
+    reconciler = Reconciler(
+        projects=(
+            ReconcilerProject(name="foreman", owner="jeffrichley", repo="foreman"),
+        ),
+        log=log,
+        gh=gh,
+        host=host,
+        dry_run=False,
+        shutdown_sentinel_path=sentinel,
+    )
+
+    await reconciler.tick()
+
+    assert not reconciler._stop_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_tick_without_sentinel_path_configured_works(tmp_path: Path) -> None:
+    """When ``shutdown_sentinel_path=None`` (default in tests that don't
+    care about it), tick must not crash and the stop event must not fire.
+    """
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    gh = _StubGHClient(_gh_with([], []))
+    host = _StubHost()
+
+    reconciler = Reconciler(
+        projects=(
+            ReconcilerProject(name="foreman", owner="jeffrichley", repo="foreman"),
+        ),
+        log=log,
+        gh=gh,
+        host=host,
+        dry_run=False,
+        # shutdown_sentinel_path explicitly omitted → defaults to None.
+    )
+
+    await reconciler.tick()
+    assert not reconciler._stop_event.is_set()

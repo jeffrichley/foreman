@@ -7,7 +7,7 @@ The init flow is a one-shot setup pass that:
      unless ``--force`` is passed
   3. Writes a ``.foreman/INSTRUCTIONS.md`` template into the local clone
      (skipping if one already exists — even with ``--force``)
-  4. Creates the 18 Foreman state + modifier + attempt labels on the
+  4. Creates the Foreman state + modifier + attempt labels on the
      target repo (idempotent: existing labels are left alone)
   5. Best-effort verifies that each role's GitHub App can mint an
      installation token against the target repo
@@ -70,40 +70,41 @@ _DEFAULT_CHECK_COMMAND = "just check"
 # requiring click in this module.
 _DEFAULT_CONFIG_PATH = Path.home() / ".foreman" / "config.toml"
 
-# The 18 Foreman labels created on the target repo. Order is intentional:
-# state labels first (in pipeline order), then modifier labels, then
+# The Foreman labels created on the target repo. Order is intentional:
+# state labels first (in v3 pipeline order), then modifier labels, then
 # attempt counters. The structure mirrors the operator's mental model of
 # the pipeline rather than alphabetic order. Keep in sync with the
-# matching tables in the role orchestrators.
+# v3 reconciler rule catalog + role modules.
 _FOREMAN_LABELS: list[tuple[str, str, str]] = [
     # name, color (no leading '#'), description
-    ("foreman:plan", "0E8A16", "Foreman: queue for planning"),
-    ("foreman:planning", "FBCA04", "Foreman: Planner in-flight"),
-    ("foreman:spec-review", "FBCA04", "Foreman: spec PR ready for review"),
-    ("foreman:spec-ready", "0E8A16", "Foreman: spec approved, queued for Worker"),
-    ("foreman:spec-fix", "D93F0B", "Foreman: spec PR needs fix"),
+    ("foreman:planning", "FBCA04", "Foreman: spec phase (Planner + Reviewer)"),
     (
-        "foreman:implementing-ready",
+        "foreman:plan-approved",
         "0E8A16",
-        "Foreman: spec PR merged, Worker queued (daemon sentinel)",
+        "Foreman: spec approved, queued for Worker",
     ),
-    ("foreman:implementing", "FBCA04", "Foreman: Worker in-flight"),
-    ("foreman:impl-review", "FBCA04", "Foreman: impl PR ready for review"),
-    ("foreman:impl-fix", "D93F0B", "Foreman: impl PR needs fix"),
-    ("foreman:ready-for-merge", "0E8A16", "Foreman: pipeline complete, human merges"),
-    ("foreman:failed", "D93F0B", "Foreman: pipeline halted, human inspection"),
-    ("foreman:hold", "BFD4F2", "Foreman: pause new node starts"),
+    ("foreman:spec-fix", "D93F0B", "Foreman: spec PR needs human follow-up"),
+    ("foreman:impl-review", "FBCA04", "Foreman: impl PR ready for Reviewer"),
+    (
+        "foreman:impl-approved",
+        "0E8A16",
+        "Foreman: impl approved, queued for merge",
+    ),
+    ("foreman:impl-fix", "D93F0B", "Foreman: impl PR needs Fixer follow-up"),
     (
         "foreman:needs-help",
         "FBCA04",
-        "Foreman: Fixer or another role got stuck; human or sweep can intervene",
+        "Foreman: surfaced for human intervention",
     ),
-    ("foreman:fix-attempt-1", "BFD4F2", "Foreman: fix cycle attempt 1 of 3"),
-    ("foreman:fix-attempt-2", "BFD4F2", "Foreman: fix cycle attempt 2 of 3"),
-    ("foreman:fix-attempt-3", "BFD4F2", "Foreman: fix cycle attempt 3 of 3"),
+    ("foreman:hold", "BFD4F2", "Foreman: manual pause (blocks all rules)"),
+    ("foreman:done", "6F42C1", "Foreman: ticket complete"),
+    ("foreman:failed", "B60205", "Foreman: ticket exhausted retries (terminal)"),
     ("foreman:impl-attempt-1", "BFD4F2", "Foreman: impl cycle attempt 1 of 3"),
     ("foreman:impl-attempt-2", "BFD4F2", "Foreman: impl cycle attempt 2 of 3"),
     ("foreman:impl-attempt-3", "BFD4F2", "Foreman: impl cycle attempt 3 of 3"),
+    ("foreman:fix-attempt-1", "BFD4F2", "Foreman: fix cycle attempt 1 of 3"),
+    ("foreman:fix-attempt-2", "BFD4F2", "Foreman: fix cycle attempt 2 of 3"),
+    ("foreman:fix-attempt-3", "BFD4F2", "Foreman: fix cycle attempt 3 of 3"),
 ]
 
 # The four role names init knows about; mirrors :mod:`foreman.identity`.
@@ -558,7 +559,7 @@ def _format_summary(result: InitResult) -> str:
         f"{result.config_path} with your\n"
         "     bot App IDs (see an existing project's apps block for reference).\n"
         f"  2. Review and customize {result.instructions_path}\n"
-        "  3. Label an issue with foreman:plan and run:\n"
+        "  3. Label an issue with foreman:planning and run:\n"
         f"     foreman plan https://github.com/{result.repo}/issues/<N> "
         f"--project {result.name}"
     )

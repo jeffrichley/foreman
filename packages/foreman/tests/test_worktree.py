@@ -1264,3 +1264,286 @@ def test_create_with_dev_base_branch_continues_when_fetch_fails(
     assert "git fetch" in combined and "warn" in combined.lower(), (
         "Expected a stderr warning about git fetch failure for the alt branch"
     )
+
+
+# ----------------------------------------------------------------------
+# Stage 3e follow-up — WorktreeManager threads ``role_token`` into every
+# git/uv subprocess so commits + pushes attribute to the role bot's
+# identity, not the daemon's parent ``GH_TOKEN``. Pass 2 adversarial
+# review LOW: WorktreeManager's git fetch / worktree add / uv sync
+# subprocess calls were inheriting the daemon's parent ``GH_TOKEN``
+# (CI runner, dev shell, whichever role last set one), leaking the
+# daemon's identity on private repos and risking auth failures on
+# repos with role-specific permissions.
+# ----------------------------------------------------------------------
+
+
+def _capture_envs_for_create(
+    captured_envs: list[dict[str, str] | None],
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """Recorder that captures the ``env`` kwarg for every git subprocess
+    while delegating execution to real ``subprocess.run`` (so the
+    underlying git operations still succeed and the worktree gets
+    built). Skips ``uv sync`` because the fixture clones don't have
+    a real pyproject installed, but the production code path that
+    runs uv sync is exercised by other tests above.
+    """
+    real_run = subprocess.run
+
+    def recording_run(cmd: Any, *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if isinstance(cmd, list) and cmd and cmd[0] == "git":
+            captured_envs.append(kwargs.get("env"))
+        return real_run(cmd, *args, **kwargs)
+
+    return recording_run
+
+
+def test_create_threads_role_token_into_git_subprocess_envs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every git subprocess inside ``create()`` receives
+    ``GH_TOKEN=<role_token>`` when the manager is constructed with one.
+
+    Without this threading, ``git fetch`` / ``git worktree add`` would
+    inherit whatever ``GH_TOKEN`` the daemon's parent process happened
+    to carry — leaking the daemon's identity (or worse, a previous
+    role's) into the role bot's git ops. The role token must win,
+    deterministically.
+    """
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    _init_git_repo(clone, origin_path=tmp_path / "origin.git")
+
+    # Parent process carries an unrelated GH_TOKEN — the wrong-identity
+    # token the daemon might have inherited. The role token must override it.
+    monkeypatch.setenv("GH_TOKEN", "ghs_PARENT_DAEMON_TOKEN_SHOULD_NOT_WIN")
+
+    captured_envs: list[dict[str, str] | None] = []
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(
+        worktrees_root=worktrees_root,
+        role_token="ghs_role_planner_token_xyz",
+    )
+
+    with patch(
+        "foreman.worktree.subprocess.run",
+        side_effect=_capture_envs_for_create(captured_envs),
+    ):
+        mgr.create(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    assert captured_envs, "expected at least one git subprocess call"
+    for env in captured_envs:
+        assert env is not None, (
+            "every git call in create() must pass env=filtered_subprocess_env(role_token=...); "
+            "default env=None would inherit the parent's GH_TOKEN"
+        )
+        assert env.get("GH_TOKEN") == "ghs_role_planner_token_xyz", (
+            f"git subprocess inherited wrong GH_TOKEN={env.get('GH_TOKEN')!r}; "
+            "the role token must override the parent process's GH_TOKEN"
+        )
+
+
+def test_create_without_role_token_preserves_parent_gh_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the manager is constructed without ``role_token`` (manual
+    CLI invocation, existing tests), the parent ``GH_TOKEN`` survives —
+    we don't accidentally strip it. The role-token override is OPTIONAL
+    by design: not every caller has a role identity in scope.
+    """
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    _init_git_repo(clone, origin_path=tmp_path / "origin.git")
+
+    monkeypatch.setenv("GH_TOKEN", "ghs_parent_inherited_token")
+
+    captured_envs: list[dict[str, str] | None] = []
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(worktrees_root=worktrees_root)  # no role_token
+
+    with patch(
+        "foreman.worktree.subprocess.run",
+        side_effect=_capture_envs_for_create(captured_envs),
+    ):
+        mgr.create(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    assert captured_envs, "expected at least one git subprocess call"
+    for env in captured_envs:
+        assert env is not None
+        # filtered_subprocess_env preserves the parent GH_TOKEN when no
+        # role_token override is supplied.
+        assert env.get("GH_TOKEN") == "ghs_parent_inherited_token"
+
+
+def test_create_impl_threads_role_token_into_git_subprocess_envs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same anti-leak invariant for ``create_impl``: fetch + symbolic-ref +
+    rev-parse + cat-file + worktree-add all must carry the worker's role
+    token, not whatever the parent shell had set.
+    """
+    clone = tmp_path / "clone"
+    _seed_clone_with_spec_branch_pushed(clone, ticket_id=42)
+
+    monkeypatch.setenv("GH_TOKEN", "ghs_PARENT_DAEMON_TOKEN_SHOULD_NOT_WIN")
+
+    captured_envs: list[dict[str, str] | None] = []
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(
+        worktrees_root=worktrees_root,
+        role_token="ghs_role_worker_token_xyz",
+    )
+
+    with patch(
+        "foreman.worktree.subprocess.run",
+        side_effect=_capture_envs_for_create(captured_envs),
+    ):
+        mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    assert captured_envs, "expected at least one git subprocess call from create_impl"
+    for env in captured_envs:
+        assert env is not None
+        assert env.get("GH_TOKEN") == "ghs_role_worker_token_xyz", (
+            f"create_impl git subprocess inherited wrong GH_TOKEN={env.get('GH_TOKEN')!r}; "
+            "the role token must override the parent process's GH_TOKEN"
+        )
+
+
+def test_attach_threads_role_token_into_git_subprocess_envs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``attach`` runs ``git fetch`` (when the branch isn't local) and
+    ``git worktree add`` — both must carry the role token. Before the
+    Stage 3e follow-up, ``attach`` didn't pass an ``env=`` at all, so
+    every fetch leaked the parent's GH_TOKEN AND VIRTUAL_ENV.
+    """
+    clone = tmp_path / "clone"
+    _seed_clone_with_spec_branch_pushed(clone, ticket_id=42)
+
+    # Force the "branch not local" path so _local_branch_exists +
+    # git fetch both fire. The spec branch was pushed to origin and
+    # then we ``git checkout main`` in the fixture, but the local
+    # ref ``refs/heads/foreman/issue-42`` still exists. Delete it
+    # so ``attach`` hits the fetch path.
+    subprocess.run(
+        ["git", "branch", "-D", "foreman/issue-42"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+
+    monkeypatch.setenv("GH_TOKEN", "ghs_PARENT_DAEMON_TOKEN_SHOULD_NOT_WIN")
+
+    captured_envs: list[dict[str, str] | None] = []
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(
+        worktrees_root=worktrees_root,
+        role_token="ghs_role_reviewer_token_xyz",
+    )
+
+    with patch(
+        "foreman.worktree.subprocess.run",
+        side_effect=_capture_envs_for_create(captured_envs),
+    ):
+        mgr.attach(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    assert captured_envs, "expected at least one git subprocess call from attach"
+    for env in captured_envs:
+        assert env is not None, (
+            "every git call in attach() must pass env=filtered_subprocess_env(role_token=...); "
+            "previously these calls passed no env at all and leaked the parent identity"
+        )
+        assert env.get("GH_TOKEN") == "ghs_role_reviewer_token_xyz", (
+            f"attach git subprocess inherited wrong GH_TOKEN={env.get('GH_TOKEN')!r}; "
+            "the reviewer's role token must win"
+        )
+
+
+def test_attach_impl_threads_role_token_into_git_subprocess_envs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same invariant for ``attach_impl`` — the downstream Reviewer /
+    impl-Fixer attach worktree carries the role token.
+    """
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    _init_git_repo(clone, origin_path=tmp_path / "origin.git")
+
+    # Seed an impl branch on origin so attach_impl's fetch finds it.
+    impl_branch_name = "foreman/impl-42"
+    subprocess.run(
+        ["git", "checkout", "-b", impl_branch_name],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    (clone / "impl.txt").write_text("impl seed\n")
+    subprocess.run(["git", "add", "impl.txt"], cwd=clone, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "impl seed"], cwd=clone, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "push", "origin", impl_branch_name],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "checkout", "main"], cwd=clone, check=True, capture_output=True)
+    # Delete the local branch to force the fetch path.
+    subprocess.run(
+        ["git", "branch", "-D", impl_branch_name], cwd=clone, check=True, capture_output=True
+    )
+
+    monkeypatch.setenv("GH_TOKEN", "ghs_PARENT_DAEMON_TOKEN_SHOULD_NOT_WIN")
+
+    captured_envs: list[dict[str, str] | None] = []
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(
+        worktrees_root=worktrees_root,
+        role_token="ghs_role_reviewer_impl_token_xyz",
+    )
+
+    with patch(
+        "foreman.worktree.subprocess.run",
+        side_effect=_capture_envs_for_create(captured_envs),
+    ):
+        mgr.attach_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    assert captured_envs, "expected at least one git subprocess call from attach_impl"
+    for env in captured_envs:
+        assert env is not None
+        assert env.get("GH_TOKEN") == "ghs_role_reviewer_impl_token_xyz"
+
+
+def test_cleanup_threads_role_token_into_git_subprocess_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``cleanup`` runs ``git worktree remove`` — a local-only op, but
+    still routed through the env filter for consistency (and to avoid
+    leaking VIRTUAL_ENV into any worktree-removal hook the target repo
+    happens to run).
+    """
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    _init_git_repo(clone, origin_path=tmp_path / "origin.git")
+
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(
+        worktrees_root=worktrees_root,
+        role_token="ghs_role_cleanup_token_xyz",
+    )
+    wt_path = mgr.create(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    monkeypatch.setenv("GH_TOKEN", "ghs_PARENT_DAEMON_TOKEN_SHOULD_NOT_WIN")
+
+    captured_envs: list[dict[str, str] | None] = []
+    with patch(
+        "foreman.worktree.subprocess.run",
+        side_effect=_capture_envs_for_create(captured_envs),
+    ):
+        mgr.cleanup(clone_path=clone, worktree_path=wt_path)
+
+    assert captured_envs, "expected git worktree remove subprocess call"
+    for env in captured_envs:
+        assert env is not None
+        assert env.get("GH_TOKEN") == "ghs_role_cleanup_token_xyz"

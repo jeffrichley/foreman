@@ -34,7 +34,11 @@ class PRState:
     `mergeable` mirrors GitHub's MergeableState string: "MERGEABLE" |
     "CONFLICTING" | "UNKNOWN". `ci_status` mirrors statusCheckRollup's
     rollupState: "SUCCESS" | "PENDING" | "FAILURE" | "ERROR" | None.
-    `linked_issue_numbers` comes from GraphQL `closingIssuesReferences`.
+    `linked_issue_numbers` is the set of issue numbers this PR closes.
+    Derived from BOTH GraphQL `closingIssuesReferences` (operator-added
+    Closes/Fixes/Resolves keywords) AND from the foreman branch
+    convention (`foreman/{issue,impl}-N` head refs). The observer
+    combines + dedupes the two sources.
     """
 
     number: int
@@ -44,6 +48,7 @@ class PRState:
     body: str
     linked_issue_numbers: tuple[int, ...]
     is_merged: bool
+    review_decision: str | None = None
 
     def closes_issue(self, issue_number: int) -> bool:
         return issue_number in self.linked_issue_numbers

@@ -166,6 +166,50 @@ class ExecutionLog:
             ).fetchone()
             return row is not None
 
+    def count_completed(
+        self, action: str, ticket_id: str, *, outcome: str | None = None
+    ) -> int:
+        """Count terminated attempts for (action, ticket_id).
+
+        A "completed" attempt is a row whose `parent_log_id` is NOT NULL —
+        i.e., a termination row pointing back at a start row. Unterminated
+        running rows don't count.
+
+        When ``outcome`` is None (default), counts ALL terminations including
+        failures (``error``, ``timeout``, ``errored:recovery``). This is the
+        right semantics for **budget gates** (max-N attempts) — a crashed run
+        burned a budget slot just like a successful one did.
+
+        When ``outcome`` is a string, filters to rows with that exact outcome.
+        This is the right semantics for **idempotence gates** ("we already did
+        this work, don't redo it") — a Planner run that crashed before opening
+        a spec PR must not permanently block re-fire. Callers that want
+        success-only counts pass ``outcome="success"``.
+        """
+        with self._connect() as conn:
+            if outcome is None:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*) FROM execution_log
+                    WHERE action = ?
+                      AND ticket_id = ?
+                      AND parent_log_id IS NOT NULL
+                    """,
+                    (action, ticket_id),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*) FROM execution_log
+                    WHERE action = ?
+                      AND ticket_id = ?
+                      AND parent_log_id IS NOT NULL
+                      AND outcome = ?
+                    """,
+                    (action, ticket_id, outcome),
+                ).fetchone()
+            return int(row[0]) if row else 0
+
     def recover_orphaned(self) -> int:
         """On daemon restart: any outcome='running' row with no termination
         means the daemon crashed mid-action. Mark each as terminated with

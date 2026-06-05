@@ -54,16 +54,29 @@ FOREIGN_WORKTREE_BLOCKED_ENV_VARS = frozenset(
 )
 
 
-def filtered_subprocess_env() -> dict[str, str]:
+def filtered_subprocess_env(*, role_token: str | None = None) -> dict[str, str]:
     """Return ``os.environ`` minus env vars that would mis-direct a foreign worktree.
 
     See :data:`FOREIGN_WORKTREE_BLOCKED_ENV_VARS` for rationale.
+
+    Args:
+        role_token: When provided, override ``GH_TOKEN`` in the returned
+            env with the role-bot's installation token. This is the
+            anti-leak: without it, ``git`` / ``gh`` subprocesses inherit
+            whatever ``GH_TOKEN`` the daemon's parent process had set
+            (CI runner, dev shell), so commits + pushes attribute to the
+            daemon's identity rather than the role bot's. Always pass
+            the role token when running git/gh inside a role's worktree.
 
     Returns:
         A copy of the current process environment with the blocklist removed.
         Everything else (PATH, HOME, USERPROFILE, GIT_*, GH_TOKEN, LANG,
         UV_CACHE_DIR, ...) is preserved so the target repo's hooks and any
         ``uv sync`` we run inside the worktree behave the same as a human
-        invocation would.
+        invocation would. If ``role_token`` is set, ``GH_TOKEN`` is forced
+        to that value regardless of what the parent had.
     """
-    return {k: v for k, v in os.environ.items() if k not in FOREIGN_WORKTREE_BLOCKED_ENV_VARS}
+    env = {k: v for k, v in os.environ.items() if k not in FOREIGN_WORKTREE_BLOCKED_ENV_VARS}
+    if role_token is not None:
+        env["GH_TOKEN"] = role_token
+    return env

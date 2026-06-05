@@ -118,6 +118,71 @@ class ReconcilerConfig(BaseModel):
         ge=1,
         description="consecutive observer failures before yellow alert",
     )
+    lock_path: str = Field(
+        default="~/.foreman/reconciler.lock",
+        description="File-based PID lock to prevent two reconciler daemons concurrently",
+    )
+    role_dispatch_timeout_seconds: int = Field(
+        default=3600,  # 1 hour — Claude Code sessions typically run 10-30 min
+        ge=60,
+        description="Hard wall-clock ceiling for a dispatched role subprocess; SIGTERM on expiry.",
+    )
+    max_concurrent_dispatches: int = Field(
+        default=2,
+        ge=1,
+        le=20,
+        description="Max concurrent role subprocesses across all tickets (Planner+Worker+Reviewer+Fixer combined).",
+    )
+    shutdown_sentinel_path: str = Field(
+        default="~/.foreman/shutdown-requested",
+        description=(
+            "Cross-platform graceful-shutdown signal. ``foreman daemon stop`` "
+            "writes this file; the reconciler polls it each tick and triggers "
+            "graceful shutdown when present (deleting the file on detection). "
+            "On POSIX, ``daemon stop`` ALSO sends SIGTERM for faster response; "
+            "on Windows, the sentinel is the only mechanism — ``os.kill`` "
+            "maps to ``TerminateProcess`` (a hard kill that delivers no signal) "
+            "so the SIGTERM-handler path can't run."
+        ),
+    )
+    auto_merge_spec: bool = Field(
+        default=True,
+        description=(
+            "Global default for auto-merging spec PRs. Spec PRs are cheap "
+            "to revert (just an .md file under docs/superpowers/specs/) "
+            "so the daemon merges them by default to keep the autonomous "
+            "loop moving. A per-project ``auto_merge_spec`` overrides this."
+        ),
+    )
+    auto_merge_impl: bool = Field(
+        default=False,
+        description=(
+            "Global default for auto-merging impl PRs. Impl PRs ship real "
+            "code, so the daemon parks at ``foreman:ready-for-merge`` for "
+            "human review by default. A per-project ``auto_merge_impl`` "
+            "overrides this."
+        ),
+    )
+
+    def effective_auto_merge_spec(self, project: ProjectConfig) -> bool:
+        """Resolve the effective spec auto-merge for ``project``.
+
+        Returns the per-project ``auto_merge_spec`` when set, else falls
+        back to the global default. ``None`` on the project means "inherit".
+        """
+        if project.auto_merge_spec is not None:
+            return project.auto_merge_spec
+        return self.auto_merge_spec
+
+    def effective_auto_merge_impl(self, project: ProjectConfig) -> bool:
+        """Resolve the effective impl auto-merge for ``project``.
+
+        Returns the per-project ``auto_merge_impl`` when set, else falls
+        back to the global default. ``None`` on the project means "inherit".
+        """
+        if project.auto_merge_impl is not None:
+            return project.auto_merge_impl
+        return self.auto_merge_impl
 
 
 class AppsConfig(BaseModel):
@@ -249,18 +314,22 @@ class ProjectConfig(BaseModel):
             "Foreman will fetch it before branching."
         ),
     )
-    auto_merge_spec: bool = Field(
-        default=False,
+    auto_merge_spec: bool | None = Field(
+        default=None,
         description=(
-            "When True, daemon auto-merges spec PRs that reach foreman:spec-ready. "
-            "When False (default), ticket parks at spec-ready awaiting human merge."
+            "Per-project override for spec-PR auto-merge. ``True`` forces "
+            "auto-merge, ``False`` forces park-for-review, ``None`` (the "
+            "default) inherits ``ReconcilerConfig.auto_merge_spec`` via "
+            "``ReconcilerConfig.effective_auto_merge_spec(project)``."
         ),
     )
-    auto_merge_impl: bool = Field(
-        default=False,
+    auto_merge_impl: bool | None = Field(
+        default=None,
         description=(
-            "When True, daemon auto-merges impl PRs that reach foreman:ready-for-merge. "
-            "When False (default), ticket parks at ready-for-merge awaiting human merge."
+            "Per-project override for impl-PR auto-merge. ``True`` forces "
+            "auto-merge, ``False`` forces park-for-review, ``None`` (the "
+            "default) inherits ``ReconcilerConfig.auto_merge_impl`` via "
+            "``ReconcilerConfig.effective_auto_merge_impl(project)``."
         ),
     )
     max_fix_attempts: int = Field(

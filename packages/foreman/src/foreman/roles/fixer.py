@@ -8,11 +8,14 @@ addressable edits to the spec doc, commits + pushes, and returns a
      :meth:`PullRequest.create_issue_comment` — the Fixer is not
      re-reviewing.
   2. Advances the originating issue's label deterministically:
-     - ``fixed``      → remove ``foreman:spec-fix``, add
-       ``foreman:spec-review`` (back to Reviewer)
-     - ``incomplete`` → keep ``foreman:spec-fix``, add
-       ``foreman:needs-help``; if attempt == 3, ALSO add
-       ``foreman:failed``
+     - ``fixed`` (spec target) → remove ``foreman:spec-fix``, add
+       ``foreman:planning`` (back to the planning umbrella state so
+       v3's reconciler re-fires ``dispatch_reviewer_spec`` on the
+       updated PR)
+     - ``fixed`` (impl target) → remove ``foreman:impl-fix``, add
+       ``foreman:impl-review`` (back to Reviewer-on-impl)
+     - ``incomplete`` → keep entry label, add ``foreman:needs-help``;
+       if attempt == 3, ALSO add ``foreman:failed``
   3. Appends a JSONL line to ``~/.foreman/stats/<repo>/fixer.jsonl``
      for lifecycle stats (proto for foreman#11).
   4. Returns :class:`~foreman.schemas.fixer.FixerOutput` to the caller.
@@ -92,7 +95,10 @@ FIXER_ALLOWED_TOOLS = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]
 
 # Labels the Fixer touches on the originating issue.
 _LABEL_SPEC_FIX = "foreman:spec-fix"
-_LABEL_SPEC_REVIEW = "foreman:spec-review"
+# v3: a successful spec-side fix transitions the issue back to the
+# planning umbrella state; the reconciler then re-fires
+# ``dispatch_reviewer_spec`` once the PR head moves.
+_LABEL_PLANNING = "foreman:planning"
 _LABEL_NEEDS_HELP = "foreman:needs-help"
 _LABEL_FAILED = "foreman:failed"
 
@@ -485,7 +491,13 @@ async def run_fixer(
 
     # Attach to the existing branch — the Planner created it; the
     # Fixer must not branch from main.
-    wt_mgr = WorktreeManager(worktrees_root=worktrees_root)
+    # WorktreeManager's git subprocesses (fetch / worktree add) must
+    # authenticate as the fixer bot — without the explicit token they
+    # inherit the daemon's parent ``GH_TOKEN`` (CI runner, dev shell)
+    # and attribute identity to the daemon's identity on private repos.
+    # Same anti-leak motivation as the Stage 3e role-module subprocess
+    # fix; WorktreeManager was scoped out at the time as a follow-up.
+    wt_mgr = WorktreeManager(worktrees_root=worktrees_root, role_token=fixer_token)
     wt_path = wt_mgr.attach(
         clone_path=Path(project.local_clone_path),
         repo_slug=repo_name,
@@ -531,7 +543,7 @@ async def run_fixer(
         allowed_tools=FIXER_ALLOWED_TOOLS,
         output_model=FixerOutput,
         cwd=wt_path,
-        env={"GH_TOKEN": fixer_token, **os.environ},
+        env={**os.environ, "GH_TOKEN": fixer_token},
     )
     duration_seconds = time.monotonic() - start_time
 
@@ -540,6 +552,26 @@ async def run_fixer(
     pr.create_issue_comment(body=llm_output.fix_comment)
 
     # Advance the issue's label deterministically.
+    #
+    # Atomic label transitions (adversarial review MEDIUM #12): every
+    # outcome computes the final ``current_labels`` set in memory, then
+    # applies it via a single ``issue.set_labels(...)`` call (PUT
+    # /issues/{N}/labels — atomic on GitHub's side). Sequential
+    # ``remove_from_labels`` + ``add_to_labels`` were the failure mode:
+    # a subprocess crash between the two PyGithub calls left the issue
+    # with neither the entry label nor the outcome label, falling out
+    # of the v3 observer's GraphQL ``filterBy.labels`` filter — silent
+    # stall.
+    #
+    # Per-branch declaration of which foreman labels the role is
+    # MUTATING this transition (Pass 2 HIGH — namespace-scoped merge).
+    # ``removed_foreman`` + ``added_foreman`` capture the role's intent;
+    # everything NOT in those sets — non-foreman labels (``priority:high``)
+    # AND foreman labels the role isn't touching (``foreman:hold``) —
+    # passes through. The actual set_labels call re-reads the label set
+    # just before writing to minimize the race window.
+    removed_foreman: set[str] = set()
+    added_foreman: set[str] = set()
     if llm_output.outcome == "fixed":
         # Back to the Reviewer for a second pass. Per-episode counter
         # reset: clear all fix-attempt-N labels (and needs-help if
@@ -548,32 +580,67 @@ async def run_fixer(
         # Lifecycle stats JSONL preserves the cumulative audit trail;
         # labels reflect current-cycle state only.
         if target == "impl_pr":
-            issue.remove_from_labels(_LABEL_IMPL_FIX)
             current_labels.discard(_LABEL_IMPL_FIX)
-            issue.add_to_labels(_LABEL_IMPL_REVIEW)
             current_labels.add(_LABEL_IMPL_REVIEW)
+            removed_foreman.add(_LABEL_IMPL_FIX)
+            added_foreman.add(_LABEL_IMPL_REVIEW)
         else:
-            issue.remove_from_labels(_LABEL_SPEC_FIX)
+            # v3: spec-side Fixer returns the issue to ``foreman:planning``
+            # so the reconciler can re-fire ``dispatch_reviewer_spec`` on
+            # the updated PR head. (v2 transitioned to a now-removed
+            # ``foreman:spec-review`` label; v3 has no separate
+            # spec-review state.)
             current_labels.discard(_LABEL_SPEC_FIX)
-            issue.add_to_labels(_LABEL_SPEC_REVIEW)
-            current_labels.add(_LABEL_SPEC_REVIEW)
+            current_labels.add(_LABEL_PLANNING)
+            removed_foreman.add(_LABEL_SPEC_FIX)
+            added_foreman.add(_LABEL_PLANNING)
         all_known_labels = issue_labels | {attempt_label}
         for label_name in all_known_labels:
             if label_name.startswith("foreman:fix-attempt-") or label_name == _LABEL_NEEDS_HELP:
-                try:
-                    issue.remove_from_labels(label_name)
-                except Exception:
-                    pass  # label may already be absent on the GitHub side
                 current_labels.discard(label_name)
     else:
         # incomplete: keep spec-fix so the human (or a later daemon
         # pass) can re-trigger; flag for help; if last attempt, also
         # add the failed escalation.
-        issue.add_to_labels(_LABEL_NEEDS_HELP)
         current_labels.add(_LABEL_NEEDS_HELP)
+        added_foreman.add(_LABEL_NEEDS_HELP)
         if attempt == max_fix_attempts:
-            issue.add_to_labels(_LABEL_FAILED)
             current_labels.add(_LABEL_FAILED)
+            added_foreman.add(_LABEL_FAILED)
+
+    # Namespace-scoped merge (Pass 2 HIGH): re-read labels NOW (not
+    # from the pre-LLM snapshot) so any operator-added label
+    # (``priority:high``, ``needs:design``) AND any foreman label the
+    # role isn't touching (e.g., ``foreman:hold``) passes through.
+    # The role's verdict is encoded in ``removed_foreman`` /
+    # ``added_foreman``; everything else survives. Race window shrinks
+    # from minutes (LLM duration) to API round-trip (~hundreds of ms).
+    #
+    # Pass 3 CRITICAL: ``issue.labels`` is a cached property in PyGithub
+    # — without ``issue.update()`` (conditional GET, see
+    # ``.venv/Lib/site-packages/github/GithubObject.py:638``) the read
+    # below returns the SAME snapshot we took at the top of
+    # ``run_fixer`` minutes ago. The minute-long LLM call would silently
+    # drop any operator-added label (``priority:high`` etc.) — the very
+    # bug this namespace-scoped merge exists to prevent. ``update()``
+    # invalidates the labels cache so the next access re-fetches.
+    issue.update()
+    current_label_names = {label.name for label in issue.labels}
+    if llm_output.outcome == "fixed":
+        # Resolve the "drop all fix-attempt-N + needs-help" rule
+        # against the CURRENT remote label set, not the pre-LLM
+        # snapshot (the semantic is "clean the episode from what's
+        # actually there now").
+        removed_foreman |= {
+            n
+            for n in current_label_names
+            if n.startswith("foreman:fix-attempt-") or n == _LABEL_NEEDS_HELP
+        }
+    final_label_set = (current_label_names - removed_foreman) | added_foreman
+    issue.set_labels(*sorted(final_label_set))
+    # Keep the in-process tracking aligned with what was actually
+    # applied so the FixerRunResult.final_labels matches reality.
+    current_labels = final_label_set
 
     # JSONL stats — write regardless of outcome.
     unaddressed_hist = _unaddressed_by_reason_histogram(llm_output)

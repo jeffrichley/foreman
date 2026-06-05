@@ -10,6 +10,7 @@ Thickening will add: `foreman daemon ...`, `foreman project add`, etc.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import shutil
 import signal
@@ -86,22 +87,45 @@ def plan(issue_url: str, project: str, config_path: Path | None) -> None:
 @click.argument("pr_url", type=str)
 @click.option("--project", required=True, help="Project name as defined in config.toml")
 @click.option(
+    "--target",
+    type=click.Choice(["spec_pr", "impl_pr"]),
+    default=None,
+    help=(
+        "PR shape this Reviewer dispatch is targeting (spec_pr | impl_pr). "
+        "Optional — when omitted, the Reviewer infers target from the PR "
+        "head branch (foreman/issue-<N> vs foreman/impl-<N>). v3 dispatches "
+        "pass --target explicitly for symmetry with the Fixer."
+    ),
+)
+@click.option(
     "--config",
     "config_path",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
     help="Path to foreman config (default: $FOREMAN_CONFIG or ~/.foreman/config.toml)",
 )
-def review(pr_url: str, project: str, config_path: Path | None) -> None:
+def review(
+    pr_url: str,
+    project: str,
+    target: str | None,
+    config_path: Path | None,
+) -> None:
     """Run the Reviewer on a spec PR opened by the Planner OR an impl
     PR opened by the Worker.
 
     The Reviewer derives spec-vs-impl from the PR's head branch shape
-    (foreman/issue-<N> vs foreman/impl-<N>) — no flag required.
+    (foreman/issue-<N> vs foreman/impl-<N>); ``--target`` is accepted but
+    currently advisory (the role infers target from the PR itself).
     """
     cfg_path = config_path or _default_config_path()
     cfg = load_config(cfg_path)
     provider = AnthropicSDKProvider()
+    # ``target`` is accepted for symmetry with ``foreman fix`` and to keep
+    # the v3 dispatch argv shape uniform; ``run_reviewer`` itself does not
+    # take a ``target`` kwarg today (the Reviewer parses the PR head to
+    # decide spec vs impl). Forwarding the flag would require a role-side
+    # signature change — out of scope for the Stage-2 action split.
+    _ = target
     result = asyncio.run(
         run_reviewer(
             pr_url=pr_url,
@@ -116,8 +140,36 @@ def review(pr_url: str, project: str, config_path: Path | None) -> None:
 
 
 @cli.command()
-@click.argument("issue_url", type=str)
+@click.option(
+    "--issue-url",
+    "issue_url",
+    required=True,
+    help="Full GitHub issue URL (https://github.com/owner/repo/issues/N).",
+)
+@click.option(
+    "--pr-url",
+    "pr_url",
+    default=None,
+    help=(
+        "Full GitHub PR URL. Optional — the Fixer derives the spec PR from "
+        "the issue's foreman/issue-<N> branch when omitted. v3's reconciler "
+        "passes the PR URL explicitly for the impl-fix target so the "
+        "dispatch is self-describing in logs."
+    ),
+)
 @click.option("--project", required=True, help="Project name as defined in config.toml")
+@click.option(
+    "--target",
+    type=click.Choice(["spec_pr", "impl_pr"]),
+    default="spec_pr",
+    show_default=True,
+    help=(
+        "Which Fixer flow to run. ``spec_pr`` requires foreman:spec-fix on "
+        "the issue; ``impl_pr`` requires foreman:impl-fix. Default matches "
+        "the pre-rescue behavior so any external caller that still omits "
+        "the flag gets the same spec-side path."
+    ),
+)
 @click.option(
     "--config",
     "config_path",
@@ -125,17 +177,36 @@ def review(pr_url: str, project: str, config_path: Path | None) -> None:
     default=None,
     help="Path to foreman config (default: $FOREMAN_CONFIG or ~/.foreman/config.toml)",
 )
-def fix(issue_url: str, project: str, config_path: Path | None) -> None:
+def fix(
+    issue_url: str,
+    pr_url: str | None,
+    project: str,
+    target: str,
+    config_path: Path | None,
+) -> None:
     """Run the Fixer on an issue queued by the Reviewer.
 
-    The issue must carry ``foreman:spec-fix``. The Fixer derives the spec
-    PR from the issue's ``foreman/issue-<N>`` branch, applies addressable
-    Reviewer findings to the spec doc, commits + pushes, and advances the
-    label based on outcome.
+    For ``--target spec_pr`` (default) the issue must carry
+    ``foreman:spec-fix``; the Fixer derives the spec PR from the issue's
+    ``foreman/issue-<N>`` branch, applies addressable Reviewer findings
+    to the spec doc, commits + pushes, and advances the label based on
+    outcome. For ``--target impl_pr`` the issue must carry
+    ``foreman:impl-fix`` and the Fixer operates on the stacked
+    ``foreman/impl-<N>`` branch instead.
+
+    ``--pr-url`` is accepted but currently advisory — ``run_fixer``
+    derives the PR from the branch convention. Passing it keeps the v3
+    dispatch argv self-describing in audit logs.
     """
     cfg_path = config_path or _default_config_path()
     cfg = load_config(cfg_path)
     provider = AnthropicSDKProvider()
+    # ``pr_url`` not yet plumbed into ``run_fixer`` — accepting it on the
+    # CLI keeps the v3 reconciler's argv shape uniform; threading it
+    # through the role is a separate change (out of scope for the
+    # Stage-2 action split). Keep the read so linters don't flag it as
+    # an unused arg.
+    _ = pr_url
     result = asyncio.run(
         run_fixer(
             issue_url=issue_url,
@@ -143,6 +214,7 @@ def fix(issue_url: str, project: str, config_path: Path | None) -> None:
             project_name=project,
             worktrees_root=_default_worktrees_root(),
             provider=provider,
+            target=target,
         )
     )
     llm = result.llm_output
@@ -339,6 +411,24 @@ def _resolve_lock_path(config: Config | None) -> Path:
     return Path(config.daemon.lock_path).expanduser()
 
 
+def _resolve_shutdown_sentinel_path(config: Config | None) -> Path:
+    """Return the path ``daemon stop`` writes (and the reconciler polls).
+
+    ``FOREMAN_SHUTDOWN_SENTINEL_PATH`` env var wins over config so tests
+    + operators can redirect without editing the config file. When
+    ``config`` is ``None`` (e.g., ``daemon stop`` called on a host
+    without a config file), falls back to the hardcoded default so the
+    sentinel write still succeeds. An empty-string env value is
+    treated as unset.
+    """
+    env_override = os.environ.get("FOREMAN_SHUTDOWN_SENTINEL_PATH") or None
+    if env_override is not None:
+        return Path(env_override).expanduser()
+    if config is None:
+        return Path("~/.foreman/shutdown-requested").expanduser()
+    return Path(config.reconciler.shutdown_sentinel_path).expanduser()
+
+
 def _read_lock_file_pid(lock_path: Path) -> int | None:
     """Best-effort: parse the PID from a daemon lock file.
 
@@ -403,7 +493,19 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
     GitHub IS the source of truth for ticket + PR state. The reconciler
     derives the right action per ticket from GH + execution log, then
     executes via the host. See docs/superpowers/specs/foreman-issue-106-spec.md.
+
+    Graceful shutdown is requested two ways: (1) Ctrl-C / SIGTERM is
+    caught by the in-loop signal handlers below (POSIX foreground only —
+    on Windows ``os.kill(pid, SIGTERM)`` from ``foreman daemon stop`` maps
+    to ``TerminateProcess``, which delivers no signal, so the handler
+    can't fire); (2) ``foreman daemon stop`` writes a sentinel file at
+    ``reconciler.shutdown_sentinel_path`` which the tick loop polls and
+    consumes — the cross-platform path that actually works on Windows.
     """
+    import logging
+
+    from foreman.daemon_lock import DaemonLock, LockAcquisitionError
+    from foreman.logging_setup import configure_daemon_logging
     from foreman.reconciler import ExecutionLog, Reconciler, ReconcilerProject
 
     # FOREMAN_CONFIG_PATH (v3) wins; falls back to FOREMAN_CONFIG (v2)
@@ -413,55 +515,162 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
         cfg_path = str(Path("~/.foreman/config.toml").expanduser())
     config = load_config(cfg_path)
 
-    db_path = Path(os.path.expanduser(config.reconciler.db_path))
-    log = ExecutionLog(db_path)
-    log.init()
-
-    # config.projects is dict[name, ProjectConfig]; ProjectConfig.repo
-    # is "owner/name" form. Split into the ReconcilerProject shape.
-    projects_list: list[ReconcilerProject] = []
-    for proj_name, proj_cfg in config.projects.items():
-        if "/" not in proj_cfg.repo:
-            raise click.ClickException(
-                f"project {proj_name!r} has malformed repo {proj_cfg.repo!r} "
-                "(expected 'owner/name')"
-            )
-        owner, repo = proj_cfg.repo.split("/", 1)
-        projects_list.append(ReconcilerProject(name=proj_name, owner=owner, repo=repo))
-    projects = tuple(projects_list)
-
-    if max_ticks == 0:
-        # Smoke-test wiring without spinning the loop.
-        click.echo(
-            f"v3-start wired: {len(projects)} projects, "
-            f"db={db_path}, dry_run={dry_run}"
-        )
-        return
-
-    if not projects:
-        click.echo("No projects configured; nothing to reconcile.")
-        return
-    gh, host = _build_v3_gh_and_host(config, log, projects[0].name)
-
-    reconciler = Reconciler(
-        projects=projects,
-        log=log,
-        gh=gh,
-        host=host,
-        dry_run=dry_run,
-        alert_after_n_failures=config.reconciler.alert_after_n_failures,
-        poll_interval_seconds=config.reconciler.poll_interval_seconds,
+    # v3 writes to its own log file so v2 vs v3 daemons can run side-by-
+    # side during the cutover window without clobbering each other's
+    # JSON-lines stream. Level reuses config.daemon.log_level — there's
+    # no separate v3 knob yet; if one is needed, add ReconcilerConfig.log_level.
+    v3_log_path = Path(os.path.expanduser("~/.foreman/v3-daemon.log"))
+    configure_daemon_logging(
+        log_path=v3_log_path,
+        level=config.daemon.log_level,
     )
 
-    async def _run() -> None:
-        if max_ticks is None:
-            await reconciler.run()
-        else:
-            for _ in range(max_ticks):
-                await reconciler.tick()
-                await asyncio.sleep(reconciler.poll_interval_seconds)
+    lock_path = Path(os.path.expanduser(config.reconciler.lock_path))
+    try:
+        with DaemonLock(lock_path):
+            # Clean up a stale shutdown sentinel from a prior `daemon stop`.
+            # Without this, a sentinel left behind by a no-op stop (or by a
+            # stop that raced ahead of cleanup) would be polled on the very
+            # first tick and shut the new daemon down instantly. We own the
+            # lock at this point, so no other daemon can be writing the
+            # sentinel concurrently — a stale file is unambiguously dead.
+            shutdown_sentinel_path = _resolve_shutdown_sentinel_path(config)
+            if shutdown_sentinel_path.exists():
+                logger = logging.getLogger("foreman")
+                logger.warning(
+                    "removing stale shutdown sentinel from prior daemon stop: %s",
+                    shutdown_sentinel_path,
+                )
+                try:
+                    shutdown_sentinel_path.unlink()
+                except FileNotFoundError:
+                    # Race with another `stop` is harmless — file's gone, which
+                    # is what we wanted.
+                    pass
 
-    asyncio.run(_run())
+            db_path = Path(os.path.expanduser(config.reconciler.db_path))
+            log = ExecutionLog(db_path)
+            log.init()
+
+            recovered = log.recover_orphaned()
+            if recovered > 0:
+                click.echo(
+                    f"recovered {recovered} orphaned running row(s) from prior daemon"
+                )
+
+            # config.projects is dict[name, ProjectConfig]; ProjectConfig.repo
+            # is "owner/name" form. Split into the ReconcilerProject shape.
+            # Resolve effective auto-merge flags here (global default +
+            # per-project override) so the daemon loop sees a single
+            # authoritative value per project without re-querying config.
+            projects_list: list[ReconcilerProject] = []
+            for proj_name, proj_cfg in config.projects.items():
+                if "/" not in proj_cfg.repo:
+                    raise click.ClickException(
+                        f"project {proj_name!r} has malformed repo {proj_cfg.repo!r} "
+                        "(expected 'owner/name')"
+                    )
+                owner, repo = proj_cfg.repo.split("/", 1)
+                projects_list.append(
+                    ReconcilerProject(
+                        name=proj_name,
+                        owner=owner,
+                        repo=repo,
+                        auto_merge_spec=config.reconciler.effective_auto_merge_spec(
+                            proj_cfg
+                        ),
+                        auto_merge_impl=config.reconciler.effective_auto_merge_impl(
+                            proj_cfg
+                        ),
+                    )
+                )
+            projects = tuple(projects_list)
+
+            if max_ticks == 0:
+                # Smoke-test wiring without spinning the loop.
+                click.echo(
+                    f"v3-start wired: {len(projects)} projects, "
+                    f"db={db_path}, dry_run={dry_run}"
+                )
+                return
+
+            if not projects:
+                click.echo("No projects configured; nothing to reconcile.")
+                return
+            gh, host = _build_v3_gh_and_host(config, log, projects[0].name)
+
+            reconciler = Reconciler(
+                projects=projects,
+                log=log,
+                gh=gh,
+                host=host,
+                dry_run=dry_run,
+                alert_after_n_failures=config.reconciler.alert_after_n_failures,
+                poll_interval_seconds=config.reconciler.poll_interval_seconds,
+                shutdown_sentinel_path=config.reconciler.shutdown_sentinel_path,
+            )
+
+            async def _shutdown_watcher(
+                stop_event: asyncio.Event,
+            ) -> None:
+                await stop_event.wait()
+                await reconciler.shutdown()
+
+            async def _run() -> None:
+                """Daemon main coroutine.
+
+                Installs SIGTERM/SIGINT handlers for graceful shutdown.
+                On POSIX, ``loop.add_signal_handler`` is preferred — handlers
+                run inside the asyncio loop thread.  On Windows, that call
+                raises ``NotImplementedError``; we fall back to
+                ``signal.signal``, which fires the handler in the main thread
+                from outside the loop, then bridge into the loop via
+                ``loop.call_soon_threadsafe``.  Either way, Ctrl-C and a
+                SIGTERM from ``foreman daemon stop`` complete in-flight ticks
+                before exiting.
+                """
+                loop = asyncio.get_event_loop()
+                stop_event = asyncio.Event()
+
+                def _signal_handler() -> None:
+                    stop_event.set()
+
+                if sys.platform == "win32":
+                    # Windows: loop.add_signal_handler raises
+                    # NotImplementedError. signal.signal works but invokes the
+                    # handler from a different context, so bridge back into
+                    # the loop with call_soon_threadsafe.
+                    def _windows_handler(signum: int, frame: Any) -> None:
+                        loop.call_soon_threadsafe(_signal_handler)
+
+                    signal.signal(signal.SIGINT, _windows_handler)
+                    signal.signal(signal.SIGTERM, _windows_handler)
+                else:
+                    try:
+                        loop.add_signal_handler(signal.SIGTERM, _signal_handler)
+                        loop.add_signal_handler(signal.SIGINT, _signal_handler)
+                    except (NotImplementedError, RuntimeError):
+                        # Embedded loops (e.g. some test harnesses) may not
+                        # support signal handlers; degrade to KeyboardInterrupt
+                        # delivered by asyncio.run.
+                        pass
+
+                watcher = asyncio.create_task(_shutdown_watcher(stop_event))
+                try:
+                    if max_ticks is None:
+                        await reconciler.run()
+                    else:
+                        for _ in range(max_ticks):
+                            await reconciler.tick()
+                            await asyncio.sleep(reconciler.poll_interval_seconds)
+                finally:
+                    watcher.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await watcher
+
+            asyncio.run(_run())
+    except LockAcquisitionError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _build_v3_gh_and_host(
@@ -488,7 +697,13 @@ def _build_v3_gh_and_host(
     # Use the planner App's token for the GraphQL observer (read-only).
     planner_token = registry.get_token("planner")
     gh = HttpxGHGraphQLClient(token=planner_token)
-    host = V3GitHubHost(v2_host=v2_host, log=log, project_name=project_name)
+    host = V3GitHubHost(
+        v2_host=v2_host,
+        log=log,
+        project_name=project_name,
+        role_dispatch_timeout_seconds=config.reconciler.role_dispatch_timeout_seconds,
+        max_concurrent_dispatches=config.reconciler.max_concurrent_dispatches,
+    )
     return gh, host
 
 
@@ -496,19 +711,40 @@ def _build_v3_gh_and_host(
 def daemon_stop() -> None:
     """Signal a running daemon to stop and wait for clean exit.
 
-    Reads the daemon's PID from the lock file (``DaemonLock`` writes
-    the PID on acquisition), sends SIGTERM, and polls the PID for
-    process death up to ``_STOP_GRACE_SECONDS``. The lock file
-    remains on disk after stop — its content is now stale but the
-    OS lock is released when the daemon's fd closes, so the next
-    ``daemon start`` succeeds and overwrites the PID.
+    Two-channel shutdown request:
+
+    1. Writes ``reconciler.shutdown_sentinel_path`` (default
+       ``~/.foreman/shutdown-requested``). The v3 reconciler polls this
+       file each tick, deletes it on detection, and triggers graceful
+       shutdown. This is the cross-platform channel — on Windows it is
+       the ONLY working mechanism because ``os.kill(pid, SIGTERM)`` maps
+       to ``TerminateProcess`` (a hard kill that delivers no signal),
+       which can't run the daemon's cleanup path.
+    2. On POSIX, also reads the daemon's PID from the lock file
+       (``DaemonLock`` writes the PID on acquisition) and sends SIGTERM
+       as a faster signal — handler fires within milliseconds rather
+       than waiting for the next tick. The lock file remains on disk
+       after stop — its content is now stale but the OS lock is
+       released when the daemon's fd closes, so the next ``daemon
+       start`` succeeds and overwrites the PID.
+
+    Either channel alone is sufficient; running both is belt-and-
+    suspenders on POSIX. The sentinel-only Windows path tolerates up
+    to ``reconciler.poll_interval_seconds`` of latency before the
+    daemon notices.
     """
     try:
         config: Config | None = _load_config_from_env()
     except (FileNotFoundError, OSError):
         config = None
+
     lock_path = _resolve_lock_path(config)
 
+    # Check the lock-file gate BEFORE writing the sentinel. If no daemon
+    # is running, leaving a sentinel on disk would silently kill the
+    # next `daemon v3-start` — the reconciler polls the sentinel on its
+    # first tick and shuts down immediately. The sentinel is only useful
+    # when there's a live daemon to receive it.
     if not lock_path.exists():
         discover = (
             "tasklist | findstr foreman"
@@ -531,17 +767,54 @@ def daemon_stop() -> None:
         )
         return
 
+    # Lock file exists AND we have a PID — there's a daemon to receive
+    # the sentinel. Write it now. This is the cross-platform shutdown
+    # channel (the only one on Windows, since SIGTERM there maps to
+    # TerminateProcess and skips the daemon's cleanup path).
+    sentinel_path = _resolve_shutdown_sentinel_path(config)
+    try:
+        sentinel_path.parent.mkdir(parents=True, exist_ok=True)
+        sentinel_path.write_text(
+            f"requested by foreman daemon stop at {time.time()}\n",
+            encoding="utf-8",
+        )
+        click.echo(f"shutdown requested via sentinel: {sentinel_path}")
+    except OSError as exc:
+        # Don't bail — the SIGTERM path below may still reach a POSIX
+        # daemon. Surface the failure so the operator knows the v3
+        # cross-platform path was skipped.
+        click.echo(f"warning: could not write shutdown sentinel ({exc})", err=True)
+
+    # Windows: skip os.kill(SIGTERM) entirely. On Windows it maps to
+    # TerminateProcess — a hard kill that delivers no signal, defeating
+    # the graceful-shutdown path the sentinel exists to enable. The
+    # daemon will pick up the sentinel on its next tick.
+    if sys.platform == "win32":
+        click.echo(
+            f"Windows: relying on sentinel only (pid {pid}). The v3 "
+            f"reconciler will detect the sentinel on its next tick "
+            f"(up to ``reconciler.poll_interval_seconds`` of latency)."
+        )
+        return
+
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         click.echo(f"Pid {pid} not running (stale lock file).")
         return
+    except OSError as exc:
+        # Don't undo the sentinel — surface the failure and let the
+        # tick-poller path complete the shutdown.
+        click.echo(
+            f"sentinel written but failed to send SIGTERM to pid {pid}: "
+            f"{exc}. Daemon will still pick up the sentinel on its next tick.",
+            err=True,
+        )
+        return
     click.echo(f"Sent SIGTERM to daemon pid {pid}; waiting for graceful shutdown.")
 
-    # Poll for process death via os.kill(pid, 0). On POSIX the daemon
-    # catches SIGTERM and runs its cleanup before exiting; on Windows
-    # os.kill(pid, SIGTERM) is TerminateProcess (hard kill) so the
-    # process dies near-instantly. Either way, the OS releases the
+    # Poll for process death via os.kill(pid, 0). The daemon catches
+    # SIGTERM and runs its cleanup before exiting; the OS releases the
     # lock when the daemon process dies — file content stays but the
     # exclusive lock is gone.
     deadline = time.monotonic() + _STOP_GRACE_SECONDS

@@ -73,10 +73,40 @@ class ImplWorktreeResult:
 
 
 class WorktreeManager:
-    """Create + cleanup per-ticket git worktrees."""
+    """Create + cleanup per-ticket git worktrees.
 
-    def __init__(self, worktrees_root: Path) -> None:
+    ``role_token`` is the role-bot's GitHub installation token. When
+    provided, every ``git`` / ``uv`` subprocess this manager spawns
+    receives ``GH_TOKEN=<role_token>`` via
+    :func:`foreman._env_filter.filtered_subprocess_env`. Without it
+    those subprocesses inherit the daemon's parent ``GH_TOKEN``
+    (CI runner, dev shell, whichever role last set one), so
+    ``git fetch`` / ``git push`` against private repos authenticate
+    as the wrong identity — same anti-attribution-leak motivation
+    as the role-module subprocess fix in Stage 3e of the v3 rescue.
+
+    ``role_token`` is OPTIONAL so the WorktreeManager remains usable
+    from manual CLI invocations and the existing test suite (which
+    constructs the manager without a role identity in scope).
+    """
+
+    def __init__(
+        self,
+        worktrees_root: Path,
+        *,
+        role_token: str | None = None,
+    ) -> None:
         self.worktrees_root = worktrees_root
+        self._role_token = role_token
+
+    def _env(self) -> dict[str, str]:
+        """Return the subprocess env for this manager's git/uv calls.
+
+        Wraps :func:`filtered_subprocess_env` so the role token (if any)
+        is forwarded as ``GH_TOKEN`` and Foreman's foreign-worktree
+        env-leak blocklist (``VIRTUAL_ENV`` etc.) is applied.
+        """
+        return filtered_subprocess_env(role_token=self._role_token)
 
     def create(
         self,
@@ -134,8 +164,10 @@ class WorktreeManager:
             return wt_path
         wt_path.parent.mkdir(parents=True, exist_ok=True)
         branch = spec_branch(ticket_id)
-        base_branch = dev_base_branch or _resolve_default_branch(clone_path)
-        _fetch_origin_branch(clone_path, base_branch)
+        base_branch = dev_base_branch or _resolve_default_branch(
+            clone_path, role_token=self._role_token
+        )
+        _fetch_origin_branch(clone_path, base_branch, role_token=self._role_token)
         subprocess.run(
             [
                 "git",
@@ -150,9 +182,9 @@ class WorktreeManager:
             check=True,
             capture_output=True,
             text=True,
-            env=filtered_subprocess_env(),
+            env=self._env(),
         )
-        _maybe_sync_worktree_deps(wt_path)
+        _maybe_sync_worktree_deps(wt_path, role_token=self._role_token)
         return wt_path
 
     def create_impl(
@@ -220,7 +252,7 @@ class WorktreeManager:
         """
         impl_branch_name = impl_branch(ticket_id)
         spec_branch_name = spec_branch(ticket_id)
-        default_branch = _resolve_default_branch(clone_path)
+        default_branch = _resolve_default_branch(clone_path, role_token=self._role_token)
 
         wt_path = self.worktrees_root / repo_slug / f"impl-{ticket_id}"
         if wt_path.exists():
@@ -262,9 +294,9 @@ class WorktreeManager:
             check=True,
             capture_output=True,
             text=True,
-            env=filtered_subprocess_env(),
+            env=self._env(),
         )
-        _maybe_sync_worktree_deps(wt_path)
+        _maybe_sync_worktree_deps(wt_path, role_token=self._role_token)
         return ImplWorktreeResult(path=wt_path, base_branch=base_branch_for_pr)
 
     def _resolve_impl_base_ref_and_branch(
@@ -296,15 +328,17 @@ class WorktreeManager:
         # Refresh the spec branch from origin so the probe sees the
         # Planner's latest push, not a stale ref. Best-effort — same
         # rationale as ``create``'s default-branch fetch.
-        _fetch_origin_branch(clone_path, spec_branch_name)
+        _fetch_origin_branch(clone_path, spec_branch_name, role_token=self._role_token)
 
-        if _origin_branch_exists(clone_path, spec_branch_name):
+        if _origin_branch_exists(clone_path, spec_branch_name, role_token=self._role_token):
             return f"origin/{spec_branch_name}", spec_branch_name
 
         # Spec branch is missing. Refresh the default branch and check
         # whether the spec doc landed on it.
-        _fetch_origin_branch(clone_path, default_branch)
-        if _spec_doc_on_origin_default(clone_path, default_branch, ticket_id):
+        _fetch_origin_branch(clone_path, default_branch, role_token=self._role_token)
+        if _spec_doc_on_origin_default(
+            clone_path, default_branch, ticket_id, role_token=self._role_token
+        ):
             return f"origin/{default_branch}", default_branch
 
         spec_doc_path = f"docs/superpowers/specs/foreman-issue-{ticket_id}-spec.md"
@@ -360,7 +394,7 @@ class WorktreeManager:
             return wt_path
         wt_path.parent.mkdir(parents=True, exist_ok=True)
         branch = spec_branch(ticket_id)
-        if not _local_branch_exists(clone_path, branch):
+        if not _local_branch_exists(clone_path, branch, role_token=self._role_token):
             # Branch isn't local yet — fetch the remote ref so worktree add
             # can resolve it. The Planner pushes the branch, so origin should
             # have it. We tolerate fetch failure here and let the worktree
@@ -371,6 +405,7 @@ class WorktreeManager:
                 check=False,
                 capture_output=True,
                 text=True,
+                env=self._env(),
             )
         subprocess.run(
             ["git", "worktree", "add", str(wt_path), branch],
@@ -378,8 +413,9 @@ class WorktreeManager:
             check=True,
             capture_output=True,
             text=True,
+            env=self._env(),
         )
-        _maybe_sync_worktree_deps(wt_path)
+        _maybe_sync_worktree_deps(wt_path, role_token=self._role_token)
         return wt_path
 
     def attach_impl(self, clone_path: Path, repo_slug: str, ticket_id: int) -> Path:
@@ -411,7 +447,7 @@ class WorktreeManager:
             return wt_path
         wt_path.parent.mkdir(parents=True, exist_ok=True)
         branch = impl_branch(ticket_id)
-        if not _local_branch_exists(clone_path, branch):
+        if not _local_branch_exists(clone_path, branch, role_token=self._role_token):
             # Branch isn't local yet — fetch the remote ref so worktree add
             # can resolve it. The Worker pushes the branch, so origin should
             # have it. We tolerate fetch failure here and let the worktree
@@ -422,6 +458,7 @@ class WorktreeManager:
                 check=False,
                 capture_output=True,
                 text=True,
+                env=self._env(),
             )
         subprocess.run(
             ["git", "worktree", "add", str(wt_path), branch],
@@ -429,8 +466,9 @@ class WorktreeManager:
             check=True,
             capture_output=True,
             text=True,
+            env=self._env(),
         )
-        _maybe_sync_worktree_deps(wt_path)
+        _maybe_sync_worktree_deps(wt_path, role_token=self._role_token)
         return wt_path
 
     def cleanup(self, clone_path: Path, worktree_path: Path) -> None:
@@ -443,10 +481,11 @@ class WorktreeManager:
             check=True,
             capture_output=True,
             text=True,
+            env=self._env(),
         )
 
 
-def _resolve_default_branch(clone_path: Path) -> str:
+def _resolve_default_branch(clone_path: Path, *, role_token: str | None = None) -> str:
     """Return the clone's default branch name (e.g. ``"main"``, ``"master"``).
 
     Resolves via ``git symbolic-ref --short refs/remotes/origin/HEAD``, which
@@ -459,6 +498,10 @@ def _resolve_default_branch(clone_path: Path) -> str:
     branch on a likely-correct guess and let a downstream git command
     produce a clear "unknown revision" error if even that's wrong, than
     crash worktree creation in a less actionable spot.
+
+    ``role_token``, when supplied, is forwarded as ``GH_TOKEN`` so the
+    git invocation authenticates as the role bot instead of inheriting
+    whatever ``GH_TOKEN`` the daemon's parent shell had.
     """
     result = subprocess.run(
         ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
@@ -466,7 +509,7 @@ def _resolve_default_branch(clone_path: Path) -> str:
         check=False,
         capture_output=True,
         text=True,
-        env=filtered_subprocess_env(),
+        env=filtered_subprocess_env(role_token=role_token),
     )
     if result.returncode != 0:
         return "main"
@@ -477,7 +520,9 @@ def _resolve_default_branch(clone_path: Path) -> str:
     return ref or "main"
 
 
-def _fetch_origin_branch(clone_path: Path, branch: str) -> None:
+def _fetch_origin_branch(
+    clone_path: Path, branch: str, *, role_token: str | None = None
+) -> None:
     """Best-effort ``git fetch origin <branch>`` to refresh the local origin ref.
 
     Without this, ``origin/<branch>`` may be stale and basing the new spec
@@ -489,6 +534,8 @@ def _fetch_origin_branch(clone_path: Path, branch: str) -> None:
 
     Uses the same env filter as the worktree-add and ``uv sync`` calls so
     we don't leak ``VIRTUAL_ENV`` etc. into git hook invocations.
+    ``role_token`` overrides ``GH_TOKEN`` so the fetch authenticates as
+    the role bot rather than inheriting the daemon's identity.
     """
     result = subprocess.run(
         ["git", "fetch", "--quiet", "origin", branch],
@@ -496,7 +543,7 @@ def _fetch_origin_branch(clone_path: Path, branch: str) -> None:
         check=False,
         capture_output=True,
         text=True,
-        env=filtered_subprocess_env(),
+        env=filtered_subprocess_env(role_token=role_token),
     )
     if result.returncode != 0:
         print(
@@ -507,19 +554,33 @@ def _fetch_origin_branch(clone_path: Path, branch: str) -> None:
         )
 
 
-def _local_branch_exists(clone_path: Path, branch: str) -> bool:
-    """Return True if ``branch`` exists as a local ref in ``clone_path``."""
+def _local_branch_exists(
+    clone_path: Path, branch: str, *, role_token: str | None = None
+) -> bool:
+    """Return True if ``branch`` exists as a local ref in ``clone_path``.
+
+    Purely local probe (no network), but still routes through the env
+    filter so a leaked ``VIRTUAL_ENV`` can't mis-direct any git hook
+    that fires inside the foreign clone. ``role_token`` is accepted
+    for symmetry with the manager's other helpers — git ``show-ref``
+    against local refs doesn't authenticate, so the token has no
+    behavioral effect here, but threading it consistently keeps the
+    call shape uniform across helpers.
+    """
     result = subprocess.run(
         ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
         cwd=clone_path,
         check=False,
         capture_output=True,
         text=True,
+        env=filtered_subprocess_env(role_token=role_token),
     )
     return result.returncode == 0
 
 
-def _origin_branch_exists(clone_path: Path, branch: str) -> bool:
+def _origin_branch_exists(
+    clone_path: Path, branch: str, *, role_token: str | None = None
+) -> bool:
     """Return True if ``origin/<branch>`` resolves as a remote-tracking ref
     in ``clone_path``.
 
@@ -538,13 +599,17 @@ def _origin_branch_exists(clone_path: Path, branch: str) -> bool:
         check=False,
         capture_output=True,
         text=True,
-        env=filtered_subprocess_env(),
+        env=filtered_subprocess_env(role_token=role_token),
     )
     return result.returncode == 0
 
 
 def _spec_doc_on_origin_default(
-    clone_path: Path, default_branch: str, ticket_id: int
+    clone_path: Path,
+    default_branch: str,
+    ticket_id: int,
+    *,
+    role_token: str | None = None,
 ) -> bool:
     """Return True if the spec doc for ``ticket_id`` exists on
     ``origin/<default_branch>``.
@@ -567,12 +632,14 @@ def _spec_doc_on_origin_default(
         check=False,
         capture_output=True,
         text=True,
-        env=filtered_subprocess_env(),
+        env=filtered_subprocess_env(role_token=role_token),
     )
     return result.returncode == 0
 
 
-def _maybe_sync_worktree_deps(worktree_path: Path) -> None:
+def _maybe_sync_worktree_deps(
+    worktree_path: Path, *, role_token: str | None = None
+) -> None:
     """Best-effort ``uv sync --all-packages`` for the worktree's venv.
 
     Skips silently if the worktree has no ``pyproject.toml`` at root or
@@ -597,7 +664,7 @@ def _maybe_sync_worktree_deps(worktree_path: Path) -> None:
         check=False,
         capture_output=True,
         text=True,
-        env=filtered_subprocess_env(),
+        env=filtered_subprocess_env(role_token=role_token),
     )
     if result.returncode == 0:
         summary = _summarize_uv_sync(result.stdout, result.stderr)

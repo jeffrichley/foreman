@@ -439,19 +439,42 @@ def test_run_init_skips_instructions_when_file_exists(tmp_path: Path) -> None:
     assert result.instructions_written is False
 
 
-def test_run_init_creates_all_19_labels_on_empty_repo(tmp_path: Path) -> None:
+def test_run_init_creates_all_v3_labels_on_empty_repo(tmp_path: Path) -> None:
     init_config, _clone = _make_init_config(tmp_path=tmp_path)
     fake_repo = _FakeRepo(slug=init_config.repo)
     admin = _FakeAdminClient(repo=fake_repo)
 
     result = run_init(init_config, admin_client=admin)
 
-    assert len(result.labels_created) == 19
+    # v3 label vocabulary: 10 state/modifier labels (incl. failed terminal)
+    # + 3 impl-attempt + 3 fix-attempt counters = 16 total. v2's plan/
+    # spec-review/spec-ready/implementing/implementing-ready/ready-for-merge
+    # labels were removed.
+    expected_names = [name for name, _color, _desc in _FOREMAN_LABELS]
+    assert len(result.labels_created) == len(expected_names)
     assert len(result.labels_existing) == 0
     created_names = [c["name"] for c in fake_repo.create_label_calls]
-    # Every documented label was created.
-    expected_names = [name for name, _color, _desc in _FOREMAN_LABELS]
     assert sorted(created_names) == sorted(expected_names)
+    # Pin the v3 vocabulary explicitly so the catalog can't silently
+    # drift back to v2 names.
+    assert set(expected_names) == {
+        "foreman:planning",
+        "foreman:plan-approved",
+        "foreman:spec-fix",
+        "foreman:impl-review",
+        "foreman:impl-approved",
+        "foreman:impl-fix",
+        "foreman:needs-help",
+        "foreman:hold",
+        "foreman:done",
+        "foreman:failed",
+        "foreman:impl-attempt-1",
+        "foreman:impl-attempt-2",
+        "foreman:impl-attempt-3",
+        "foreman:fix-attempt-1",
+        "foreman:fix-attempt-2",
+        "foreman:fix-attempt-3",
+    }
 
 
 def test_run_init_skips_existing_labels(tmp_path: Path) -> None:
@@ -461,22 +484,22 @@ def test_run_init_skips_existing_labels(tmp_path: Path) -> None:
         slug=init_config.repo,
         existing_labels=[
             _FakeLabel(
-                name="foreman:plan",
+                name="foreman:planning",
                 color="CCCCCC",
                 description="Custom operator description",
             ),
-            _FakeLabel(name="foreman:planning"),
+            _FakeLabel(name="foreman:hold"),
         ],
     )
     admin = _FakeAdminClient(repo=fake_repo)
 
     result = run_init(init_config, admin_client=admin)
 
-    # 19 - 2 already-existed = 17 created
-    assert len(result.labels_created) == 17
-    assert sorted(result.labels_existing) == ["foreman:plan", "foreman:planning"]
+    total = len(_FOREMAN_LABELS)
+    assert len(result.labels_created) == total - 2
+    assert sorted(result.labels_existing) == ["foreman:hold", "foreman:planning"]
     # The pre-existing label's color/description was NOT overwritten.
-    plan_label = next(lbl for lbl in fake_repo._labels if lbl.name == "foreman:plan")
+    plan_label = next(lbl for lbl in fake_repo._labels if lbl.name == "foreman:planning")
     assert plan_label.color == "CCCCCC"
     assert plan_label.description == "Custom operator description"
 
@@ -617,7 +640,7 @@ def test_run_init_bot_verification_records_failure_without_aborting(
     assert "installation not found" in planner.detail
     # Config still written + labels still created
     assert init_config.config_path.exists()
-    assert len(result.labels_created) == 19
+    assert len(result.labels_created) == len(_FOREMAN_LABELS)
 
 
 def test_run_init_summary_contains_expected_fields(tmp_path: Path) -> None:
@@ -631,9 +654,14 @@ def test_run_init_summary_contains_expected_fields(tmp_path: Path) -> None:
     assert "jeffrichley/foreman" in summary
     assert "[projects.foreman]" in summary
     assert "INSTRUCTIONS.md" in summary
-    assert "19 labels" in summary
+    assert f"{len(_FOREMAN_LABELS)} labels" in summary
     assert "Next steps" in summary
     assert "foreman plan https://github.com/jeffrichley/foreman/issues/" in summary
+    # v3: the next-steps prompt now points operators at the v3 entry
+    # label (``foreman:planning``); the legacy ``foreman:plan`` label
+    # was removed.
+    assert "foreman:planning" in summary
+    assert "foreman:plan and run" not in summary
 
 
 def test_run_init_summary_notes_existing_instructions(tmp_path: Path) -> None:
