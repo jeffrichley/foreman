@@ -22,11 +22,14 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from github.GithubException import GithubException
 
 from foreman.config import AppsConfig, Config, ProjectConfig
 from foreman.roles.worker import (
     WORKER_ALLOWED_TOOLS,
     _count_impl_attempts,
+    _create_pull_with_base_fallback,
+    _is_invalid_base_422,
     _resolve_check_command,
     parse_issue_url,
     run_worker,
@@ -93,6 +96,160 @@ def test_resolve_check_command_returns_just_check_when_empty_string() -> None:
 
 def test_resolve_check_command_uses_project_override() -> None:
     assert _resolve_check_command("make test") == "make test"
+
+
+# ----------------------------------------------------------------------
+# _is_invalid_base_422 + _create_pull_with_base_fallback (foreman#122)
+# ----------------------------------------------------------------------
+
+
+def _invalid_base_422_exception() -> GithubException:
+    """Construct the exact GithubException shape PyGithub raises when
+    GitHub rejects ``create_pull`` because the ``base`` ref is gone.
+    Matches the live 422 payload caught on foreman#100."""
+    return GithubException(
+        status=422,
+        data={
+            "message": "Validation Failed",
+            "errors": [
+                {"resource": "PullRequest", "field": "base", "code": "invalid"}
+            ],
+            "documentation_url": "https://docs.github.com/rest/pulls/pulls#create-a-pull-request",
+        },
+        headers={},
+    )
+
+
+def test_is_invalid_base_422_matches_real_shape() -> None:
+    assert _is_invalid_base_422(_invalid_base_422_exception()) is True
+
+
+def test_is_invalid_base_422_rejects_non_422_status() -> None:
+    exc = GithubException(status=500, data={"errors": []}, headers={})
+    assert _is_invalid_base_422(exc) is False
+
+
+def test_is_invalid_base_422_rejects_422_without_base_invalid() -> None:
+    exc = GithubException(
+        status=422,
+        data={"errors": [{"resource": "PullRequest", "field": "head", "code": "invalid"}]},
+        headers={},
+    )
+    assert _is_invalid_base_422(exc) is False
+
+
+class _StubRepoForFallback:
+    """Minimal stand-in for ``github.Repository.Repository`` exposing
+    just what ``_create_pull_with_base_fallback`` touches:
+    ``default_branch`` + ``create_pull(...)``. Records call args so the
+    test can assert which ``base`` was used."""
+
+    def __init__(
+        self,
+        *,
+        default_branch: str = "main",
+        first_call_exception: Exception | None = None,
+    ) -> None:
+        self.default_branch = default_branch
+        self._first_call_exception = first_call_exception
+        self.create_pull_calls: list[dict[str, Any]] = []
+
+    def create_pull(self, *, title: str, body: str, base: str, head: str) -> Any:
+        self.create_pull_calls.append(
+            {"title": title, "body": body, "base": base, "head": head}
+        )
+        if len(self.create_pull_calls) == 1 and self._first_call_exception is not None:
+            raise self._first_call_exception
+        pr = MagicMock()
+        pr.html_url = f"https://github.com/owner/repo/pull/{len(self.create_pull_calls)}"
+        return pr
+
+
+def test_create_pull_with_base_fallback_passes_through_on_success() -> None:
+    """No exception path: a single create_pull call against the
+    requested base; no fallback ever fires."""
+    repo = _StubRepoForFallback(default_branch="main")
+    pr = _create_pull_with_base_fallback(
+        repo,  # type: ignore[arg-type]
+        title="feat: x",
+        body="body",
+        base="foreman/issue-100",
+        head="foreman/impl-100",
+    )
+    assert pr.html_url == "https://github.com/owner/repo/pull/1"
+    assert repo.create_pull_calls == [
+        {
+            "title": "feat: x",
+            "body": "body",
+            "base": "foreman/issue-100",
+            "head": "foreman/impl-100",
+        }
+    ]
+
+
+def test_create_pull_with_base_fallback_retries_on_invalid_base_422() -> None:
+    """foreman#122: when the spec branch was deleted on origin (e.g.,
+    auto-delete after spec PR merge), GitHub rejects create_pull with
+    422 base=invalid. The wrapper recovers by retrying against the
+    repo's default branch instead of crashing the run."""
+    repo = _StubRepoForFallback(
+        default_branch="main",
+        first_call_exception=_invalid_base_422_exception(),
+    )
+    pr = _create_pull_with_base_fallback(
+        repo,  # type: ignore[arg-type]
+        title="feat: x",
+        body="body",
+        base="foreman/issue-100",
+        head="foreman/impl-100",
+    )
+    assert pr.html_url == "https://github.com/owner/repo/pull/2"
+    assert len(repo.create_pull_calls) == 2
+    assert repo.create_pull_calls[0]["base"] == "foreman/issue-100"
+    assert repo.create_pull_calls[1]["base"] == "main"
+    # Other args unchanged across the retry.
+    assert repo.create_pull_calls[1]["head"] == "foreman/impl-100"
+    assert repo.create_pull_calls[1]["title"] == "feat: x"
+
+
+def test_create_pull_with_base_fallback_does_not_loop_when_base_is_default() -> None:
+    """If ``base`` is already ``default_branch`` and we still get
+    422 base=invalid, the wrapper re-raises rather than retrying with
+    the same value. Whatever GitHub didn't like is not the
+    deleted-spec-branch case the fallback is meant to recover."""
+    repo = _StubRepoForFallback(
+        default_branch="main",
+        first_call_exception=_invalid_base_422_exception(),
+    )
+    with pytest.raises(GithubException):
+        _create_pull_with_base_fallback(
+            repo,  # type: ignore[arg-type]
+            title="feat: x",
+            body="body",
+            base="main",
+            head="foreman/impl-100",
+        )
+    assert len(repo.create_pull_calls) == 1
+
+
+def test_create_pull_with_base_fallback_re_raises_unrelated_github_exception() -> None:
+    """Non-422 GithubException (e.g., 500 server error) is not the
+    deleted-spec-branch case — re-raise without a retry."""
+    repo = _StubRepoForFallback(
+        default_branch="main",
+        first_call_exception=GithubException(
+            status=500, data={"message": "server error"}, headers={}
+        ),
+    )
+    with pytest.raises(GithubException):
+        _create_pull_with_base_fallback(
+            repo,  # type: ignore[arg-type]
+            title="feat: x",
+            body="body",
+            base="foreman/issue-100",
+            head="foreman/impl-100",
+        )
+    assert len(repo.create_pull_calls) == 1
 
 
 # ----------------------------------------------------------------------
