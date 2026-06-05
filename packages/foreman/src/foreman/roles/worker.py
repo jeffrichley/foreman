@@ -610,319 +610,354 @@ async def run_worker(
     )
     issue.set_labels(*pre_dispatch_labels)
 
-    # Resolve the spec branch + spec PR (PR may be None — implementation
-    # proceeds either way; the impl PR body's spec-PR reference adapts).
-    spec_branch_name = spec_branch(issue_number)
-    impl_branch_name = impl_branch(issue_number)
-    spec_pr = _find_spec_pr(repo, owner=owner, branch=spec_branch_name)
-    spec_pr_number = spec_pr.number if spec_pr is not None else None
-
-    # Resolve check_command per D2: project override or default.
-    check_command = _resolve_check_command(project.check_command)
-
-    # Create the Worker's stacked impl worktree. NOT ``create`` (would
-    # branch from main) and NOT ``attach`` (would reuse the spec-side
-    # ``issue-<N>/`` worktree and inherit any Fixer WIP state).
-    # ``create_impl`` returns the worktree path AND the branch the impl
-    # PR should target — usually the spec branch (D1 stacked PR), or
-    # the default branch when the spec branch is gone (issue #48
-    # fallback).
-    # WorktreeManager's git subprocesses (fetch / worktree add) must
-    # authenticate as the worker bot — without the explicit token they
-    # inherit the daemon's parent ``GH_TOKEN`` (CI runner, dev shell)
-    # and attribute identity to the daemon's identity on private repos.
-    # Same anti-leak motivation as ``_get_pr_diff`` / ``_read_spec_doc_from_branch``;
-    # the role token is plumbed through the worktree module's git helpers.
-    wt_mgr = WorktreeManager(worktrees_root=worktrees_root, role_token=worker_token)
-    wt_result = wt_mgr.create_impl(
-        clone_path=Path(project.local_clone_path),
-        repo_slug=repo_name,
-        ticket_id=issue_number,
-        repo_url=f"https://github.com/{project.repo}.git",
-    )
-    wt_path = wt_result.path
-
-    # Read the spec doc — on-disk first (it's checked out on this
-    # branch), git-show fallback to authoritative spec-branch content.
-    spec_doc_content = _read_spec_doc_from_branch(
-        worktree_path=wt_path,
-        spec_branch=spec_branch_name,
-        issue_number=issue_number,
-        role_token=worker_token,
-    )
-
-    # Baseline preflight (D4): capture the failing-tests set BEFORE the
-    # LLM does anything. Anything in this set is "not the Worker's
-    # problem" and gets subtracted from post-Worker failures to find
-    # what the Worker actually introduced.
-    _baseline_rc, baseline_failures, _baseline_output = _run_check_command(
-        check_command=check_command, cwd=wt_path, role_token=worker_token
-    )
-
-    instructions = load_project_instructions(Path(project.local_clone_path))
-
-    system_prompt = _load_worker_prompt()
-    user_prompt = _build_user_prompt(
-        issue_title=issue.title or "",
-        issue_body=issue.body or "",
-        spec_doc_content=spec_doc_content,
-        spec_pr_number=spec_pr_number,
-        issue_number=issue_number,
-        baseline_failures=baseline_failures,
-        check_command=check_command,
-        attempt=attempt,
-        max_impl_attempts=max_impl_attempts,
-        instructions=instructions,
-    )
-
-    start_time = time.monotonic()
+    # Crash-safety: if anything below raises before the final outcome
+    # set_labels at line ~876, the issue would be left with
+    # foreman:impl-attempt-N but without foreman:plan-approved, and no rule
+    # in the v3 catalog matches that state. Revert the entry-label transition
+    # so the next reconciler tick can re-dispatch via _plan_approved_no_impl_pr,
+    # advancing count_completed each crash until _impl_attempts_exhausted fires.
+    outcome_labels_committed = False
     try:
-        llm_output = await provider.run_agent(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            allowed_tools=WORKER_ALLOWED_TOOLS,
-            output_model=WorkerOutput,
-            cwd=wt_path,
-            env={**os.environ, "GH_TOKEN": worker_token},
+
+        # Resolve the spec branch + spec PR (PR may be None — implementation
+        # proceeds either way; the impl PR body's spec-PR reference adapts).
+        spec_branch_name = spec_branch(issue_number)
+        impl_branch_name = impl_branch(issue_number)
+        spec_pr = _find_spec_pr(repo, owner=owner, branch=spec_branch_name)
+        spec_pr_number = spec_pr.number if spec_pr is not None else None
+
+        # Resolve check_command per D2: project override or default.
+        check_command = _resolve_check_command(project.check_command)
+
+        # Create the Worker's stacked impl worktree. NOT ``create`` (would
+        # branch from main) and NOT ``attach`` (would reuse the spec-side
+        # ``issue-<N>/`` worktree and inherit any Fixer WIP state).
+        # ``create_impl`` returns the worktree path AND the branch the impl
+        # PR should target — usually the spec branch (D1 stacked PR), or
+        # the default branch when the spec branch is gone (issue #48
+        # fallback).
+        # WorktreeManager's git subprocesses (fetch / worktree add) must
+        # authenticate as the worker bot — without the explicit token they
+        # inherit the daemon's parent ``GH_TOKEN`` (CI runner, dev shell)
+        # and attribute identity to the daemon's identity on private repos.
+        # Same anti-leak motivation as ``_get_pr_diff`` / ``_read_spec_doc_from_branch``;
+        # the role token is plumbed through the worktree module's git helpers.
+        wt_mgr = WorktreeManager(worktrees_root=worktrees_root, role_token=worker_token)
+        wt_result = wt_mgr.create_impl(
+            clone_path=Path(project.local_clone_path),
+            repo_slug=repo_name,
+            ticket_id=issue_number,
+            repo_url=f"https://github.com/{project.repo}.git",
         )
-    except Exception as exc:
-        # D5: SDK errors (timeout, network, validation, anything) MUST NOT
-        # crash the orchestrator silently. Synthesize an incomplete-shaped
-        # output so the rest of the pipeline (label transitions, stats,
-        # caller's CLI summary) still runs deterministically. The
-        # exception message lives in work_comment + check_output_summary
-        # so a human can diagnose without spelunking logs.
-        duration_seconds = time.monotonic() - start_time
-        _log.exception("Worker provider.run_agent raised; surfacing as outcome=incomplete")
-        llm_output = WorkerOutput(
-            outcome="incomplete",
-            work_comment=(
-                "incomplete — Worker provider error before structured output "
-                f"was produced: {type(exc).__name__}: {exc}"
-            ),
-            commits_made=[],
-            implemented_sub_requests=[],
-            skipped_sub_requests=[],
-            did_check_pass=False,
-            check_output_summary=(f"provider.run_agent raised {type(exc).__name__}: {exc}"),
-            confidence="low",
+        wt_path = wt_result.path
+
+        # Read the spec doc — on-disk first (it's checked out on this
+        # branch), git-show fallback to authoritative spec-branch content.
+        spec_doc_content = _read_spec_doc_from_branch(
+            worktree_path=wt_path,
+            spec_branch=spec_branch_name,
+            issue_number=issue_number,
+            role_token=worker_token,
         )
-        # Post-Worker verification still runs below — but since no LLM
-        # work landed, post == baseline, so new_failures will be empty
-        # and the outcome stays `incomplete`. The label transitions
-        # branch normally.
-    else:
-        duration_seconds = time.monotonic() - start_time
 
-    # Post-Worker verification (D4): re-run check_command and diff
-    # against baseline to derive ground truth.
-    post_rc, post_failures, post_output = _run_check_command(
-        check_command=check_command, cwd=wt_path, role_token=worker_token
-    )
-    new_failures = post_failures - baseline_failures
-    orchestrator_check_passed = post_rc == 0 and not new_failures
-
-    # D4 override rule: if the Worker claimed `implemented` but the
-    # orchestrator found new failures, the truth wins — force
-    # `incomplete`. Other outcomes (incomplete, spec_invalid) trust
-    # the Worker's claim — the Worker may legitimately know it
-    # couldn't finish even if check_command happens to pass.
-    final_outcome = llm_output.outcome
-    final_did_check_pass = orchestrator_check_passed
-    if llm_output.outcome == "implemented" and new_failures:
-        final_outcome = "incomplete"
-        _log.warning(
-            "Worker claimed implemented but orchestrator found %d new "
-            "failure(s); forcing outcome=incomplete. New: %s",
-            len(new_failures),
-            sorted(new_failures),
+        # Baseline preflight (D4): capture the failing-tests set BEFORE the
+        # LLM does anything. Anything in this set is "not the Worker's
+        # problem" and gets subtracted from post-Worker failures to find
+        # what the Worker actually introduced.
+        _baseline_rc, baseline_failures, _baseline_output = _run_check_command(
+            check_command=check_command, cwd=wt_path, role_token=worker_token
         )
-        final_did_check_pass = False
-    # If Worker said `implemented` and check passed: trust both. If Worker
-    # said `incomplete` and check happens to pass: still incomplete (the
-    # Worker knows things check_command doesn't, like skipped
-    # acceptance criteria).
 
-    # Branch on the FINAL outcome (after orchestrator override).
-    #
-    # Per-branch declaration of which foreman labels the role is
-    # MUTATING this transition (Pass 2 HIGH — namespace-scoped merge).
-    # ``removed_foreman_post`` + ``added_foreman_post`` capture the
-    # role's intent; everything NOT in those sets — non-foreman labels
-    # (``priority:high``) AND foreman labels the role isn't touching
-    # (``foreman:hold``) — passes through. The actual set_labels call
-    # re-reads the label set just before writing to minimize the
-    # race window for operator-added labels during the LLM call.
-    pr_url: str | None = None
-    removed_foreman_post: set[str] = set()
-    added_foreman_post: set[str] = set()
-    if final_outcome == "implemented":
-        # Open the impl PR, stacked on the spec branch (D1). The
-        # PyGithub call gives us the new PR's html_url to return.
-        # ``pr_title`` and ``pr_body`` are guaranteed non-None by the
-        # WorkerOutput validator; the override path above only flips
-        # `implemented` → `incomplete`, never the reverse.
-        assert llm_output.pr_title is not None
-        assert llm_output.pr_body is not None
-        impl_pr = _create_pull_with_base_fallback(
-            repo,
-            title=llm_output.pr_title,
-            body=llm_output.pr_body,
-            base=wt_result.base_branch,
-            head=impl_branch_name,
+        instructions = load_project_instructions(Path(project.local_clone_path))
+
+        system_prompt = _load_worker_prompt()
+        user_prompt = _build_user_prompt(
+            issue_title=issue.title or "",
+            issue_body=issue.body or "",
+            spec_doc_content=spec_doc_content,
+            spec_pr_number=spec_pr_number,
+            issue_number=issue_number,
+            baseline_failures=baseline_failures,
+            check_command=check_command,
+            attempt=attempt,
+            max_impl_attempts=max_impl_attempts,
+            instructions=instructions,
         )
-        pr_url = impl_pr.html_url
 
-        # Label transitions for the implemented outcome. Per-episode
-        # counter reset: drop all impl-attempt-N labels + needs-help +
-        # foreman:failed so any future re-trigger starts with a fresh
-        # 3-attempt budget and a clean dashboard. (Pass 2 MEDIUM: without
-        # the foreman:failed drop, an operator re-triggering a previously-
-        # failed ticket leaves stale failed state on the issue after a
-        # successful run.)
-        # v3: no ``implementing`` label to clear — the entry label
-        # ``foreman:plan-approved`` was already removed at dispatch.
-        current_labels.add(_LABEL_IMPL_REVIEW)
-        all_known_labels = _label_names(issue_labels, attempt_label)
-        for _label_name in all_known_labels:
-            if (
-                _label_name.startswith("foreman:impl-attempt-")
-                or _label_name == _LABEL_NEEDS_HELP
-                or _label_name == _LABEL_FAILED
-            ):
-                current_labels.discard(_label_name)
-        added_foreman_post.add(_LABEL_IMPL_REVIEW)
-        # ``removed_foreman_post`` is computed at the WRITE site from
-        # the freshly-read label set (impl-attempt-N matching is
-        # pattern-based, so we resolve it against CURRENT remote state,
-        # not the pre-LLM snapshot).
-    elif final_outcome == "spec_invalid":
-        # D6: post the spec_invalid_reason as a comment on the SPEC PR
-        # (not the issue). The Worker's branch is left in place (commits,
-        # if any, stay) but no impl PR is opened — the spec must be
-        # re-fixed before the Worker tries again.
-        assert llm_output.spec_invalid_reason is not None
-        if spec_pr is not None:
-            spec_pr.create_issue_comment(body=llm_output.spec_invalid_reason)
-        else:
-            _log.warning(
-                "Worker emitted spec_invalid but no open spec PR was found; rationale: %s",
-                llm_output.spec_invalid_reason,
-            )
-        # Entry label was already cleared at dispatch time; idempotent
-        # re-clear in the in-memory set so the final ``set_labels`` call
-        # below cleanly enters spec-fix regardless of how the Worker
-        # came in (manual CLI vs daemon).
-        for _entry_label in _WORKER_ENTRY_LABELS:
-            current_labels.discard(_entry_label)
-        current_labels.add(_LABEL_SPEC_FIX)
-        current_labels.add(_LABEL_NEEDS_HELP)
-        removed_foreman_post |= set(_WORKER_ENTRY_LABELS)
-        added_foreman_post.add(_LABEL_SPEC_FIX)
-        added_foreman_post.add(_LABEL_NEEDS_HELP)
-    else:
-        # incomplete: add needs-help so observers know to look. v3 does
-        # not use an in-flight ``implementing`` label — the impl-attempt-N
-        # marker carries cycle state. On the last attempt, also stamp
-        # foreman:failed so the queue surfaces it for human triage.
-        current_labels.add(_LABEL_NEEDS_HELP)
-        added_foreman_post.add(_LABEL_NEEDS_HELP)
-        if attempt == max_impl_attempts:
-            current_labels.add(_LABEL_FAILED)
-            added_foreman_post.add(_LABEL_FAILED)
-
-    # Atomic label transition (adversarial review MEDIUM #12): apply the
-    # full final ``current_labels`` set in one ``issue.set_labels(...)``
-    # call (PUT /issues/{N}/labels). Replaces sequential
-    # ``remove_from_labels`` + ``add_to_labels`` calls that could leave
-    # the issue half-transitioned on a subprocess crash — silently
-    # dropping it out of the v3 observer's GraphQL ``filterBy.labels``
-    # filter.
-    #
-    # Namespace-scoped merge (Pass 2 HIGH): re-read labels NOW (not
-    # from the pre-LLM snapshot) so any operator-added label
-    # (``priority:high``, ``needs:design``) AND any foreman label the
-    # role isn't touching (e.g., ``foreman:hold``) passes through. The
-    # role's verdict is encoded in ``removed_foreman_post`` /
-    # ``added_foreman_post``; everything else survives. Race window
-    # shrinks from minutes (LLM duration) to API round-trip.
-    #
-    # Pass 3 CRITICAL: ``issue.labels`` is a cached property in PyGithub
-    # — without ``issue.update()`` (conditional GET, see
-    # ``.venv/Lib/site-packages/github/GithubObject.py:638``) the read
-    # below returns the SAME snapshot we took at the top of
-    # ``run_worker`` minutes ago. The minute-long LLM call would silently
-    # drop any operator-added label (``priority:high`` etc.) — the very
-    # bug this namespace-scoped merge exists to prevent. ``update()``
-    # invalidates the labels cache so the next access re-fetches.
-    issue.update()
-    current_label_names_post = {label.name for label in issue.labels}
-    if final_outcome == "implemented":
-        # Resolve the "drop all impl-attempt-N + needs-help + failed"
-        # rule against the CURRENT remote label set, not the pre-LLM
-        # snapshot (operators may have added/removed attempt labels
-        # during the LLM call — unlikely but the semantic is "clean
-        # the episode from what's actually there now").
-        removed_foreman_post = {
-            n
-            for n in current_label_names_post
-            if (
-                n.startswith("foreman:impl-attempt-")
-                or n == _LABEL_NEEDS_HELP
-                or n == _LABEL_FAILED
-            )
-        }
-    final_label_set = (current_label_names_post - removed_foreman_post) | added_foreman_post
-    issue.set_labels(*sorted(final_label_set))
-    # Keep the in-process tracking aligned with what was actually
-    # applied so the WorkerRunResult.final_labels matches reality.
-    current_labels = final_label_set
-
-    # Stats logging — write regardless of outcome. The orchestrator's
-    # post-verification truth is what we persist (final_outcome +
-    # final_did_check_pass), not the Worker's original self-report.
-    # The audit log reads as "what actually happened," not "what the
-    # Worker thought happened."
-    #
-    # pr_number on the stats row is the IMPL PR number when we opened
-    # one (implemented branch above), or None otherwise. We intentionally
-    # do NOT log the spec PR number here — that's a different artifact
-    # in a different audit dimension and conflating them would make
-    # downstream queries lie. The spec PR is the Fixer's lane.
-    impl_pr_number: int | None = None
-    if pr_url:
+        start_time = time.monotonic()
         try:
-            impl_pr_number = int(pr_url.rsplit("/", 1)[-1])
-        except ValueError:
-            impl_pr_number = None
-    skipped_hist = _skipped_by_reason_histogram(llm_output)
-    log_worker_run(
-        repo_slug=actual_repo_slug,
-        issue_number=issue_number,
-        pr_number=impl_pr_number,
-        attempt=attempt,
-        outcome=final_outcome,
-        total_sub_requests=(
-            len(llm_output.implemented_sub_requests) + len(llm_output.skipped_sub_requests)
-        ),
-        implemented_count=len(llm_output.implemented_sub_requests),
-        skipped_count=len(llm_output.skipped_sub_requests),
-        skipped_by_reason=skipped_hist,
-        did_check_pass=final_did_check_pass,
-        confidence=llm_output.confidence,
-        duration_seconds=duration_seconds,
-        baseline_failures_count=len(baseline_failures),
-        new_failures_count=len(new_failures),
-    )
-    # Discard the combined-output buffer from the post-check run so it
-    # doesn't sit in memory across the rest of the lifetime of the
-    # async result (the orchestrator returns to its caller after this).
-    del post_output
+            llm_output = await provider.run_agent(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                allowed_tools=WORKER_ALLOWED_TOOLS,
+                output_model=WorkerOutput,
+                cwd=wt_path,
+                env={**os.environ, "GH_TOKEN": worker_token},
+            )
+        except Exception as exc:
+            # D5: SDK errors (timeout, network, validation, anything) MUST NOT
+            # crash the orchestrator silently. Synthesize an incomplete-shaped
+            # output so the rest of the pipeline (label transitions, stats,
+            # caller's CLI summary) still runs deterministically. The
+            # exception message lives in work_comment + check_output_summary
+            # so a human can diagnose without spelunking logs.
+            duration_seconds = time.monotonic() - start_time
+            _log.exception("Worker provider.run_agent raised; surfacing as outcome=incomplete")
+            llm_output = WorkerOutput(
+                outcome="incomplete",
+                work_comment=(
+                    "incomplete — Worker provider error before structured output "
+                    f"was produced: {type(exc).__name__}: {exc}"
+                ),
+                commits_made=[],
+                implemented_sub_requests=[],
+                skipped_sub_requests=[],
+                did_check_pass=False,
+                check_output_summary=(f"provider.run_agent raised {type(exc).__name__}: {exc}"),
+                confidence="low",
+            )
+            # Post-Worker verification still runs below — but since no LLM
+            # work landed, post == baseline, so new_failures will be empty
+            # and the outcome stays `incomplete`. The label transitions
+            # branch normally.
+        else:
+            duration_seconds = time.monotonic() - start_time
 
-    return WorkerRunResult(
-        llm_output=llm_output,
-        attempt=attempt,
-        pr_url=pr_url,
-        final_did_check_pass=final_did_check_pass,
-        final_labels=sorted(current_labels),
-    )
+        # Post-Worker verification (D4): re-run check_command and diff
+        # against baseline to derive ground truth.
+        post_rc, post_failures, post_output = _run_check_command(
+            check_command=check_command, cwd=wt_path, role_token=worker_token
+        )
+        new_failures = post_failures - baseline_failures
+        orchestrator_check_passed = post_rc == 0 and not new_failures
+
+        # D4 override rule: if the Worker claimed `implemented` but the
+        # orchestrator found new failures, the truth wins — force
+        # `incomplete`. Other outcomes (incomplete, spec_invalid) trust
+        # the Worker's claim — the Worker may legitimately know it
+        # couldn't finish even if check_command happens to pass.
+        final_outcome = llm_output.outcome
+        final_did_check_pass = orchestrator_check_passed
+        if llm_output.outcome == "implemented" and new_failures:
+            final_outcome = "incomplete"
+            _log.warning(
+                "Worker claimed implemented but orchestrator found %d new "
+                "failure(s); forcing outcome=incomplete. New: %s",
+                len(new_failures),
+                sorted(new_failures),
+            )
+            final_did_check_pass = False
+        # If Worker said `implemented` and check passed: trust both. If Worker
+        # said `incomplete` and check happens to pass: still incomplete (the
+        # Worker knows things check_command doesn't, like skipped
+        # acceptance criteria).
+
+        # Branch on the FINAL outcome (after orchestrator override).
+        #
+        # Per-branch declaration of which foreman labels the role is
+        # MUTATING this transition (Pass 2 HIGH — namespace-scoped merge).
+        # ``removed_foreman_post`` + ``added_foreman_post`` capture the
+        # role's intent; everything NOT in those sets — non-foreman labels
+        # (``priority:high``) AND foreman labels the role isn't touching
+        # (``foreman:hold``) — passes through. The actual set_labels call
+        # re-reads the label set just before writing to minimize the
+        # race window for operator-added labels during the LLM call.
+        pr_url: str | None = None
+        removed_foreman_post: set[str] = set()
+        added_foreman_post: set[str] = set()
+        if final_outcome == "implemented":
+            # Open the impl PR, stacked on the spec branch (D1). The
+            # PyGithub call gives us the new PR's html_url to return.
+            # ``pr_title`` and ``pr_body`` are guaranteed non-None by the
+            # WorkerOutput validator; the override path above only flips
+            # `implemented` → `incomplete`, never the reverse.
+            assert llm_output.pr_title is not None
+            assert llm_output.pr_body is not None
+            impl_pr = _create_pull_with_base_fallback(
+                repo,
+                title=llm_output.pr_title,
+                body=llm_output.pr_body,
+                base=wt_result.base_branch,
+                head=impl_branch_name,
+            )
+            pr_url = impl_pr.html_url
+
+            # Label transitions for the implemented outcome. Per-episode
+            # counter reset: drop all impl-attempt-N labels + needs-help +
+            # foreman:failed so any future re-trigger starts with a fresh
+            # 3-attempt budget and a clean dashboard. (Pass 2 MEDIUM: without
+            # the foreman:failed drop, an operator re-triggering a previously-
+            # failed ticket leaves stale failed state on the issue after a
+            # successful run.)
+            # v3: no ``implementing`` label to clear — the entry label
+            # ``foreman:plan-approved`` was already removed at dispatch.
+            current_labels.add(_LABEL_IMPL_REVIEW)
+            all_known_labels = _label_names(issue_labels, attempt_label)
+            for _label_name in all_known_labels:
+                if (
+                    _label_name.startswith("foreman:impl-attempt-")
+                    or _label_name == _LABEL_NEEDS_HELP
+                    or _label_name == _LABEL_FAILED
+                ):
+                    current_labels.discard(_label_name)
+            added_foreman_post.add(_LABEL_IMPL_REVIEW)
+            # ``removed_foreman_post`` is computed at the WRITE site from
+            # the freshly-read label set (impl-attempt-N matching is
+            # pattern-based, so we resolve it against CURRENT remote state,
+            # not the pre-LLM snapshot).
+        elif final_outcome == "spec_invalid":
+            # D6: post the spec_invalid_reason as a comment on the SPEC PR
+            # (not the issue). The Worker's branch is left in place (commits,
+            # if any, stay) but no impl PR is opened — the spec must be
+            # re-fixed before the Worker tries again.
+            assert llm_output.spec_invalid_reason is not None
+            if spec_pr is not None:
+                spec_pr.create_issue_comment(body=llm_output.spec_invalid_reason)
+            else:
+                _log.warning(
+                    "Worker emitted spec_invalid but no open spec PR was found; rationale: %s",
+                    llm_output.spec_invalid_reason,
+                )
+            # Entry label was already cleared at dispatch time; idempotent
+            # re-clear in the in-memory set so the final ``set_labels`` call
+            # below cleanly enters spec-fix regardless of how the Worker
+            # came in (manual CLI vs daemon).
+            for _entry_label in _WORKER_ENTRY_LABELS:
+                current_labels.discard(_entry_label)
+            current_labels.add(_LABEL_SPEC_FIX)
+            current_labels.add(_LABEL_NEEDS_HELP)
+            removed_foreman_post |= set(_WORKER_ENTRY_LABELS)
+            added_foreman_post.add(_LABEL_SPEC_FIX)
+            added_foreman_post.add(_LABEL_NEEDS_HELP)
+        else:
+            # incomplete: add needs-help so observers know to look. v3 does
+            # not use an in-flight ``implementing`` label — the impl-attempt-N
+            # marker carries cycle state. On the last attempt, also stamp
+            # foreman:failed so the queue surfaces it for human triage.
+            current_labels.add(_LABEL_NEEDS_HELP)
+            added_foreman_post.add(_LABEL_NEEDS_HELP)
+            if attempt == max_impl_attempts:
+                current_labels.add(_LABEL_FAILED)
+                added_foreman_post.add(_LABEL_FAILED)
+
+        # Atomic label transition (adversarial review MEDIUM #12): apply the
+        # full final ``current_labels`` set in one ``issue.set_labels(...)``
+        # call (PUT /issues/{N}/labels). Replaces sequential
+        # ``remove_from_labels`` + ``add_to_labels`` calls that could leave
+        # the issue half-transitioned on a subprocess crash — silently
+        # dropping it out of the v3 observer's GraphQL ``filterBy.labels``
+        # filter.
+        #
+        # Namespace-scoped merge (Pass 2 HIGH): re-read labels NOW (not
+        # from the pre-LLM snapshot) so any operator-added label
+        # (``priority:high``, ``needs:design``) AND any foreman label the
+        # role isn't touching (e.g., ``foreman:hold``) passes through. The
+        # role's verdict is encoded in ``removed_foreman_post`` /
+        # ``added_foreman_post``; everything else survives. Race window
+        # shrinks from minutes (LLM duration) to API round-trip.
+        #
+        # Pass 3 CRITICAL: ``issue.labels`` is a cached property in PyGithub
+        # — without ``issue.update()`` (conditional GET, see
+        # ``.venv/Lib/site-packages/github/GithubObject.py:638``) the read
+        # below returns the SAME snapshot we took at the top of
+        # ``run_worker`` minutes ago. The minute-long LLM call would silently
+        # drop any operator-added label (``priority:high`` etc.) — the very
+        # bug this namespace-scoped merge exists to prevent. ``update()``
+        # invalidates the labels cache so the next access re-fetches.
+        issue.update()
+        current_label_names_post = {label.name for label in issue.labels}
+        if final_outcome == "implemented":
+            # Resolve the "drop all impl-attempt-N + needs-help + failed"
+            # rule against the CURRENT remote label set, not the pre-LLM
+            # snapshot (operators may have added/removed attempt labels
+            # during the LLM call — unlikely but the semantic is "clean
+            # the episode from what's actually there now").
+            removed_foreman_post = {
+                n
+                for n in current_label_names_post
+                if (
+                    n.startswith("foreman:impl-attempt-")
+                    or n == _LABEL_NEEDS_HELP
+                    or n == _LABEL_FAILED
+                )
+            }
+        final_label_set = (current_label_names_post - removed_foreman_post) | added_foreman_post
+        issue.set_labels(*sorted(final_label_set))
+        outcome_labels_committed = True
+        # Keep the in-process tracking aligned with what was actually
+        # applied so the WorkerRunResult.final_labels matches reality.
+        current_labels = final_label_set
+
+        # Stats logging — write regardless of outcome. The orchestrator's
+        # post-verification truth is what we persist (final_outcome +
+        # final_did_check_pass), not the Worker's original self-report.
+        # The audit log reads as "what actually happened," not "what the
+        # Worker thought happened."
+        #
+        # pr_number on the stats row is the IMPL PR number when we opened
+        # one (implemented branch above), or None otherwise. We intentionally
+        # do NOT log the spec PR number here — that's a different artifact
+        # in a different audit dimension and conflating them would make
+        # downstream queries lie. The spec PR is the Fixer's lane.
+        impl_pr_number: int | None = None
+        if pr_url:
+            try:
+                impl_pr_number = int(pr_url.rsplit("/", 1)[-1])
+            except ValueError:
+                impl_pr_number = None
+        skipped_hist = _skipped_by_reason_histogram(llm_output)
+        log_worker_run(
+            repo_slug=actual_repo_slug,
+            issue_number=issue_number,
+            pr_number=impl_pr_number,
+            attempt=attempt,
+            outcome=final_outcome,
+            total_sub_requests=(
+                len(llm_output.implemented_sub_requests) + len(llm_output.skipped_sub_requests)
+            ),
+            implemented_count=len(llm_output.implemented_sub_requests),
+            skipped_count=len(llm_output.skipped_sub_requests),
+            skipped_by_reason=skipped_hist,
+            did_check_pass=final_did_check_pass,
+            confidence=llm_output.confidence,
+            duration_seconds=duration_seconds,
+            baseline_failures_count=len(baseline_failures),
+            new_failures_count=len(new_failures),
+        )
+        # Discard the combined-output buffer from the post-check run so it
+        # doesn't sit in memory across the rest of the lifetime of the
+        # async result (the orchestrator returns to its caller after this).
+        del post_output
+
+        return WorkerRunResult(
+            llm_output=llm_output,
+            attempt=attempt,
+            pr_url=pr_url,
+            final_did_check_pass=final_did_check_pass,
+            final_labels=sorted(current_labels),
+        )
+    finally:
+        if not outcome_labels_committed:
+            # Worker crashed before the outcome set_labels. Best-effort revert:
+            # remove the impl-attempt-N we just added, restore plan-approved.
+            # A revert failure leaves the issue stuck in impl-attempt-N — log loudly
+            # but do not mask the original exception.
+            try:
+                issue.update()
+                current_after_crash = {label.name for label in issue.labels}
+                revert_labels = sorted(
+                    (current_after_crash - added_foreman_pre) | removed_foreman_pre
+                )
+                issue.set_labels(*revert_labels)
+                _log.warning(
+                    "worker crashed before outcome; reverted entry labels for issue=%d (added back: %s, removed: %s)",
+                    issue_number,
+                    sorted(removed_foreman_pre),
+                    sorted(added_foreman_pre),
+                )
+            except Exception:
+                _log.exception(
+                    "worker entry-label revert FAILED for issue=%d; ticket stays stuck in impl-attempt-%d state",
+                    issue_number,
+                    attempt,
+                )
