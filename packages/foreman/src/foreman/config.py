@@ -20,6 +20,21 @@ from pathlib import Path
 from pydantic import BaseModel, Field, field_validator
 
 
+def resolve_config_path() -> Path:
+    """Resolve the foreman config TOML path, honoring container env var.
+
+    Precedence (highest first):
+      1. ``FOREMAN_CONFIG_PATH`` — set by docker-compose for containers.
+      2. ``FOREMAN_CONFIG`` — legacy env var, kept for backward-compat
+         with existing host workflows.
+      3. ``~/.foreman/config.toml`` — host default.
+    """
+    env_value = os.environ.get("FOREMAN_CONFIG_PATH") or os.environ.get("FOREMAN_CONFIG")
+    if env_value:
+        return Path(env_value)
+    return Path.home() / ".foreman" / "config.toml"
+
+
 class AdminConfig(BaseModel):
     """Admin identity (Jeff's PAT) used for ``foreman project add`` ops."""
 

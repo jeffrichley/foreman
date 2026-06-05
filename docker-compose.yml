@@ -1,0 +1,75 @@
+# Foreman daemon container orchestration.
+# Per the Docker design spec; see docs/superpowers/specs/2026-06-05-foreman-docker-runtime-design.md
+#
+# Lifecycle:
+#   docker compose up -d daemon       # start (detached)
+#   docker compose stop daemon        # stop (preserves state)
+#   docker compose logs -f daemon     # tail structured JSON-lines
+#   docker compose down               # remove container (volumes survive)
+#   docker compose down -v            # DESTRUCTIVE: wipes all state
+
+services:
+  daemon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: foreman:dev
+    container_name: foreman-daemon
+
+    # PID 1: tini handles zombie reaping + signal forwarding for Python.
+    # See Docker design spec, Architecture section, "PID 1 / signal forwarding."
+    init: true
+
+    # Env file (gitignored) holds the GitHub App IDs. Required for
+    # production — without it the daemon starts but auth fails at first
+    # GraphQL fetch (no FOREMAN_*_APP_ID env vars). Copy `.env.example`
+    # to `.env` and fill in the App IDs from your GitHub Apps' settings
+    # pages before `docker compose up`.
+    env_file:
+      - .env
+
+    # Compose secrets — Max credentials + 5 GitHub App pem keys.
+    # tmpfs-mounted at /run/secrets/<name>, read-only, never persisted in image.
+    secrets:
+      - planner_pem
+      - reviewer_pem
+      - fixer_pem
+      - worker_pem
+      - orchestrator_pem
+      - claude_credentials
+
+    # Persistent state volumes. NOT visible from the Windows host — inspect
+    # via `docker exec foreman-daemon ls /foreman/...` or `docker cp`.
+    volumes:
+      - foreman-repos:/foreman/repos
+      - foreman-state:/foreman/state
+      - foreman-logs:/foreman/logs
+
+    # Docker json-file driver: rotation at 10MB × 5 files (≈50MB ceiling).
+    # Without this it grows forever inside the WSL2 VM.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+# Named volumes (managed by Docker; survive container restarts and `down`).
+volumes:
+  foreman-repos:
+  foreman-state:
+  foreman-logs:
+
+# Secrets sourced from the host's protected user directory.
+secrets:
+  planner_pem:
+    file: ${HOME}/.foreman/keys/planner.pem
+  reviewer_pem:
+    file: ${HOME}/.foreman/keys/reviewer.pem
+  fixer_pem:
+    file: ${HOME}/.foreman/keys/fixer.pem
+  worker_pem:
+    file: ${HOME}/.foreman/keys/worker.pem
+  orchestrator_pem:
+    file: ${HOME}/.foreman/keys/orchestrator.pem
+  claude_credentials:
+    file: ${HOME}/.claude/.credentials.json

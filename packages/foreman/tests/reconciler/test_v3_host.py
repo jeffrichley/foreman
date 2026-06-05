@@ -742,3 +742,85 @@ def test_default_runner_without_log_path_uses_devnull(tmp_path: Path) -> None:
     assert returncode == 0
     # No log file written — nothing in tmp_path.
     assert not any(tmp_path.iterdir())
+
+
+def test_dispatch_role_argv_does_not_use_uv_run(tmp_path: Path) -> None:
+    """The container-runtime daemon dispatches via PATH-resolved `foreman`,
+    NOT `uv run foreman`. The `uv run` form re-syncs the editable install
+    on every invocation, which fails on Windows when the daemon's own
+    `foreman.exe` is file-locked (the failure mode this whole design
+    eliminates)."""
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+
+    captured_argv: list[list[str]] = []
+
+    class _FakeProc:
+        pid = 4242
+
+        async def wait(self) -> int:
+            return 0
+
+    def runner(argv: list[str], **kwargs: Any) -> _FakeProc:
+        captured_argv.append(argv)
+        return _FakeProc()
+
+    host = V3GitHubHost(v2_host=_FakeV2Host(), log=log, subprocess_runner=runner)
+    start_id = log.write_action(
+        ticket_id="foreman/owner/repo#143",
+        project="foreman",
+        rule_name="dispatch_planner",
+        action="dispatch_planner",
+        outcome="running",
+        details={},
+    )
+    host.dispatch_role(
+        role="planner",
+        target=None,
+        owner="owner",
+        repo="repo",
+        issue=143,
+        pr_number=None,
+        start_log_id=start_id,
+        project="foreman",
+    )
+    assert len(captured_argv) == 1
+    argv = captured_argv[0]
+    assert argv[0] == "foreman", f"expected argv[0]='foreman', got {argv[0]!r}"
+    assert "uv" not in argv[:2], (
+        f"`uv run` wrapper still in argv — this re-introduces the Windows "
+        f"file-lock bug the Docker runtime exists to eliminate. argv={argv}"
+    )
+
+
+def test_foreman_log_dir_env_var_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FOREMAN_LOG_DIR overrides the default host fallback."""
+    monkeypatch.setenv("FOREMAN_LOG_DIR", "/custom/path/foreman/logs")
+    from foreman.reconciler.v3_host import resolve_log_dir
+    assert resolve_log_dir() == Path("/custom/path/foreman/logs")
+
+
+def test_foreman_log_dir_falls_back_to_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When FOREMAN_LOG_DIR is unset, fall back to ~/.foreman/logs.
+    Keeps `foreman daemon v3-start` invokable on the host for ad-hoc
+    debug without containerization."""
+    monkeypatch.delenv("FOREMAN_LOG_DIR", raising=False)
+    from foreman.reconciler.v3_host import resolve_log_dir
+    assert resolve_log_dir() == Path.home() / ".foreman" / "logs"
+
+
+def test_foreman_state_dir_env_var_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FOREMAN_STATE_DIR overrides the default host fallback. Used in the
+    container to point the daemon at the foreman-state named volume so
+    SQLite + sentinels + v3-daemon.log survive `docker compose down`."""
+    monkeypatch.setenv("FOREMAN_STATE_DIR", "/foreman/state")
+    from foreman.reconciler.v3_host import resolve_state_dir
+    assert resolve_state_dir() == Path("/foreman/state")
+
+
+def test_foreman_state_dir_falls_back_to_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When FOREMAN_STATE_DIR is unset, fall back to ~/.foreman (the host
+    directory holding config.toml, daemon.lock, etc.)."""
+    monkeypatch.delenv("FOREMAN_STATE_DIR", raising=False)
+    from foreman.reconciler.v3_host import resolve_state_dir
+    assert resolve_state_dir() == Path.home() / ".foreman"

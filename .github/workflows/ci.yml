@@ -18,9 +18,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Windows runner removed 2026-06-04 — pre-existing pytest/pathlib
-        # KeyboardInterrupt flake caused every PR to require admin-override
-        # merge. Restore once the flake is root-caused. Tracked separately.
+        # Windows runner removed permanently 2026-06-05 per the Docker
+        # runtime design (`docs/superpowers/specs/2026-06-05-foreman-docker-runtime-design.md`).
+        # The daemon now runs in a Linux container under WSL2; Windows
+        # is no longer a target environment for the daemon path.
+        # foreman#98 + foreman#99 closed by that design.
         os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20

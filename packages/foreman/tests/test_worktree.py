@@ -1618,3 +1618,43 @@ def test_cleanup_threads_role_token_into_git_subprocess_env(
     for env in captured_envs:
         assert env is not None
         assert env.get("GH_TOKEN") == "ghs_role_cleanup_token_xyz"
+
+
+def test_ensure_clone_creates_clone_when_missing(tmp_path: Path) -> None:
+    """When the configured local_clone_path doesn't exist, ensure_clone
+    must `git clone <repo_url>` into it. Used by the container's first
+    boot when the foreman-repos volume is empty.
+
+    We stub the actual clone with a local bare repo so the test doesn't
+    hit the network."""
+    # Set up a local "origin" the daemon will clone from
+    origin = tmp_path / "origin.git"
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=seed, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "seed@example.com"],
+        cwd=seed, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Seed"],
+        cwd=seed, check=True, capture_output=True,
+    )
+    (seed / "README.md").write_text("seed\n")
+    subprocess.run(["git", "add", "."], cwd=seed, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "seed"], cwd=seed, check=True, capture_output=True)
+    subprocess.run(["git", "clone", "--bare", str(seed), str(origin)], check=True, capture_output=True)
+
+    target = tmp_path / "repos" / "myproject"
+    assert not target.exists(), "precondition: target must be missing"
+
+    from foreman.worktree import ensure_clone
+    ensure_clone(repo_url=str(origin), clone_path=target)
+
+    assert target.exists(), "clone directory should exist after ensure_clone"
+    assert (target / ".git").exists(), "should be a real git clone, not just a dir"
+    # Should NOT re-clone on second call (idempotent)
+    first_mtime = (target / ".git").stat().st_mtime
+    ensure_clone(repo_url=str(origin), clone_path=target)
+    second_mtime = (target / ".git").stat().st_mtime
+    assert first_mtime == second_mtime, "ensure_clone must be idempotent on second call"

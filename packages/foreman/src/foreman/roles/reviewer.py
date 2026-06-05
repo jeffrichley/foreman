@@ -406,12 +406,14 @@ async def run_reviewer(
             clone_path=Path(project.local_clone_path),
             repo_slug=repo_name,
             ticket_id=issue_number,
+            repo_url=f"https://github.com/{project.repo}.git",
         )
     else:
         wt_path = wt_mgr.attach(
             clone_path=Path(project.local_clone_path),
             repo_slug=repo_name,
             ticket_id=issue_number,
+            repo_url=f"https://github.com/{project.repo}.git",
         )
 
     pr_diff = _get_pr_diff(

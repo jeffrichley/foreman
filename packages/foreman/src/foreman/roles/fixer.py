@@ -502,6 +502,7 @@ async def run_fixer(
         clone_path=Path(project.local_clone_path),
         repo_slug=repo_name,
         ticket_id=issue_number,
+        repo_url=f"https://github.com/{project.repo}.git",
     )
 
     # Recover the Reviewer's structured findings from the marker-fenced

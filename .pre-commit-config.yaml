@@ -1,0 +1,35 @@
+# Pre-commit hooks for foreman.
+#
+# Install once per clone (see RUNBOOK "Pre-commit hooks"):
+#   git config --unset core.hooksPath   # one-time, if previously set
+#   uv run pre-commit install --hook-type pre-commit --hook-type pre-push
+#
+# After install, hooks run automatically at the configured stages.
+# To run a hook against all files on demand:
+#   uv run pre-commit run --all-files
+#   uv run pre-commit run gitleaks --all-files
+
+repos:
+  # Secret scanner — runs at COMMIT against staged content.
+  # https://github.com/gitleaks/gitleaks
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.24.2
+    hooks:
+      - id: gitleaks
+
+  # Local repo hooks. `just check` runs at PUSH (pytest + lint gate
+  # mirroring CI). This replaces the older .githooks/pre-push shell
+  # script — the framework now drives both stages from a single
+  # configuration so contributors don't need to set core.hooksPath
+  # manually.
+  - repo: local
+    hooks:
+      - id: just-check
+        name: just check (pytest + lint gate)
+        entry: just check
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+        # The gate is project-wide, not per-file; pre-commit's default
+        # of passing the changed files into the entry command is wrong
+        # here.
