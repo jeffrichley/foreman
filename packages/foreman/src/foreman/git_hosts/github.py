@@ -92,6 +92,25 @@ class GitHubProvider(GitHostProvider):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
             self._git(worktree_path, "add", "--", relpath)
+        # foreman#117: when a prior Planner run on this issue was killed
+        # AFTER committing but BEFORE pushing, the worktree HEAD already
+        # carries the previous commit. The files we just wrote match
+        # HEAD, `git add` is a no-op, and `git commit` would exit 1
+        # ("nothing to commit, working tree clean") — bricking the
+        # Planner on every retry. Detect that empty-staged state and
+        # short-circuit: return the existing HEAD so the caller pushes
+        # the prior commit instead of crashing on a no-op commit.
+        diff_check = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"],
+            cwd=worktree_path,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=_filtered_subprocess_env(),
+        )
+        if diff_check.returncode == 0:
+            head = self._git(worktree_path, "rev-parse", "HEAD")
+            return head.stdout.strip()
         self._git(worktree_path, "commit", "-m", message)
         result = self._git(worktree_path, "rev-parse", "HEAD")
         return result.stdout.strip()
