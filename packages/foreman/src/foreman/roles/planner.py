@@ -190,6 +190,7 @@ async def run_planner(
         repo_slug=repo_name,
         ticket_id=issue_number,
         dev_base_branch=project.dev_base_branch,
+        repo_url=f"https://github.com/{project.repo}.git",
     )
     host.configure_worktree_identity(wt_path)
 

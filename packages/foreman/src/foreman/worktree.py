@@ -144,6 +144,7 @@ class WorktreeManager:
         ticket_id: int,
         *,
         dev_base_branch: str | None = None,
+        repo_url: str | None = None,
     ) -> Path:
         """Create a worktree for one ticket. Idempotent on existing worktree.
 
@@ -188,6 +189,14 @@ class WorktreeManager:
         clearer hook error, which is a better signal to the operator
         than masking the real problem here).
         """
+        # Container first-run bootstrap: if `clone_path` doesn't exist
+        # yet (empty `foreman-repos` volume), clone it from `repo_url`
+        # before any worktree-add operation. Idempotent: no-op when the
+        # clone already exists. `repo_url` is optional so legacy
+        # host-side callers (which pre-clone manually) still work.
+        if repo_url is not None:
+            ensure_clone(repo_url=repo_url, clone_path=clone_path)
+
         wt_path = self.worktrees_root / repo_slug / f"issue-{ticket_id}"
         if wt_path.exists():
             return wt_path
@@ -217,7 +226,12 @@ class WorktreeManager:
         return wt_path
 
     def create_impl(
-        self, clone_path: Path, repo_slug: str, ticket_id: int
+        self,
+        clone_path: Path,
+        repo_slug: str,
+        ticket_id: int,
+        *,
+        repo_url: str | None = None,
     ) -> ImplWorktreeResult:
         """Create a fresh worktree for the Worker's impl branch.
 
@@ -279,6 +293,13 @@ class WorktreeManager:
         ``foreman/issue-<N>`` at the call site, because that's only
         correct on the stacked path.
         """
+        # Container first-run bootstrap: see WorktreeManager.create()
+        # docstring for the contract. ensure_clone is a no-op when the
+        # clone already exists; `repo_url=None` keeps legacy host-side
+        # callers (which pre-clone manually) unchanged.
+        if repo_url is not None:
+            ensure_clone(repo_url=repo_url, clone_path=clone_path)
+
         impl_branch_name = impl_branch(ticket_id)
         spec_branch_name = spec_branch(ticket_id)
         default_branch = _resolve_default_branch(clone_path, role_token=self._role_token)
@@ -402,7 +423,14 @@ class WorktreeManager:
         )
         return base_branch_for_pr
 
-    def attach(self, clone_path: Path, repo_slug: str, ticket_id: int) -> Path:
+    def attach(
+        self,
+        clone_path: Path,
+        repo_slug: str,
+        ticket_id: int,
+        *,
+        repo_url: str | None = None,
+    ) -> Path:
         """Attach a worktree to an existing ``foreman/issue-<N>`` branch.
 
         Used by downstream roles (Reviewer / Fixer / Worker) that should NOT
@@ -418,6 +446,14 @@ class WorktreeManager:
         afterward so the target repo's pre-push hook can ``uv run --no-sync``
         without exploding.
         """
+        # Container first-run bootstrap — handles the edge case of a
+        # post-`down -v` restart where the foreman-repos volume is empty
+        # but the daemon's first observed state of this ticket is already
+        # post-Planner (awaiting-review / awaiting-fix). See
+        # WorktreeManager.create() docstring for the contract.
+        if repo_url is not None:
+            ensure_clone(repo_url=repo_url, clone_path=clone_path)
+
         wt_path = self.worktrees_root / repo_slug / f"issue-{ticket_id}"
         if wt_path.exists():
             return wt_path
@@ -447,7 +483,14 @@ class WorktreeManager:
         _maybe_sync_worktree_deps(wt_path, role_token=self._role_token)
         return wt_path
 
-    def attach_impl(self, clone_path: Path, repo_slug: str, ticket_id: int) -> Path:
+    def attach_impl(
+        self,
+        clone_path: Path,
+        repo_slug: str,
+        ticket_id: int,
+        *,
+        repo_url: str | None = None,
+    ) -> Path:
         """Attach a worktree to an existing ``foreman/impl-<N>`` branch.
 
         Read-side counterpart to :meth:`create_impl`. After the Worker pushes
@@ -471,6 +514,10 @@ class WorktreeManager:
         afterward so the target repo's pre-push hook can ``uv run --no-sync``
         without exploding.
         """
+        # Container first-run bootstrap. See WorktreeManager.create().
+        if repo_url is not None:
+            ensure_clone(repo_url=repo_url, clone_path=clone_path)
+
         wt_path = self.worktrees_root / repo_slug / f"impl-{ticket_id}"
         if wt_path.exists():
             return wt_path
