@@ -1,0 +1,20 @@
+# Speed up the build context: never ship venvs, caches, or local logs.
+.venv/
+**/.venv/
+**/__pycache__/
+**/*.pyc
+.foreman/
+docs/superpowers/plans/
+docs/superpowers/specs/
+.git/
+.github/
+.gitignore
+.env
+*.log
+node_modules/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# The docker/ tree itself does NOT need to be IN the build context for
+# everything; the Dockerfile uses targeted COPY paths.
