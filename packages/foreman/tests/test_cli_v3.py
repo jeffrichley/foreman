@@ -41,9 +41,17 @@ def test_v3_start_help_lists_dry_run_flag() -> None:
 def test_v3_start_short_circuits_without_runtime_setup(monkeypatch, tmp_path) -> None:
     # Sanity: the command is wired and the entry point function is callable.
     # Full runtime (real GH client + bus) is integration-tested elsewhere.
+    # All paths point under tmp_path so the test never touches the real
+    # ~/.foreman/reconciler.lock (a live daemon's lock would make this fail
+    # with "daemon already running" on a developer's box).
     runner = CliRunner()
-    monkeypatch.setenv("FOREMAN_CONFIG_PATH", str(tmp_path / "config.toml"))
-    (tmp_path / "config.toml").write_text("[reconciler]\ndb_path = '" + str(tmp_path / "reconciler.sqlite").replace("\\", "/") + "'\n")
+    config_path = _write_v3_config(
+        tmp_path,
+        lock_path=tmp_path / "reconciler.lock",
+        db_path=tmp_path / "reconciler.sqlite",
+        sentinel_path=tmp_path / "shutdown-requested",
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG_PATH", str(config_path))
     result = runner.invoke(cli, ["daemon", "v3-start", "--max-ticks", "0", "--dry-run"])
     # --max-ticks 0 means "wire everything, run zero ticks, exit". Either
     # exit 0 (clean) or a controlled stub-not-implemented exit; never crash
