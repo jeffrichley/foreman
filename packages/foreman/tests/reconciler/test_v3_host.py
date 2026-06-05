@@ -791,3 +791,19 @@ def test_dispatch_role_argv_does_not_use_uv_run(tmp_path: Path) -> None:
         f"`uv run` wrapper still in argv — this re-introduces the Windows "
         f"file-lock bug the Docker runtime exists to eliminate. argv={argv}"
     )
+
+
+def test_foreman_log_dir_env_var_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FOREMAN_LOG_DIR overrides the default host fallback."""
+    monkeypatch.setenv("FOREMAN_LOG_DIR", "/custom/path/foreman/logs")
+    from foreman.reconciler.v3_host import resolve_log_dir
+    assert resolve_log_dir() == Path("/custom/path/foreman/logs")
+
+
+def test_foreman_log_dir_falls_back_to_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When FOREMAN_LOG_DIR is unset, fall back to ~/.foreman/logs.
+    Keeps `foreman daemon v3-start` invokable on the host for ad-hoc
+    debug without containerization."""
+    monkeypatch.delenv("FOREMAN_LOG_DIR", raising=False)
+    from foreman.reconciler.v3_host import resolve_log_dir
+    assert resolve_log_dir() == Path.home() / ".foreman" / "logs"

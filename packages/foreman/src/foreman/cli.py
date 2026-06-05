@@ -756,7 +756,7 @@ def _build_v3_gh_and_host(config: Config, log: Any) -> tuple[Any, Any]:
     from foreman.daemon_host import GitHubDaemonHost
     from foreman.identity import IdentityRegistry
     from foreman.reconciler.gh_graphql import HttpxGHGraphQLClient
-    from foreman.reconciler.v3_host import V3GitHubHost
+    from foreman.reconciler.v3_host import V3GitHubHost, resolve_log_dir
 
     # Pick any registered project as the orchestrator-token bootstrap seed —
     # the orchestrator App's installation token spans every repo it's
@@ -778,11 +778,13 @@ def _build_v3_gh_and_host(config: Config, log: Any) -> tuple[Any, Any]:
         role_dispatch_timeout_seconds=config.reconciler.role_dispatch_timeout_seconds,
         max_concurrent_dispatches=config.reconciler.max_concurrent_dispatches,
         # foreman#119: capture per-dispatch subprocess output under
-        # ~/.foreman/logs/<role>/<issue>__<ts>Z.log so a failed Planner/
+        # <log_dir>/<role>/<issue>__<ts>Z.log so a failed Planner/
         # Worker/Fixer/Reviewer can be diagnosed without manually
         # replaying the dispatch. Path is also recorded in the
         # execution log's `details` so post-mortem is one command.
-        log_dir=Path.home() / ".foreman" / "logs",
+        # resolve_log_dir() honors FOREMAN_LOG_DIR (set by compose for
+        # the container at /foreman/logs) with ~/.foreman/logs fallback.
+        log_dir=resolve_log_dir(),
     )
     return gh, host
 

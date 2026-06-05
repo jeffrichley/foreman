@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import subprocess
 import threading
 from collections.abc import Callable
@@ -32,6 +33,20 @@ from typing import IO, Any, Protocol
 from foreman.reconciler.exec_log import ExecutionLog
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_log_dir() -> Path:
+    """Resolve the per-dispatch log directory, honoring container env var.
+
+    Container compose sets ``FOREMAN_LOG_DIR=/foreman/logs``. On the host,
+    when the env var is unset, fall back to ``~/.foreman/logs`` so
+    ``foreman daemon v3-start`` is still invokable for ad-hoc debug
+    without containerization.
+    """
+    env_value = os.environ.get("FOREMAN_LOG_DIR")
+    if env_value:
+        return Path(env_value)
+    return Path.home() / ".foreman" / "logs"
 
 # Map v3 role names to the CLI subcommand the v2 daemon exposes.
 _ROLE_TO_SUBCOMMAND = {
