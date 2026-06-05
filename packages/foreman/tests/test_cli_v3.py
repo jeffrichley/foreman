@@ -15,18 +15,24 @@ def _write_v3_config(
     lock_path: Path,
     db_path: Path,
     sentinel_path: Path,
+    reload_sentinel_path: Path | None = None,
 ) -> Path:
     """Write a minimal v3-start config TOML pointing at tmp_path locations.
 
     Centralizes the as_posix() escaping so individual tests stay readable.
+    ``reload_sentinel_path`` is optional so existing tests stay unchanged;
+    when provided, the field is written into the ``[reconciler]`` block.
     """
     config_path = tmp_path / "config.toml"
-    config_path.write_text(
+    body = (
         "[reconciler]\n"
         f'db_path = "{db_path.as_posix()}"\n'
         f'lock_path = "{lock_path.as_posix()}"\n'
         f'shutdown_sentinel_path = "{sentinel_path.as_posix()}"\n'
     )
+    if reload_sentinel_path is not None:
+        body += f'reload_sentinel_path = "{reload_sentinel_path.as_posix()}"\n'
+    config_path.write_text(body)
     return config_path
 
 
@@ -95,4 +101,48 @@ def test_v3_start_removes_stale_sentinel_at_startup(monkeypatch, tmp_path) -> No
         "v3-start must remove a stale sentinel left over from a prior "
         "`daemon stop` before the reconciler's first poll, otherwise the "
         "new daemon would shut down on its first tick"
+    )
+
+
+def test_v3_start_removes_stale_reload_sentinel_at_startup(
+    monkeypatch, tmp_path
+) -> None:
+    """If a stale reload sentinel was left on disk by a prior `daemon
+    reload` (or by some prior edge case), a fresh `daemon v3-start`
+    must clean it up before the reconciler's first tick — otherwise
+    the tick poller would consume it and log a confusing
+    config_reload row for an already-fresh config.
+
+    Parallel to ``test_v3_start_removes_stale_sentinel_at_startup``;
+    uses --max-ticks 0 to wire everything and exit before the loop
+    starts."""
+    reload_sentinel_path = tmp_path / "reload-requested"
+    reload_sentinel_path.write_text(
+        "stale from prior reload\n", encoding="utf-8"
+    )
+    assert reload_sentinel_path.exists()  # pre-condition
+
+    lock_path = tmp_path / "reconciler.lock"
+    db_path = tmp_path / "reconciler.sqlite"
+    shutdown_sentinel_path = tmp_path / "shutdown-requested"
+    config_path = _write_v3_config(
+        tmp_path,
+        lock_path=lock_path,
+        db_path=db_path,
+        sentinel_path=shutdown_sentinel_path,
+        reload_sentinel_path=reload_sentinel_path,
+    )
+    monkeypatch.setenv("FOREMAN_CONFIG_PATH", str(config_path))
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["daemon", "v3-start", "--max-ticks", "0", "--dry-run"]
+    )
+
+    assert result.exit_code in (0, 2), result.output
+    assert not reload_sentinel_path.exists(), (
+        "v3-start must remove a stale reload sentinel left over from a "
+        "prior `daemon reload` before the reconciler's first poll, "
+        "otherwise the new daemon would log a confusing config_reload "
+        "row on its first tick"
     )

@@ -30,7 +30,9 @@ state advance, the relevant role is dispatched via a provider facade
 worktree at `~/.foreman/worktrees/<repo>/<ticket-id>/`. Tool capabilities
 are scoped per-role (Reviewer is read-only on files; Worker can push
 commits). Lifecycle events persist to a local SQLite database; a foreman
-MCP server exposes query tools for cross-being observation.
+MCP server exposes query tools for cross-being observation. Add projects
+via `foreman init` then call `foreman daemon reload` to register them
+with the running daemon (no restart needed).
 
 ## Working in this repo
 

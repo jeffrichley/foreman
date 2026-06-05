@@ -31,6 +31,15 @@ an implementation is done. This project uses: `<configured_check_command>`
 Includes lint + typecheck + tests; should exit zero on success and
 non-zero on any failure.
 
+## Daemon lifecycle
+
+Adding a new project to `~/.foreman/config.toml` requires
+`foreman daemon reload` for the running daemon to pick it up. Removing a
+project also requires `foreman daemon reload` to stop emitting actions
+for it. The change takes effect on the daemon's next tick (up to
+`reconciler.poll_interval_seconds`, default 60s). In-flight role
+subprocesses for removed projects complete naturally.
+
 ## Active development branch
 
 If this project's active development line lives on a feature branch
