@@ -594,6 +594,8 @@ git commit -m "feat(docker): add build script with pre-build clean-check"
 
 **`.mcp.json` is also intentionally not refreshed from host.** The host's MCP config (in `~/.claude.json`, not `~/.claude/.mcp.json` as earlier drafted) wraps commands with `cmd /c` for Windows compatibility. The container is Linux and needs the bare `npx` form. The vendored `docker/claude/.mcp.json` is hand-maintained to keep the trimmed-to-context7 config in the right shape.
 
+**`CLAUDE.md` is daemon-specific and hand-maintained, NOT copied from host** (Checkpoint A decision). The host's `~/.claude/CLAUDE.md` is Jeff's interactive workflow config (gstack skill references, gbrain paths) and would mis-bias the role subprocess into thinking it's an interactive assistant with skills like `/browse` available. The vendored `docker/claude/CLAUDE.md` instead tells the role subprocess what it IS (a foreman role inside a sealed container), what it IS NOT (an interactive assistant, a skills-library agent, a long-lived process), what tools it has access to, and how to handle uncertainty (fail with labels, not chat). The refresh script enforces this: it never copies `~/.claude/CLAUDE.md`.
+
 The initial seeding below is a one-time bootstrap. After this task lands, the host plugin cache is no longer load-bearing for foreman.
 
 - [ ] **Step 1: Identify the superpowers plugin version on host**

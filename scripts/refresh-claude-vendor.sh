@@ -51,11 +51,13 @@ if [[ -d ~/.claude/skills ]]; then
     fi
 fi
 
-# CLAUDE.md
-if [[ -f ~/.claude/CLAUDE.md ]]; then
-    cp ~/.claude/CLAUDE.md "$VENDOR_DIR/CLAUDE.md"
-    echo "  refreshed: CLAUDE.md"
-fi
+# CLAUDE.md is intentionally NOT refreshed from host. The vendored
+# docker/claude/CLAUDE.md is daemon-specific — it tells the role
+# subprocess "you're not an interactive assistant, the user is the
+# daemon, don't invoke gstack skills, etc." The host's CLAUDE.md is
+# Jeff's interactive workflow config (gstack skill references, gbrain
+# paths) and would mis-bias the role subprocess. Edit
+# docker/claude/CLAUDE.md by hand if the daemon contract changes.
 
 # settings.json (optional)
 if [[ -f ~/.claude/settings.json ]]; then
