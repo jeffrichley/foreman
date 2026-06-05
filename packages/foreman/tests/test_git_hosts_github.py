@@ -237,6 +237,47 @@ def test_commit_files_to_worktree_writes_adds_commits_and_returns_sha(
     assert author == "foreman-planner[bot] <12345+foreman-planner[bot]@users.noreply.github.com>"
 
 
+def test_commit_files_to_worktree_is_idempotent_when_content_matches_head(
+    tmp_path: Path,
+) -> None:
+    """foreman#117: when a prior killed-mid-flight Planner run already
+    committed the spec doc to the worktree, the next call must not
+    crash on `git commit` returning "nothing to commit, working tree
+    clean". Treat empty staged-diff as success and return the existing
+    HEAD SHA so the caller pushes the prior commit.
+    """
+    wt = _init_worktree(tmp_path)
+    provider = GitHubProvider(identity=_identity(), client=MagicMock())
+    provider.configure_worktree_identity(wt)
+
+    spec_relpath = "docs/specs/x.md"
+    spec_content = "# Spec\n\nthe planner output for issue 117\n"
+    commit_message = "docs(spec): add x"
+
+    first_sha = provider.commit_files_to_worktree(
+        worktree_path=wt,
+        files={spec_relpath: spec_content},
+        message=commit_message,
+    )
+
+    second_sha = provider.commit_files_to_worktree(
+        worktree_path=wt,
+        files={spec_relpath: spec_content},
+        message=commit_message,
+    )
+
+    assert second_sha == first_sha
+    commit_count = subprocess.run(
+        ["git", "rev-list", "--count", "HEAD"],
+        cwd=wt,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    # 1 seed + 1 spec commit; the second call must NOT add a third.
+    assert commit_count == "2"
+
+
 def test_push_branch_uses_installation_token_url(tmp_path: Path) -> None:
     """Push must use an HTTPS URL embedding ``x-access-token:<token>``."""
     wt = _init_worktree(tmp_path)
