@@ -807,3 +807,20 @@ def test_foreman_log_dir_falls_back_to_home(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.delenv("FOREMAN_LOG_DIR", raising=False)
     from foreman.reconciler.v3_host import resolve_log_dir
     assert resolve_log_dir() == Path.home() / ".foreman" / "logs"
+
+
+def test_foreman_state_dir_env_var_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FOREMAN_STATE_DIR overrides the default host fallback. Used in the
+    container to point the daemon at the foreman-state named volume so
+    SQLite + sentinels + v3-daemon.log survive `docker compose down`."""
+    monkeypatch.setenv("FOREMAN_STATE_DIR", "/foreman/state")
+    from foreman.reconciler.v3_host import resolve_state_dir
+    assert resolve_state_dir() == Path("/foreman/state")
+
+
+def test_foreman_state_dir_falls_back_to_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When FOREMAN_STATE_DIR is unset, fall back to ~/.foreman (the host
+    directory holding config.toml, daemon.lock, etc.)."""
+    monkeypatch.delenv("FOREMAN_STATE_DIR", raising=False)
+    from foreman.reconciler.v3_host import resolve_state_dir
+    assert resolve_state_dir() == Path.home() / ".foreman"

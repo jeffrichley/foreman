@@ -48,6 +48,21 @@ def resolve_log_dir() -> Path:
         return Path(env_value)
     return Path.home() / ".foreman" / "logs"
 
+
+def resolve_state_dir() -> Path:
+    """Resolve the daemon state directory, honoring container env var.
+
+    Container compose sets ``FOREMAN_STATE_DIR=/foreman/state`` and mounts
+    a named volume there so the daemon's state file (SQLite, sentinels,
+    v3-daemon.log) survives ``docker compose down``. On the host, when
+    the env var is unset, fall back to ``~/.foreman`` (the directory
+    that already holds ``config.toml``, ``daemon.lock``, etc.).
+    """
+    env_value = os.environ.get("FOREMAN_STATE_DIR")
+    if env_value:
+        return Path(env_value)
+    return Path.home() / ".foreman"
+
 # Map v3 role names to the CLI subcommand the v2 daemon exposes.
 _ROLE_TO_SUBCOMMAND = {
     "planner": "plan",

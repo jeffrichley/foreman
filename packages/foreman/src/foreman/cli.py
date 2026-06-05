@@ -575,7 +575,11 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
     # side during the cutover window without clobbering each other's
     # JSON-lines stream. Level reuses config.daemon.log_level — there's
     # no separate v3 knob yet; if one is needed, add ReconcilerConfig.log_level.
-    v3_log_path = Path(os.path.expanduser("~/.foreman/v3-daemon.log"))
+    # resolve_state_dir() honors FOREMAN_STATE_DIR (set by compose for
+    # the container at /foreman/state, mounted as a named volume so the
+    # log survives `docker compose down`) with ~/.foreman fallback.
+    from foreman.reconciler.v3_host import resolve_state_dir
+    v3_log_path = resolve_state_dir() / "v3-daemon.log"
     configure_daemon_logging(
         log_path=v3_log_path,
         level=config.daemon.log_level,
