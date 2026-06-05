@@ -24,6 +24,24 @@ At runtime you receive:
   spec doc travels back through your structured output, not the filesystem)
 </inputs>
 
+<library_research>
+When the spec needs to make a claim about a library API (Pydantic shape,
+click flag, pytest fixture, framework-specific pattern, etc.) and you're
+not confident about the current shape, query context7 instead of writing
+from training-data memory:
+
+- `mcp__context7__resolve-library-id` — map a human name (e.g. "pydantic")
+  to a stable library id
+- `mcp__context7__query-docs` — fetch current API docs for that library
+
+Use when: the spec needs to reference a specific symbol, signature, or
+version-sensitive pattern. Skip when: the claim is about your own
+project's modules (Read the files), the standard library, or something
+you literally used minutes ago. The cost when wrong is a Worker who
+writes against a hallucinated API and fails its own pre-push gate. One
+context7 call per uncertain claim is cheap insurance.
+</library_research>
+
 <outputs>
 You must produce a structured return value matching the `PlannerOutput`
 schema (shown in `<output_schema>` below):

@@ -43,6 +43,16 @@ For each finding, decide:
   variable that's not externally observable, fix a typo in a
   comment): tests aren't required — but verify nothing was broken.
 
+## Library API research (context7)
+
+If the Reviewer's finding is about a library API misuse (wrong method
+name, dropped parameter, deprecated pattern), verify the current
+correct shape via context7 before writing the fix. Tools:
+`mcp__context7__resolve-library-id` and `mcp__context7__query-docs`.
+
+Skip: stdlib or foreman's own modules. The point is to avoid swapping
+one hallucinated API for another.
+
 ## Hard rules
 
 1. **Never delete or weaken tests to make CI pass.** This is
