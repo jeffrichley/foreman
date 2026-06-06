@@ -25,6 +25,7 @@ from foreman.init import (
     _format_project_block,
     _project_block_exists,
     _remote_matches_repo,
+    _render_instructions_template,
     _validate_clone_path,
     _validate_repo_slug,
     _write_project_block_to_config,
@@ -723,3 +724,129 @@ def test_run_init_returns_init_result_with_typed_fields(tmp_path: Path) -> None:
     assert result.instructions_path == clone / ".foreman" / "INSTRUCTIONS.md"
     assert isinstance(result.bot_verifications, list)
     assert len(result.bot_verifications) == 4
+
+
+# ----------------------------------------------------------------------
+# Instructions template — timestamp-stability invariant
+# ----------------------------------------------------------------------
+
+
+def test_run_init_warns_when_instructions_uncommitted(tmp_path: Path) -> None:
+    """Fresh init on a seeded clone leaves ``.foreman/INSTRUCTIONS.md``
+    as an untracked file. The warning must surface a copy-pasteable
+    ``git add ... && git commit ...`` command, and the summary must
+    render that command in the visible output."""
+    init_config, clone = _make_init_config(tmp_path=tmp_path)
+    fake_repo = _FakeRepo(slug=init_config.repo)
+    admin = _FakeAdminClient(repo=fake_repo)
+
+    result = run_init(init_config, admin_client=admin)
+
+    # File was written but not committed → warning must be set.
+    assert result.instructions_dirty_warning is not None
+    # The command shape matches the acceptance criterion exactly.
+    assert "git -C" in result.instructions_dirty_warning
+    assert str(clone) in result.instructions_dirty_warning
+    assert "add .foreman/INSTRUCTIONS.md" in result.instructions_dirty_warning
+    assert "&&" in result.instructions_dirty_warning
+    assert 'commit -m "chore: commit .foreman/INSTRUCTIONS.md"' in result.instructions_dirty_warning
+    # And the rendered summary surfaces it.
+    assert "Warning:" in result.summary
+    assert result.instructions_dirty_warning in result.summary
+
+
+def test_run_init_no_warning_when_instructions_committed(tmp_path: Path) -> None:
+    """When ``.foreman/INSTRUCTIONS.md`` is already committed in the
+    clone (and the file-exists short-circuit applies), the
+    dirty-warning field is None and the summary contains no
+    ``Warning:`` block."""
+    init_config, clone = _make_init_config(tmp_path=tmp_path)
+    foreman_dir = clone / ".foreman"
+    foreman_dir.mkdir()
+    (foreman_dir / "INSTRUCTIONS.md").write_text("# preexisting\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", ".foreman/INSTRUCTIONS.md"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "pre-commit instructions"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    fake_repo = _FakeRepo(slug=init_config.repo)
+    admin = _FakeAdminClient(repo=fake_repo)
+
+    result = run_init(init_config, admin_client=admin)
+
+    assert result.instructions_dirty_warning is None
+    assert "Warning:" not in result.summary
+
+
+def test_run_init_no_warning_when_git_status_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A subprocess failure during the porcelain check must not raise
+    out of ``run_init``: the warning is suppressed (``None``) and init
+    completes normally."""
+    init_config, _clone = _make_init_config(tmp_path=tmp_path)
+    fake_repo = _FakeRepo(slug=init_config.repo)
+    admin = _FakeAdminClient(repo=fake_repo)
+
+    from foreman import init as init_mod
+
+    real_run = subprocess.run
+
+    def fake_run(*args, **kwargs):  # type: ignore[no-untyped-def]
+        # Only intercept the porcelain call. Other subprocess.run calls
+        # (e.g. inside ``_validate_clone_path``) must keep working so
+        # init can still reach the helper.
+        argv = args[0] if args else kwargs.get("args", [])
+        if (
+            isinstance(argv, list)
+            and len(argv) >= 3
+            and argv[0] == "git"
+            and argv[1] == "status"
+            and argv[2] == "--porcelain"
+        ):
+            raise OSError("simulated git failure")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(init_mod.subprocess, "run", fake_run)
+
+    result = run_init(init_config, admin_client=admin)
+
+    # Init succeeded (no exception propagated) and no warning surfaced.
+    assert result.instructions_dirty_warning is None
+    assert "Warning:" not in result.summary
+
+
+def test_template_render_is_timestamp_stable() -> None:
+    """Rendering the instructions template twice with the same inputs
+    must produce byte-identical output, and the template body must not
+    contain any time-volatile placeholder markers.
+
+    This pins the invariant that protects ``foreman init`` from
+    daily "file changed" noise on the clean-tree gate: the template
+    body has no timestamp / generated-at / now placeholders, so the
+    rendered ``.foreman/INSTRUCTIONS.md`` is reproducible from
+    ``(repo_name, check_command)`` alone.
+    """
+    first = _render_instructions_template("foreman", "just check")
+    second = _render_instructions_template("foreman", "just check")
+    assert first == second
+
+    forbidden_markers = (
+        "{timestamp}",
+        "<timestamp>",
+        "<date>",
+        "<generated_at>",
+        "{now}",
+    )
+    for marker in forbidden_markers:
+        assert marker not in first, (
+            f"Template contains time-volatile marker {marker!r}; "
+            "rendered output will drift across runs."
+        )

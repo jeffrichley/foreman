@@ -177,6 +177,12 @@ class InitResult:
     labels_existing: list[str]
     """Names of labels that already existed and were not modified."""
     bot_verifications: list[BotVerification] = field(default_factory=list)
+    instructions_dirty_warning: str | None = None
+    """Copy-pasteable ``git add ... && git commit ...`` command when the
+    generated ``.foreman/INSTRUCTIONS.md`` is untracked or has
+    uncommitted modifications after init. ``None`` when the file is
+    clean (committed, no diff) OR when the git-status check itself
+    failed (defensive: a git error must not block init)."""
     summary: str = ""
 
 
@@ -334,6 +340,48 @@ def _write_instructions_template(
     rendered = _render_instructions_template(repo_name, check_command)
     target.write_text(rendered, encoding="utf-8")
     return target, True
+
+
+def _check_instructions_committed(clone_path: Path) -> str | None:
+    """Return a copy-pasteable warning when ``.foreman/INSTRUCTIONS.md``
+    is untracked or has uncommitted modifications in ``clone_path``.
+
+    Runs ``git status --porcelain -- .foreman/INSTRUCTIONS.md`` and
+    inspects the output:
+
+    * Empty output → the file is committed and clean → returns ``None``.
+    * Non-empty output → the file is untracked or modified → returns a
+      warning string naming the exact ``git add ... && git commit ...``
+      command the operator should run.
+    * Subprocess failure (non-zero exit, missing git binary, OSError,
+      etc.) → returns ``None``. A git problem here must NOT block
+      ``foreman init`` from completing; the operator's clone is in a
+      state we can't reason about, so we stay silent rather than
+      surfacing a misleading warning.
+
+    The warning embeds ``-C <clone_path>`` so the printed command works
+    regardless of the operator's current working directory.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain", "--", ".foreman/INSTRUCTIONS.md"],
+            cwd=clone_path,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # Missing git binary, permission denied, etc. — silently treat
+        # as clean rather than failing init.
+        return None
+    if result.returncode != 0:
+        return None
+    if not result.stdout.strip():
+        return None
+    return (
+        f'git -C {clone_path} add .foreman/INSTRUCTIONS.md && '
+        f'git -C {clone_path} commit -m "chore: commit .foreman/INSTRUCTIONS.md"'
+    )
 
 
 # ----------------------------------------------------------------------
@@ -544,7 +592,7 @@ def _format_summary(result: InitResult) -> str:
         "review + customize" if result.instructions_written else "existing file preserved"
     )
 
-    summary = (
+    head = (
         f"OK Foreman initialized for {result.repo}\n"
         f"  Config block:  {result.config_path} "
         f"(added [projects.{result.name}])\n"
@@ -553,6 +601,8 @@ def _format_summary(result: InitResult) -> str:
         f"({len(result.labels_created)} newly created, "
         f"{len(result.labels_existing)} already existed)\n"
         f"  Bots:\n{bots_block}\n"
+    )
+    next_steps = (
         "\n"
         "Next steps:\n"
         f"  1. Add the [projects.{result.name}.apps] block to "
@@ -563,7 +613,15 @@ def _format_summary(result: InitResult) -> str:
         f"     foreman plan https://github.com/{result.repo}/issues/<N> "
         f"--project {result.name}"
     )
-    return summary
+    if result.instructions_dirty_warning:
+        warning_block = (
+            "\n"
+            "Warning: .foreman/INSTRUCTIONS.md is untracked or modified in the\n"
+            "clone. Commit it now to avoid a dirty-tree trip on the next build:\n"
+            f"  {result.instructions_dirty_warning}\n"
+        )
+        return head + warning_block + next_steps
+    return head + next_steps
 
 
 # ----------------------------------------------------------------------
@@ -615,6 +673,10 @@ def run_init(
         repo_name=init_config.repo.split("/", 1)[1],
         check_command=init_config.check_command,
     )
+    # Detect whether the just-written template is committed in the
+    # clone. The check is defensive — any failure returns None — so it
+    # cannot block init from completing.
+    instructions_dirty_warning = _check_instructions_committed(init_config.clone_path)
 
     # Step 4: labels (idempotent).
     labels_created, labels_existing = _ensure_labels(
@@ -660,6 +722,7 @@ def run_init(
         labels_created=labels_created,
         labels_existing=labels_existing,
         bot_verifications=bot_verifications,
+        instructions_dirty_warning=instructions_dirty_warning,
     )
     result.summary = _format_summary(result)
     return result
