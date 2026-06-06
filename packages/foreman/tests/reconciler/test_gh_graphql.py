@@ -81,3 +81,71 @@ def test_graphql_network_error_raises_observer_unreachable() -> None:
 
     with pytest.raises(ObserverUnreachable):
         client.graphql("query { x }", {})
+
+
+# --------------------------------------------------------------------
+# foreman#142 — token_supplier refreshes the Authorization header per
+# request so an installation-token expiry doesn't permanently 401 the
+# daemon (which is what happens when a static `token=` is captured in
+# httpx.Client headers at construction time).
+# --------------------------------------------------------------------
+
+
+def test_graphql_calls_token_supplier_on_each_request() -> None:
+    """Each ``graphql()`` call must invoke the supplier — proves the daemon
+    re-reads the current installation token instead of caching the value
+    captured at client construction."""
+    transport = _MockTransport(_ok_handler)
+    tokens = iter(["ghs_first", "ghs_second", "ghs_third"])
+    call_count = {"n": 0}
+
+    def supplier() -> str:
+        call_count["n"] += 1
+        return next(tokens)
+
+    client = HttpxGHGraphQLClient(token_supplier=supplier, transport=transport)
+
+    client.graphql("query { x }", {})
+    assert call_count["n"] == 1
+    assert transport.last_request is not None
+    assert transport.last_request.headers["authorization"] == "Bearer ghs_first"
+
+    client.graphql("query { x }", {})
+    assert call_count["n"] == 2
+    assert transport.last_request.headers["authorization"] == "Bearer ghs_second"
+
+    client.graphql("query { x }", {})
+    assert call_count["n"] == 3
+    assert transport.last_request.headers["authorization"] == "Bearer ghs_third"
+
+
+def test_graphql_token_supplier_post_rotation_is_picked_up() -> None:
+    """Direct repro of the foreman#142 daemon failure mode: a token that
+    expires mid-life is replaced by the supplier, and the next request
+    uses the new value rather than the cached header. Pre-fix this would
+    keep using ``ghs_stale`` and 401 forever."""
+    transport = _MockTransport(_ok_handler)
+    current = {"value": "ghs_stale"}
+    client = HttpxGHGraphQLClient(
+        token_supplier=lambda: current["value"], transport=transport
+    )
+
+    client.graphql("query { x }", {})
+    assert transport.last_request is not None
+    assert transport.last_request.headers["authorization"] == "Bearer ghs_stale"
+
+    current["value"] = "ghs_fresh"
+
+    client.graphql("query { x }", {})
+    assert transport.last_request.headers["authorization"] == "Bearer ghs_fresh"
+
+
+def test_graphql_requires_exactly_one_of_token_or_supplier() -> None:
+    """Construction with both ``token`` and ``token_supplier`` — or neither —
+    is a programming error and should fail loudly at construction, not at
+    first request."""
+    with pytest.raises(ValueError, match="exactly one"):
+        HttpxGHGraphQLClient()
+
+    with pytest.raises(ValueError, match="exactly one"):
+        HttpxGHGraphQLClient(token="ghs_x", token_supplier=lambda: "ghs_y")
