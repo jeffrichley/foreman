@@ -269,7 +269,7 @@ class V3GitHubHost:
         log: ExecutionLog,
         subprocess_runner: SubprocessRunner | None = None,
         role_dispatch_timeout_seconds: int = 3600,
-        max_concurrent_dispatches: int = 2,
+        max_concurrent_dispatches: int = 1,
         log_dir: Path | None = None,
     ) -> None:
         self._v2 = v2_host

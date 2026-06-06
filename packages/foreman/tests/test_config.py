@@ -668,6 +668,21 @@ def test_global_auto_merge_defaults() -> None:
     assert cfg.auto_merge_impl is False
 
 
+def test_max_concurrent_dispatches_defaults_to_one() -> None:
+    """Default is 1 — strictly sequential dispatch — so a fresh foreman
+    install runs the safest behavior out of the box.
+
+    Why pinned: operators who want parallelism set this explicitly via
+    config (the choice becomes auditable). Silently flipping the default
+    upward would re-introduce the 2026-06-05 surprise where the
+    autonomous loop ran two role subprocesses in parallel without anyone
+    consciously enabling it. Each role subprocess saturates bandwidth,
+    disk, or LLM-context budgets on a dev box; opt-IN is the principle.
+    """
+    cfg = ReconcilerConfig()
+    assert cfg.max_concurrent_dispatches == 1
+
+
 def test_project_auto_merge_inherits_global_when_unset() -> None:
     """A project with no override inherits the reconciler's defaults via
     the ``effective_auto_merge_*`` resolvers."""

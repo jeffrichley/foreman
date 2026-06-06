@@ -143,10 +143,19 @@ class ReconcilerConfig(BaseModel):
         description="Hard wall-clock ceiling for a dispatched role subprocess; SIGTERM on expiry.",
     )
     max_concurrent_dispatches: int = Field(
-        default=2,
+        default=1,
         ge=1,
         le=20,
-        description="Max concurrent role subprocesses across all tickets (Planner+Worker+Reviewer+Fixer combined).",
+        description=(
+            "Max concurrent role subprocesses across all tickets "
+            "(Planner+Worker+Reviewer+Fixer combined). Default is 1 — "
+            "strictly sequential dispatch — so a fresh foreman install runs "
+            "the safest behavior out of the box. Operators who have read "
+            "the docs and decided they want parallelism set this explicitly "
+            "to 2, 4, or higher. Each role subprocess can saturate bandwidth, "
+            "disk, or LLM-context budgets on a dev box that hasn't been "
+            "consciously sized for parallelism; opt-IN is the principle."
+        ),
     )
     shutdown_sentinel_path: str = Field(
         default="~/.foreman/shutdown-requested",
