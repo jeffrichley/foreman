@@ -56,12 +56,16 @@ from github.PullRequest import PullRequest
 from github.Repository import Repository
 from pydantic import ValidationError
 
-from foreman.branches import spec_branch
+from foreman.branches import impl_branch, spec_branch
 from foreman.config import Config
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade
-from foreman.roles.reviewer import FINDINGS_BEGIN_MARKER, FINDINGS_END_MARKER
+from foreman.roles.reviewer import (
+    FINDINGS_BEGIN_MARKER,
+    FINDINGS_END_MARKER,
+    parse_pr_url,
+)
 from foreman.schemas.fixer import FixerOutput, FixerRunResult
 from foreman.schemas.reviewer import Finding
 from foreman.stats import log_fixer_run
@@ -341,22 +345,33 @@ def _read_spec_doc(worktree_path: Path, issue_number: int) -> str | None:
         return None
 
 
-def _find_spec_pr(repo: Repository, owner: str, branch: str) -> PullRequest:
-    """Locate the open spec PR whose head branch matches ``branch``.
+def _find_pr_by_branch(
+    repo: Repository,
+    *,
+    owner: str,
+    branch: str,
+    target: Literal["spec_pr", "impl_pr"],
+) -> PullRequest:
+    """Locate the open PR whose head branch matches ``branch``.
 
-    The Planner names spec branches ``foreman/issue-<N>``. We query
-    open PRs by head (``owner:branch``) and take the first match.
-    Raises if no open PR is found — the Fixer is only meant to act on
-    PRs the Reviewer flagged, so an absent PR is an upstream-state
-    error worth surfacing loudly.
+    Used as the fallback when ``run_fixer`` is invoked without an
+    explicit ``--pr-url``. ``target`` is consumed only to phrase the
+    "no open PR" error message ("spec PR" vs "impl PR"); the lookup
+    logic — open-state filter + ``owner:branch`` head qualifier — is
+    independent of the target. The Planner names spec branches
+    ``foreman/issue-<N>`` and the Worker names impl branches
+    ``foreman/impl-<N>``; both flow through this helper. Raises if no
+    open PR is found — the Fixer is only meant to act on PRs the
+    Reviewer flagged, so an absent PR is an upstream-state error worth
+    surfacing loudly.
     """
     head_qualifier = f"{owner}:{branch}"
     pulls = list(repo.get_pulls(state="open", head=head_qualifier))
     if not pulls:
+        kind = "impl PR" if target == "impl_pr" else "spec PR"
         raise RuntimeError(
-            f"No open PR found for branch {branch!r} in {repo.full_name!r}. "
-            "The Fixer expects the Planner-opened spec PR to still be open "
-            "for the issue it's fixing."
+            f"No open {kind} found for branch {branch!r} in {repo.full_name!r}. "
+            f"The Fixer expects the open {kind} for the issue it's fixing."
         )
     return pulls[0]
 
@@ -397,6 +412,7 @@ async def run_fixer(
     provider: ProviderFacade,
     identity_registry: IdentityRegistry | None = None,
     target: str = "spec_pr",
+    pr_url: str | None = None,
 ) -> FixerRunResult:
     """Run the Fixer role end-to-end on one issue.
 
@@ -415,6 +431,19 @@ async def run_fixer(
             fresh :class:`~foreman.identity.IdentityRegistry` for the
             project. Tests inject a fake registry to bypass real App
             auth.
+        target: Which Fixer flow to run. ``spec_pr`` (default) acts on
+            the Planner-opened spec PR on the ``foreman/issue-<N>``
+            branch. ``impl_pr`` acts on the Worker-opened impl PR on
+            the ``foreman/impl-<N>`` branch.
+        pr_url: Optional full GitHub PR URL. When provided the PR is
+            resolved directly via ``parse_pr_url`` + ``repo.get_pull``
+            and no branch discovery is attempted — this matches the v3
+            reconciler's "self-describing dispatch" shape and fixes the
+            impl-fix crash when the spec PR has been merged before the
+            impl-fix runs. When ``None`` the role falls back to a
+            target-aware branch lookup (``spec_branch(N)`` for
+            ``target="spec_pr"``, ``impl_branch(N)`` for
+            ``target="impl_pr"``).
 
     Returns:
         A :class:`~foreman.schemas.fixer.FixerRunResult` bundling the
@@ -484,13 +513,43 @@ async def run_fixer(
     issue.add_to_labels(attempt_label)
     current_labels.add(attempt_label)
 
-    # Resolve the spec PR from the issue's branch convention.
-    branch = spec_branch(issue_number)
-    pr = _find_spec_pr(repo, owner=owner, branch=branch)
+    # Resolve the PR. Prefer the explicit ``pr_url`` passed by the v3
+    # reconciler (the dispatcher's argv is the source of truth — it
+    # knows whether this is a spec-fix or impl-fix and which PR
+    # number); fall back to a target-aware branch lookup when
+    # ``pr_url`` is absent (in-process dispatcher, manual CLI use).
+    # The fallback's target-awareness is what fixes issue #156: when
+    # the spec PR has been merged before the impl-fix runs, the
+    # spec-branch lookup raises and the role dies before any LLM
+    # dispatch.
+    if pr_url is not None:
+        pr_owner, pr_repo_name, pr_number = parse_pr_url(pr_url)
+        pr_repo_slug = f"{pr_owner}/{pr_repo_name}"
+        if pr_repo_slug != actual_repo_slug:
+            raise ValueError(
+                f"PR URL repo {pr_repo_slug!r} does not match project "
+                f"{project_name!r} configured repo {actual_repo_slug!r}"
+            )
+        pr = repo.get_pull(pr_number)
+    else:
+        if target == "impl_pr":
+            branch = impl_branch(issue_number)
+        else:
+            branch = spec_branch(issue_number)
+        pr = _find_pr_by_branch(
+            repo,
+            owner=owner,
+            branch=branch,
+            target=cast(Literal["spec_pr", "impl_pr"], target),
+        )
     review_comment = _latest_reviewer_review_comment(pr)
 
-    # Attach to the existing branch — the Planner created it; the
-    # Fixer must not branch from main.
+    # Attach to the existing branch — the upstream role (Planner for
+    # spec, Worker for impl) created it; the Fixer must not branch from
+    # main. ``attach`` checks out ``foreman/issue-<N>`` into
+    # ``issue-<N>/``; ``attach_impl`` checks out ``foreman/impl-<N>``
+    # into ``impl-<N>/``. The choice tracks ``target`` the same way the
+    # Reviewer does (reviewer.py:404-417).
     # WorktreeManager's git subprocesses (fetch / worktree add) must
     # authenticate as the fixer bot — without the explicit token they
     # inherit the daemon's parent ``GH_TOKEN`` (CI runner, dev shell)
@@ -498,12 +557,20 @@ async def run_fixer(
     # Same anti-leak motivation as the Stage 3e role-module subprocess
     # fix; WorktreeManager was scoped out at the time as a follow-up.
     wt_mgr = WorktreeManager(worktrees_root=worktrees_root, role_token=fixer_token)
-    wt_path = wt_mgr.attach(
-        clone_path=Path(project.local_clone_path),
-        repo_slug=repo_name,
-        ticket_id=issue_number,
-        repo_url=f"https://github.com/{project.repo}.git",
-    )
+    if target == "impl_pr":
+        wt_path = wt_mgr.attach_impl(
+            clone_path=Path(project.local_clone_path),
+            repo_slug=repo_name,
+            ticket_id=issue_number,
+            repo_url=f"https://github.com/{project.repo}.git",
+        )
+    else:
+        wt_path = wt_mgr.attach(
+            clone_path=Path(project.local_clone_path),
+            repo_slug=repo_name,
+            ticket_id=issue_number,
+            repo_url=f"https://github.com/{project.repo}.git",
+        )
 
     # Recover the Reviewer's structured findings from the marker-fenced
     # JSON block the Reviewer embeds in its posted review body

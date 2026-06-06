@@ -234,6 +234,7 @@ class _FakeRepo:
         self._issue = issue
         self.full_name = "jeffrichley/voice"
         self.get_pulls_calls: list[dict[str, Any]] = []
+        self.get_pull_calls: list[int] = []
         self.get_issue_calls: list[int] = []
 
     def get_pulls(
@@ -241,6 +242,12 @@ class _FakeRepo:
     ) -> list[_FakePR]:
         self.get_pulls_calls.append({"state": state, "head": head, **kwargs})
         return [self._pr]
+
+    def get_pull(self, number: int) -> _FakePR:
+        # Direct PR resolution (used when ``run_fixer`` is invoked with
+        # an explicit ``pr_url`` — fallback discovery is skipped).
+        self.get_pull_calls.append(number)
+        return self._pr
 
     def get_issue(self, number: int) -> _FakeIssue:
         self.get_issue_calls.append(number)
@@ -294,6 +301,64 @@ def _seed_clone_with_spec_branch(clone: Path, issue_number: int) -> str:
     )
     subprocess.run(["git", "add", "."], cwd=clone, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "spec doc"], cwd=clone, check=True, capture_output=True)
+    head_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "checkout", "main"], cwd=clone, check=True, capture_output=True)
+    return head_sha
+
+
+def _seed_clone_with_impl_branch(clone: Path, issue_number: int) -> str:
+    """Init a minimal git repo with a Worker-style ``foreman/impl-N`` branch.
+
+    Mirrors :func:`_seed_clone_with_spec_branch` but lays down the
+    impl-side state the Fixer expects when running with
+    ``target="impl_pr"``: seed → spec doc → impl commit, with the
+    ``foreman/impl-<N>`` branch pointing at the impl commit. The spec
+    branch is intentionally NOT created — this mirrors the real-world
+    impl-fix trace at issue #156 where the spec PR had been merged and
+    its branch deleted hours before the impl-fix fired.
+    """
+    clone.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=clone, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=clone, check=True, capture_output=True
+    )
+    (clone / "README.md").write_text("seed\n")
+    subprocess.run(["git", "add", "."], cwd=clone, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "seed"], cwd=clone, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(clone)],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "fetch", "origin"], cwd=clone, check=False, capture_output=True)
+    branch = f"foreman/impl-{issue_number}"
+    subprocess.run(["git", "checkout", "-b", branch], cwd=clone, check=True, capture_output=True)
+    # Spec doc reachable from the impl branch — the v3 model stacks
+    # impl on spec so ``_read_spec_doc`` works from either worktree.
+    spec_dir = clone / "docs" / "superpowers" / "specs"
+    spec_dir.mkdir(parents=True, exist_ok=True)
+    (spec_dir / f"foreman-issue-{issue_number}-spec.md").write_text(
+        f"# Spec for issue #{issue_number}\n"
+    )
+    subprocess.run(["git", "add", "."], cwd=clone, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "spec doc"], cwd=clone, check=True, capture_output=True)
+    # Impl change on top of the spec commit.
+    (clone / f"impl-{issue_number}.txt").write_text("impl change\n")
+    subprocess.run(["git", "add", "."], cwd=clone, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "impl"], cwd=clone, check=True, capture_output=True)
     head_sha = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=clone,
@@ -370,13 +435,17 @@ def _make_fake_repo(
     head_sha: str,
     labels: list[str] | None = None,
     reviews: list[_FakeReview] | None = None,
+    head_ref: str | None = None,
+    pr_number: int = 77,
 ) -> tuple[_FakeRepo, _FakePR, _FakeIssue]:
     labels = labels if labels is not None else ["foreman:spec-fix"]
+    if head_ref is None:
+        head_ref = f"foreman/issue-{issue_number}"
     pr = _FakePR(
-        number=77,
+        number=pr_number,
         title="spec: SSML",
         body=f"Adds SSML spec. Closes #{issue_number}.",
-        head_ref=f"foreman/issue-{issue_number}",
+        head_ref=head_ref,
         head_sha=head_sha,
         base_ref="main",
         reviews=reviews,
@@ -1062,7 +1131,7 @@ async def test_run_fixer_raises_when_no_open_spec_pr(
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
 
-    with pytest.raises(RuntimeError, match="No open PR"):
+    with pytest.raises(RuntimeError, match="No open spec PR"):
         await run_fixer(
             issue_url="https://github.com/jeffrichley/voice/issues/42",
             config=cfg,
@@ -1099,6 +1168,173 @@ async def test_run_fixer_raises_when_pr_has_no_reviews(
             provider=fake_provider,
             identity_registry=registry,
         )
+
+
+# ----------------------------------------------------------------------
+# impl_pr target — pr_url plumb + target-aware branch discovery (issue #156)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_fixer_uses_pr_url_when_provided_for_impl_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When dispatched with ``target='impl_pr'`` AND an explicit
+    ``pr_url``, the Fixer must resolve the PR directly via
+    ``repo.get_pull(pr_number)`` and skip branch discovery.
+
+    Mirrors the issue #156 trace: an autonomous impl-fix dispatch fires
+    against an issue whose spec PR has been merged hours ago (and its
+    branch deleted). Previously the role discarded ``pr_url``, called
+    ``_find_spec_pr`` on the merged spec branch, and crashed with
+    "No open PR found for branch foreman/issue-N" before any LLM work.
+    """
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_impl_branch(clone, issue_number=137)
+    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    cfg = _make_config(clone)
+    repo, pr, _issue = _make_fake_repo(
+        issue_number=137,
+        head_sha=head_sha,
+        labels=["foreman:impl-fix"],
+        head_ref="foreman/impl-137",
+        pr_number=153,
+    )
+
+    # Simulate the real-world crash: any fallback call to ``get_pulls``
+    # would raise loudly. If the role still hits branch discovery, the
+    # AssertionError surfaces immediately.
+    def _exploding_pulls(**_: Any) -> list[_FakePR]:
+        raise AssertionError(
+            "get_pulls must not be called when --pr-url is provided "
+            "(target='impl_pr', pr_url=https://github.com/jeffrichley/voice/pull/153)"
+        )
+
+    repo.get_pulls = _exploding_pulls  # type: ignore[assignment]
+    client = _FakeFixerClient(repo=repo)
+    registry = _make_registry(client)
+
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+
+    await run_fixer(
+        issue_url="https://github.com/jeffrichley/voice/issues/137",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+        target="impl_pr",
+        pr_url="https://github.com/jeffrichley/voice/pull/153",
+    )
+
+    # PR resolved via direct ``get_pull(pr_number)``, with the parsed
+    # number from the URL.
+    assert repo.get_pull_calls == [153]
+    # LLM was dispatched — the role did not crash on the no-spec-branch
+    # state of the clone (mirroring issue #156's trace).
+    fake_provider.run_agent.assert_called_once()
+    # PR comment landed (proves the impl-fix flow completed end-to-end).
+    assert pr.issue_comments_posted == ["fixed — addressed AC bullet 3."]
+
+
+@pytest.mark.asyncio
+async def test_run_fixer_branch_discovery_is_target_aware_for_impl_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When dispatched with ``target='impl_pr'`` and no ``pr_url``, the
+    discovery's head qualifier must be ``foreman/impl-<N>`` (NOT
+    ``foreman/issue-<N>``). Guards against the pre-#156 bug where the
+    role hardcoded ``spec_branch(issue_number)`` for both targets.
+    """
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_impl_branch(clone, issue_number=137)
+    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    cfg = _make_config(clone)
+    repo, _pr, _issue = _make_fake_repo(
+        issue_number=137,
+        head_sha=head_sha,
+        labels=["foreman:impl-fix"],
+        head_ref="foreman/impl-137",
+    )
+    client = _FakeFixerClient(repo=repo)
+    registry = _make_registry(client)
+
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+
+    await run_fixer(
+        issue_url="https://github.com/jeffrichley/voice/issues/137",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+        target="impl_pr",
+    )
+
+    # The head qualifier on the discovery call uses the IMPL branch
+    # convention. If the role regresses to ``spec_branch`` for both
+    # targets, this assert fails.
+    assert repo.get_pulls_calls
+    last_call = repo.get_pulls_calls[-1]
+    assert last_call["head"] == "jeffrichley:foreman/impl-137"
+    assert last_call["state"] == "open"
+    # Direct PR resolution path NOT taken (no pr_url supplied).
+    assert repo.get_pull_calls == []
+
+
+@pytest.mark.asyncio
+async def test_run_fixer_impl_discovery_error_message_is_impl_specific(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ``target='impl_pr'`` discovery returns no open PRs, the
+    ``RuntimeError`` must mention "impl PR" (not "spec PR"). The
+    issue #156 trace had operators chasing a misleading "spec PR not
+    found" message on what was actually an impl-PR dispatch.
+    """
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_impl_branch(clone, issue_number=137)
+    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    cfg = _make_config(clone)
+    repo, _pr, _issue = _make_fake_repo(
+        issue_number=137,
+        head_sha=head_sha,
+        labels=["foreman:impl-fix"],
+        head_ref="foreman/impl-137",
+    )
+
+    # Discovery returns nothing — mirrors "PR closed / not yet open".
+    def _empty_pulls(**_: Any) -> list[_FakePR]:
+        return []
+
+    repo.get_pulls = _empty_pulls  # type: ignore[assignment]
+    client = _FakeFixerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await run_fixer(
+            issue_url="https://github.com/jeffrichley/voice/issues/137",
+            config=cfg,
+            project_name="voice",
+            worktrees_root=tmp_path / "worktrees",
+            provider=fake_provider,
+            identity_registry=registry,
+            target="impl_pr",
+        )
+
+    message = str(excinfo.value)
+    assert "impl PR" in message
+    assert "spec PR" not in message
+    assert "foreman/impl-137" in message
 
 
 # ----------------------------------------------------------------------

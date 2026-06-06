@@ -197,19 +197,14 @@ def fix(
     ``foreman:impl-fix`` and the Fixer operates on the stacked
     ``foreman/impl-<N>`` branch instead.
 
-    ``--pr-url`` is accepted but currently advisory — ``run_fixer``
-    derives the PR from the branch convention. Passing it keeps the v3
-    dispatch argv self-describing in audit logs.
+    ``--pr-url`` is forwarded into ``run_fixer`` when supplied; the role
+    resolves the PR directly via that URL and skips branch discovery.
+    When ``--pr-url`` is omitted the role falls back to a target-aware
+    branch lookup.
     """
     cfg_path = config_path or _default_config_path()
     cfg = load_config(cfg_path)
     provider = AnthropicSDKProvider()
-    # ``pr_url`` not yet plumbed into ``run_fixer`` — accepting it on the
-    # CLI keeps the v3 reconciler's argv shape uniform; threading it
-    # through the role is a separate change (out of scope for the
-    # Stage-2 action split). Keep the read so linters don't flag it as
-    # an unused arg.
-    _ = pr_url
     result = asyncio.run(
         run_fixer(
             issue_url=issue_url,
@@ -218,6 +213,7 @@ def fix(
             worktrees_root=_default_worktrees_root(),
             provider=provider,
             target=target,
+            pr_url=pr_url,
         )
     )
     llm = result.llm_output
