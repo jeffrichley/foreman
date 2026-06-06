@@ -314,8 +314,23 @@ class V3GitHubHost:
         pr_number: int | None,
         start_log_id: int,
         project: str,
-    ) -> int:
-        """Spawn `uv run foreman <subcommand>` as a subprocess; return PID.
+    ) -> int | None:
+        """Spawn `uv run foreman <subcommand>` as a subprocess.
+
+        Returns the spawned subprocess's PID on success. Returns ``None``
+        when the concurrency cap is full — the caller treats that as
+        "skipped this poll, retry next." NEVER raises for cap-reached:
+        cap-skip is a routine outcome of N tickets being ready in one
+        poll, not an error condition. Raising would cascade through
+        ``execute_action``'s except clause and write a terminate row
+        with outcome ``error``, which both pollutes the log AND
+        (per the 2026-06-06 production incident) corrupts the attempt-
+        counting rules that key off recent terminations.
+
+        Other failures still raise: unknown role (programmer error),
+        missing pr_number for reviewer (programmer error), runner
+        spawn failure (real environment problem). Capacity slot is
+        released on those raise paths so they don't leak.
 
         ``target`` is ``"spec_pr"`` / ``"impl_pr"`` for Reviewer + Fixer (the
         target-ambiguous roles), and ``None`` for Planner + Worker. Plumbed
@@ -326,7 +341,9 @@ class V3GitHubHost:
         before calling this method. The background tracker carries it through
         and writes the termination row when the subprocess exits — so
         ``count_completed`` advances in production without depending on the
-        worker's bus envelope landing.
+        worker's bus envelope landing. When this method returns ``None``
+        (cap-skip), the caller is responsible for terminating the start row
+        with outcome ``skipped_capacity`` so the row doesn't dangle.
 
         ``project`` is the project name the action is for. One V3GitHubHost
         instance is shared across all registered projects, so the project
@@ -335,10 +352,14 @@ class V3GitHubHost:
         ``--project`` so the role CLI loads the right project config.
         """
         if not self._dispatch_capacity.acquire(blocking=False):
-            raise RuntimeError(
-                f"concurrency cap reached ({self._max_concurrent_dispatches} active "
-                "dispatches); will retry next poll"
+            logger.info(
+                "dispatch skipped role=%s issue=%s — concurrency cap %d "
+                "reached; will retry next poll",
+                role,
+                issue,
+                self._max_concurrent_dispatches,
             )
+            return None
         subcommand = _ROLE_TO_SUBCOMMAND.get(role)
         if subcommand is None:
             self._dispatch_capacity.release()
