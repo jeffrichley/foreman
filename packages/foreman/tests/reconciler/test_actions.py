@@ -129,6 +129,11 @@ class _FakeHost:
     def merge_pr(self, *, owner: str, repo: str, pr_number: int) -> None:
         self.calls.append(("merge_pr", {"owner": owner, "repo": repo, "pr_number": pr_number}))
 
+    # When non-None, dispatch_role returns this value as the "PID". Set
+    # to None to simulate the cap-skip path (host's concurrency cap was
+    # full at dispatch time).
+    dispatch_role_return: int | None = 12345
+
     def dispatch_role(
         self,
         *,
@@ -140,7 +145,7 @@ class _FakeHost:
         pr_number: int | None,
         start_log_id: int,
         project: str,
-    ) -> int:
+    ) -> int | None:
         self.calls.append(
             (
                 "dispatch_role",
@@ -156,7 +161,7 @@ class _FakeHost:
                 },
             )
         )
-        return 12345  # fake pid
+        return self.dispatch_role_return
 
 
 def test_execute_noop_does_nothing(tmp_path: Path) -> None:
@@ -173,6 +178,65 @@ def test_execute_noop_does_nothing(tmp_path: Path) -> None:
     with sqlite3.connect(tmp_path / "log.sqlite") as conn:
         rows = conn.execute("SELECT COUNT(*) FROM execution_log").fetchone()[0]
     assert rows == 0
+
+
+def test_execute_dispatch_skipped_capacity_terminates_running_row(tmp_path: Path) -> None:
+    """When host.dispatch_role returns None (cap-skip), executor terminates
+    the start row with outcome ``skipped_capacity`` and does NOT raise.
+
+    Regression for the 2026-06-06 cap-cascade incident: pre-fix,
+    dispatch_role raised RuntimeError when full, which the executor's
+    except-clause caught and wrote as outcome=error. That error termination
+    polluted attempt-counting AND ultimately led to tickets being marked
+    foreman:failed via downstream rule evaluation. The fix changes
+    dispatch_role's contract from raise→return-None and the executor
+    handles the None path explicitly as a no-burn skip.
+    """
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    snap = _snapshot()
+    ctx = ActionContext(snapshot=snap, issue=snap.issues[0], pr=None, log=log)
+    host = _FakeHost()
+    # Simulate the cap-skip path: dispatch_role returns None.
+    host.dispatch_role_return = None
+
+    # No raise — cap-skip is routine, not exceptional.
+    execute_action(
+        Action.DISPATCH_PLANNER,
+        ctx,
+        host=host,
+        rule_name="dispatch_planner",
+        dry_run=False,
+    )
+
+    # The host's dispatch_role WAS called (we attempted to dispatch).
+    assert len(host.calls) == 1
+    assert host.calls[0][0] == "dispatch_role"
+
+    # The start row was terminated with skipped_capacity — NOT with success
+    # (which would double-count) and NOT with error (which polluted the log
+    # and corrupted attempt-counting in the original bug).
+    with sqlite3.connect(tmp_path / "log.sqlite") as conn:
+        rows = conn.execute(
+            "SELECT outcome, details FROM execution_log "
+            "WHERE action='dispatch_planner' AND outcome != 'running'"
+        ).fetchall()
+    assert len(rows) == 1, (
+        f"Expected exactly one termination row, got {len(rows)}. "
+        "Either the cap-skip path didn't terminate, or it wrote multiple "
+        "rows."
+    )
+    outcome, details = rows[0]
+    assert outcome == "skipped_capacity", (
+        f"Expected outcome=skipped_capacity, got {outcome!r}. If this "
+        "shows 'error', the cap-cascade fix regressed and the original "
+        "2026-06-06 incident is back."
+    )
+    assert "concurrency cap reached" in details
+
+    # has_unterminated must be False — we DID terminate the row, just
+    # with skipped_capacity not success.
+    assert log.has_unterminated("dispatch_planner", ctx.ticket_id) is False
 
 
 def test_execute_dispatch_planner_writes_running_and_calls_host(tmp_path: Path) -> None:

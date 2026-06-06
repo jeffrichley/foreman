@@ -225,8 +225,17 @@ def test_terminate_dispatch_writes_termination_row_synchronously(tmp_path: Path)
     assert log.count_completed("dispatch_reviewer", "foreman/owner/repo#10") == 1
 
 
-def test_concurrency_cap_refuses_dispatch_when_full(tmp_path: Path) -> None:
-    """Once max_concurrent_dispatches is reached, further dispatch_role raises."""
+def test_concurrency_cap_returns_none_when_full(tmp_path: Path) -> None:
+    """Once max_concurrent_dispatches is reached, dispatch_role returns
+    None — the caller treats that as "skipped this poll, retry next."
+
+    NEVER raises for cap-reached. This is the load-bearing fix for the
+    2026-06-06 cap-cascade incident: raising caused execute_action's
+    except clause to write a terminate row with outcome ``error``, which
+    polluted the log AND corrupted the attempt-counting rules that key
+    off recent terminations. Cap-skip is a routine outcome of N tickets
+    being ready in one poll, not an error condition.
+    """
     log = ExecutionLog(tmp_path / "log.sqlite")
     log.init()
 
@@ -245,18 +254,84 @@ def test_concurrency_cap_refuses_dispatch_when_full(tmp_path: Path) -> None:
     # Manually acquire the only slot to simulate "already full"
     host._dispatch_capacity.acquire(blocking=False)
 
-    # Next dispatch_role should raise — caught by executor in production
-    with pytest.raises(RuntimeError, match="concurrency cap reached"):
-        host.dispatch_role(
+    # dispatch_role returns None — caller treats as cap-skip.
+    result = host.dispatch_role(
+        role="planner",
+        target=None,
+        owner="jeffrichley",
+        repo="foreman",
+        issue=1,
+        pr_number=None,
+        start_log_id=1,
+        project="foreman",
+    )
+    assert result is None, (
+        f"Expected None for cap-skip, got {result!r}. The fix flipped "
+        "raise → return None. If this regressed back to raising, the "
+        "2026-06-06 cap-cascade bug is back."
+    )
+
+
+def test_concurrency_cap_skip_does_not_consume_slot(tmp_path: Path) -> None:
+    """Repeated cap-skipped dispatches must NOT consume the semaphore.
+    Otherwise after N skips the cap would be permanently negative and
+    no legitimate dispatch could ever proceed.
+    """
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+
+    class _Proc:
+        pid = 1234
+
+        async def wait(self) -> int:
+            return 0
+
+    host = V3GitHubHost(
+        v2_host=_FakeV2Host(),
+        log=log,
+        subprocess_runner=lambda _argv: _Proc(),
+        max_concurrent_dispatches=2,
+    )
+    # Fill the cap with two manual acquires.
+    host._dispatch_capacity.acquire(blocking=False)
+    host._dispatch_capacity.acquire(blocking=False)
+
+    # Three cap-skipped dispatches in a row — none should consume
+    # the (already-full) semaphore.
+    for _ in range(3):
+        result = host.dispatch_role(
             role="planner",
             target=None,
             owner="jeffrichley",
             repo="foreman",
-            issue=1,
+            issue=99,
             pr_number=None,
             start_log_id=1,
             project="foreman",
         )
+        assert result is None
+
+    # Release one slot — simulating an in-flight subprocess finishing.
+    host._dispatch_capacity.release()
+
+    # The next dispatch must succeed — the slot is genuinely available
+    # again. If the cap-skip path consumed the semaphore, we'd be in
+    # negative-territory here and this call would skip too.
+    pid = host.dispatch_role(
+        role="planner",
+        target=None,
+        owner="jeffrichley",
+        repo="foreman",
+        issue=100,
+        pr_number=None,
+        start_log_id=2,
+        project="foreman",
+    )
+    assert pid == 1234, (
+        f"Expected pid 1234 after slot was released, got {pid!r}. "
+        "Cap-skip must not consume the slot — if it did, repeated "
+        "skips would permanently lock the cap."
+    )
 
 
 def test_dispatch_role_releases_slot_when_runner_raises(tmp_path: Path) -> None:

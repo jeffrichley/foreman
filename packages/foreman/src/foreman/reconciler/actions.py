@@ -150,7 +150,7 @@ def execute_action(
             )
         elif action in _DISPATCH_ROLE_FOR_ACTION:
             role, target = _DISPATCH_ROLE_FOR_ACTION[action]
-            host.dispatch_role(
+            pid = host.dispatch_role(
                 role=role,
                 target=target,
                 owner=ctx.snapshot.owner,
@@ -160,6 +160,25 @@ def execute_action(
                 start_log_id=start_id,
                 project=ctx.snapshot.project,
             )
+            # ``pid is None`` means the concurrency cap was full and the
+            # host opted to skip this dispatch — see V3GitHubHost.dispatch_role
+            # for the rationale. Terminate the start row with a
+            # ``skipped_capacity`` outcome so it doesn't dangle in
+            # ``running`` state forever, and return early so the success
+            # path below doesn't write a second termination row. The
+            # attempt-counting rules in rules.py count ``success`` only
+            # (see ``_planning_pr_needs_review``'s docstring), so a
+            # ``skipped_capacity`` row does NOT burn budget — the
+            # cap-skip is rule-neutral, which is what we want.
+            if pid is None:
+                ctx.log.terminate_action(
+                    parent_log_id=start_id,
+                    outcome="skipped_capacity",
+                    details={
+                        "reason": "concurrency cap reached at dispatch time",
+                    },
+                )
+                return
         elif action is Action.MERGE_SPEC_PR or action is Action.MERGE_IMPL_PR:
             if ctx.pr is None:
                 raise RuntimeError(f"{action.name} requires a PR in context")
