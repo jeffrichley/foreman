@@ -16,8 +16,14 @@ from __future__ import annotations
 import os
 import tomllib
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
+
+# Valid values for ``merge_mechanism``. Lives at module scope so the
+# config layer + the host's dispatch logic + tests can all reference
+# the same authoritative tuple.
+MergeMechanism = Literal["direct", "queue"]
 
 
 def resolve_config_path() -> Path:
@@ -201,6 +207,29 @@ class ReconcilerConfig(BaseModel):
             "overrides this."
         ),
     )
+    merge_mechanism: MergeMechanism = Field(
+        default="direct",
+        description=(
+            "Global default for HOW the daemon merges a PR. Two modes:\n"
+            "\n"
+            "- ``direct``: call ``pr.merge()`` against the GitHub API. Works "
+            "on any repo without setup, but fails with the "
+            "``strict_required_status_checks_policy`` error (\"head branch is "
+            "not up to date with base\") when main has moved since the PR "
+            "opened. The daemon's retry loop then spins forever until an "
+            "operator rebases the branch.\n"
+            "- ``queue``: defer to GitHub MergeQueue, which rebases the PR "
+            "onto current main, re-runs CI against the merged state, and "
+            "merges atomically. Requires the base branch to have MergeQueue "
+            "enabled in its branch-protection ruleset AND the orchestrator-"
+            "bot App to hold the ``Merge queues: write`` permission. See "
+            "foreman#158 for the rationale.\n"
+            "\n"
+            "Default is ``direct`` (matches the cap=1 principle: operators "
+            "opt INTO the more sophisticated mechanism). A per-project "
+            "override is honored via ``effective_merge_mechanism(project)``."
+        ),
+    )
 
     def effective_auto_merge_spec(self, project: ProjectConfig) -> bool:
         """Resolve the effective spec auto-merge for ``project``.
@@ -221,6 +250,22 @@ class ReconcilerConfig(BaseModel):
         if project.auto_merge_impl is not None:
             return project.auto_merge_impl
         return self.auto_merge_impl
+
+    def effective_merge_mechanism(self, project: ProjectConfig) -> MergeMechanism:
+        """Resolve the effective merge mechanism for ``project``.
+
+        Returns the per-project ``merge_mechanism`` when set, else falls
+        back to the global default. ``None`` on the project means "inherit
+        from global." Symmetric with ``effective_auto_merge_*``.
+
+        The action layer reads this per-call so a project can flip
+        between ``direct`` and ``queue`` without restarting the daemon —
+        the config reload sentinel (``foreman daemon reload``) re-loads
+        the file and the next poll uses the new value.
+        """
+        if project.merge_mechanism is not None:
+            return project.merge_mechanism
+        return self.merge_mechanism
 
 
 class AppsConfig(BaseModel):
@@ -368,6 +413,23 @@ class ProjectConfig(BaseModel):
             "auto-merge, ``False`` forces park-for-review, ``None`` (the "
             "default) inherits ``ReconcilerConfig.auto_merge_impl`` via "
             "``ReconcilerConfig.effective_auto_merge_impl(project)``."
+        ),
+    )
+    merge_mechanism: MergeMechanism | None = Field(
+        default=None,
+        description=(
+            "Per-project override for the merge mechanism. Set to "
+            "``\"queue\"`` for projects whose base branch has MergeQueue "
+            "enabled in its branch-protection ruleset; ``\"direct\"`` "
+            "elsewhere. ``None`` (the default) inherits "
+            "``ReconcilerConfig.merge_mechanism`` via "
+            "``ReconcilerConfig.effective_merge_mechanism(project)``.\n"
+            "\n"
+            "Per-project granularity matters because MergeQueue is enabled "
+            "at the GitHub repo level, not at foreman's. Different projects "
+            "may have it set up at different times. The loop should keep "
+            "working everywhere — projects opt IN to queue mechanism as "
+            "the GH-side setup lands. See foreman#158."
         ),
     )
     max_fix_attempts: int = Field(

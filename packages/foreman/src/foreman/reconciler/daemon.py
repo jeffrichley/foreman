@@ -14,6 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from foreman.config import MergeMechanism
 from foreman.reconciler.actions import Action, ActionContext, execute_action
 from foreman.reconciler.exec_log import ExecutionLog
 from foreman.reconciler.host import ReconcilerHost
@@ -102,6 +103,10 @@ class ReconcilerProject:
     decide between auto-merge and park-for-human transitions. Defaults
     match the global ``ReconcilerConfig`` defaults so tests that omit them
     keep the same behavior as production with no project-level overrides.
+
+    ``merge_mechanism`` similarly carries the EFFECTIVE per-project merge
+    mechanism — see ``ReconcilerConfig.effective_merge_mechanism`` and
+    foreman#158. Default is ``"direct"`` (matches global default).
     """
 
     name: str
@@ -109,6 +114,7 @@ class ReconcilerProject:
     repo: str
     auto_merge_spec: bool = True
     auto_merge_impl: bool = False
+    merge_mechanism: MergeMechanism = "direct"
 
 
 class Reconciler:
@@ -388,6 +394,7 @@ class Reconciler:
                 log=self.log,
                 auto_merge_spec=project.auto_merge_spec,
                 auto_merge_impl=project.auto_merge_impl,
+                merge_mechanism=project.merge_mechanism,
             )
             action, rule_name = evaluate_with_rule(ctx)
             if action is Action.NOOP:

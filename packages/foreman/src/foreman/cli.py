@@ -480,6 +480,7 @@ def _build_reconciler_projects(config: Config) -> tuple[Any, ...]:
                 repo=repo,
                 auto_merge_spec=config.reconciler.effective_auto_merge_spec(proj_cfg),
                 auto_merge_impl=config.reconciler.effective_auto_merge_impl(proj_cfg),
+                merge_mechanism=config.reconciler.effective_merge_mechanism(proj_cfg),
             )
         )
     return tuple(projects_list)

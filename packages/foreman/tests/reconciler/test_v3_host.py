@@ -72,13 +72,37 @@ def test_post_comment_delegates_to_v2_host(tmp_path: Path) -> None:
     assert v2.calls == [("post_issue_comment", ("jeffrichley/foreman", 143, "hi"))]
 
 
-def test_merge_pr_delegates_to_v2_host(tmp_path: Path) -> None:
+def test_merge_pr_direct_mechanism_delegates_to_v2_host(tmp_path: Path) -> None:
+    """``mechanism="direct"`` calls ``pr.merge()`` via the v2 host —
+    today's behavior preserved.
+    """
     v2 = _FakeV2Host()
     log = ExecutionLog(tmp_path / "log.sqlite")
     log.init()
     host = V3GitHubHost(v2_host=v2, log=log, subprocess_runner=None)
 
-    host.merge_pr(owner="jeffrichley", repo="foreman", pr_number=144)
+    host.merge_pr(
+        owner="jeffrichley", repo="foreman", pr_number=144, mechanism="direct"
+    )
+
+    assert v2.calls == [("merge_pull_request", ("jeffrichley/foreman", 144))]
+
+
+def test_merge_pr_queue_mechanism_currently_also_calls_v2_host(tmp_path: Path) -> None:
+    """``mechanism="queue"`` today calls the same underlying merge — the
+    queue-specific behavior (MergeQueue API endpoint, "queued"
+    response handling) lands in a follow-up to foreman#158. This test
+    pins the current wiring so a later refactor that splits the
+    branches doesn't regress the wiring.
+    """
+    v2 = _FakeV2Host()
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    host = V3GitHubHost(v2_host=v2, log=log, subprocess_runner=None)
+
+    host.merge_pr(
+        owner="jeffrichley", repo="foreman", pr_number=144, mechanism="queue"
+    )
 
     assert v2.calls == [("merge_pull_request", ("jeffrichley/foreman", 144))]
 

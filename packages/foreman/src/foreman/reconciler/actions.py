@@ -9,6 +9,7 @@ import enum
 import logging
 from dataclasses import dataclass
 
+from foreman.config import MergeMechanism
 from foreman.reconciler.exec_log import ExecutionLog
 from foreman.reconciler.host import ReconcilerHost
 from foreman.reconciler.state import IssueState, ProjectSnapshot, PRState
@@ -60,6 +61,13 @@ class ActionContext:
     review" transition. Defaults match the global ``ReconcilerConfig``
     defaults (spec=True, impl=False) so legacy callers that omit the flags
     keep the same behavior.
+
+    `merge_mechanism` is the EFFECTIVE per-project merge mechanism (after
+    global+project resolution via ``ReconcilerConfig.effective_merge_mechanism``).
+    The executor passes it to ``host.merge_pr`` so the host can dispatch
+    between ``direct`` (call ``pr.merge()``) and ``queue`` (defer to GitHub
+    MergeQueue). Default is ``"direct"`` matching the global config default;
+    see foreman#158.
     """
 
     snapshot: ProjectSnapshot
@@ -68,6 +76,7 @@ class ActionContext:
     log: ExecutionLog
     auto_merge_spec: bool = True
     auto_merge_impl: bool = False
+    merge_mechanism: MergeMechanism = "direct"
 
     @property
     def ticket_id(self) -> str:
@@ -186,6 +195,7 @@ def execute_action(
                 owner=ctx.snapshot.owner,
                 repo=ctx.snapshot.repo,
                 pr_number=ctx.pr.number,
+                mechanism=ctx.merge_mechanism,
             )
         elif action is Action.ADVANCE_LABEL_TO_PLAN_APPROVED:
             host.remove_label(

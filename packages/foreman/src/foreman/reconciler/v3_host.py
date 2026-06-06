@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any, Protocol
 
+from foreman.config import MergeMechanism
 from foreman.reconciler.exec_log import ExecutionLog
 
 logger = logging.getLogger(__name__)
@@ -300,8 +301,32 @@ class V3GitHubHost:
     def post_comment(self, *, owner: str, repo: str, issue: int, body: str) -> None:
         self._v2.post_issue_comment(f"{owner}/{repo}", issue, body)
 
-    def merge_pr(self, *, owner: str, repo: str, pr_number: int) -> None:
-        self._v2.merge_pull_request(f"{owner}/{repo}", pr_number)
+    def merge_pr(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        mechanism: MergeMechanism,
+    ) -> None:
+        """Merge a PR via the project's configured mechanism (foreman#158).
+
+        Today both branches call the same underlying ``pr.merge()`` —
+        the queue-specific behavior (call GitHub MergeQueue endpoint
+        explicitly, recognize 'queued' as success-not-failure, etc.)
+        lands in a follow-up. The wiring being in place means the
+        follow-up can implement just the queue branch without touching
+        the executor or rules layer.
+        """
+        if mechanism == "queue":
+            # TODO(foreman#158 follow-up): call the GitHub MergeQueue
+            # endpoint and recognize the "queued" response as success.
+            # For now, falls through to the direct merge — branch
+            # protection enforces "must use queue" at the repo level
+            # when MergeQueue is enabled, so this still works.
+            self._v2.merge_pull_request(f"{owner}/{repo}", pr_number)
+        else:
+            self._v2.merge_pull_request(f"{owner}/{repo}", pr_number)
 
     def dispatch_role(
         self,
