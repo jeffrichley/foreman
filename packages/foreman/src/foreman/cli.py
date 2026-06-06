@@ -785,6 +785,15 @@ def _build_v3_gh_and_host(config: Config, log: Any) -> tuple[Any, Any]:
     # the token-at-startup permanently in httpx headers, so the daemon
     # silently 401'd ~1 hour after launch. See foreman#142.
     gh = HttpxGHGraphQLClient(token_supplier=lambda: registry.get_token("planner"))
+    # foreman#158: separate GraphQL client for the queue-merge path.
+    # Authenticated as the orchestrator-bot App (same identity that
+    # mutates labels and merges via REST) — that's the App that needs
+    # "Merge queues: write" permission on the target repo when an
+    # operator enables MergeQueue. The observer's gh keeps using the
+    # planner App because its workload is observation-only.
+    gh_queue = HttpxGHGraphQLClient(
+        token_supplier=lambda: registry.get_orchestrator_token()
+    )
     host = V3GitHubHost(
         v2_host=v2_host,
         log=log,
@@ -798,6 +807,7 @@ def _build_v3_gh_and_host(config: Config, log: Any) -> tuple[Any, Any]:
         # resolve_log_dir() honors FOREMAN_LOG_DIR (set by compose for
         # the container at /foreman/logs) with ~/.foreman/logs fallback.
         log_dir=resolve_log_dir(),
+        gh_queue_client=gh_queue,
     )
     return gh, host
 
