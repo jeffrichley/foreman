@@ -88,23 +88,193 @@ def test_merge_pr_direct_mechanism_delegates_to_v2_host(tmp_path: Path) -> None:
     assert v2.calls == [("merge_pull_request", ("jeffrichley/foreman", 144))]
 
 
-def test_merge_pr_queue_mechanism_currently_also_calls_v2_host(tmp_path: Path) -> None:
-    """``mechanism="queue"`` today calls the same underlying merge — the
-    queue-specific behavior (MergeQueue API endpoint, "queued"
-    response handling) lands in a follow-up to foreman#158. This test
-    pins the current wiring so a later refactor that splits the
-    branches doesn't regress the wiring.
+class _FakeGraphQLClient:
+    """Recording test double for the queue GraphQL client.
+
+    Holds a queue of pre-canned responses returned in order; each call
+    records the (query, variables) so tests can assert against them.
+    """
+
+    def __init__(self, responses: list[dict[str, Any]]) -> None:
+        self._responses = list(responses)
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def graphql(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append((query, variables))
+        if not self._responses:
+            raise AssertionError(
+                f"_FakeGraphQLClient: unexpected call (query={query[:60]!r})"
+            )
+        return self._responses.pop(0)
+
+
+def _build_queue_responses(*, state: str = "QUEUED") -> list[dict[str, Any]]:
+    """Two pre-canned successful responses: node-ID lookup + enqueue."""
+    return [
+        {"data": {"repository": {"pullRequest": {"id": "PR_node_abc"}}}},
+        {
+            "data": {
+                "enqueuePullRequest": {
+                    "mergeQueueEntry": {
+                        "id": "MQE_node_xyz",
+                        "state": state,
+                        "position": 0,
+                        "estimatedTimeToMerge": 60,
+                    }
+                }
+            }
+        },
+    ]
+
+
+def test_merge_pr_queue_mechanism_uses_graphql_mutation(tmp_path: Path) -> None:
+    """``mechanism="queue"`` calls the GraphQL ``enqueuePullRequest``
+    mutation via the host's queue client — NOT the v2 REST merge.
+
+    Pins the foreman#158 follow-up: the merge path actually routes
+    through MergeQueue when configured, instead of the stale-base-prone
+    direct merge.
+    """
+    v2 = _FakeV2Host()
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    gql = _FakeGraphQLClient(_build_queue_responses(state="QUEUED"))
+    host = V3GitHubHost(
+        v2_host=v2,
+        log=log,
+        subprocess_runner=None,
+        gh_queue_client=gql,
+    )
+
+    host.merge_pr(
+        owner="jeffrichley", repo="foreman", pr_number=144, mechanism="queue"
+    )
+
+    # The v2 REST merge was NOT called — we routed through the queue.
+    assert v2.calls == []
+    # Two GraphQL calls: node-ID lookup + enqueue mutation.
+    assert len(gql.calls) == 2
+    lookup_query, lookup_vars = gql.calls[0]
+    assert "GetPRNodeId" in lookup_query
+    assert lookup_vars == {
+        "owner": "jeffrichley",
+        "repo": "foreman",
+        "number": 144,
+    }
+    enqueue_query, enqueue_vars = gql.calls[1]
+    assert "enqueuePullRequest" in enqueue_query
+    assert enqueue_vars["input"]["pullRequestId"] == "PR_node_abc"
+    assert "foreman-daemon-pr-144" in enqueue_vars["input"]["clientMutationId"]
+
+
+@pytest.mark.parametrize(
+    "state", ["QUEUED", "AWAITING_CHECKS", "MERGEABLE"]
+)
+def test_merge_pr_queue_treats_healthy_states_as_success(
+    tmp_path: Path, state: str
+) -> None:
+    """States QUEUED / AWAITING_CHECKS / MERGEABLE are accepted as
+    success — the daemon does NOT retry. The queue will process the
+    merge over the next few minutes; the daemon's next poll sees the
+    PR eventually merged and advances label normally.
+    """
+    v2 = _FakeV2Host()
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    gql = _FakeGraphQLClient(_build_queue_responses(state=state))
+    host = V3GitHubHost(
+        v2_host=v2,
+        log=log,
+        subprocess_runner=None,
+        gh_queue_client=gql,
+    )
+
+    # No exception — success.
+    host.merge_pr(
+        owner="jeffrichley", repo="foreman", pr_number=144, mechanism="queue"
+    )
+
+
+@pytest.mark.parametrize(
+    "state", ["UNMERGEABLE", "LOCKED"]
+)
+def test_merge_pr_queue_surfaces_needs_help_states(
+    tmp_path: Path, state: str
+) -> None:
+    """States UNMERGEABLE / LOCKED raise so the executor's catch path
+    can surface needs-help. These are real conflict / branch-lock
+    situations that need human review, not retries.
+    """
+    v2 = _FakeV2Host()
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    gql = _FakeGraphQLClient(_build_queue_responses(state=state))
+    host = V3GitHubHost(
+        v2_host=v2,
+        log=log,
+        subprocess_runner=None,
+        gh_queue_client=gql,
+    )
+
+    with pytest.raises(RuntimeError, match="needs human review"):
+        host.merge_pr(
+            owner="jeffrichley", repo="foreman", pr_number=144, mechanism="queue"
+        )
+
+
+def test_merge_pr_queue_propagates_graphql_errors(tmp_path: Path) -> None:
+    """GraphQL ``errors`` array (e.g., MergeQueue not enabled) raises so
+    the operator sees the message. Matches the empirical probe response:
+
+        Merge queues are not enabled for jeffrichley/foreman.
+
+    Most common cause: branch protection ruleset lacks the "require
+    merge queue" rule. Operator either enables MergeQueue on the base
+    branch OR sets ``merge_mechanism = "direct"`` for the project.
+    """
+    v2 = _FakeV2Host()
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    gql = _FakeGraphQLClient([
+        {"data": {"repository": {"pullRequest": {"id": "PR_node_abc"}}}},
+        {
+            "data": {"enqueuePullRequest": None},
+            "errors": [
+                {
+                    "type": "UNPROCESSABLE",
+                    "message": "Merge queues are not enabled for jeffrichley/foreman.",
+                }
+            ],
+        },
+    ])
+    host = V3GitHubHost(
+        v2_host=v2,
+        log=log,
+        subprocess_runner=None,
+        gh_queue_client=gql,
+    )
+
+    with pytest.raises(RuntimeError, match="Merge queues are not enabled"):
+        host.merge_pr(
+            owner="jeffrichley", repo="foreman", pr_number=144, mechanism="queue"
+        )
+
+
+def test_merge_pr_queue_without_client_raises_clear_error(tmp_path: Path) -> None:
+    """When the host was built without a queue client AND mechanism=
+    "queue", the error message names the wiring problem — not a cryptic
+    AttributeError. Operators who flip the config knob without wiring
+    the client through cli.py should see the actual fix.
     """
     v2 = _FakeV2Host()
     log = ExecutionLog(tmp_path / "log.sqlite")
     log.init()
     host = V3GitHubHost(v2_host=v2, log=log, subprocess_runner=None)
 
-    host.merge_pr(
-        owner="jeffrichley", repo="foreman", pr_number=144, mechanism="queue"
-    )
-
-    assert v2.calls == [("merge_pull_request", ("jeffrichley/foreman", 144))]
+    with pytest.raises(RuntimeError, match="gh_queue_client"):
+        host.merge_pr(
+            owner="jeffrichley", repo="foreman", pr_number=144, mechanism="queue"
+        )
 
 
 def test_dispatch_role_spawns_subprocess_and_returns_pid(tmp_path: Path) -> None:

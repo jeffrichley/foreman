@@ -90,6 +90,53 @@ class _SubprocessLike(Protocol):
     async def wait(self) -> int: ...
 
 
+class _GraphQLClientLike(Protocol):
+    """The minimal GraphQL surface V3's queue-merge path needs.
+
+    Matches ``HttpxGHGraphQLClient.graphql`` so the real client and any
+    test fake can substitute interchangeably. Kept thin on purpose:
+    the host only ever needs to POST a query/variables pair and read
+    the JSON response.
+    """
+
+    def graphql(self, query: str, variables: dict[str, Any]) -> dict[str, Any]: ...
+
+
+# GraphQL queries for the MergeQueue path. Hoisted to module scope so
+# tests can grep for them, and so the queries don't sit inline making
+# the dispatch method body harder to read.
+
+_PR_NODE_ID_QUERY = """
+query GetPRNodeId($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) { id }
+  }
+}
+"""
+
+_ENQUEUE_PR_MUTATION = """
+mutation EnqueuePR($input: EnqueuePullRequestInput!) {
+  enqueuePullRequest(input: $input) {
+    mergeQueueEntry {
+      id
+      state
+      position
+      estimatedTimeToMerge
+    }
+  }
+}
+"""
+
+# Queue entry states the daemon treats as "successfully accepted into
+# queue, nothing to retry." See foreman#158's empirical findings:
+# QUEUED + AWAITING_CHECKS + MERGEABLE are healthy states the queue
+# will process to merge over the next ~minutes. UNMERGEABLE + LOCKED
+# require human attention — the daemon surfaces foreman:needs-help
+# rather than retrying.
+_QUEUE_HEALTHY_STATES = frozenset({"QUEUED", "AWAITING_CHECKS", "MERGEABLE"})
+_QUEUE_NEEDS_HELP_STATES = frozenset({"UNMERGEABLE", "LOCKED"})
+
+
 SubprocessRunner = Callable[..., _SubprocessLike]
 """Callable that spawns a subprocess and returns a ``_SubprocessLike`` wrapper.
 
@@ -272,6 +319,7 @@ class V3GitHubHost:
         role_dispatch_timeout_seconds: int = 3600,
         max_concurrent_dispatches: int = 1,
         log_dir: Path | None = None,
+        gh_queue_client: _GraphQLClientLike | None = None,
     ) -> None:
         self._v2 = v2_host
         self._log = log
@@ -291,6 +339,18 @@ class V3GitHubHost:
         # default), output goes to DEVNULL as before — preserves the
         # existing behavior for any caller that hasn't opted in.
         self._log_dir = log_dir
+        # foreman#158: when set, ``merge_pr`` with ``mechanism="queue"``
+        # routes through GitHub's GraphQL ``enqueuePullRequest`` mutation
+        # instead of the v2 REST ``pr.merge()``. The client should be
+        # authenticated as the orchestrator-bot App (the same identity
+        # that already mutates labels) — that's the App that needs
+        # "Merge queues: write" permission on the target repo.
+        #
+        # When ``None``, ``merge_pr`` falls back to the v2 direct merge
+        # regardless of ``mechanism``. This keeps tests and ad-hoc
+        # invocations working without forcing a queue client through
+        # every test fixture.
+        self._gh_queue_client = gh_queue_client
 
     def add_label(self, *, owner: str, repo: str, issue: int, label: str) -> None:
         self._v2.add_issue_label(f"{owner}/{repo}", issue, label)
@@ -319,14 +379,140 @@ class V3GitHubHost:
         the executor or rules layer.
         """
         if mechanism == "queue":
-            # TODO(foreman#158 follow-up): call the GitHub MergeQueue
-            # endpoint and recognize the "queued" response as success.
-            # For now, falls through to the direct merge — branch
-            # protection enforces "must use queue" at the repo level
-            # when MergeQueue is enabled, so this still works.
-            self._v2.merge_pull_request(f"{owner}/{repo}", pr_number)
+            self._enqueue_pull_request(
+                owner=owner, repo=repo, pr_number=pr_number
+            )
         else:
             self._v2.merge_pull_request(f"{owner}/{repo}", pr_number)
+
+    def _enqueue_pull_request(
+        self, *, owner: str, repo: str, pr_number: int
+    ) -> None:
+        """Add a PR to GitHub's MergeQueue via the GraphQL mutation.
+
+        Implementation grounded in the empirical schema probe from
+        foreman#158: GitHub exposes the queue add as a GraphQL mutation
+        named ``enqueuePullRequest`` (NOT a REST endpoint, and NOT
+        ``addPullRequestToMergeQueue`` despite some docs). PyGithub does
+        not wrap it, so we use our existing ``HttpxGHGraphQLClient``
+        directly.
+
+        Two-step call: GraphQL needs the PR's node ID, not the integer
+        number, so we issue a tiny lookup query first. Both calls reuse
+        the same client so the orchestrator-bot's token is minted once
+        per invocation.
+
+        Response handling — based on the probe's observed shapes:
+
+        - Errors array non-empty (e.g., "Merge queues are not enabled
+          for <repo>"): raise. Today's retry-loop fires, which is the
+          right call for configuration errors that deserve operator
+          attention.
+        - ``mergeQueueEntry.state`` in QUEUED / AWAITING_CHECKS / MERGEABLE:
+          success. Log the position + ETA and return. The daemon's next
+          poll sees the PR eventually merged once the queue lands it,
+          which triggers the normal ADVANCE_LABEL_TO_DONE path.
+        - ``state`` in UNMERGEABLE / LOCKED: log + surface as ``foreman:
+          needs-help`` (genuine human-attention case — likely conflict
+          or branch-lock). Done via raising so the executor's catch
+          path treats it as a needs-help-grade failure rather than a
+          retryable error.
+        """
+        if self._gh_queue_client is None:
+            raise RuntimeError(
+                "merge_mechanism='queue' but V3GitHubHost was built "
+                "without a queue-capable GraphQL client. Wire one "
+                "through cli.py: gh_queue_client=HttpxGHGraphQLClient("
+                "token_supplier=registry.get_orchestrator_token)."
+            )
+
+        # Step 1: resolve PR number → GraphQL node ID. We can't avoid
+        # this round-trip because the enqueue mutation takes the node ID
+        # form, and the daemon only has the integer PR number.
+        node_resp = self._gh_queue_client.graphql(
+            _PR_NODE_ID_QUERY,
+            {"owner": owner, "repo": repo, "number": pr_number},
+        )
+        try:
+            pr_node_id = node_resp["data"]["repository"]["pullRequest"]["id"]
+        except (KeyError, TypeError) as exc:
+            raise RuntimeError(
+                f"Could not resolve node ID for {owner}/{repo}#{pr_number}: "
+                f"response={node_resp!r}"
+            ) from exc
+
+        # Step 2: call enqueuePullRequest.
+        resp = self._gh_queue_client.graphql(
+            _ENQUEUE_PR_MUTATION,
+            {
+                "input": {
+                    "pullRequestId": pr_node_id,
+                    "clientMutationId": f"foreman-daemon-pr-{pr_number}",
+                }
+            },
+        )
+
+        # Errors array → propagate. Most common cause is "Merge queues
+        # are not enabled for <repo>" (operator hasn't enabled MergeQueue
+        # on the base branch); the operator should see the message and
+        # either enable MergeQueue or set merge_mechanism="direct" for
+        # this project.
+        if resp.get("errors"):
+            err = resp["errors"][0]
+            raise RuntimeError(
+                f"enqueuePullRequest failed for {owner}/{repo}#{pr_number}: "
+                f"{err.get('type', 'UNKNOWN')}: {err.get('message', 'no message')}"
+            )
+
+        # Defensive: confirm the response shape matches what we observed
+        # in the probe. If GitHub changes the shape, we want a loud
+        # message, not a silent state inconsistency.
+        try:
+            entry = resp["data"]["enqueuePullRequest"]["mergeQueueEntry"]
+        except (KeyError, TypeError) as exc:
+            raise RuntimeError(
+                f"enqueuePullRequest returned unexpected shape for "
+                f"{owner}/{repo}#{pr_number}: {resp!r}"
+            ) from exc
+
+        if entry is None:
+            raise RuntimeError(
+                f"enqueuePullRequest returned null mergeQueueEntry for "
+                f"{owner}/{repo}#{pr_number} (no error in response). "
+                "GitHub semantics for this case are not documented; "
+                "treating as failure."
+            )
+
+        state = entry.get("state")
+        if state in _QUEUE_HEALTHY_STATES:
+            logger.info(
+                "PR %s/%s#%d added to merge queue: state=%s position=%s "
+                "estimatedTimeToMerge=%ss",
+                owner,
+                repo,
+                pr_number,
+                state,
+                entry.get("position"),
+                entry.get("estimatedTimeToMerge"),
+            )
+            return
+
+        if state in _QUEUE_NEEDS_HELP_STATES:
+            raise RuntimeError(
+                f"PR {owner}/{repo}#{pr_number} added to queue but "
+                f"state={state} — needs human review (conflict, locked "
+                "branch, or other unmergeable condition)."
+            )
+
+        # Unknown state — GitHub added a new value we haven't classified.
+        # Raise loudly so we notice and update _QUEUE_HEALTHY_STATES /
+        # _QUEUE_NEEDS_HELP_STATES.
+        raise RuntimeError(
+            f"PR {owner}/{repo}#{pr_number} added to queue but state="
+            f"{state!r} is not in foreman's known MergeQueue states "
+            f"({sorted(_QUEUE_HEALTHY_STATES | _QUEUE_NEEDS_HELP_STATES)}). "
+            "GitHub may have added a new state; update v3_host.py."
+        )
 
     def dispatch_role(
         self,
