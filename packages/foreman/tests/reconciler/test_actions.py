@@ -126,8 +126,20 @@ class _FakeHost:
     def post_comment(self, *, owner: str, repo: str, issue: int, body: str) -> None:
         self.calls.append(("post_comment", {"owner": owner, "repo": repo, "issue": issue, "body": body}))
 
-    def merge_pr(self, *, owner: str, repo: str, pr_number: int) -> None:
-        self.calls.append(("merge_pr", {"owner": owner, "repo": repo, "pr_number": pr_number}))
+    def merge_pr(
+        self, *, owner: str, repo: str, pr_number: int, mechanism: str
+    ) -> None:
+        self.calls.append(
+            (
+                "merge_pr",
+                {
+                    "owner": owner,
+                    "repo": repo,
+                    "pr_number": pr_number,
+                    "mechanism": mechanism,
+                },
+            )
+        )
 
     # When non-None, dispatch_role returns this value as the "PID". Set
     # to None to simulate the cap-skip path (host's concurrency cap was

@@ -683,6 +683,54 @@ def test_max_concurrent_dispatches_defaults_to_one() -> None:
     assert cfg.max_concurrent_dispatches == 1
 
 
+def test_merge_mechanism_defaults_to_direct() -> None:
+    """Default is ``direct`` per the cap=1 principle — operators opt INTO
+    the more sophisticated mechanism.
+
+    The safer default for a fresh install or any unconfigured project
+    is the direct merge: it works without GH-side setup. Operators flip
+    to ``queue`` per-project after enabling MergeQueue on that repo's
+    base branch. See foreman#158.
+    """
+    cfg = ReconcilerConfig()
+    assert cfg.merge_mechanism == "direct"
+
+
+def test_merge_mechanism_inherits_global_when_project_unset() -> None:
+    """A project with ``merge_mechanism=None`` falls back to the global
+    default via ``effective_merge_mechanism``.
+    """
+    cfg = ReconcilerConfig(merge_mechanism="queue")
+    project = ProjectConfig(repo="foo/bar", local_clone_path="/tmp/foo")
+    assert project.merge_mechanism is None
+    assert cfg.effective_merge_mechanism(project) == "queue"
+
+
+def test_merge_mechanism_per_project_override_wins() -> None:
+    """A per-project ``merge_mechanism="direct"`` overrides the global
+    ``"queue"``. Symmetric to the auto-merge-flag resolution pattern.
+    """
+    cfg = ReconcilerConfig(merge_mechanism="queue")
+    project = ProjectConfig(
+        repo="foo/bar",
+        local_clone_path="/tmp/foo",
+        merge_mechanism="direct",
+    )
+    assert cfg.effective_merge_mechanism(project) == "direct"
+
+
+def test_merge_mechanism_rejects_unknown_value() -> None:
+    """The ``MergeMechanism`` Literal pins the valid values; unknown
+    values fail validation at config-load time, not at dispatch time.
+    The contract is: the daemon never sees a value like ``"rebase"`` or
+    a typo — pydantic refuses it at startup so we fail loud-and-early.
+    """
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="merge_mechanism"):
+        ReconcilerConfig(merge_mechanism="rebase")  # type: ignore[arg-type]
+
+
 def test_project_auto_merge_inherits_global_when_unset() -> None:
     """A project with no override inherits the reconciler's defaults via
     the ``effective_auto_merge_*`` resolvers."""

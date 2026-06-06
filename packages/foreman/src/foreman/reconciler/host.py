@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from foreman.config import MergeMechanism
+
 
 class ReconcilerHost(Protocol):
     """The host side-effect surface for v3 actions."""
@@ -15,7 +17,32 @@ class ReconcilerHost(Protocol):
     def add_label(self, *, owner: str, repo: str, issue: int, label: str) -> None: ...
     def remove_label(self, *, owner: str, repo: str, issue: int, label: str) -> None: ...
     def post_comment(self, *, owner: str, repo: str, issue: int, body: str) -> None: ...
-    def merge_pr(self, *, owner: str, repo: str, pr_number: int) -> None: ...
+    def merge_pr(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        mechanism: MergeMechanism,
+    ) -> None:
+        """Merge a PR via the project's configured mechanism.
+
+        ``mechanism`` is the EFFECTIVE per-project value resolved upstream
+        in the executor (``ActionContext.merge_mechanism``). The host
+        dispatches on it:
+
+        - ``direct``: synchronous ``pr.merge()`` against the GH API.
+          Today's behavior; fails with the strict-status-checks-policy
+          error when main has moved since the PR opened.
+        - ``queue``: defer to GitHub MergeQueue. Requires the base
+          branch's branch-protection ruleset to have MergeQueue enabled
+          AND the orchestrator-bot App to hold the ``Merge queues:
+          write`` permission. See foreman#158.
+
+        Wiring landed in foreman#161 (this PR); the queue-specific
+        implementation lands in a follow-up.
+        """
+        ...
     def dispatch_role(
         self,
         *,
