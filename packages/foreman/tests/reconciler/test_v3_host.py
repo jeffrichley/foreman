@@ -13,7 +13,11 @@ from typing import Any
 import pytest
 
 from foreman.reconciler.exec_log import ExecutionLog
-from foreman.reconciler.v3_host import V3GitHubHost, _default_subprocess_runner
+from foreman.reconciler.v3_host import (
+    V3GitHubHost,
+    _build_role_subprocess_env,
+    _default_subprocess_runner,
+)
 
 
 @dataclass
@@ -824,3 +828,88 @@ def test_foreman_state_dir_falls_back_to_home(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.delenv("FOREMAN_STATE_DIR", raising=False)
     from foreman.reconciler.v3_host import resolve_state_dir
     assert resolve_state_dir() == Path.home() / ".foreman"
+
+
+# ---------------------------------------------------------------------------
+# Role-subprocess env-scrub tests
+# ---------------------------------------------------------------------------
+#
+# These guard the daemon-side leg of the 2026-06-06 fix that closed the
+# autonomous-loop runtime-shutdown bug. The runtime daemon detected a
+# /root/.foreman/shutdown-requested sentinel it never wrote because a role
+# subprocess's pytest-or-CLI invocation had inherited the daemon's env and
+# resolved its own sentinel-write path to the prod location. The scrub
+# rewrites those env paths so role subprocesses can never reach the
+# daemon's polled state — even when the role tool stack is unaware of
+# the constraint. See _build_role_subprocess_env for the full rationale.
+
+
+def test_build_role_subprocess_env_rewrites_sentinel_and_lock_paths() -> None:
+    """The three load-bearing env vars are rewritten to noop paths so a
+    role subprocess that calls ``foreman daemon stop`` never reaches the
+    daemon's polled sentinel or interrogates the daemon's lock.
+    """
+    base = {"FOREMAN_CONFIG_PATH": "/etc/foreman/config.toml", "HOME": "/root"}
+    env = _build_role_subprocess_env(base)
+    assert env["FOREMAN_SHUTDOWN_SENTINEL_PATH"].endswith("noop-shutdown-sentinel")
+    assert env["FOREMAN_RELOAD_SENTINEL_PATH"].endswith("noop-reload-sentinel")
+    assert env["FOREMAN_LOCK_PATH"].endswith("noop-lock")
+    # The role-noop paths must NOT collide with the prod paths a
+    # daemon container would use.
+    assert "/root/.foreman" not in env["FOREMAN_SHUTDOWN_SENTINEL_PATH"]
+    assert "/foreman/state" not in env["FOREMAN_LOCK_PATH"]
+
+
+def test_build_role_subprocess_env_drops_state_and_log_dir() -> None:
+    """The daemon's state and log dir env vars are NOT inherited by the
+    role subprocess. Inheriting them would let a role's pytest session
+    resolve config-default sentinel paths to the prod state dir.
+    """
+    base = {
+        "FOREMAN_STATE_DIR": "/foreman/state",
+        "FOREMAN_LOG_DIR": "/foreman/logs",
+        "FOREMAN_CONFIG_PATH": "/etc/foreman/config.toml",
+        "HOME": "/root",
+    }
+    env = _build_role_subprocess_env(base)
+    assert "FOREMAN_STATE_DIR" not in env
+    assert "FOREMAN_LOG_DIR" not in env
+
+
+def test_build_role_subprocess_env_preserves_config_path_and_home() -> None:
+    """FOREMAN_CONFIG_PATH stays — the role needs project config.
+    HOME stays — claude_agent_sdk needs ``~/.claude/.credentials.json``.
+    Both are load-bearing for the role's legitimate work; scrubbing
+    them would break dispatch.
+    """
+    base = {
+        "FOREMAN_CONFIG_PATH": "/etc/foreman/config.toml",
+        "HOME": "/root",
+        "PATH": "/usr/local/bin:/usr/bin",
+        "GH_TOKEN": "ghp_test_token_value",
+    }
+    env = _build_role_subprocess_env(base)
+    assert env["FOREMAN_CONFIG_PATH"] == "/etc/foreman/config.toml"
+    assert env["HOME"] == "/root"
+    # Other inherited env (PATH, credentials) pass through untouched.
+    assert env["PATH"] == "/usr/local/bin:/usr/bin"
+    assert env["GH_TOKEN"] == "ghp_test_token_value"
+
+
+def test_build_role_subprocess_env_does_not_mutate_base_env() -> None:
+    """The helper must return a new dict, not mutate the caller's env.
+    A subtle aliasing bug here would mean the daemon's own os.environ
+    gets the noop sentinel paths applied — defeating the daemon's
+    ability to poll its real sentinel.
+    """
+    base = {
+        "FOREMAN_CONFIG_PATH": "/etc/foreman/config.toml",
+        "FOREMAN_STATE_DIR": "/foreman/state",
+        "HOME": "/root",
+    }
+    base_snapshot = dict(base)
+    _build_role_subprocess_env(base)
+    assert base == base_snapshot, (
+        "Helper mutated its base_env argument — the daemon's own env "
+        "would be corrupted if base_env is os.environ."
+    )

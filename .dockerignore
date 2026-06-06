@@ -16,5 +16,19 @@ node_modules/
 .ruff_cache/
 .mypy_cache/
 
+# Tests are NOT shipped in the runtime image. The daemon and role
+# subprocesses never invoke them — only the host-side pre-push hook
+# and the worker's own per-worktree validation runs (against the
+# worktree's tests, not the baked install's) do. Keeping them out
+# of the image:
+#   - shrinks the image,
+#   - removes a leak path where a role's pytest could resolve config
+#     defaults to the prod state dir (the 2026-06-06 mystery shutdown),
+#   - makes the install's surface match what the daemon actually
+#     runs at runtime.
+packages/*/tests/
+packages/*/**/tests/
+**/conftest.py
+
 # The docker/ tree itself does NOT need to be IN the build context for
 # everything; the Dockerfile uses targeted COPY paths.
