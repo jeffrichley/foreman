@@ -25,7 +25,7 @@ import logging
 import os
 import subprocess
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any, Protocol
@@ -157,6 +157,61 @@ class _PopenWithLog(_PopenWrapper):
                 )
 
 
+# Constant sentinel paths handed to role subprocesses via env. They
+# point OUTSIDE the daemon's polled state dir so a role subprocess
+# that invokes ``foreman daemon stop`` (directly, via claude_agent_sdk
+# bash, via inherited env in a child process, anywhere) writes its
+# sentinel to a path the daemon does not watch — and reads the lock
+# at a path that does not exist, falling through to the "no daemon"
+# branch without writing anything at all.
+#
+# Constants (vs. per-dispatch tmp dirs) intentional: there's no
+# cleanup obligation, no concurrency conflict (the paths only get
+# touched if a role explicitly calls daemon stop, which it shouldn't),
+# and the constant path is grep-able as evidence the scrub fired.
+_ROLE_SUBPROCESS_SENTINEL_PATH = "/tmp/foreman-role-noop-shutdown-sentinel"
+_ROLE_SUBPROCESS_RELOAD_PATH = "/tmp/foreman-role-noop-reload-sentinel"
+_ROLE_SUBPROCESS_LOCK_PATH = "/tmp/foreman-role-noop-lock"
+
+
+def _build_role_subprocess_env(base_env: Mapping[str, str]) -> dict[str, str]:
+    """Compute the env a role subprocess should run with.
+
+    Inherits everything from ``base_env`` (the daemon's env, including
+    FOREMAN_CONFIG_PATH so the role can load its project config, and
+    HOME so claude_agent_sdk finds ~/.claude/.credentials.json), then:
+
+    - Sets ``FOREMAN_SHUTDOWN_SENTINEL_PATH`` / ``FOREMAN_RELOAD_SENTINEL_PATH``
+      / ``FOREMAN_LOCK_PATH`` to constant paths OUTSIDE the daemon's
+      state dir. A role subprocess invoking ``foreman daemon stop``
+      (directly or through any inherited-env child) resolves the lock
+      to a path that doesn't exist, falls through to the "no daemon"
+      branch, and never reaches the sentinel-write path.
+    - Drops ``FOREMAN_STATE_DIR`` / ``FOREMAN_LOG_DIR``. The role
+      doesn't need them — they're for the daemon's own state + log
+      directories — and inheriting them would let a role's pytest
+      session resolve config-default sentinel paths to the prod
+      ``/foreman/state/`` mount.
+
+    Surfaced 2026-06-06: a role subprocess's inherited env let a
+    ``foreman daemon stop`` invocation (or equivalent test code path)
+    write the real ``/root/.foreman/shutdown-requested``, which the
+    running daemon polled 30s later and gracefully shut down on.
+
+    Defense in depth: the test suite also scrubs these vars per-test
+    via the ``_isolate_foreman_env`` conftest fixture, closing the
+    leak at the test layer. Both layers together make the bug
+    structurally impossible.
+    """
+    env = dict(base_env)
+    env["FOREMAN_SHUTDOWN_SENTINEL_PATH"] = _ROLE_SUBPROCESS_SENTINEL_PATH
+    env["FOREMAN_RELOAD_SENTINEL_PATH"] = _ROLE_SUBPROCESS_RELOAD_PATH
+    env["FOREMAN_LOCK_PATH"] = _ROLE_SUBPROCESS_LOCK_PATH
+    env.pop("FOREMAN_STATE_DIR", None)
+    env.pop("FOREMAN_LOG_DIR", None)
+    return env
+
+
 def _default_subprocess_runner(
     argv: list[str], *, log_path: Path | None = None
 ) -> _SubprocessLike:
@@ -174,10 +229,17 @@ def _default_subprocess_runner(
     When ``log_path`` is ``None``, output is dropped to ``DEVNULL`` as
     before — preserves the existing behavior for code paths that haven't
     opted in.
+
+    Every spawn passes an env computed by ``_build_role_subprocess_env``:
+    the daemon's env minus state/log dir vars, with sentinel + lock paths
+    rewritten to constant tmp paths the daemon does not watch. See that
+    helper's docstring for the full rationale.
     """
+    env = _build_role_subprocess_env(os.environ)
     if log_path is None:
         proc = subprocess.Popen(
             argv,
+            env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -187,6 +249,7 @@ def _default_subprocess_runner(
     try:
         proc = subprocess.Popen(
             argv,
+            env=env,
             stdout=log_fh,
             stderr=subprocess.STDOUT,
         )
