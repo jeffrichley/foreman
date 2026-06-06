@@ -391,10 +391,14 @@ def test_dispatch_reviewer_spec_re_fires_after_prior_completed_run(
     assert evaluate(ctx, rules=RULES) is Action.DISPATCH_REVIEWER_SPEC
 
 
-def test_merge_spec_pr_now_requires_plan_approved_label_and_flag(
+def test_advance_label_to_merging_plan_requires_plan_approved_label_and_flag(
     tmp_path: Path,
 ) -> None:
-    """merge_spec_pr only fires on plan-approved label + green + flag on."""
+    """foreman#165 converted from ``test_merge_spec_pr_now_requires_...``:
+    the new ``advance_label_to_merging_plan`` rule fires on the same
+    predicate inputs (plan-approved label + auto_merge_spec=True) — but
+    the action it emits is now the label-advance rather than a direct
+    ``host.merge_pr`` call."""
     from foreman.reconciler.rules import RULES
     ctx = _ctx_with(
         tmp_path,
@@ -402,11 +406,13 @@ def test_merge_spec_pr_now_requires_plan_approved_label_and_flag(
         _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
         auto_merge_spec=True,
     )
-    assert evaluate(ctx, rules=RULES) is Action.MERGE_SPEC_PR
+    assert evaluate(ctx, rules=RULES) is Action.ADVANCE_LABEL_TO_MERGING_PLAN
 
 
-def test_merge_spec_pr_blocked_when_flag_off(tmp_path: Path) -> None:
-    """auto_merge_spec=False parks the PR at plan-approved (no auto-merge)."""
+def test_advance_label_to_merging_plan_blocked_when_flag_off(tmp_path: Path) -> None:
+    """foreman#165 converted from ``test_merge_spec_pr_blocked_when_flag_off``:
+    auto_merge_spec=False parks the PR at plan-approved (no auto-merge);
+    the new label-advance rule must not fire."""
     from foreman.reconciler.rules import RULES
     ctx = _ctx_with(
         tmp_path,
@@ -414,11 +420,16 @@ def test_merge_spec_pr_blocked_when_flag_off(tmp_path: Path) -> None:
         _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
         auto_merge_spec=False,
     )
-    assert evaluate(ctx, rules=RULES) is not Action.MERGE_SPEC_PR
+    assert evaluate(ctx, rules=RULES) is not Action.ADVANCE_LABEL_TO_MERGING_PLAN
 
 
-def test_merge_spec_pr_no_longer_fires_on_planning_label(tmp_path: Path) -> None:
-    """The old behavior — fire on foreman:planning with green CI — is GONE."""
+def test_advance_label_to_merging_plan_does_not_fire_on_planning_label(
+    tmp_path: Path,
+) -> None:
+    """foreman#165 converted from
+    ``test_merge_spec_pr_no_longer_fires_on_planning_label``: the new
+    label-advance only fires on ``plan-approved``, not on ``planning`` —
+    the same gating semantic as the removed merge_spec_pr rule."""
     from foreman.reconciler.rules import RULES
     ctx = _ctx_with(
         tmp_path,
@@ -426,7 +437,7 @@ def test_merge_spec_pr_no_longer_fires_on_planning_label(tmp_path: Path) -> None
         _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
         auto_merge_spec=True,
     )
-    assert evaluate(ctx, rules=RULES) is not Action.MERGE_SPEC_PR
+    assert evaluate(ctx, rules=RULES) is not Action.ADVANCE_LABEL_TO_MERGING_PLAN
 
 
 def test_advance_label_to_plan_approved_when_spec_pr_merged(tmp_path: Path) -> None:
@@ -485,7 +496,10 @@ def test_dispatch_fixer_impl_fires_on_impl_fix_label(tmp_path: Path) -> None:
     assert evaluate(ctx, rules=RULES) is Action.DISPATCH_FIXER_IMPL
 
 
-def test_merge_impl_pr_fires_on_impl_approved(tmp_path: Path) -> None:
+def test_advance_label_to_merging_impl_fires_on_impl_approved(tmp_path: Path) -> None:
+    """foreman#165 converted from ``test_merge_impl_pr_fires_on_impl_approved``:
+    impl-approved label + impl-shaped PR + auto_merge_impl=True → the new
+    label-advance rule fires. The old direct merge_impl_pr action is gone."""
     from foreman.reconciler.rules import RULES
     ctx = _ctx_with(
         tmp_path,
@@ -493,11 +507,13 @@ def test_merge_impl_pr_fires_on_impl_approved(tmp_path: Path) -> None:
         _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143"),
         auto_merge_impl=True,
     )
-    assert evaluate(ctx, rules=RULES) is Action.MERGE_IMPL_PR
+    assert evaluate(ctx, rules=RULES) is Action.ADVANCE_LABEL_TO_MERGING_IMPL
 
 
-def test_merge_impl_pr_requires_flag(tmp_path: Path) -> None:
-    """auto_merge_impl=False parks the PR at impl-approved (no auto-merge)."""
+def test_advance_label_to_merging_impl_requires_flag(tmp_path: Path) -> None:
+    """foreman#165 converted from ``test_merge_impl_pr_requires_flag``:
+    auto_merge_impl=False parks the PR at impl-approved; the label-advance
+    must not fire."""
     from foreman.reconciler.rules import RULES
     ctx = _ctx_with(
         tmp_path,
@@ -505,19 +521,15 @@ def test_merge_impl_pr_requires_flag(tmp_path: Path) -> None:
         _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143"),
         auto_merge_impl=False,
     )
-    assert evaluate(ctx, rules=RULES) is not Action.MERGE_IMPL_PR
+    assert evaluate(ctx, rules=RULES) is not Action.ADVANCE_LABEL_TO_MERGING_IMPL
 
 
-def test_merge_impl_pr_fires_when_flag_on(tmp_path: Path) -> None:
-    """merge_impl_pr fires on impl-approved + green + flag on."""
-    from foreman.reconciler.rules import RULES
-    ctx = _ctx_with(
-        tmp_path,
-        _issue(labels=("foreman:impl-approved",)),
-        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143"),
-        auto_merge_impl=True,
-    )
-    assert evaluate(ctx, rules=RULES) is Action.MERGE_IMPL_PR
+# (Note: ``test_merge_impl_pr_fires_when_flag_on`` from the v2 catalog was
+# a semantic duplicate of ``test_merge_impl_pr_fires_on_impl_approved``
+# once both were converted to the new label-advance assertion. Deleted
+# per the spec's disposition list — the single converted
+# ``test_advance_label_to_merging_impl_fires_on_impl_approved`` above
+# covers the case once.)
 
 
 def test_advance_label_to_done_when_impl_pr_merged(tmp_path: Path) -> None:
@@ -766,13 +778,16 @@ def test_impl_pr_ci_failure_ignores_spec_shaped_pr(tmp_path: Path) -> None:
 # --- MEDIUM #11: merge_*_pr + lagging-label rules filter by head_ref ---
 
 
-def test_merge_spec_pr_does_not_fire_against_impl_pr(tmp_path: Path) -> None:
-    """Defense in depth: even if the daemon's picker handed an impl PR into
+def test_advance_label_to_merging_plan_does_not_fire_against_impl_pr(
+    tmp_path: Path,
+) -> None:
+    """foreman#165 converted from ``test_merge_spec_pr_does_not_fire_against_impl_pr``:
+    defense in depth — even if the daemon's picker handed an impl PR into
     ``ctx.pr`` for a plan-approved issue (transient stacked-PR window or
-    legacy state), ``merge_spec_pr`` must refuse to fire because the PR's
-    head_ref isn't spec-shaped. Otherwise the executor would call
-    ``host.merge_pr(pr_number=<impl_pr>)`` while logging the rule name as
-    "merge_spec_pr"."""
+    legacy state), ``advance_label_to_merging_plan`` must refuse to fire
+    because the PR's head_ref isn't spec-shaped. Otherwise the wrong
+    label would be added and the next tick's attempt_merge_plan would
+    operate on the impl PR."""
     from foreman.reconciler.rules import RULES
 
     ctx = _ctx_with(
@@ -785,13 +800,16 @@ def test_merge_spec_pr_does_not_fire_against_impl_pr(tmp_path: Path) -> None:
         ),
         auto_merge_spec=True,
     )
-    assert evaluate(ctx, rules=RULES) is not Action.MERGE_SPEC_PR
+    assert evaluate(ctx, rules=RULES) is not Action.ADVANCE_LABEL_TO_MERGING_PLAN
 
 
-def test_merge_impl_pr_does_not_fire_against_spec_pr(tmp_path: Path) -> None:
-    """Symmetric to ``test_merge_spec_pr_does_not_fire_against_impl_pr``:
-    even with ``foreman:impl-approved`` + green CI + auto_merge_impl=True,
-    a spec-shaped PR must not be merged by ``merge_impl_pr``."""
+def test_advance_label_to_merging_impl_does_not_fire_against_spec_pr(
+    tmp_path: Path,
+) -> None:
+    """foreman#165 converted from ``test_merge_impl_pr_does_not_fire_against_spec_pr``:
+    symmetric head-ref filter coverage — even with ``foreman:impl-approved``
+    + auto_merge_impl=True, a spec-shaped PR must not be advanced into
+    the merging-impl state by ``advance_label_to_merging_impl``."""
     from foreman.reconciler.rules import RULES
 
     ctx = _ctx_with(
@@ -804,7 +822,7 @@ def test_merge_impl_pr_does_not_fire_against_spec_pr(tmp_path: Path) -> None:
         ),
         auto_merge_impl=True,
     )
-    assert evaluate(ctx, rules=RULES) is not Action.MERGE_IMPL_PR
+    assert evaluate(ctx, rules=RULES) is not Action.ADVANCE_LABEL_TO_MERGING_IMPL
 
 
 def test_advance_label_to_plan_approved_ignores_impl_shaped_pr(
@@ -915,3 +933,160 @@ def test_dispatch_reviewer_impl_blocked_after_3_completed_attempts(tmp_path: Pat
         )
         ctx.log.terminate_action(parent_log_id=start_id, outcome="error", details={})
     assert evaluate(ctx, rules=RULES) is Action.SURFACE_HELP
+
+
+# ---------------------------------------------------------------------------
+# foreman#165 — new rule predicates (advance_label_to_merging_* and
+# attempt_merge_* per target)
+# ---------------------------------------------------------------------------
+
+
+def test_advance_label_to_merging_plan_fires_on_plan_approved_with_open_spec_pr_and_auto_merge_spec(
+    tmp_path: Path,
+) -> None:
+    """The one-shot label transition fires when plan-approved + open
+    spec PR + auto_merge_spec=True, AND no merging-* label is yet
+    present. This is the new spec-side merge entry point."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:plan-approved",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
+        auto_merge_spec=True,
+    )
+    assert evaluate(ctx, rules=RULES) is Action.ADVANCE_LABEL_TO_MERGING_PLAN
+
+
+def test_advance_label_to_merging_plan_skipped_when_auto_merge_spec_false(
+    tmp_path: Path,
+) -> None:
+    """auto_merge_spec=False parks the ticket at plan-approved — the
+    label-advance must not fire (operator-driven merge path)."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:plan-approved",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
+        auto_merge_spec=False,
+    )
+    assert evaluate(ctx, rules=RULES) is not Action.ADVANCE_LABEL_TO_MERGING_PLAN
+
+
+def test_advance_label_to_merging_plan_skipped_when_merging_label_already_present(
+    tmp_path: Path,
+) -> None:
+    """Idempotence: once ``merging-plan`` is on the issue, the label-advance
+    must NOT re-fire (otherwise it would loop, since plan-approved persists
+    through the merging-plan phase). The attempt_merge_plan rule is what
+    fires from here on."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:plan-approved", "foreman:merging-plan")),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
+        auto_merge_spec=True,
+    )
+    assert evaluate(ctx, rules=RULES) is not Action.ADVANCE_LABEL_TO_MERGING_PLAN
+
+
+def test_attempt_merge_plan_fires_on_merging_plan_label_with_open_spec_pr(
+    tmp_path: Path,
+) -> None:
+    """Once merging-plan is set + the spec PR is still open + not merged,
+    the attempt_merge_plan rule fires on every tick. The handler reads
+    live mergeStateStatus and branches; the rule itself has no CI-state
+    predicates because the handler does the per-tick state read."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:plan-approved", "foreman:merging-plan")),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
+        auto_merge_spec=True,
+    )
+    assert evaluate(ctx, rules=RULES) is Action.ATTEMPT_MERGE_PLAN
+
+
+def test_attempt_merge_plan_skipped_on_merged_spec_pr(tmp_path: Path) -> None:
+    """Once the spec PR is merged, ``ctx.pr.is_merged`` flips True and the
+    attempt_merge_plan rule's predicate returns False. Without this gate,
+    the rule would re-fire ``host.merge_pr`` on an already-merged PR."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:plan-approved", "foreman:merging-plan")),
+        _pr(is_merged=True),
+    )
+    assert evaluate(ctx, rules=RULES) is not Action.ATTEMPT_MERGE_PLAN
+
+
+def test_advance_label_to_merging_impl_fires_on_impl_approved_with_open_impl_pr_and_auto_merge_impl(
+    tmp_path: Path,
+) -> None:
+    """Impl-side symmetric: the one-shot label transition fires when
+    impl-approved + open impl PR + auto_merge_impl=True."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-approved",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143"),
+        auto_merge_impl=True,
+    )
+    assert evaluate(ctx, rules=RULES) is Action.ADVANCE_LABEL_TO_MERGING_IMPL
+
+
+def test_advance_label_to_merging_impl_skipped_when_auto_merge_impl_false(
+    tmp_path: Path,
+) -> None:
+    """auto_merge_impl=False parks the ticket at impl-approved — the
+    label-advance must not fire."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-approved",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143"),
+        auto_merge_impl=False,
+    )
+    assert evaluate(ctx, rules=RULES) is not Action.ADVANCE_LABEL_TO_MERGING_IMPL
+
+
+def test_advance_label_to_merging_impl_skipped_when_merging_label_already_present(
+    tmp_path: Path,
+) -> None:
+    """Idempotence: once ``merging-impl`` is on the issue, the label-advance
+    must not re-fire — same as the spec side."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-approved", "foreman:merging-impl")),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143"),
+        auto_merge_impl=True,
+    )
+    assert evaluate(ctx, rules=RULES) is not Action.ADVANCE_LABEL_TO_MERGING_IMPL
+
+
+def test_attempt_merge_impl_fires_on_merging_impl_label_with_open_impl_pr(
+    tmp_path: Path,
+) -> None:
+    """Once merging-impl is set + impl PR open + not merged, the
+    attempt_merge_impl rule fires per tick. Mirrors the spec-side test."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-approved", "foreman:merging-impl")),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143"),
+        auto_merge_impl=True,
+    )
+    assert evaluate(ctx, rules=RULES) is Action.ATTEMPT_MERGE_IMPL
+
+
+def test_attempt_merge_impl_skipped_on_merged_impl_pr(tmp_path: Path) -> None:
+    """Once the impl PR is merged, the rule stops firing. The
+    ``advance_label_to_done`` lagging rule then drives the
+    impl-approved → done transition on the next tick."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-approved", "foreman:merging-impl")),
+        _pr(is_merged=True, head_ref="foreman/impl-143"),
+    )
+    assert evaluate(ctx, rules=RULES) is not Action.ATTEMPT_MERGE_IMPL

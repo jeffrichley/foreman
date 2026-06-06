@@ -138,12 +138,36 @@ foreman v3 rescue Stage 2 target-split pattern
      filter rationale (HIGH #11, the stacked-PR window) is
      preserved verbatim in the new predicates' docstrings.
    - The existing `_spec_pr_merged_label_lagging` and
-     `_impl_pr_merged_label_lagging` rules are **unchanged**. They
-     still fire when the PR is merged externally (human merges
-     ahead of the daemon) or after a successful `ATTEMPT_MERGE_*`
-     completes its `host.merge_pr` step — the lagging-label rule
-     handles "PR merged + label not yet advanced" regardless of who
-     merged the PR.
+     `_impl_pr_merged_label_lagging` rules are **unchanged**, but
+     their post-merging-phase coverage is asymmetric and the spec
+     calls this out explicitly so the Worker does not over-scope.
+     - **Impl side**: `_impl_pr_merged_label_lagging`
+       (rules.py:390) requires `foreman:impl-approved` in labels
+       (rules.py:397). Because `impl-approved` PERSISTS through
+       the `merging-impl` phase (added by Reviewer's atomic
+       `set_labels` in `roles/reviewer.py:498`, never removed by
+       the merging flow), the impl-side lagging rule DOES fire
+       after a successful `ATTEMPT_MERGE_IMPL` and drives the
+       `impl-approved → done` label transition. It also still
+       fires when a human merges the impl PR externally.
+     - **Spec side**: `_spec_pr_merged_label_lagging`
+       (rules.py:297) requires `foreman:planning` in labels
+       (rules.py:306). Reviewer's atomic `set_labels` removes
+       `planning` and adds `plan-approved` BEFORE the
+       `merging-plan` phase begins, so by the time
+       `ATTEMPT_MERGE_PLAN` succeeds the `planning` label is
+       already gone and the spec-side lagging rule does NOT fire.
+       The post-`ATTEMPT_MERGE_PLAN` transition is instead driven
+       by `dispatch_worker` (precedence 130) firing on the
+       persistent `foreman:plan-approved` label on the next poll
+       — exactly the same path used today when the existing
+       `merge_spec_pr` rule succeeds.
+     - **No change to either lagging rule is needed**. The
+       asymmetry is intrinsic to today's label vocabulary
+       (`planning` lives only on pre-approved spec PRs;
+       `impl-approved` lives both during merging-impl and
+       afterward) and is handled correctly by the existing
+       predicates as-written.
 8. **`execute_action` in `actions.py` gains handlers for the four new
    action values**:
    - `ADVANCE_LABEL_TO_MERGING_PLAN` calls `host.add_label(label="foreman:merging-plan")`
@@ -232,6 +256,73 @@ foreman v3 rescue Stage 2 target-split pattern
     - `test_attempt_merge_plan_skipped_on_merged_spec_pr` (so the
       action doesn't re-fire after merge)
     - Symmetric four tests for the impl side.
+
+    **Disposition of the eight existing `Action.MERGE_SPEC_PR` /
+    `Action.MERGE_IMPL_PR` tests already in
+    `packages/foreman/tests/reconciler/test_rules.py`.** Acceptance
+    criterion #4 deletes those two enum members; without explicit
+    direction here, the file fails at pytest collection time with
+    `AttributeError`, so acceptance criterion #13 (`just check`
+    passes) cannot be satisfied. Each existing test below MUST be
+    either converted (retarget the assertion to the new
+    `ADVANCE_LABEL_TO_MERGING_*` action; rename for clarity) or
+    deleted (semantic duplicate). The auto-merge-flag and head-ref
+    filter coverage these tests encode must survive in the
+    converted form — they exercise the predicates added in
+    acceptance #7, not the removed ones.
+    - `test_merge_spec_pr_now_requires_plan_approved_label_and_flag`
+      (line 394): **convert** — change the assertion target from
+      `is Action.MERGE_SPEC_PR` to
+      `is Action.ADVANCE_LABEL_TO_MERGING_PLAN` and rename to
+      `test_advance_label_to_merging_plan_requires_plan_approved_label_and_flag`.
+      Predicate inputs (`foreman:plan-approved` label, green CI,
+      `auto_merge_spec=True`) are unchanged; the new
+      `advance_label_to_merging_plan` rule (precedence 115) is what
+      fires on the same inputs.
+    - `test_merge_spec_pr_blocked_when_flag_off` (line 408):
+      **convert** — retarget to
+      `is not Action.ADVANCE_LABEL_TO_MERGING_PLAN`; rename to
+      `test_advance_label_to_merging_plan_blocked_when_flag_off`.
+      Preserves the `auto_merge_spec=False` parking semantic.
+    - `test_merge_spec_pr_no_longer_fires_on_planning_label`
+      (line 420): **convert** — retarget to
+      `is not Action.ADVANCE_LABEL_TO_MERGING_PLAN`; rename to
+      `test_advance_label_to_merging_plan_does_not_fire_on_planning_label`.
+      Preserves the planning-label gating semantic (only
+      `foreman:plan-approved`, never `foreman:planning`, triggers
+      the new label-advance rule).
+    - `test_merge_impl_pr_fires_on_impl_approved` (line 488):
+      **convert** — retarget to
+      `is Action.ADVANCE_LABEL_TO_MERGING_IMPL`; rename to
+      `test_advance_label_to_merging_impl_fires_on_impl_approved`.
+    - `test_merge_impl_pr_requires_flag` (line 499): **convert** —
+      retarget to
+      `is not Action.ADVANCE_LABEL_TO_MERGING_IMPL`; rename to
+      `test_advance_label_to_merging_impl_requires_flag`. Preserves
+      the `auto_merge_impl=False` parking semantic.
+    - `test_merge_impl_pr_fires_when_flag_on` (line 511):
+      **delete** — semantic duplicate of
+      `test_merge_impl_pr_fires_on_impl_approved` once both are
+      converted (identical predicate inputs, identical expected
+      action). The converted
+      `test_advance_label_to_merging_impl_fires_on_impl_approved`
+      covers this case once.
+    - `test_merge_spec_pr_does_not_fire_against_impl_pr`
+      (line 769): **convert** — retarget to
+      `is not Action.ADVANCE_LABEL_TO_MERGING_PLAN`; rename to
+      `test_advance_label_to_merging_plan_does_not_fire_against_impl_pr`.
+      Preserves the MEDIUM #11 head-ref filter coverage (the new
+      `advance_label_to_merging_plan` predicate also requires
+      `head_ref.startswith("foreman/issue-")`, so the same defense
+      applies). Update the docstring's rule-name reference from
+      `merge_spec_pr` to `advance_label_to_merging_plan`.
+    - `test_merge_impl_pr_does_not_fire_against_spec_pr`
+      (line 791): **convert** — retarget to
+      `is not Action.ADVANCE_LABEL_TO_MERGING_IMPL`; rename to
+      `test_advance_label_to_merging_impl_does_not_fire_against_spec_pr`.
+      Preserves the symmetric head-ref filter coverage. Update the
+      docstring's rule-name reference from `merge_impl_pr` to
+      `advance_label_to_merging_impl`.
 11. **Tests added to
     `packages/foreman/tests/reconciler/test_v3_host.py`**:
     - `test_get_pr_mergeability_returns_state_from_graphql` — fake
@@ -334,7 +425,7 @@ direct passes through to today's `pr.merge()` while queue routes
 through the dormant `_enqueue_pull_request` path. Neither change here.
 The new state machine sits BEFORE the merge call, not instead of it.
 
-### Out-of-band PR closure remains handled by existing lagging rules
+### Out-of-band PR closure and post-merge transitions
 
 If a human closes the spec PR without merging while the issue is in
 `merging-plan`, `ctx.pr` flips to `None` (or
@@ -342,9 +433,26 @@ If a human closes the spec PR without merging while the issue is in
 `attempt_merge_plan` rule's predicate requires `ctx.pr is not None` and
 `not ctx.pr.is_merged`, so it stops firing. The existing
 `needs_help_label` safety rule (precedence 10) catches anything that
-escalates; the existing `_spec_pr_merged_label_lagging` rule catches
-"PR merged externally + label not yet advanced." No new rules needed
-for these paths.
+escalates. No new rules needed for the closure path.
+
+Post-merge transitions split per-target (see acceptance criterion #7
+for the full asymmetry explanation):
+
+- After a successful `ATTEMPT_MERGE_IMPL`, the existing
+  `_impl_pr_merged_label_lagging` rule fires because
+  `foreman:impl-approved` persists through the merging-impl phase,
+  driving the `impl-approved → done` label transition. It also
+  catches the "human merged the impl PR externally" case for the
+  same reason.
+- After a successful `ATTEMPT_MERGE_PLAN`, the spec-side
+  `_spec_pr_merged_label_lagging` rule does NOT fire (its
+  `foreman:planning` precondition was cleared by Reviewer before
+  merging began). The transition is instead driven by the
+  existing `dispatch_worker` rule (precedence 130) firing on the
+  persistent `foreman:plan-approved` label on the next poll —
+  identical to the path used today when the existing
+  `merge_spec_pr` rule succeeds. No new rules and no changes to
+  either lagging rule are needed.
 
 ## Sub-requests (topologically sorted)
 
@@ -404,7 +512,14 @@ for these paths.
    3. Add the four new `Rule(...)` entries to `_PROGRESS_RULES` at
       the precedence values listed in acceptance criterion #7.
 10. In `packages/foreman/tests/reconciler/test_rules.py`, add the
-    new rule-predicate tests listed in acceptance criterion #10.
+    new rule-predicate tests listed in acceptance criterion #10
+    AND apply the disposition list in that same acceptance
+    criterion to the eight existing `Action.MERGE_SPEC_PR` /
+    `Action.MERGE_IMPL_PR` tests (convert seven, delete one). The
+    converted tests' rule-name docstring references should be
+    updated from `merge_*_pr` to the new
+    `advance_label_to_merging_*` rule names as part of the same
+    edit.
 11. Run `just check` and resolve any drift caught by lint / typecheck.
     Lint / mypy may flag the unused `MergeMechanism` import in
     `actions.py` (still needed — `_handle_attempt_merge` passes it
@@ -423,7 +538,7 @@ for these paths.
 | `packages/foreman/tests/test_init.py` | Update the v3-vocabulary assertion set. |
 | `packages/foreman/tests/reconciler/test_v3_host.py` | Five new host tests (state read, check-count compute, mutation issuance, two error-shape tests). |
 | `packages/foreman/tests/reconciler/test_actions.py` | Update `Action` enum coverage test; extend `_FakeHost`; eight new state-branch tests + one impl-target mirror test + one dry-run test. |
-| `packages/foreman/tests/reconciler/test_rules.py` | Eight new rule-predicate tests (four per target). |
+| `packages/foreman/tests/reconciler/test_rules.py` | Eight new rule-predicate tests (four per target). Plus: convert seven existing `Action.MERGE_SPEC_PR` / `Action.MERGE_IMPL_PR` tests to assert against `ADVANCE_LABEL_TO_MERGING_PLAN` / `ADVANCE_LABEL_TO_MERGING_IMPL` and delete one semantic duplicate, per the disposition list under acceptance criterion #10. |
 
 No changes are required to `packages/foreman/src/foreman/config.py`
 (the `merge_mechanism` knob stays as-is), `packages/foreman/src/foreman/reconciler/state.py`

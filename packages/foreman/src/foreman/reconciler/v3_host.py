@@ -32,6 +32,7 @@ from typing import IO, Any, Protocol
 
 from foreman.config import MergeMechanism
 from foreman.reconciler.exec_log import ExecutionLog
+from foreman.reconciler.host import PRMergeability
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,71 @@ mutation EnqueuePR($input: EnqueuePullRequestInput!) {
   }
 }
 """
+
+# foreman#165: read the PR's live ``mergeStateStatus`` + the per-check
+# ``conclusion`` / ``status`` / ``isRequired`` fields on the most recent
+# commit's status check rollup so ``_handle_attempt_merge`` can compute
+# failing- and pending-required-check counts in one round-trip.
+#
+# ``statusCheckRollup.contexts`` is a union of ``CheckRun`` and
+# ``StatusContext``. ``isRequired`` is exposed on both; ``conclusion``
+# / ``status`` only on ``CheckRun``; ``state`` only on ``StatusContext``.
+# We branch in Python on the union member because GitHub's GraphQL
+# requires the inline fragments to read the per-type fields.
+_PR_MERGEABILITY_QUERY = """
+query GetPRMergeability($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      mergeStateStatus
+      commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              contexts(first: 100) {
+                nodes {
+                  __typename
+                  ... on CheckRun {
+                    isRequired(pullRequestNumber: $number)
+                    conclusion
+                    status
+                  }
+                  ... on StatusContext {
+                    isRequired(pullRequestNumber: $number)
+                    state
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+_UPDATE_BRANCH_MUTATION = """
+mutation UpdatePRBranch($input: UpdatePullRequestBranchInput!) {
+  updatePullRequestBranch(input: $input) {
+    pullRequest { id }
+  }
+}
+"""
+
+# foreman#165: which CheckRun conclusions count as "this required check
+# has terminated non-SUCCESS." Anything else either ran clean (SUCCESS,
+# NEUTRAL, SKIPPED) or is still pending — the latter is counted as
+# pending in ``_count_required_checks`` via the COMPLETED-status check.
+_CHECK_FAILING_CONCLUSIONS = frozenset(
+    {"FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STALE"}
+)
+
+# foreman#165: legacy commit-status states (``StatusContext`` union arm)
+# that count as failing. ``StatusContext`` doesn't have a separate
+# ``status`` field — only ``state``. ``EXPECTED`` and ``PENDING`` are
+# still-running; ``SUCCESS`` is clean; everything else is failure.
+_STATUS_FAILING_STATES = frozenset({"ERROR", "FAILURE"})
+_STATUS_PENDING_STATES = frozenset({"EXPECTED", "PENDING"})
 
 # Queue entry states the daemon treats as "successfully accepted into
 # queue, nothing to retry." See foreman#158's empirical findings:
@@ -513,6 +579,139 @@ class V3GitHubHost:
             f"({sorted(_QUEUE_HEALTHY_STATES | _QUEUE_NEEDS_HELP_STATES)}). "
             "GitHub may have added a new state; update v3_host.py."
         )
+
+    def get_pr_mergeability(
+        self, *, owner: str, repo: str, pr_number: int
+    ) -> PRMergeability:
+        """Read the PR's live ``mergeStateStatus`` + required-check counts.
+
+        foreman#165: ``_handle_attempt_merge`` calls this every tick to
+        decide between merge / wait / rebase / needs-help. The query
+        forces GitHub to compute ``mergeStateStatus`` for this specific
+        PR (the bulk PR-list query in the observer returns ``UNKNOWN``
+        for many PRs because GitHub computes it lazily).
+        """
+        if self._gh_queue_client is None:
+            raise RuntimeError(
+                "get_pr_mergeability requires V3GitHubHost to be built "
+                "with a GraphQL client. Wire one through cli.py: "
+                "gh_queue_client=HttpxGHGraphQLClient("
+                "token_supplier=registry.get_orchestrator_token)."
+            )
+
+        resp = self._gh_queue_client.graphql(
+            _PR_MERGEABILITY_QUERY,
+            {"owner": owner, "repo": repo, "number": pr_number},
+        )
+
+        if resp.get("errors"):
+            err = resp["errors"][0]
+            raise RuntimeError(
+                f"getPRMergeability failed for {owner}/{repo}#{pr_number}: "
+                f"{err.get('type', 'UNKNOWN')}: {err.get('message', 'no message')}"
+            )
+
+        try:
+            pr_node = resp["data"]["repository"]["pullRequest"]
+            state = pr_node["mergeStateStatus"]
+        except (KeyError, TypeError) as exc:
+            raise RuntimeError(
+                f"getPRMergeability returned unexpected shape for "
+                f"{owner}/{repo}#{pr_number}: {resp!r}"
+            ) from exc
+
+        failing, pending = self._count_required_checks(pr_node)
+
+        return PRMergeability(
+            state=str(state),
+            failing_required_check_count=failing,
+            pending_required_check_count=pending,
+        )
+
+    @staticmethod
+    def _count_required_checks(pr_node: dict[str, Any]) -> tuple[int, int]:
+        """Walk the PR's latest commit's statusCheckRollup and count
+        required failing + pending checks.
+
+        Returns ``(failing_count, pending_count)``. Each context is either
+        a ``CheckRun`` (has ``conclusion``/``status``) or a legacy
+        ``StatusContext`` (has ``state``). Non-required contexts are
+        ignored — the spec's state machine only cares about required
+        checks because GitHub's ``BLOCKED`` state already reflects
+        required-only gating.
+        """
+        commits = ((pr_node.get("commits") or {}).get("nodes")) or []
+        if not commits:
+            return 0, 0
+        rollup = (commits[0].get("commit") or {}).get("statusCheckRollup")
+        if rollup is None:
+            return 0, 0
+        contexts = ((rollup.get("contexts") or {}).get("nodes")) or []
+        failing = 0
+        pending = 0
+        for ctx in contexts:
+            if not ctx.get("isRequired"):
+                continue
+            typename = ctx.get("__typename")
+            if typename == "CheckRun":
+                conclusion = ctx.get("conclusion")
+                status = ctx.get("status")
+                if conclusion is None or status != "COMPLETED":
+                    pending += 1
+                elif conclusion in _CHECK_FAILING_CONCLUSIONS:
+                    failing += 1
+            elif typename == "StatusContext":
+                ctx_state = ctx.get("state")
+                if ctx_state in _STATUS_PENDING_STATES:
+                    pending += 1
+                elif ctx_state in _STATUS_FAILING_STATES:
+                    failing += 1
+        return failing, pending
+
+    def update_branch(
+        self, *, owner: str, repo: str, pr_number: int
+    ) -> None:
+        """Call GitHub's ``updatePullRequestBranch`` GraphQL mutation
+        (server-side rebase onto the base branch's head).
+
+        foreman#165: ``_handle_attempt_merge`` calls this when
+        ``mergeStateStatus`` is ``BEHIND``. GitHub recomputes mergeability
+        server-side; the next poll re-enters the rule and re-reads the
+        live state.
+        """
+        if self._gh_queue_client is None:
+            raise RuntimeError(
+                "update_branch requires V3GitHubHost to be built with a "
+                "GraphQL client. Wire one through cli.py: "
+                "gh_queue_client=HttpxGHGraphQLClient("
+                "token_supplier=registry.get_orchestrator_token)."
+            )
+
+        # Two-step shape matching ``_enqueue_pull_request``: GraphQL needs
+        # the PR's node ID, not the integer number.
+        node_resp = self._gh_queue_client.graphql(
+            _PR_NODE_ID_QUERY,
+            {"owner": owner, "repo": repo, "number": pr_number},
+        )
+        try:
+            pr_node_id = node_resp["data"]["repository"]["pullRequest"]["id"]
+        except (KeyError, TypeError) as exc:
+            raise RuntimeError(
+                f"Could not resolve node ID for {owner}/{repo}#{pr_number}: "
+                f"response={node_resp!r}"
+            ) from exc
+
+        resp = self._gh_queue_client.graphql(
+            _UPDATE_BRANCH_MUTATION,
+            {"input": {"pullRequestId": pr_node_id}},
+        )
+
+        if resp.get("errors"):
+            err = resp["errors"][0]
+            raise RuntimeError(
+                f"updatePullRequestBranch failed for {owner}/{repo}#{pr_number}: "
+                f"{err.get('type', 'UNKNOWN')}: {err.get('message', 'no message')}"
+            )
 
     def dispatch_role(
         self,

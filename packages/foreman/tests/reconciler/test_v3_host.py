@@ -277,6 +277,223 @@ def test_merge_pr_queue_without_client_raises_clear_error(tmp_path: Path) -> Non
         )
 
 
+# ----------------------------------------------------------------------
+# foreman#165 — get_pr_mergeability + update_branch
+# ----------------------------------------------------------------------
+
+
+def _build_mergeability_response(
+    state: str,
+    *,
+    checks: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """One synthetic ``GetPRMergeability`` GraphQL response.
+
+    ``state`` lands in ``mergeStateStatus``; ``checks`` is a list of
+    rollup-context entries (each already in __typename + CheckRun /
+    StatusContext shape). Used by the get_pr_mergeability tests below
+    to feed the V3GitHubHost a fully synthetic snapshot without any
+    real GraphQL call.
+    """
+    context_nodes = list(checks or [])
+    return {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "mergeStateStatus": state,
+                    "commits": {
+                        "nodes": [
+                            {
+                                "commit": {
+                                    "statusCheckRollup": {
+                                        "contexts": {"nodes": context_nodes},
+                                    }
+                                }
+                            }
+                        ]
+                    },
+                }
+            }
+        }
+    }
+
+
+def test_get_pr_mergeability_returns_state_from_graphql(tmp_path: Path) -> None:
+    """The PRMergeability returned by the host reflects GitHub's
+    ``mergeStateStatus`` verbatim — uppercase, no rewrite — so the
+    action handler's branch logic in ``_handle_attempt_merge`` can
+    pattern-match the raw GitHub enum values.
+    """
+    v2 = _FakeV2Host()
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    gql = _FakeGraphQLClient([_build_mergeability_response("CLEAN", checks=[])])
+    host = V3GitHubHost(
+        v2_host=v2, log=log, subprocess_runner=None, gh_queue_client=gql
+    )
+
+    result = host.get_pr_mergeability(
+        owner="jeffrichley", repo="foreman", pr_number=144
+    )
+
+    assert result.state == "CLEAN"
+    assert result.failing_required_check_count == 0
+    assert result.pending_required_check_count == 0
+    # One GraphQL call: the mergeability query.
+    assert len(gql.calls) == 1
+    query, variables = gql.calls[0]
+    assert "GetPRMergeability" in query
+    assert variables == {"owner": "jeffrichley", "repo": "foreman", "number": 144}
+
+
+def test_get_pr_mergeability_computes_check_counts_from_rollup(
+    tmp_path: Path,
+) -> None:
+    """The host walks the rollup contexts, filters by ``isRequired``,
+    and counts:
+
+    - failing required: CheckRun with terminal-non-SUCCESS conclusion,
+      or StatusContext with state in {ERROR, FAILURE}
+    - pending required: CheckRun whose conclusion is None or whose
+      status is not COMPLETED, or StatusContext with state in
+      {EXPECTED, PENDING}
+
+    Non-required contexts are skipped entirely — the v3 state machine
+    only cares about required gates.
+    """
+    v2 = _FakeV2Host()
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    gql = _FakeGraphQLClient([
+        _build_mergeability_response(
+            "BLOCKED",
+            checks=[
+                # Required, still running (status != COMPLETED).
+                {
+                    "__typename": "CheckRun",
+                    "isRequired": True,
+                    "conclusion": None,
+                    "status": "IN_PROGRESS",
+                },
+                # Required, finished red.
+                {
+                    "__typename": "CheckRun",
+                    "isRequired": True,
+                    "conclusion": "FAILURE",
+                    "status": "COMPLETED",
+                },
+                # Required, finished green — ignored.
+                {
+                    "__typename": "CheckRun",
+                    "isRequired": True,
+                    "conclusion": "SUCCESS",
+                    "status": "COMPLETED",
+                },
+                # Non-required, finished red — does NOT count toward
+                # failing_required_check_count.
+                {
+                    "__typename": "CheckRun",
+                    "isRequired": False,
+                    "conclusion": "FAILURE",
+                    "status": "COMPLETED",
+                },
+                # Required legacy StatusContext, still pending.
+                {
+                    "__typename": "StatusContext",
+                    "isRequired": True,
+                    "state": "PENDING",
+                },
+                # Required legacy StatusContext, ERROR state.
+                {
+                    "__typename": "StatusContext",
+                    "isRequired": True,
+                    "state": "ERROR",
+                },
+            ],
+        )
+    ])
+    host = V3GitHubHost(
+        v2_host=v2, log=log, subprocess_runner=None, gh_queue_client=gql
+    )
+
+    result = host.get_pr_mergeability(
+        owner="jeffrichley", repo="foreman", pr_number=144
+    )
+
+    assert result.state == "BLOCKED"
+    # 1 CheckRun FAILURE + 1 StatusContext ERROR.
+    assert result.failing_required_check_count == 2
+    # 1 CheckRun in-progress + 1 StatusContext PENDING.
+    assert result.pending_required_check_count == 2
+
+
+def test_update_branch_issues_graphql_mutation(tmp_path: Path) -> None:
+    """``update_branch`` issues two GraphQL calls — node-ID lookup +
+    ``updatePullRequestBranch`` mutation — using the same client as
+    ``_enqueue_pull_request``. Asserts the mutation name + variable
+    shape match GitHub's expected schema.
+    """
+    v2 = _FakeV2Host()
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    gql = _FakeGraphQLClient([
+        # Node-ID lookup.
+        {"data": {"repository": {"pullRequest": {"id": "PR_node_xyz"}}}},
+        # updatePullRequestBranch mutation response.
+        {"data": {"updatePullRequestBranch": {"pullRequest": {"id": "PR_node_xyz"}}}},
+    ])
+    host = V3GitHubHost(
+        v2_host=v2, log=log, subprocess_runner=None, gh_queue_client=gql
+    )
+
+    host.update_branch(owner="jeffrichley", repo="foreman", pr_number=144)
+
+    assert len(gql.calls) == 2
+    lookup_query, lookup_vars = gql.calls[0]
+    assert "GetPRNodeId" in lookup_query
+    assert lookup_vars == {
+        "owner": "jeffrichley",
+        "repo": "foreman",
+        "number": 144,
+    }
+    mutation_query, mutation_vars = gql.calls[1]
+    assert "updatePullRequestBranch" in mutation_query
+    assert mutation_vars == {"input": {"pullRequestId": "PR_node_xyz"}}
+
+
+def test_get_pr_mergeability_without_client_raises_clear_error(
+    tmp_path: Path,
+) -> None:
+    """Symmetric to ``test_merge_pr_queue_without_client_raises_clear_error``:
+    when the host was built with no GraphQL client and an action handler
+    calls ``get_pr_mergeability``, the error message names the wiring
+    problem — not a cryptic ``AttributeError``.
+    """
+    v2 = _FakeV2Host()
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    host = V3GitHubHost(v2_host=v2, log=log, subprocess_runner=None)
+
+    with pytest.raises(RuntimeError, match="GraphQL client"):
+        host.get_pr_mergeability(
+            owner="jeffrichley", repo="foreman", pr_number=144
+        )
+
+
+def test_update_branch_without_client_raises_clear_error(
+    tmp_path: Path,
+) -> None:
+    """Same wiring-error shape as ``get_pr_mergeability`` for the
+    update-branch path."""
+    v2 = _FakeV2Host()
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    host = V3GitHubHost(v2_host=v2, log=log, subprocess_runner=None)
+
+    with pytest.raises(RuntimeError, match="GraphQL client"):
+        host.update_branch(owner="jeffrichley", repo="foreman", pr_number=144)
+
+
 def test_dispatch_role_spawns_subprocess_and_returns_pid(tmp_path: Path) -> None:
     v2 = _FakeV2Host()
     log = ExecutionLog(tmp_path / "log.sqlite")
