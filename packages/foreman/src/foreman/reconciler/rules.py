@@ -277,20 +277,45 @@ def _planning_pr_needs_review(ctx: ActionContext) -> bool:
     )
 
 
-def _plan_approved_pr_green_and_flag(ctx: ActionContext) -> bool:
-    # Head-ref filter (MEDIUM #11): refuse to merge a non-spec-shaped PR even
-    # when the daemon picked one for this ticket (transient stacked-PR
-    # window where both spec and impl PRs are linked to the same issue).
-    # Without this filter, ``merge_spec_pr`` could call ``host.merge_pr`` on
-    # an impl PR while logging the rule name as "merge_spec_pr".
+def _advance_label_to_merging_plan_when_eligible(ctx: ActionContext) -> bool:
+    # foreman#165: replaces ``_plan_approved_pr_green_and_flag``. Drives the
+    # one-shot label transition from ``plan-approved`` into
+    # ``plan-approved + merging-plan``; the subsequent ticks then evaluate
+    # the ``attempt_merge_plan`` rule until the PR merges. The
+    # ``merging-*`` exclusion stops the label-advance rule from re-firing
+    # once the label has already been added.
+    # Head-ref filter (MEDIUM #11, preserved from the removed
+    # ``_plan_approved_pr_green_and_flag`` predicate): refuse to operate on
+    # a non-spec-shaped PR even when the daemon picked one for this ticket
+    # (transient stacked-PR window where both spec and impl PRs are linked
+    # to the same issue). Without this filter, the label-advance could fire
+    # against an impl PR, parking the wrong attempt-merge rule on next tick.
     return (
         "foreman:plan-approved" in ctx.issue.labels
+        and "foreman:merging-plan" not in ctx.issue.labels
+        and "foreman:merging-impl" not in ctx.issue.labels
         and ctx.pr is not None
         and not ctx.pr.is_merged
         and ctx.pr.head_ref.startswith("foreman/issue-")
-        and ctx.pr.mergeable == "MERGEABLE"
-        and ctx.pr.ci_status == "SUCCESS"
         and ctx.auto_merge_spec
+    )
+
+
+def _attempt_merge_plan_eligible(ctx: ActionContext) -> bool:
+    # foreman#165 (new rule): once ``merging-plan`` is set, the rule fires
+    # on every tick until the PR merges. The handler reads live
+    # ``mergeStateStatus`` and branches: merge / rebase / wait / needs-help.
+    # Re-fire is required (wait / rebase states are no-ops) so there is
+    # no ``count_completed`` gate here; idempotence comes from
+    # ``ctx.pr.is_merged`` flipping True once the merge lands.
+    # Head-ref filter (MEDIUM #11, preserved from the removed
+    # ``_plan_approved_pr_green_and_flag`` predicate): only spec-shape
+    # branches drive spec-side merge attempts.
+    return (
+        "foreman:merging-plan" in ctx.issue.labels
+        and ctx.pr is not None
+        and not ctx.pr.is_merged
+        and ctx.pr.head_ref.startswith("foreman/issue-")
     )
 
 
@@ -372,18 +397,42 @@ def _spec_fix_pending(ctx: ActionContext) -> bool:
     )
 
 
-def _impl_approved_pr_green_and_flag(ctx: ActionContext) -> bool:
-    # Head-ref filter (MEDIUM #11): symmetric to ``_plan_approved_pr_green_and_flag``.
-    # Refuse to fire on a spec-shaped PR even when the daemon picked one for
-    # this ticket — ``merge_impl_pr`` must only merge impl-shaped branches.
+def _advance_label_to_merging_impl_when_eligible(ctx: ActionContext) -> bool:
+    # foreman#165: symmetric to ``_advance_label_to_merging_plan_when_eligible``.
+    # Once Reviewer's atomic ``set_labels`` lands ``foreman:impl-approved``
+    # on the issue, this rule drives the one-shot label transition into
+    # ``impl-approved + merging-impl``; the subsequent ticks evaluate the
+    # ``attempt_merge_impl`` rule until the PR merges. The ``merging-*``
+    # exclusion stops the label-advance from re-firing once the label
+    # has already been added.
+    # Head-ref filter (MEDIUM #11, preserved from the removed
+    # ``_impl_approved_pr_green_and_flag`` predicate): refuse to fire on a
+    # spec-shaped PR even when the daemon picked one for this ticket —
+    # ``ATTEMPT_MERGE_IMPL`` must only merge impl-shaped branches.
     return (
         "foreman:impl-approved" in ctx.issue.labels
+        and "foreman:merging-plan" not in ctx.issue.labels
+        and "foreman:merging-impl" not in ctx.issue.labels
         and ctx.pr is not None
         and not ctx.pr.is_merged
         and ctx.pr.head_ref.startswith("foreman/impl-")
-        and ctx.pr.mergeable == "MERGEABLE"
-        and ctx.pr.ci_status == "SUCCESS"
         and ctx.auto_merge_impl
+    )
+
+
+def _attempt_merge_impl_eligible(ctx: ActionContext) -> bool:
+    # foreman#165 (new rule): symmetric to ``_attempt_merge_plan_eligible``.
+    # Fires on every tick once ``merging-impl`` is set, until the PR
+    # merges (then ``ctx.pr.is_merged`` flips True and the predicate
+    # returns False). No ``count_completed`` gate — wait / rebase states
+    # are no-ops by design and must be re-evaluable.
+    # Head-ref filter (MEDIUM #11): only impl-shape branches drive
+    # impl-side merge attempts.
+    return (
+        "foreman:merging-impl" in ctx.issue.labels
+        and ctx.pr is not None
+        and not ctx.pr.is_merged
+        and ctx.pr.head_ref.startswith("foreman/impl-")
     )
 
 
@@ -419,11 +468,18 @@ _PROGRESS_RULES: tuple[Rule, ...] = (
         then=Action.DISPATCH_REVIEWER_SPEC,
     ),
     Rule(
-        name="merge_spec_pr",
+        name="advance_label_to_merging_plan",
         tier=PrecedenceTier.FORWARD_PROGRESS,
         precedence=115,
-        when=_plan_approved_pr_green_and_flag,
-        then=Action.MERGE_SPEC_PR,
+        when=_advance_label_to_merging_plan_when_eligible,
+        then=Action.ADVANCE_LABEL_TO_MERGING_PLAN,
+    ),
+    Rule(
+        name="attempt_merge_plan",
+        tier=PrecedenceTier.FORWARD_PROGRESS,
+        precedence=118,
+        when=_attempt_merge_plan_eligible,
+        then=Action.ATTEMPT_MERGE_PLAN,
     ),
     Rule(
         name="advance_label_to_plan_approved_lagging",
@@ -461,11 +517,18 @@ _PROGRESS_RULES: tuple[Rule, ...] = (
         then=Action.DISPATCH_FIXER_IMPL,
     ),
     Rule(
-        name="merge_impl_pr",
+        name="advance_label_to_merging_impl",
         tier=PrecedenceTier.FORWARD_PROGRESS,
-        precedence=160,
-        when=_impl_approved_pr_green_and_flag,
-        then=Action.MERGE_IMPL_PR,
+        precedence=158,
+        when=_advance_label_to_merging_impl_when_eligible,
+        then=Action.ADVANCE_LABEL_TO_MERGING_IMPL,
+    ),
+    Rule(
+        name="attempt_merge_impl",
+        tier=PrecedenceTier.FORWARD_PROGRESS,
+        precedence=162,
+        when=_attempt_merge_impl_eligible,
+        then=Action.ATTEMPT_MERGE_IMPL,
     ),
     Rule(
         name="advance_label_to_done",

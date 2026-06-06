@@ -461,9 +461,11 @@ def test_run_init_creates_all_v3_labels_on_empty_repo(tmp_path: Path) -> None:
     assert set(expected_names) == {
         "foreman:planning",
         "foreman:plan-approved",
+        "foreman:merging-plan",
         "foreman:spec-fix",
         "foreman:impl-review",
         "foreman:impl-approved",
+        "foreman:merging-impl",
         "foreman:impl-fix",
         "foreman:needs-help",
         "foreman:hold",
