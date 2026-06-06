@@ -9,6 +9,7 @@ exceptions the observer expects.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -22,24 +23,54 @@ _DEFAULT_TIMEOUT = 30.0
 class HttpxGHGraphQLClient:
     """Bearer-token httpx wrapper around GitHub's GraphQL v4 endpoint.
 
-    `token` is an App-installation token (ghs_xxx) — same shape v2 uses for
-    REST. GitHub treats it identically for GraphQL when the App has matching
-    GraphQL permissions (foreman planner App already does).
+    Two construction modes:
+
+    ``token_supplier`` — a zero-arg callable returning a current installation
+        token string. Called on every ``graphql()`` request. This is the right
+        shape when the underlying token is short-lived (App-installation tokens
+        expire after 1 hour) and the caller has a refresh mechanism upstream
+        (e.g., ``IdentityRegistry._get_cached`` already re-mints when a cached
+        token is near expiry).
+
+    ``token`` — a static token string (backwards compatibility). The token is
+        captured once and reused for the client's entire lifetime. Use this
+        only for short-lived clients (tests, one-shot scripts) where you know
+        the token will not expire mid-lifetime.
+
+    Exactly one of ``token`` / ``token_supplier`` must be provided.
+
+    Why this shape: when the token is embedded once in ``httpx.Client.headers``
+    (as the legacy ``token`` path does), httpx caches that header forever and
+    the daemon silently 401s when the installation token expires. Daemon
+    observers — which run as long as the process — must use ``token_supplier``
+    so each poll picks up a fresh token. See foreman#142 for the post-mortem.
     """
 
     def __init__(
         self,
         *,
-        token: str,
+        token: str | None = None,
+        token_supplier: Callable[[], str] | None = None,
         timeout: float = _DEFAULT_TIMEOUT,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
-        self._token = token
+        if (token is None) == (token_supplier is None):
+            raise ValueError(
+                "exactly one of `token` or `token_supplier` must be provided"
+            )
+        if token_supplier is not None:
+            self._token_supplier: Callable[[], str] = token_supplier
+        else:
+            # Static-token path: wrap in a constant supplier so the request
+            # path is uniform. We still mint the request-time header per
+            # call; the supplier is just a thunk.
+            static = token
+            assert static is not None  # narrow for mypy
+            self._token_supplier = lambda: static
         self._client = httpx.Client(
             timeout=timeout,
             transport=transport,
             headers={
-                "Authorization": f"Bearer {token}",
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
             },
@@ -51,11 +82,18 @@ class HttpxGHGraphQLClient:
         # and `,`) instead of httpx's compact encoder so the wire body is
         # human-readable when captured in logs / fixtures.
         body = json.dumps({"query": query, "variables": variables})
+        # Mint the Authorization header per request from the token supplier.
+        # IdentityRegistry's supplier transparently re-mints when the cached
+        # installation token is near expiry — no extra plumbing needed here.
+        token = self._token_supplier()
         try:
             response = self._client.post(
                 _GRAPHQL_ENDPOINT,
                 content=body,
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {token}",
+                },
             )
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise ObserverUnreachable(str(exc)) from exc

@@ -777,8 +777,13 @@ def _build_v3_gh_and_host(config: Config, log: Any) -> tuple[Any, Any]:
     v2_host = GitHubDaemonHost(identity_registry=registry)
 
     # Use the planner App's token for the GraphQL observer (read-only).
-    planner_token = registry.get_token("planner")
-    gh = HttpxGHGraphQLClient(token=planner_token)
+    # Pass a supplier (not a static string) so each poll re-fetches the
+    # current token from IdentityRegistry — App-installation tokens expire
+    # after 1 hour, and the registry's _get_cached path transparently
+    # re-mints when the cached one is near expiry. The pre-fix code captured
+    # the token-at-startup permanently in httpx headers, so the daemon
+    # silently 401'd ~1 hour after launch. See foreman#142.
+    gh = HttpxGHGraphQLClient(token_supplier=lambda: registry.get_token("planner"))
     host = V3GitHubHost(
         v2_host=v2_host,
         log=log,
