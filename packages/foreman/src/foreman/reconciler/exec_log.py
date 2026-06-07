@@ -175,16 +175,25 @@ class ExecutionLog:
         i.e., a termination row pointing back at a start row. Unterminated
         running rows don't count.
 
-        When ``outcome`` is None (default), counts ALL terminations including
-        failures (``error``, ``timeout``, ``errored:recovery``). This is the
-        right semantics for **budget gates** (max-N attempts) — a crashed run
-        burned a budget slot just like a successful one did.
+        When ``outcome`` is None (default), counts terminations that
+        represent real work — successes, errors, timeouts, recovery
+        failures — and EXCLUDES ``skipped_capacity``. The cap-skip
+        happens before any role subprocess runs, so it isn't a real
+        attempt against the budget. This matches the explicit invariant
+        in ``actions.py``'s dispatch-role terminator: "a
+        ``skipped_capacity`` row does NOT burn budget — the cap-skip
+        is rule-neutral, which is what we want." Closes foreman#174 —
+        previously a queue-waiter ticket would get escalated to
+        ``foreman:needs-help`` after 3 cap-skips even though the
+        Worker never ran.
 
-        When ``outcome`` is a string, filters to rows with that exact outcome.
-        This is the right semantics for **idempotence gates** ("we already did
-        this work, don't redo it") — a Planner run that crashed before opening
-        a spec PR must not permanently block re-fire. Callers that want
-        success-only counts pass ``outcome="success"``.
+        When ``outcome`` is a string, filters to rows with that exact
+        outcome — ``skipped_capacity`` IS included if explicitly
+        requested, so callers that genuinely want to count cap-skips
+        (e.g., observability, a future stuck-pipeline detector) can
+        pass ``outcome="skipped_capacity"`` and get the raw count
+        back. Callers that want success-only counts pass
+        ``outcome="success"``.
         """
         with self._connect() as conn:
             if outcome is None:
@@ -194,6 +203,7 @@ class ExecutionLog:
                     WHERE action = ?
                       AND ticket_id = ?
                       AND parent_log_id IS NOT NULL
+                      AND outcome != 'skipped_capacity'
                     """,
                     (action, ticket_id),
                 ).fetchone()
