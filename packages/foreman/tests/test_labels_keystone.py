@@ -69,6 +69,7 @@ _V3_CATALOG_FILES: tuple[Path, ...] = (
     _FOREMAN_SRC / "reconciler" / "rules.py",
     _FOREMAN_SRC / "reconciler" / "actions.py",
     _FOREMAN_SRC / "reconciler" / "observer.py",
+    _FOREMAN_SRC / "reconciler" / "daemon.py",
     _FOREMAN_SRC / "roles" / "worker.py",
     _FOREMAN_SRC / "roles" / "reviewer.py",
     _FOREMAN_SRC / "roles" / "fixer.py",

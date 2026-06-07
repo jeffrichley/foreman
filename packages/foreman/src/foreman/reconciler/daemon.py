@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from foreman.config import MergeMechanism
+from foreman.labels import Labels
 from foreman.reconciler.actions import Action, ActionContext, execute_action
 from foreman.reconciler.exec_log import ExecutionLog
 from foreman.reconciler.host import ReconcilerHost
@@ -66,8 +67,8 @@ def _pick_pr_for_ticket(
     if not linked_prs:
         return None
 
-    spec_phase = {"foreman:planning", "foreman:plan-approved", "foreman:spec-fix"}
-    impl_phase = {"foreman:impl-review", "foreman:impl-approved", "foreman:impl-fix"}
+    spec_phase = {Labels.PLANNING, Labels.PLAN_APPROVED, Labels.SPEC_FIX}
+    impl_phase = {Labels.IMPL_REVIEW, Labels.IMPL_APPROVED, Labels.IMPL_FIX}
 
     labels = set(issue.labels)
     prefer_spec = bool(labels & spec_phase)
