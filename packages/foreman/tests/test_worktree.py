@@ -1022,6 +1022,144 @@ def test_create_impl_idempotent_returns_result_with_recomputed_base(
     )
 
 
+def test_create_impl_reattaches_when_local_branch_exists_but_worktree_dir_gone(
+    tmp_path: Path,
+) -> None:
+    """foreman#187: a prior Worker run created the local
+    ``foreman/impl-<N>`` branch (via ``git worktree add -b``) but was
+    killed before pushing. A subsequent ``git worktree prune`` cleaned
+    up the orphaned ``impl-<N>/`` directory while leaving the local
+    branch registered. The next ``create_impl`` call must detect this
+    state and reattach to the existing local branch instead of
+    crashing with ``fatal: a branch named 'foreman/impl-<N>' already
+    exists``.
+    """
+    clone = tmp_path / "clone"
+    _seed_clone_with_spec_branch_pushed(clone, ticket_id=42)
+
+    # Mirror the post-crash state: local ``foreman/impl-42`` exists
+    # (created by a prior ``git worktree add -b`` that succeeded
+    # before the Worker was killed) but the ``impl-42/`` worktree
+    # directory has been wiped (``git worktree prune`` after the
+    # registration went stale). Create the branch directly off the
+    # spec branch tip so the stacked-path probe still wins.
+    subprocess.run(
+        ["git", "branch", "foreman/impl-42", "origin/foreman/issue-42"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    impl_tip_before = subprocess.run(
+        ["git", "rev-parse", "foreman/impl-42"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+
+    # This call would crash today with CalledProcessError ("a branch
+    # named 'foreman/impl-42' already exists") because the existing
+    # idempotent guard only checks the dir, not the branch.
+    result = mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    assert result.path.exists()
+    assert result.path == worktrees_root / "voice" / "impl-42"
+    # Stacked-path probe still wins because origin/foreman/issue-42 is
+    # present on the seeded clone.
+    assert result.base_branch == "foreman/issue-42", (
+        f"Stacked path should still resolve; got {result.base_branch!r}"
+    )
+
+    branch_check = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=result.path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert branch_check.stdout.strip() == "foreman/impl-42"
+
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=result.path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert head == impl_tip_before, (
+        f"Reattach must point HEAD at the pre-existing local branch tip "
+        f"({impl_tip_before}); got {head}. A re-create would have moved "
+        f"HEAD to origin/foreman/issue-42's tip."
+    )
+
+
+def test_create_impl_reattach_preserves_prior_commit_on_local_branch(
+    tmp_path: Path,
+) -> None:
+    """foreman#187: when the prior crashed Worker run committed but
+    didn't push, that commit lives only on the local branch. The
+    reattach path must preserve it — the foreman#117 empty-staged
+    commit short-circuit then handles the next commit step.
+    """
+    clone = tmp_path / "clone"
+    _seed_clone_with_spec_branch_pushed(clone, ticket_id=42)
+
+    # Build the local impl branch with one extra commit on top of the
+    # spec branch tip, mirroring a Worker that committed pre-push and
+    # then crashed.
+    subprocess.run(
+        ["git", "checkout", "-b", "foreman/impl-42", "origin/foreman/issue-42"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    (clone / "worker_wip.txt").write_text("partial impl from a prior run\n")
+    subprocess.run(
+        ["git", "add", "worker_wip.txt"], cwd=clone, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "wip: pre-crash impl commit"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    pre_crash_tip = subprocess.run(
+        ["git", "rev-parse", "foreman/impl-42"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    # Move off the impl branch so create_impl can attach a worktree to it.
+    subprocess.run(["git", "checkout", "main"], cwd=clone, check=True, capture_output=True)
+
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+    result = mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=result.path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert head == pre_crash_tip, (
+        f"Reattach must preserve the prior unpushed commit "
+        f"({pre_crash_tip}); got {head}. A force-reset would have moved "
+        f"HEAD to the spec branch tip and silently discarded the WIP."
+    )
+
+    # Sanity: the file the prior commit added must be present in the
+    # reattached worktree.
+    assert (result.path / "worker_wip.txt").read_text() == (
+        "partial impl from a prior run\n"
+    )
+
+
 def test_attach_impl_attaches_to_existing_impl_branch(tmp_path: Path) -> None:
     """``attach_impl`` is the read-side counterpart to ``create_impl`` —
     downstream roles (Reviewer on the impl PR, eventual impl-Fixer) attach

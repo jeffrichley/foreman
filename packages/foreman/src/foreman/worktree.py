@@ -282,6 +282,19 @@ class WorktreeManager:
         any cached metadata file. Callers should not assume a stable
         per-worktree ``base_branch`` across calls.
 
+        **Reattach (issue #187)**: if ``impl-<N>/`` is absent but the
+        local branch ``foreman/impl-<N>`` exists (orphaned by a prior
+        ``git worktree prune`` after a Worker crash between
+        ``worktree add -b`` and the next push), reattach to it via
+        ``git worktree add <path> <branch>`` (no ``-b``) instead of
+        failing on the branch-already-exists collision. No fetch of
+        ``origin/foreman/impl-<N>`` runs on this path: the local
+        branch is authoritative because it may carry unpushed Worker
+        commits. The foreman#117 empty-staged-commit short-circuit in
+        ``commit_files_to_worktree`` composes with this path so a
+        prior commit that matches the about-to-be-written files
+        survives without re-committing.
+
         Same fetch + uv-sync best-effort discipline as :meth:`create`.
         The fetch targets ``foreman/issue-<N>`` so the local origin ref
         is current — without this the probe would see a stale ref.
@@ -316,6 +329,55 @@ class WorktreeManager:
                 spec_branch_name=spec_branch_name,
                 default_branch=default_branch,
             )
+            return ImplWorktreeResult(path=wt_path, base_branch=base_branch_for_pr)
+
+        if _local_branch_exists(
+            clone_path, impl_branch_name, role_token=self._role_token
+        ):
+            # foreman#187: the worktree directory was wiped (e.g.,
+            # prior Worker run crashed after ``git worktree add -b``
+            # succeeded but before any push, then ``git worktree
+            # prune`` cleaned up the orphaned registration) but the
+            # local impl branch survives. Reattach to it WITHOUT
+            # ``-b`` so the existing branch's commits are preserved;
+            # the foreman#117 empty-staged guard in
+            # ``commit_files_to_worktree`` handles the "files match
+            # HEAD" case on the next commit step.
+            #
+            # No fetch of origin/foreman/impl-<N> runs on this path —
+            # the local branch is authoritative because it may carry
+            # unpushed Worker commits. (Contrast with ``attach`` /
+            # ``attach_impl``, which onboard a downstream role onto a
+            # branch the Worker has already pushed and therefore DO
+            # best-effort fetch.)
+            wt_path.parent.mkdir(parents=True, exist_ok=True)
+            _, base_branch_for_pr = self._resolve_impl_base_ref_and_branch(
+                clone_path=clone_path,
+                ticket_id=ticket_id,
+                spec_branch_name=spec_branch_name,
+                default_branch=default_branch,
+            )
+            print(
+                f"[foreman.worktree] reattaching to existing local "
+                f"branch {impl_branch_name} at {wt_path} "
+                f"(issue #187 recovery path)",
+                file=sys.stderr,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "worktree",
+                    "add",
+                    str(wt_path),
+                    impl_branch_name,
+                ],
+                cwd=clone_path,
+                check=True,
+                capture_output=True,
+                text=True,
+                env=self._env(),
+            )
+            _maybe_sync_worktree_deps(wt_path, role_token=self._role_token)
             return ImplWorktreeResult(path=wt_path, base_branch=base_branch_for_pr)
 
         wt_path.parent.mkdir(parents=True, exist_ok=True)
