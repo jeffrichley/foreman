@@ -51,6 +51,7 @@ When the code drifts from this doc, **update the doc in the same PR** that drift
 - **Single-writer execution log.** Only the daemon writes to `~/.foreman/reconciler.db`. Role subprocesses send signals back to the daemon via subprocess exit codes (and side effects on GitHub), never by writing the log directly.
 - **Idempotence via label state + log queries.** Rules consult the exec_log (`count_completed`, `has_unterminated`, `has_recent`) to avoid re-firing actions inside a budget window.
 - **Concurrency cap = 1 (default).** One role subprocess at a time per daemon. Cap-skipped dispatches do NOT burn attempt budget.
+- **Five GitHub App identities.** Planner, Worker, Reviewer, Fixer (the four "roles" — each one dispatches an LLM subprocess), plus the **orchestrator** (the daemon's own bot, used for direct host operations like label management, PR merging, observer polling). The orchestrator is not a role in the LLM-dispatch sense — it has no subprocess, no prompt, no schema — but it owns its own App identity and credentials. See §6.
 
 ---
 
@@ -297,6 +298,20 @@ Four role subprocesses, dispatched by the daemon, each with its own CLI entry po
 | Worker | `foreman implement <issue_url>` | `roles/worker.py` | creates `foreman/impl-N` from spec branch | `worker_app_id` | Yes (`set_labels` pre + post) |
 | Reviewer | `foreman review <pr_url>` | `roles/reviewer.py` | attaches existing | `reviewer_app_id` | Yes (`set_labels` post) |
 | Fixer | `foreman fix --issue-url <url> --target {spec_pr,impl_pr}` | `roles/fixer.py` | attaches existing | `fixer_app_id` | Mostly (additive pre-dispatch, atomic post) |
+
+### The 5th identity: orchestrator
+
+The four roles above are the **LLM-dispatching** identities — each one corresponds to a subprocess that loads a prompt, calls Anthropic, and validates structured output. There's a **fifth GitHub App identity** that does NOT dispatch an LLM: the **orchestrator**.
+
+- **Config:** `OrchestratorConfig` at `config.py:50-82`. Owns `orchestrator_app_id` + private key.
+- **Bot account:** `foreman-orchestrator-bot`.
+- **Used by:** `daemon_host.py`, `identity.py`, `cli.py`, `reconciler/v3_host.py`.
+- **What it does:** every direct host operation the daemon performs in its own name — `host.add_label(...)`, `host.remove_label(...)`, `host.merge_pr(...)`, `host.update_branch(...)`, observer GraphQL polling. Historically these would have used Jeff's PAT; the orchestrator bot gives every Foreman action a clean audit trail.
+- **What it does NOT:** load prompts, call LLMs, write labels via `set_labels` (label writes via this identity are the targeted single-label `add_label` / `remove_label` calls from action handlers).
+
+When you see a GitHub comment or label change authored by `foreman-orchestrator-bot[bot]`, it came from the daemon itself, not a role subprocess. The four role bots only act inside their own subprocesses.
+
+The reason this matters for PR review: a change to action-handler code (anything in `reconciler/actions.py`) acts as the orchestrator. A change to a role subprocess (anything in `roles/*.py`) acts as that role's bot. Don't accidentally mix the two when audit-trail behavior changes.
 
 ### Output schemas
 
