@@ -965,31 +965,102 @@ def test_resolve_lock_path_honors_env_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """FOREMAN_LOCK_PATH overrides the config-provided lock_path so
-    daemon stop / status agree with daemon start on the same path."""
+    daemon stop / status agree with daemon start on the same path.
+
+    Override must beat BOTH the legacy daemon.lock_path AND the v3
+    reconciler.lock_path so operators can redirect to a temp file in
+    smoke-tests without editing config.
+    """
     from foreman.cli import _resolve_lock_path
-    from foreman.config import DaemonConfig
+    from foreman.config import DaemonConfig, ReconcilerConfig
 
     env_lock = tmp_path / "env.lock"
-    config_lock = tmp_path / "config.lock"
+    v3_lock = tmp_path / "v3.lock"
+    legacy_lock = tmp_path / "legacy.lock"
 
     cfg = type(
         "FakeConfig",
         (),
-        {"daemon": DaemonConfig(lock_path=str(config_lock))},
+        {
+            "daemon": DaemonConfig(lock_path=str(legacy_lock)),
+            "reconciler": ReconcilerConfig(lock_path=str(v3_lock)),
+        },
     )()
     monkeypatch.setenv("FOREMAN_LOCK_PATH", str(env_lock))
 
     assert _resolve_lock_path(cfg) == env_lock
 
 
+def test_resolve_lock_path_returns_v3_reconciler_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """foreman#118: v3 is the canonical runtime. When the operator's config
+    does NOT explicitly set ``[daemon]\\nlock_path`` (the usual case for any
+    v3 config), ``_resolve_lock_path`` must return ``config.reconciler.lock_path``
+    so that ``daemon stop`` / ``status`` address the same file ``daemon
+    v3-start`` acquired. Without this fix operators saw 'No daemon lock file
+    at ...daemon.lock' even though the v3 daemon was running and holding
+    ``reconciler.lock``."""
+    from foreman.cli import _resolve_lock_path
+    from foreman.config import DaemonConfig, ReconcilerConfig
+
+    monkeypatch.delenv("FOREMAN_LOCK_PATH", raising=False)
+
+    v3_lock = tmp_path / "reconciler.lock"
+
+    cfg = type(
+        "FakeConfig",
+        (),
+        {
+            # DaemonConfig() with no explicit lock_path — model_fields_set
+            # will not contain "lock_path", so the helper falls through to
+            # the v3 reconciler section.
+            "daemon": DaemonConfig(),
+            "reconciler": ReconcilerConfig(lock_path=str(v3_lock)),
+        },
+    )()
+
+    assert _resolve_lock_path(cfg) == v3_lock
+
+
+def test_resolve_lock_path_honors_legacy_daemon_lock_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Backwards-compat shim: when a legacy v2 config has explicitly set
+    ``[daemon]\\nlock_path``, honor it. Without the shim, pre-v3 config files
+    silently start writing to the v3 path on upgrade — a foot-gun for anyone
+    who pinned the v2 lock to a non-default location."""
+    from foreman.cli import _resolve_lock_path
+    from foreman.config import DaemonConfig, ReconcilerConfig
+
+    monkeypatch.delenv("FOREMAN_LOCK_PATH", raising=False)
+
+    legacy_lock = tmp_path / "legacy-daemon.lock"
+    v3_lock = tmp_path / "reconciler.lock"
+
+    cfg = type(
+        "FakeConfig",
+        (),
+        {
+            # Explicit lock_path means model_fields_set will include it.
+            "daemon": DaemonConfig(lock_path=str(legacy_lock)),
+            "reconciler": ReconcilerConfig(lock_path=str(v3_lock)),
+        },
+    )()
+
+    assert _resolve_lock_path(cfg) == legacy_lock
+
+
 def test_resolve_lock_path_falls_back_to_default_without_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Without a config (e.g., bare operator invocation), the resolved lock
+    path is the v3 canonical default — ``~/.foreman/reconciler.lock``."""
     from foreman.cli import _resolve_lock_path
 
     monkeypatch.delenv("FOREMAN_LOCK_PATH", raising=False)
 
-    assert _resolve_lock_path(None) == Path("~/.foreman/daemon.lock").expanduser()
+    assert _resolve_lock_path(None) == Path("~/.foreman/reconciler.lock").expanduser()
 
 
 @pytest.mark.skipif(
@@ -1193,7 +1264,7 @@ def test_daemon_stop_works_without_config_file(
 ) -> None:
     """Operator without a config file can still stop the daemon —
     falls back to the default lock path via FOREMAN_LOCK_PATH or
-    ~/.foreman/daemon.lock."""
+    ~/.foreman/reconciler.lock (v3 canonical)."""
     monkeypatch.delenv("FOREMAN_CONFIG", raising=False)
 
     default_lock_path = tmp_path / "default.lock"

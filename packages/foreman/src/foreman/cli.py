@@ -400,18 +400,35 @@ _STOP_POLL_INTERVAL_SECONDS = 0.1
 def _resolve_lock_path(config: Config | None) -> Path:
     """Return the daemon's lock-file path.
 
-    ``FOREMAN_LOCK_PATH`` env var wins over config, matching
-    ``daemon_start``'s resolution order. When ``config`` is ``None``
-    (e.g., ``daemon stop`` called on a host without a config file),
-    falls back to the hardcoded default so stop / status still work.
+    v3 is the canonical runtime — ``config.reconciler.lock_path`` is the
+    file ``daemon v3-start`` acquires, so ``daemon stop`` / ``daemon
+    status`` MUST resolve to the same path. (foreman#118: prior to this
+    fix, the helper returned ``config.daemon.lock_path`` — a stale v2
+    path — leaving operators with 'No daemon lock file at ...daemon.lock'
+    while the v3 daemon was happily running and holding
+    ``reconciler.lock``.)
+
+    Backwards-compat shim: legacy v2 configs that explicitly set
+    ``[daemon]\\nlock_path`` in their TOML continue to take effect.
+    Pydantic's ``model_fields_set`` reports keys present in the source
+    TOML — a value read from the schema default comes back unset, so
+    the shim only kicks in when the operator deliberately set the v2
+    path (typically pre-v3 config files that haven't been migrated).
+
+    ``FOREMAN_LOCK_PATH`` env var wins over config so tests + operators
+    can redirect without editing the config file. When ``config`` is
+    ``None`` (e.g., ``daemon stop`` called on a host without a config
+    file), falls back to the v3 default so stop / status still work.
     An empty-string env value is treated as unset.
     """
     env_override = os.environ.get("FOREMAN_LOCK_PATH") or None
     if env_override is not None:
         return Path(env_override).expanduser()
     if config is None:
-        return Path("~/.foreman/daemon.lock").expanduser()
-    return Path(config.daemon.lock_path).expanduser()
+        return Path("~/.foreman/reconciler.lock").expanduser()
+    if "lock_path" in config.daemon.model_fields_set:
+        return Path(config.daemon.lock_path).expanduser()
+    return Path(config.reconciler.lock_path).expanduser()
 
 
 def _resolve_shutdown_sentinel_path(config: Config | None) -> Path:
@@ -586,7 +603,11 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
         level=config.daemon.log_level,
     )
 
-    lock_path = Path(os.path.expanduser(config.reconciler.lock_path))
+    # Symmetry with ``daemon stop`` / ``daemon status`` (foreman#118): all
+    # three resolve through the same helper so the file v3-start acquires
+    # is the same file stop / status look for. Inline reads of
+    # ``config.reconciler.lock_path`` here would re-introduce the drift.
+    lock_path = _resolve_lock_path(config)
     try:
         with DaemonLock(lock_path):
             # Clean up a stale shutdown sentinel from a prior `daemon stop`.
