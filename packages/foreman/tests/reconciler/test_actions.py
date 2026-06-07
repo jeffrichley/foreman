@@ -47,6 +47,9 @@ def test_action_enum_covers_spec_catalog() -> None:
         "ADVANCE_LABEL_TO_MERGING_IMPL",
         "ATTEMPT_MERGE_PLAN",
         "ATTEMPT_MERGE_IMPL",
+        # foreman#171 — auto-transition the queue label so the daemon
+        # doesn't stall silently on ``foreman:plan``-only tickets.
+        "ADVANCE_LABEL_TO_PLANNING",
         "ADVANCE_LABEL_TO_PLAN_APPROVED",
         "DISPATCH_WORKER",
         # Per-target Reviewer + Fixer dispatch (Stage-2 action split).
@@ -373,6 +376,31 @@ def test_dispatch_role_uses_snapshot_project_not_host_default(tmp_path: Path) ->
     )
 
     assert captured_dispatch_kwargs["project"] == "foreman"
+
+
+def test_execute_advance_label_to_planning_swaps_labels(tmp_path: Path) -> None:
+    """foreman#171: handler removes ``foreman:plan`` and adds
+    ``foreman:planning`` so ``dispatch_planner`` fires on the next poll."""
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    snap = _snapshot()
+    ctx = ActionContext(snapshot=snap, issue=snap.issues[0], pr=None, log=log)
+    host = _FakeHost()
+
+    execute_action(
+        Action.ADVANCE_LABEL_TO_PLANNING,
+        ctx,
+        host=host,
+        rule_name="advance_label_to_planning",
+        dry_run=False,
+    )
+
+    # remove_label("foreman:plan") + add_label("foreman:planning")
+    label_calls = [(c[0], c[1]["label"]) for c in host.calls]
+    assert ("remove_label", "foreman:plan") in label_calls
+    assert ("add_label", "foreman:planning") in label_calls
+    # Termination row written; no orphan ``running`` row.
+    assert log.has_unterminated("advance_label_to_planning", ctx.ticket_id) is False
 
 
 def test_execute_advance_label_writes_running_then_success(tmp_path: Path) -> None:

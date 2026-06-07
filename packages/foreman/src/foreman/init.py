@@ -77,6 +77,11 @@ _DEFAULT_CONFIG_PATH = Path.home() / ".foreman" / "config.toml"
 # v3 reconciler rule catalog + role modules.
 _FOREMAN_LABELS: list[tuple[str, str, str]] = [
     # name, color (no leading '#'), description
+    (
+        "foreman:plan",
+        "0E8A16",
+        "Foreman: queue for planning (auto-transitions to foreman:planning)",
+    ),
     ("foreman:planning", "FBCA04", "Foreman: spec phase (Planner + Reviewer)"),
     (
         "foreman:plan-approved",

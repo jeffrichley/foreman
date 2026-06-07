@@ -459,6 +459,8 @@ def test_run_init_creates_all_v3_labels_on_empty_repo(tmp_path: Path) -> None:
     # Pin the v3 vocabulary explicitly so the catalog can't silently
     # drift back to v2 names.
     assert set(expected_names) == {
+        # foreman#171: queue label, auto-transitions to foreman:planning
+        "foreman:plan",
         "foreman:planning",
         "foreman:plan-approved",
         "foreman:merging-plan",

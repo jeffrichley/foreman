@@ -5,7 +5,9 @@ Multi-identity GitHub-issue-to-PR orchestrator on agent-core substrate.
 ## What it does
 
 foreman watches a GitHub repo for issues labeled `foreman:plan` and walks
-each one through a multi-node pipeline that produces a merged PR:
+each one through a multi-node pipeline that produces a merged PR. The
+daemon auto-transitions `foreman:plan` to `foreman:planning` on the next
+poll, so you only ever set the entry label by hand:
 
 1. **Planner** drafts a spec PR from the issue
 2. **Reviewer** reviews the spec PR with fresh-eyes independence
