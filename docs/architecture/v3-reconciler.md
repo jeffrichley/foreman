@@ -357,7 +357,7 @@ These are real, in-the-code today. The list is curated; not every minor quirk is
 
 5. **No `foreman daemon ps` equivalent.** v2 had it; v3 doesn't. Diagnostic gap if a ticket parks mid-pipeline and you want to see why without grepping the SQLite log.
 
-6. **`recover_orphaned()` runs at startup but not periodically.** If the daemon survives but a child subprocess gets killed externally (OOM-killer, parent reaper, etc.), the orphan row sits as `running` until the next daemon restart. Could be a periodic-task in the tick loop.
+6. **`recover_orphaned()` runs at startup only — documented decision.** The recovery is called once in the daemon startup sequence (`cli.py:658-662`). In theory, if the daemon survives but `_track_subprocess_completion` somehow dies mid-flight (asyncio exception, GC), an orphan `running` row could persist until the next restart. We have NOT observed this in practice across weeks of operation — every orphan we've recovered was on the startup path, never mid-run. The fix surface is non-trivial (periodic recovery without a PID-alive check would falsely terminate legitimate long-running subprocesses; with one it requires a schema-compat change to store PIDs in the start row). **Decision: do not fix until we observe an actual incident.** If a stuck `running` row ever materializes in the exec_log with no live subprocess, file a fresh ticket then — we'll have real failure-mode data to design the fix against.
 
 7. **No explicit timeout on subprocess termination in the dispatch action.** The 1-hour wall clock comes from `role_dispatch_timeout_seconds`; below that, the daemon waits indefinitely. A role that hangs in network IO with a server that doesn't close will hold the cap-1 slot until the timeout.
 
