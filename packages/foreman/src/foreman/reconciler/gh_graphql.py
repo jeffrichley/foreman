@@ -67,8 +67,28 @@ class HttpxGHGraphQLClient:
             static = token
             assert static is not None  # narrow for mypy
             self._token_supplier = lambda: static
+        # Disable keepalive entirely (max_keepalive_connections=0).
+        # See foreman#166: with the default pool, a CLOSE_WAIT socket can
+        # accumulate after the remote sends FIN, and httpx happily keeps it
+        # in the pool. The next request reuses the dead connection and
+        # silently blocks. The daemon makes ~1 GraphQL call per project
+        # per poll cycle (~60s), so a fresh TLS handshake per call costs
+        # ~50-100ms — irrelevant at that cadence, eliminates the wedge.
+        #
+        # `pool=5.0` is the connection-pool acquire timeout (fast-fail if
+        # we somehow can't get a slot); the per-phase read/connect/write
+        # timeouts replace the prior single-float ``timeout`` (still kept
+        # as the ``Timeout(...)`` first-positional default so callers
+        # that pass a custom float still work).
         self._client = httpx.Client(
-            timeout=timeout,
+            limits=httpx.Limits(max_connections=10, max_keepalive_connections=0),
+            timeout=httpx.Timeout(
+                timeout,
+                connect=10.0,
+                read=30.0,
+                write=10.0,
+                pool=5.0,
+            ),
             transport=transport,
             headers={
                 "Accept": "application/vnd.github+json",
