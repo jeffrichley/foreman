@@ -3,7 +3,8 @@ this module covers the evaluator's behavior over the catalog."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from foreman.reconciler.actions import Action, ActionContext
@@ -170,6 +171,37 @@ def _ctx_with(
         auto_merge_spec=auto_merge_spec,
         auto_merge_impl=auto_merge_impl,
     )
+
+
+def _seed_advance_label_row_at(
+    log: ExecutionLog,
+    *,
+    ticket_id: str,
+    action: str,
+    seconds_ago: int,
+) -> None:
+    """Insert a `success`-outcome row into the exec_log with ts set
+    exactly ``seconds_ago`` seconds before ``datetime.now(UTC)``.
+
+    Bypasses ``ExecutionLog.write_action`` because that method takes
+    its ``ts`` from SQLite's ``CURRENT_TIMESTAMP`` default; the 24h
+    boundary tests need an explicit delta. The ``ts`` format matches
+    the one ``has_recent`` builds its cutoff in (exec_log.py:153-157)
+    so SQLite's lexicographic comparison sees the row at the intended
+    offset.
+    """
+    ts = (datetime.now(UTC) - timedelta(seconds=seconds_ago)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    with sqlite3.connect(log.db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO execution_log
+                (ts, ticket_id, project, rule_name, action, outcome, details)
+            VALUES (?, ?, 'foreman', ?, ?, 'success', '{}')
+            """,
+            (ts, ticket_id, f"{action}_rule", action),
+        )
 
 
 def test_needs_help_label_fires_surface_help(tmp_path: Path) -> None:
@@ -535,6 +567,48 @@ def test_advance_label_to_plan_approved_idempotent(tmp_path: Path) -> None:
     assert evaluate(ctx, rules=RULES) is Action.NOOP
 
 
+def test_advance_label_to_plan_approved_lagging_re_fires_after_24h_window(
+    tmp_path: Path,
+) -> None:
+    """Boundary: a successful row at 24h + 1s ago does NOT suppress the
+    lagging rule (24h `has_recent` guard's cutoff has expired) — the
+    rule re-fires ``ADVANCE_LABEL_TO_PLAN_APPROVED``."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:planning",)),
+        _pr(is_merged=True),
+    )
+    _seed_advance_label_row_at(
+        ctx.log,
+        ticket_id=ctx.ticket_id,
+        action="advance_label_to_plan_approved",
+        seconds_ago=24 * 3600 + 1,
+    )
+    assert evaluate(ctx, rules=RULES) is Action.ADVANCE_LABEL_TO_PLAN_APPROVED
+
+
+def test_advance_label_to_plan_approved_lagging_suppressed_within_24h_window(
+    tmp_path: Path,
+) -> None:
+    """Boundary: a successful row at 23h59m59s ago DOES suppress the
+    lagging rule (still inside the 24h `has_recent` guard) — evaluate
+    drops through to ``NOOP``."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:planning",)),
+        _pr(is_merged=True),
+    )
+    _seed_advance_label_row_at(
+        ctx.log,
+        ticket_id=ctx.ticket_id,
+        action="advance_label_to_plan_approved",
+        seconds_ago=23 * 3600 + 59 * 60 + 59,
+    )
+    assert evaluate(ctx, rules=RULES) is Action.NOOP
+
+
 def test_dispatch_worker_fires_on_plan_approved(tmp_path: Path) -> None:
     from foreman.reconciler.rules import RULES
     ctx = _ctx_with(tmp_path, _issue(labels=("foreman:plan-approved",)))
@@ -605,6 +679,44 @@ def test_advance_label_to_done_when_impl_pr_merged(tmp_path: Path) -> None:
         _pr(is_merged=True, head_ref="foreman/impl-143"),
     )
     assert evaluate(ctx, rules=RULES) is Action.ADVANCE_LABEL_TO_DONE
+
+
+def test_advance_label_to_done_re_fires_after_24h_window(tmp_path: Path) -> None:
+    """Impl-side mirror of the spec-side boundary test: a successful
+    ``advance_label_to_done`` row at 24h + 1s ago does NOT suppress the
+    lagging rule — it re-fires ``ADVANCE_LABEL_TO_DONE``."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-approved",)),
+        _pr(is_merged=True, head_ref="foreman/impl-143"),
+    )
+    _seed_advance_label_row_at(
+        ctx.log,
+        ticket_id=ctx.ticket_id,
+        action="advance_label_to_done",
+        seconds_ago=24 * 3600 + 1,
+    )
+    assert evaluate(ctx, rules=RULES) is Action.ADVANCE_LABEL_TO_DONE
+
+
+def test_advance_label_to_done_suppressed_within_24h_window(tmp_path: Path) -> None:
+    """Impl-side mirror of the spec-side boundary test: a successful
+    ``advance_label_to_done`` row at 23h59m59s ago DOES suppress the
+    lagging rule — evaluate drops through to ``NOOP``."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-approved",)),
+        _pr(is_merged=True, head_ref="foreman/impl-143"),
+    )
+    _seed_advance_label_row_at(
+        ctx.log,
+        ticket_id=ctx.ticket_id,
+        action="advance_label_to_done",
+        seconds_ago=23 * 3600 + 59 * 60 + 59,
+    )
+    assert evaluate(ctx, rules=RULES) is Action.NOOP
 
 
 def test_hold_label_blocks_all_actions(tmp_path: Path) -> None:
