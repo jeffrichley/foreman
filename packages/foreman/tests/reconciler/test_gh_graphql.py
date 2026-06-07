@@ -149,3 +149,49 @@ def test_graphql_requires_exactly_one_of_token_or_supplier() -> None:
 
     with pytest.raises(ValueError, match="exactly one"):
         HttpxGHGraphQLClient(token="ghs_x", token_supplier=lambda: "ghs_y")
+
+
+def test_client_disables_keepalive_to_prevent_close_wait_wedge() -> None:
+    """foreman#166 regression guard.
+
+    With the default ``httpx.Limits``, a CLOSE_WAIT socket (remote sent
+    FIN, local hasn't closed) can persist in the keepalive pool. The
+    next request reuses it and silently blocks, wedging the daemon's
+    poll loop for hours with no exception surfacing.
+
+    The fix disables keepalive entirely: every request gets a fresh
+    connection. At ~1 GraphQL call per project per 60s poll, the TLS
+    handshake cost is negligible (~50-100ms) and the wedge class is
+    eliminated.
+    """
+    # No transport override — we want to inspect the real HTTPTransport's
+    # connection pool config, not the MockTransport used elsewhere.
+    client = HttpxGHGraphQLClient(token="ghs_test")
+
+    # No keepalive connections allowed in the pool — fresh connection
+    # per request. (httpx exposes the configured limits via the
+    # transport's connection pool internals.)
+    pool = client._client._transport._pool
+    assert pool._max_keepalive_connections == 0
+    # max_connections still bounded so we don't unbounded-spawn under
+    # rare burst load.
+    assert pool._max_connections == 10
+
+
+def test_client_uses_per_phase_timeouts() -> None:
+    """Bounded read / connect / write / pool timeouts (foreman#166).
+
+    The pool-acquire timeout is the critical one: with no pool-acquire
+    bound, even with keepalive disabled, an exhausted ``max_connections``
+    would wait indefinitely. A 5s bound makes pool exhaustion fail fast
+    and visible in the daemon's exception log instead of silently
+    blocking the poll cycle.
+    """
+    transport = _MockTransport(_ok_handler)
+    client = HttpxGHGraphQLClient(token="ghs_test", transport=transport)
+
+    timeout = client._client.timeout
+    assert timeout.connect == 10.0
+    assert timeout.read == 30.0
+    assert timeout.write == 10.0
+    assert timeout.pool == 5.0
