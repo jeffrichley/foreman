@@ -27,6 +27,13 @@ class Action(enum.Enum):
 
     NOOP = "noop"
     SURFACE_HELP = "surface_help"
+    # foreman#171: ``foreman:plan`` is the documented "queue for planning"
+    # entry label, but no rule fires on it directly — ``dispatch_planner``
+    # requires ``foreman:planning``. This action is the forward-progress
+    # bridge: ``foreman:plan`` → ``foreman:planning`` on the next poll.
+    # Without it, fresh tickets stall invisibly (the observer also has to
+    # include ``foreman:plan`` in its filter for the rule to ever fire).
+    ADVANCE_LABEL_TO_PLANNING = "advance_label_to_planning"
     DISPATCH_PLANNER = "dispatch_planner"
     # foreman#165: the old ``MERGE_SPEC_PR`` / ``MERGE_IMPL_PR`` enum
     # values are gone. The flow is now: a ``foreman:*-approved`` issue
@@ -384,6 +391,24 @@ def execute_action(
             _handle_attempt_merge(ctx, host, target="plan")
         elif action is Action.ATTEMPT_MERGE_IMPL:
             _handle_attempt_merge(ctx, host, target="impl")
+        elif action is Action.ADVANCE_LABEL_TO_PLANNING:
+            # foreman#171: ``foreman:plan`` is the queue label; advance to
+            # ``foreman:planning`` so ``dispatch_planner`` fires on the
+            # next poll. The predicate (_plan_label_only) gates this to
+            # truly-fresh tickets — no phase labels, no hold/needs-help,
+            # no impl-attempt-N/fix-attempt-N counters.
+            host.remove_label(
+                owner=ctx.snapshot.owner,
+                repo=ctx.snapshot.repo,
+                issue=ctx.issue.number,
+                label="foreman:plan",
+            )
+            host.add_label(
+                owner=ctx.snapshot.owner,
+                repo=ctx.snapshot.repo,
+                issue=ctx.issue.number,
+                label="foreman:planning",
+            )
         elif action is Action.ADVANCE_LABEL_TO_PLAN_APPROVED:
             host.remove_label(
                 owner=ctx.snapshot.owner,

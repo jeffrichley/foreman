@@ -186,6 +186,17 @@ def test_fetch_project_state_handles_null_review_decision() -> None:
     assert snap.prs[0].review_decision is None
 
 
+def test_observer_query_includes_plan_entry_label() -> None:
+    """foreman#171: ``foreman:plan`` is the documented entry label —
+    operators set it when filing a ticket. Without it in
+    ``filterBy.labels`` the daemon never receives the issue in its
+    snapshot, so the ``advance_label_to_planning`` rule (which exists
+    to auto-transition this label) can never fire and the ticket stalls
+    silently."""
+    from foreman.reconciler.observer import _QUERY
+    assert '"foreman:plan"' in _QUERY
+
+
 def test_observer_query_includes_spec_fix_label() -> None:
     # spec-fix issues should appear in the observer poll so the daemon can
     # surface them for human follow-up (no auto-rerun, just visibility).

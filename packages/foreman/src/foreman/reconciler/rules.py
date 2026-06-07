@@ -452,6 +452,59 @@ def _impl_pr_merged_label_lagging(ctx: ActionContext) -> bool:
     return True
 
 
+def _plan_label_only(ctx: ActionContext) -> bool:
+    """foreman#171: fire ``advance_label_to_planning`` iff a ticket carries
+    ``foreman:plan`` AND nothing else that signals it has already been
+    worked.
+
+    The exclusion set has three layers:
+
+    1. **Phase labels** (per spec): any ``foreman:{planning,plan-approved,
+       merging-*,spec-fix,impl-*,done,failed}`` means the ticket is past
+       the queue phase. Even if someone left ``foreman:plan`` on the
+       issue, we don't reset it.
+
+    2. **Operator-control labels**: ``foreman:hold`` and
+       ``foreman:needs-help``. Safety-tier rules at higher precedence
+       should preempt, but belt-and-suspenders here means we don't
+       silently regress if the precedence ordering changes.
+
+    3. **Attempt-counter labels**: ``foreman:impl-attempt-N`` or
+       ``foreman:fix-attempt-N`` on the issue means the ticket has been
+       through a role cycle. Stale counters survive daemon DB wipes
+       (proven 2026-06-06 when ``foreman_*`` volumes were rebuilt and
+       the GH labels persisted while ``count_completed`` reset). If the
+       counters are present, refuse to advance — an operator should
+       clean them up explicitly.
+    """
+    labels = set(ctx.issue.labels)
+    if "foreman:plan" not in labels:
+        return False
+    _PHASE_EXCLUDED = {
+        "foreman:planning",
+        "foreman:plan-approved",
+        "foreman:merging-plan",
+        "foreman:merging-impl",
+        "foreman:spec-fix",
+        "foreman:impl-review",
+        "foreman:impl-approved",
+        "foreman:impl-fix",
+        "foreman:done",
+        "foreman:failed",
+        "foreman:hold",
+        "foreman:needs-help",
+    }
+    if labels & _PHASE_EXCLUDED:
+        return False
+    if any(
+        lbl.startswith("foreman:impl-attempt-")
+        or lbl.startswith("foreman:fix-attempt-")
+        for lbl in labels
+    ):
+        return False
+    return True
+
+
 _PROGRESS_RULES: tuple[Rule, ...] = (
     Rule(
         name="dispatch_planner",
@@ -466,6 +519,20 @@ _PROGRESS_RULES: tuple[Rule, ...] = (
         precedence=105,
         when=_planning_pr_needs_review,
         then=Action.DISPATCH_REVIEWER_SPEC,
+    ),
+    Rule(
+        name="advance_label_to_planning",
+        tier=PrecedenceTier.FORWARD_PROGRESS,
+        # Precedence 110: must be >= 100 per the FORWARD_PROGRESS tier
+        # convention (test_forward_progress_tier_uses_precedence_at_or_above_100).
+        # Position relative to dispatch_planner (100) and
+        # dispatch_reviewer_spec (105) doesn't matter for correctness —
+        # both have predicates that require ``foreman:planning`` (which
+        # the ``foreman:plan``-only ticket lacks), so neither matches and
+        # the evaluator continues to this rule.
+        precedence=110,
+        when=_plan_label_only,
+        then=Action.ADVANCE_LABEL_TO_PLANNING,
     ),
     Rule(
         name="advance_label_to_merging_plan",

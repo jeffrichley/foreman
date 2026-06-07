@@ -228,6 +228,71 @@ def test_no_safety_condition_does_not_emit_surface_help(tmp_path: Path) -> None:
 # --- Forward-progress rule cases ---
 
 
+def test_advance_label_to_planning_fires_on_plan_only_ticket(tmp_path: Path) -> None:
+    """foreman#171: a fresh ticket labeled only ``foreman:plan`` should
+    auto-transition to ``foreman:planning`` so ``dispatch_planner`` fires
+    on the next poll."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(tmp_path, _issue(labels=("foreman:plan",)))
+    assert evaluate(ctx, rules=RULES) is Action.ADVANCE_LABEL_TO_PLANNING
+
+
+def test_advance_label_to_planning_suppressed_by_planning_label(tmp_path: Path) -> None:
+    """A ticket with both ``foreman:plan`` and ``foreman:planning`` is past
+    the queue phase; the new rule must not fire (no double-transition)."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path, _issue(labels=("foreman:plan", "foreman:planning"))
+    )
+    # dispatch_planner at prec 100 wins over our prec-95 rule when its
+    # predicate matches, but the test is really about: our rule's
+    # predicate must NOT match here. Test directly via evaluate result:
+    # whatever fires, it shouldn't be ADVANCE_LABEL_TO_PLANNING.
+    assert evaluate(ctx, rules=RULES) is not Action.ADVANCE_LABEL_TO_PLANNING
+
+
+def test_advance_label_to_planning_suppressed_by_plan_approved(tmp_path: Path) -> None:
+    """A stale ``foreman:plan`` alongside ``foreman:plan-approved`` must
+    NOT re-advance — the ticket has already been through the Reviewer."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path, _issue(labels=("foreman:plan", "foreman:plan-approved"))
+    )
+    assert evaluate(ctx, rules=RULES) is not Action.ADVANCE_LABEL_TO_PLANNING
+
+
+def test_advance_label_to_planning_suppressed_by_hold(tmp_path: Path) -> None:
+    """``foreman:hold`` preempts everything (belt-and-suspenders beyond the
+    safety-tier rules) — a ``plan + hold`` ticket must not auto-advance."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path, _issue(labels=("foreman:plan", "foreman:hold"))
+    )
+    assert evaluate(ctx, rules=RULES) is not Action.ADVANCE_LABEL_TO_PLANNING
+
+
+def test_advance_label_to_planning_suppressed_by_needs_help(tmp_path: Path) -> None:
+    """``foreman:needs-help`` means a human owns this — don't auto-advance
+    even if ``foreman:plan`` is also present."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path, _issue(labels=("foreman:plan", "foreman:needs-help"))
+    )
+    assert evaluate(ctx, rules=RULES) is not Action.ADVANCE_LABEL_TO_PLANNING
+
+
+def test_advance_label_to_planning_suppressed_by_impl_attempt_counter(tmp_path: Path) -> None:
+    """An ``foreman:impl-attempt-N`` label means the ticket has been
+    through a Worker cycle; the daemon DB wipe scenario (2026-06-06)
+    makes this the canonical signal since ``count_completed`` resets but
+    the GH labels persist. Refuse to re-advance."""
+    from foreman.reconciler.rules import RULES
+    ctx = _ctx_with(
+        tmp_path, _issue(labels=("foreman:plan", "foreman:impl-attempt-1"))
+    )
+    assert evaluate(ctx, rules=RULES) is not Action.ADVANCE_LABEL_TO_PLANNING
+
+
 def test_dispatch_planner_fires_on_planning_no_pr(tmp_path: Path) -> None:
     from foreman.reconciler.rules import RULES
     ctx = _ctx_with(tmp_path, _issue(labels=("foreman:planning",)))
