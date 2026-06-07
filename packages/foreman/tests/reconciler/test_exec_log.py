@@ -327,3 +327,79 @@ def test_count_completed_filters_by_outcome(tmp_path: Path) -> None:
         )
         == 0
     )
+
+
+def test_count_completed_excludes_skipped_capacity_by_default(tmp_path: Path) -> None:
+    """foreman#174 regression guard.
+
+    Default ``count_completed`` (no ``outcome`` filter) is the path the
+    budget-gate rules use (``_impl_attempts_exhausted``,
+    ``_fix_attempts_exhausted``, etc.). It must EXCLUDE
+    ``skipped_capacity`` terminations — a cap-skip happens before any
+    role subprocess runs, so it isn't a real attempt against the
+    budget. Previously a queue-waiter ticket got escalated to
+    ``foreman:needs-help`` after 3 cap-skips even though the Worker
+    never ran (live trace on issue #170, 2026-06-07 00:21–00:24).
+    """
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+
+    ticket_id = "owner/repo#1"
+
+    # Three cap-skipped dispatch_worker attempts.
+    for _ in range(3):
+        start_id = log.write_action(
+            ticket_id=ticket_id,
+            project="owner",
+            rule_name="dispatch_worker",
+            action="dispatch_worker",
+            outcome="running",
+            details={},
+        )
+        log.terminate_action(
+            parent_log_id=start_id, outcome="skipped_capacity", details={}
+        )
+
+    # Default path: cap-skips don't burn budget. The 3 termination rows
+    # exist, but the budget-gate-relevant count is 0.
+    assert log.count_completed("dispatch_worker", ticket_id) == 0
+
+    # Explicit ``outcome="skipped_capacity"`` still returns the raw count
+    # for callers that genuinely want to track cap-skips (observability,
+    # a future stuck-pipeline detector).
+    assert (
+        log.count_completed(
+            "dispatch_worker", ticket_id, outcome="skipped_capacity"
+        )
+        == 3
+    )
+
+
+def test_count_completed_default_still_counts_errors_and_successes(tmp_path: Path) -> None:
+    """foreman#174 belt-and-suspenders: the fix only excludes
+    ``skipped_capacity`` from the default-path budget count — successes,
+    errors, timeouts, and recovery failures still count, because each
+    represents a real attempt that burned a budget slot.
+    """
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+
+    ticket_id = "owner/repo#1"
+
+    # success + error + timeout + skipped_capacity — only first three
+    # should count against the budget.
+    for outcome in ("success", "error", "timeout", "skipped_capacity"):
+        start_id = log.write_action(
+            ticket_id=ticket_id,
+            project="owner",
+            rule_name="dispatch_worker",
+            action="dispatch_worker",
+            outcome="running",
+            details={},
+        )
+        log.terminate_action(
+            parent_log_id=start_id, outcome=outcome, details={}
+        )
+
+    # 3 real attempts (skipped_capacity excluded).
+    assert log.count_completed("dispatch_worker", ticket_id) == 3
