@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -77,10 +78,12 @@ def configure_daemon_logging(
     Two handlers attached:
     - **FileHandler** writing JSON lines to ``log_path`` — machine-readable
       audit log, includes every ``extra={...}`` field at the top level.
-    - **RichHandler** writing pretty colored output to stderr — for humans
-      watching the foreground daemon. Suppressed when ``console=False``
-      (e.g., in tests that import this function but don't want terminal
-      output).
+    - **StreamHandler** writing JSON lines to ``sys.stdout`` —
+      machine-readable mirror of the file payload so
+      ``docker logs <container>`` and any log-aggregator that consumes
+      container stdout see the same records, one per line. Suppressed
+      when ``console=False`` (e.g., in tests that import this function
+      but don't want terminal output) — FileHandler only.
 
     Idempotent — re-calling replaces all existing handlers on the
     'foreman' logger.
@@ -96,20 +99,9 @@ def configure_daemon_logging(
     foreman_logger.addHandler(file_handler)
 
     if console:
-        # Imported lazily so tests that don't exercise this branch don't
-        # need rich installed at import time.
-        from rich.console import Console
-        from rich.logging import RichHandler
-
-        rich_handler = RichHandler(
-            console=Console(stderr=True),
-            show_time=True,
-            show_path=False,
-            rich_tracebacks=True,
-            markup=False,
-        )
-        rich_handler.setFormatter(logging.Formatter("%(message)s"))
-        foreman_logger.addHandler(rich_handler)
+        stream_handler = logging.StreamHandler(stream=sys.stdout)
+        stream_handler.setFormatter(_JsonLinesFormatter())
+        foreman_logger.addHandler(stream_handler)
 
     foreman_logger.setLevel(level.upper())
     foreman_logger.propagate = False
