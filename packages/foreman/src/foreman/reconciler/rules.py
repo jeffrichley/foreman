@@ -14,6 +14,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from foreman.labels import Labels
 from foreman.reconciler.actions import Action, ActionContext
 
 logger = logging.getLogger(__name__)
@@ -38,11 +39,11 @@ class Rule:
 
 
 def _hold_label(ctx: ActionContext) -> bool:
-    return "foreman:hold" in ctx.issue.labels
+    return Labels.HOLD in ctx.issue.labels
 
 
 def _needs_help_label(ctx: ActionContext) -> bool:
-    return "foreman:needs-help" in ctx.issue.labels
+    return Labels.NEEDS_HELP in ctx.issue.labels
 
 
 def _mergeable_conflict(ctx: ActionContext) -> bool:
@@ -60,7 +61,7 @@ def _impl_pr_ci_failure(ctx: ActionContext) -> bool:
         return False
     return any(
         label in ctx.issue.labels
-        for label in ("foreman:impl-review", "foreman:impl-approved", "foreman:impl-fix")
+        for label in (Labels.IMPL_REVIEW, Labels.IMPL_APPROVED, Labels.IMPL_FIX)
     )
 
 
@@ -72,7 +73,7 @@ def _spec_pr_ci_failure(ctx: ActionContext) -> bool:
     # stacked-PR window where both shapes are linked to the same issue).
     if not ctx.pr.head_ref.startswith("foreman/issue-"):
         return False
-    return "foreman:planning" in ctx.issue.labels
+    return Labels.PLANNING in ctx.issue.labels
 
 
 _MAX_FIX_ATTEMPTS = 3
@@ -84,7 +85,7 @@ def _fix_attempts_exhausted(ctx: ActionContext) -> bool:
     # Budget is per-impl-cycle: only impl-side Fixer dispatches count toward
     # the attempt cap. Spec-side fixes don't share the same retry budget.
     return (
-        "foreman:impl-fix" in ctx.issue.labels
+        Labels.IMPL_FIX in ctx.issue.labels
         and ctx.log.count_completed("dispatch_fixer_impl", ctx.ticket_id) >= _MAX_FIX_ATTEMPTS
     )
 
@@ -94,14 +95,14 @@ def _spec_fix_attempts_exhausted(ctx: ActionContext) -> bool:
     # Pairs with ``_spec_fix_pending`` below — both scope to the spec-side
     # action key so the spec retry budget is independent of impl-side.
     return (
-        "foreman:spec-fix" in ctx.issue.labels
+        Labels.SPEC_FIX in ctx.issue.labels
         and ctx.log.count_completed("dispatch_fixer_spec", ctx.ticket_id) >= _MAX_FIX_ATTEMPTS
     )
 
 
 def _impl_attempts_exhausted(ctx: ActionContext) -> bool:
     return (
-        "foreman:plan-approved" in ctx.issue.labels
+        Labels.PLAN_APPROVED in ctx.issue.labels
         and ctx.log.count_completed("dispatch_worker", ctx.ticket_id) >= _MAX_IMPL_ATTEMPTS
     )
 
@@ -118,7 +119,7 @@ def _reviewer_spec_attempts_exhausted(ctx: ActionContext) -> bool:
     # action key is scoped to ``dispatch_reviewer_spec`` so the spec-side
     # budget is independent of impl-side.
     return (
-        "foreman:planning" in ctx.issue.labels
+        Labels.PLANNING in ctx.issue.labels
         and ctx.log.count_completed("dispatch_reviewer_spec", ctx.ticket_id) >= _MAX_REVIEWER_ATTEMPTS
     )
 
@@ -127,7 +128,7 @@ def _reviewer_impl_attempts_exhausted(ctx: ActionContext) -> bool:
     # Impl-side Reviewer budget. Symmetric to ``_reviewer_spec_attempts_exhausted``
     # but scoped to ``dispatch_reviewer_impl`` + ``foreman:impl-review`` label.
     return (
-        "foreman:impl-review" in ctx.issue.labels
+        Labels.IMPL_REVIEW in ctx.issue.labels
         and ctx.log.count_completed("dispatch_reviewer_impl", ctx.ticket_id) >= _MAX_REVIEWER_ATTEMPTS
     )
 
@@ -237,7 +238,7 @@ def _planning_no_pr(ctx: ActionContext) -> bool:
     # Budget gates (max-N attempts) intentionally use the all-terminations
     # default; idempotence gates like this one need success-only.
     return (
-        "foreman:planning" in ctx.issue.labels
+        Labels.PLANNING in ctx.issue.labels
         and ctx.pr is None
         and not ctx.log.has_unterminated("dispatch_planner", ctx.ticket_id)
         and ctx.log.count_completed(
@@ -268,7 +269,7 @@ def _planning_pr_needs_review(ctx: ActionContext) -> bool:
     # an infinite hot-spawn loop. Every other dispatch role has a budget;
     # Reviewer was the only gap.
     return (
-        "foreman:planning" in ctx.issue.labels
+        Labels.PLANNING in ctx.issue.labels
         and ctx.pr is not None
         and not ctx.pr.is_merged
         and ctx.pr.head_ref.startswith("foreman/issue-")
@@ -291,9 +292,9 @@ def _advance_label_to_merging_plan_when_eligible(ctx: ActionContext) -> bool:
     # to the same issue). Without this filter, the label-advance could fire
     # against an impl PR, parking the wrong attempt-merge rule on next tick.
     return (
-        "foreman:plan-approved" in ctx.issue.labels
-        and "foreman:merging-plan" not in ctx.issue.labels
-        and "foreman:merging-impl" not in ctx.issue.labels
+        Labels.PLAN_APPROVED in ctx.issue.labels
+        and Labels.MERGING_PLAN not in ctx.issue.labels
+        and Labels.MERGING_IMPL not in ctx.issue.labels
         and ctx.pr is not None
         and not ctx.pr.is_merged
         and ctx.pr.head_ref.startswith("foreman/issue-")
@@ -312,7 +313,7 @@ def _attempt_merge_plan_eligible(ctx: ActionContext) -> bool:
     # ``_plan_approved_pr_green_and_flag`` predicate): only spec-shape
     # branches drive spec-side merge attempts.
     return (
-        "foreman:merging-plan" in ctx.issue.labels
+        Labels.MERGING_PLAN in ctx.issue.labels
         and ctx.pr is not None
         and not ctx.pr.is_merged
         and ctx.pr.head_ref.startswith("foreman/issue-")
@@ -328,7 +329,7 @@ def _spec_pr_merged_label_lagging(ctx: ActionContext) -> bool:
     # earlier — only spec-shape merges should drive this transition.
     if not ctx.pr.head_ref.startswith("foreman/issue-"):
         return False
-    if "foreman:planning" not in ctx.issue.labels:
+    if Labels.PLANNING not in ctx.issue.labels:
         return False
     if ctx.log.has_recent(
         "advance_label_to_plan_approved", ctx.ticket_id, within_seconds=3600 * 24
@@ -339,7 +340,7 @@ def _spec_pr_merged_label_lagging(ctx: ActionContext) -> bool:
 
 def _plan_approved_no_impl_pr(ctx: ActionContext) -> bool:
     return (
-        "foreman:plan-approved" in ctx.issue.labels
+        Labels.PLAN_APPROVED in ctx.issue.labels
         and not ctx.log.has_unterminated("dispatch_worker", ctx.ticket_id)
         and ctx.log.count_completed("dispatch_worker", ctx.ticket_id) < _MAX_IMPL_ATTEMPTS
     )
@@ -355,7 +356,7 @@ def _impl_review_green(ctx: ActionContext) -> bool:
     # Budget cap: symmetric to spec-side; closes the hot-spawn-loop gap
     # Plan B Stage 1+2 introduced by terminating crashed Reviewer rows.
     return (
-        "foreman:impl-review" in ctx.issue.labels
+        Labels.IMPL_REVIEW in ctx.issue.labels
         and ctx.pr is not None
         and not ctx.pr.is_merged
         and ctx.pr.head_ref.startswith("foreman/impl-")
@@ -372,7 +373,7 @@ def _impl_fix_pending(ctx: ActionContext) -> bool:
     # Head-ref filter (4c): refuse to dispatch impl-side Fixer onto a
     # spec-shaped PR.
     return (
-        "foreman:impl-fix" in ctx.issue.labels
+        Labels.IMPL_FIX in ctx.issue.labels
         and ctx.pr is not None
         and ctx.pr.head_ref.startswith("foreman/impl-")
         and not ctx.log.has_unterminated("dispatch_fixer_impl", ctx.ticket_id)
@@ -388,7 +389,7 @@ def _spec_fix_pending(ctx: ActionContext) -> bool:
     # spec-side fix loop would be dead (adversarial review CRITICAL #3).
     # Head-ref filter (4c): only target spec-shaped PRs.
     return (
-        "foreman:spec-fix" in ctx.issue.labels
+        Labels.SPEC_FIX in ctx.issue.labels
         and ctx.pr is not None
         and not ctx.pr.is_merged
         and ctx.pr.head_ref.startswith("foreman/issue-")
@@ -410,9 +411,9 @@ def _advance_label_to_merging_impl_when_eligible(ctx: ActionContext) -> bool:
     # spec-shaped PR even when the daemon picked one for this ticket —
     # ``ATTEMPT_MERGE_IMPL`` must only merge impl-shaped branches.
     return (
-        "foreman:impl-approved" in ctx.issue.labels
-        and "foreman:merging-plan" not in ctx.issue.labels
-        and "foreman:merging-impl" not in ctx.issue.labels
+        Labels.IMPL_APPROVED in ctx.issue.labels
+        and Labels.MERGING_PLAN not in ctx.issue.labels
+        and Labels.MERGING_IMPL not in ctx.issue.labels
         and ctx.pr is not None
         and not ctx.pr.is_merged
         and ctx.pr.head_ref.startswith("foreman/impl-")
@@ -429,7 +430,7 @@ def _attempt_merge_impl_eligible(ctx: ActionContext) -> bool:
     # Head-ref filter (MEDIUM #11): only impl-shape branches drive
     # impl-side merge attempts.
     return (
-        "foreman:merging-impl" in ctx.issue.labels
+        Labels.MERGING_IMPL in ctx.issue.labels
         and ctx.pr is not None
         and not ctx.pr.is_merged
         and ctx.pr.head_ref.startswith("foreman/impl-")
@@ -443,7 +444,7 @@ def _impl_pr_merged_label_lagging(ctx: ActionContext) -> bool:
     # advance ``impl-approved → done`` when ``ctx.pr`` is a spec-shaped PR.
     if not ctx.pr.head_ref.startswith("foreman/impl-"):
         return False
-    if "foreman:impl-approved" not in ctx.issue.labels:
+    if Labels.IMPL_APPROVED not in ctx.issue.labels:
         return False
     if ctx.log.has_recent(
         "advance_label_to_done", ctx.ticket_id, within_seconds=3600 * 24
@@ -478,27 +479,27 @@ def _plan_label_only(ctx: ActionContext) -> bool:
        clean them up explicitly.
     """
     labels = set(ctx.issue.labels)
-    if "foreman:plan" not in labels:
+    if Labels.PLAN not in labels:
         return False
     _PHASE_EXCLUDED = {
-        "foreman:planning",
-        "foreman:plan-approved",
-        "foreman:merging-plan",
-        "foreman:merging-impl",
-        "foreman:spec-fix",
-        "foreman:impl-review",
-        "foreman:impl-approved",
-        "foreman:impl-fix",
-        "foreman:done",
-        "foreman:failed",
-        "foreman:hold",
-        "foreman:needs-help",
+        Labels.PLANNING,
+        Labels.PLAN_APPROVED,
+        Labels.MERGING_PLAN,
+        Labels.MERGING_IMPL,
+        Labels.SPEC_FIX,
+        Labels.IMPL_REVIEW,
+        Labels.IMPL_APPROVED,
+        Labels.IMPL_FIX,
+        Labels.DONE,
+        Labels.FAILED,
+        Labels.HOLD,
+        Labels.NEEDS_HELP,
     }
     if labels & _PHASE_EXCLUDED:
         return False
     if any(
-        lbl.startswith("foreman:impl-attempt-")
-        or lbl.startswith("foreman:fix-attempt-")
+        lbl.startswith(Labels.IMPL_ATTEMPT_PREFIX)
+        or lbl.startswith(Labels.FIX_ATTEMPT_PREFIX)
         for lbl in labels
     ):
         return False

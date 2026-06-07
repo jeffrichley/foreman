@@ -83,6 +83,7 @@ from foreman.branches import impl_branch, spec_branch
 from foreman.config import Config
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
+from foreman.labels import Labels
 from foreman.provider import ProviderFacade
 from foreman.schemas.worker import WorkerOutput, WorkerRunResult
 from foreman.stats import log_worker_run
@@ -108,12 +109,13 @@ WORKER_ALLOWED_TOOLS = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]
 # the Worker entry label is ``foreman:plan-approved`` (Reviewer signoff
 # on the spec PR sets it). There is no in-flight ``implementing`` label
 # in v3 — execution-log + impl-attempt-N labels carry that state.
-_LABEL_PLAN_APPROVED = "foreman:plan-approved"
-_WORKER_ENTRY_LABELS = frozenset({_LABEL_PLAN_APPROVED})
-_LABEL_IMPL_REVIEW = "foreman:impl-review"
-_LABEL_SPEC_FIX = "foreman:spec-fix"
-_LABEL_NEEDS_HELP = "foreman:needs-help"
-_LABEL_FAILED = "foreman:failed"
+#
+# Issue #194: the per-module ``_LABEL_*`` constants previously declared
+# here are gone; consumers reach for :class:`foreman.labels.Labels`
+# directly. The entry-label set is kept here because the Worker uses
+# it as a ``frozenset`` for both label-set membership checks and the
+# atomic ``set_labels`` write path.
+_WORKER_ENTRY_LABELS = frozenset({Labels.PLAN_APPROVED})
 
 # Default verification command when ``ProjectConfig.check_command`` is None.
 # Voice + agent-core + other reference projects all use ``just check`` as
@@ -651,7 +653,7 @@ async def run_worker(
     if not (issue_labels & _WORKER_ENTRY_LABELS):
         raise RuntimeError(
             f"Issue #{issue_number} does not carry the Worker entry label "
-            f"({_LABEL_PLAN_APPROVED!r}); "
+            f"({Labels.PLAN_APPROVED!r}); "
             f"labels: "
             + ", ".join(sorted(issue_labels) or ["<none>"])
             + ". The Worker only acts on issues queued by the Reviewer "
@@ -699,7 +701,7 @@ async def run_worker(
     # explicitly names the foreman labels it is removing
     # (``removed_foreman`` = entry labels) and adding (``added_foreman``
     # = attempt counter); everything else survives.
-    attempt_label = f"foreman:impl-attempt-{attempt}"
+    attempt_label = Labels.impl_attempt(attempt)
     current_labels.add(attempt_label)
     for _entry_label in _WORKER_ENTRY_LABELS:
         current_labels.discard(_entry_label)
@@ -911,16 +913,16 @@ async def run_worker(
             # successful run.)
             # v3: no ``implementing`` label to clear — the entry label
             # ``foreman:plan-approved`` was already removed at dispatch.
-            current_labels.add(_LABEL_IMPL_REVIEW)
+            current_labels.add(Labels.IMPL_REVIEW)
             all_known_labels = _label_names(issue_labels, attempt_label)
             for _label_name in all_known_labels:
                 if (
-                    _label_name.startswith("foreman:impl-attempt-")
-                    or _label_name == _LABEL_NEEDS_HELP
-                    or _label_name == _LABEL_FAILED
+                    _label_name.startswith(Labels.IMPL_ATTEMPT_PREFIX)
+                    or _label_name == Labels.NEEDS_HELP
+                    or _label_name == Labels.FAILED
                 ):
                     current_labels.discard(_label_name)
-            added_foreman_post.add(_LABEL_IMPL_REVIEW)
+            added_foreman_post.add(Labels.IMPL_REVIEW)
             # ``removed_foreman_post`` is computed at the WRITE site from
             # the freshly-read label set (impl-attempt-N matching is
             # pattern-based, so we resolve it against CURRENT remote state,
@@ -944,21 +946,21 @@ async def run_worker(
             # came in (manual CLI vs daemon).
             for _entry_label in _WORKER_ENTRY_LABELS:
                 current_labels.discard(_entry_label)
-            current_labels.add(_LABEL_SPEC_FIX)
-            current_labels.add(_LABEL_NEEDS_HELP)
+            current_labels.add(Labels.SPEC_FIX)
+            current_labels.add(Labels.NEEDS_HELP)
             removed_foreman_post |= set(_WORKER_ENTRY_LABELS)
-            added_foreman_post.add(_LABEL_SPEC_FIX)
-            added_foreman_post.add(_LABEL_NEEDS_HELP)
+            added_foreman_post.add(Labels.SPEC_FIX)
+            added_foreman_post.add(Labels.NEEDS_HELP)
         else:
             # incomplete: add needs-help so observers know to look. v3 does
             # not use an in-flight ``implementing`` label — the impl-attempt-N
             # marker carries cycle state. On the last attempt, also stamp
             # foreman:failed so the queue surfaces it for human triage.
-            current_labels.add(_LABEL_NEEDS_HELP)
-            added_foreman_post.add(_LABEL_NEEDS_HELP)
+            current_labels.add(Labels.NEEDS_HELP)
+            added_foreman_post.add(Labels.NEEDS_HELP)
             if attempt == max_impl_attempts:
-                current_labels.add(_LABEL_FAILED)
-                added_foreman_post.add(_LABEL_FAILED)
+                current_labels.add(Labels.FAILED)
+                added_foreman_post.add(Labels.FAILED)
 
         # Atomic label transition (adversarial review MEDIUM #12): apply the
         # full final ``current_labels`` set in one ``issue.set_labels(...)``
@@ -996,9 +998,9 @@ async def run_worker(
                 n
                 for n in current_label_names_post
                 if (
-                    n.startswith("foreman:impl-attempt-")
-                    or n == _LABEL_NEEDS_HELP
-                    or n == _LABEL_FAILED
+                    n.startswith(Labels.IMPL_ATTEMPT_PREFIX)
+                    or n == Labels.NEEDS_HELP
+                    or n == Labels.FAILED
                 )
             }
         final_label_set = (current_label_names_post - removed_foreman_post) | added_foreman_post

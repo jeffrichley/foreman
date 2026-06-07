@@ -60,6 +60,7 @@ from foreman.branches import spec_branch
 from foreman.config import Config
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
+from foreman.labels import Labels
 from foreman.provider import ProviderFacade
 from foreman.roles.reviewer import FINDINGS_BEGIN_MARKER, FINDINGS_END_MARKER
 from foreman.schemas.fixer import FixerOutput, FixerRunResult
@@ -94,24 +95,20 @@ _FIX_ATTEMPT_RE = re.compile(r"^foreman:fix-attempt-(\d+)$")
 FIXER_ALLOWED_TOOLS = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]
 
 # Labels the Fixer touches on the originating issue.
-_LABEL_SPEC_FIX = "foreman:spec-fix"
-# v3: a successful spec-side fix transitions the issue back to the
-# planning umbrella state; the reconciler then re-fires
-# ``dispatch_reviewer_spec`` once the PR head moves.
-_LABEL_PLANNING = "foreman:planning"
-_LABEL_NEEDS_HELP = "foreman:needs-help"
-_LABEL_FAILED = "foreman:failed"
+#
+# Issue #194: the per-module ``_LABEL_*`` constants previously declared
+# here are gone; consumers reach for :class:`foreman.labels.Labels`
+# directly. v3 has no distinct ``spec-review`` state, so a successful
+# spec-side fix transitions back to :attr:`Labels.PLANNING` and the
+# reconciler re-fires ``dispatch_reviewer_spec`` once the PR head moves.
 
 # foreman#79: per-target routing for the Fixer. The role accepts a
 # ``target`` kwarg (added by foreman#41 via DaemonRunners) that
 # distinguishes spec-PR fixes from impl-PR fixes. Each target gets
 # its own entry-label precondition and its own prompt composition.
-_LABEL_IMPL_FIX = "foreman:impl-fix"
-_LABEL_IMPL_REVIEW = "foreman:impl-review"
-
 _FIXER_ENTRY_LABEL_BY_TARGET: dict[str, str] = {
-    "spec_pr": _LABEL_SPEC_FIX,
-    "impl_pr": _LABEL_IMPL_FIX,
+    "spec_pr": Labels.SPEC_FIX,
+    "impl_pr": Labels.IMPL_FIX,
 }
 
 _FIXER_SUPERPOWERS_BY_TARGET: dict[str, list[str]] = {
@@ -480,7 +477,7 @@ async def run_fixer(
 
     # Stamp the new attempt label IMMEDIATELY so it's visible even if
     # the LLM dispatch crashes mid-run. Audit-trail before audit-loss.
-    attempt_label = f"foreman:fix-attempt-{attempt}"
+    attempt_label = Labels.fix_attempt(attempt)
     issue.add_to_labels(attempt_label)
     current_labels.add(attempt_label)
 
@@ -581,33 +578,33 @@ async def run_fixer(
         # Lifecycle stats JSONL preserves the cumulative audit trail;
         # labels reflect current-cycle state only.
         if target == "impl_pr":
-            current_labels.discard(_LABEL_IMPL_FIX)
-            current_labels.add(_LABEL_IMPL_REVIEW)
-            removed_foreman.add(_LABEL_IMPL_FIX)
-            added_foreman.add(_LABEL_IMPL_REVIEW)
+            current_labels.discard(Labels.IMPL_FIX)
+            current_labels.add(Labels.IMPL_REVIEW)
+            removed_foreman.add(Labels.IMPL_FIX)
+            added_foreman.add(Labels.IMPL_REVIEW)
         else:
             # v3: spec-side Fixer returns the issue to ``foreman:planning``
             # so the reconciler can re-fire ``dispatch_reviewer_spec`` on
             # the updated PR head. (v2 transitioned to a now-removed
             # ``foreman:spec-review`` label; v3 has no separate
             # spec-review state.)
-            current_labels.discard(_LABEL_SPEC_FIX)
-            current_labels.add(_LABEL_PLANNING)
-            removed_foreman.add(_LABEL_SPEC_FIX)
-            added_foreman.add(_LABEL_PLANNING)
+            current_labels.discard(Labels.SPEC_FIX)
+            current_labels.add(Labels.PLANNING)
+            removed_foreman.add(Labels.SPEC_FIX)
+            added_foreman.add(Labels.PLANNING)
         all_known_labels = issue_labels | {attempt_label}
         for label_name in all_known_labels:
-            if label_name.startswith("foreman:fix-attempt-") or label_name == _LABEL_NEEDS_HELP:
+            if label_name.startswith(Labels.FIX_ATTEMPT_PREFIX) or label_name == Labels.NEEDS_HELP:
                 current_labels.discard(label_name)
     else:
         # incomplete: keep spec-fix so the human (or a later daemon
         # pass) can re-trigger; flag for help; if last attempt, also
         # add the failed escalation.
-        current_labels.add(_LABEL_NEEDS_HELP)
-        added_foreman.add(_LABEL_NEEDS_HELP)
+        current_labels.add(Labels.NEEDS_HELP)
+        added_foreman.add(Labels.NEEDS_HELP)
         if attempt == max_fix_attempts:
-            current_labels.add(_LABEL_FAILED)
-            added_foreman.add(_LABEL_FAILED)
+            current_labels.add(Labels.FAILED)
+            added_foreman.add(Labels.FAILED)
 
     # Namespace-scoped merge (Pass 2 HIGH): re-read labels NOW (not
     # from the pre-LLM snapshot) so any operator-added label
@@ -635,7 +632,7 @@ async def run_fixer(
         removed_foreman |= {
             n
             for n in current_label_names
-            if n.startswith("foreman:fix-attempt-") or n == _LABEL_NEEDS_HELP
+            if n.startswith(Labels.FIX_ATTEMPT_PREFIX) or n == Labels.NEEDS_HELP
         }
     final_label_set = (current_label_names - removed_foreman) | added_foreman
     issue.set_labels(*sorted(final_label_set))

@@ -49,6 +49,7 @@ from github import Github, GithubException
 
 from foreman.auth import fetch_app_metadata, mint_installation_token
 from foreman.config import AppsConfig, Config, load_config
+from foreman.labels import Labels
 
 _log = logging.getLogger(__name__)
 
@@ -70,56 +71,51 @@ _DEFAULT_CHECK_COMMAND = "just check"
 # requiring click in this module.
 _DEFAULT_CONFIG_PATH = Path.home() / ".foreman" / "config.toml"
 
-# The Foreman labels created on the target repo. Order is intentional:
-# state labels first (in v3 pipeline order), then modifier labels, then
-# attempt counters. The structure mirrors the operator's mental model of
-# the pipeline rather than alphabetic order. Keep in sync with the
-# v3 reconciler rule catalog + role modules.
-_FOREMAN_LABELS: list[tuple[str, str, str]] = [
-    # name, color (no leading '#'), description
-    (
-        "foreman:plan",
+# Per-label color (no leading ``#``) + description. Keyed by the
+# canonical ``foreman:*`` string (sourced from :class:`Labels` — single
+# source of truth for the label names themselves). Colors and
+# descriptions are operator-facing init concerns and stay here rather
+# than in the leaf ``labels.py`` module so any caller can import the
+# catalog without dragging along init's render-summary copy text.
+#
+# Issue #194: keys MUST exactly match ``set(Labels.all())``. The
+# keystone test (``tests/test_labels_keystone.py``) enforces this
+# at test-time; adding a label to :class:`Labels` without registering
+# a color + description here is a test failure, not a silent skip.
+_LABEL_METADATA: dict[str, tuple[str, str]] = {
+    # name: (color, description)
+    Labels.PLAN: (
         "0E8A16",
         "Foreman: queue for planning (auto-transitions to foreman:planning)",
     ),
-    ("foreman:planning", "FBCA04", "Foreman: spec phase (Planner + Reviewer)"),
-    (
-        "foreman:plan-approved",
-        "0E8A16",
-        "Foreman: spec approved, queued for Worker",
-    ),
-    (
-        "foreman:merging-plan",
-        "FBCA04",
-        "Foreman: attempting to merge the spec PR",
-    ),
-    ("foreman:spec-fix", "D93F0B", "Foreman: spec PR needs human follow-up"),
-    ("foreman:impl-review", "FBCA04", "Foreman: impl PR ready for Reviewer"),
-    (
-        "foreman:impl-approved",
-        "0E8A16",
-        "Foreman: impl approved, queued for merge",
-    ),
-    (
-        "foreman:merging-impl",
-        "FBCA04",
-        "Foreman: attempting to merge the impl PR",
-    ),
-    ("foreman:impl-fix", "D93F0B", "Foreman: impl PR needs Fixer follow-up"),
-    (
-        "foreman:needs-help",
-        "FBCA04",
-        "Foreman: surfaced for human intervention",
-    ),
-    ("foreman:hold", "BFD4F2", "Foreman: manual pause (blocks all rules)"),
-    ("foreman:done", "6F42C1", "Foreman: ticket complete"),
-    ("foreman:failed", "B60205", "Foreman: ticket exhausted retries (terminal)"),
-    ("foreman:impl-attempt-1", "BFD4F2", "Foreman: impl cycle attempt 1 of 3"),
-    ("foreman:impl-attempt-2", "BFD4F2", "Foreman: impl cycle attempt 2 of 3"),
-    ("foreman:impl-attempt-3", "BFD4F2", "Foreman: impl cycle attempt 3 of 3"),
-    ("foreman:fix-attempt-1", "BFD4F2", "Foreman: fix cycle attempt 1 of 3"),
-    ("foreman:fix-attempt-2", "BFD4F2", "Foreman: fix cycle attempt 2 of 3"),
-    ("foreman:fix-attempt-3", "BFD4F2", "Foreman: fix cycle attempt 3 of 3"),
+    Labels.PLANNING: ("FBCA04", "Foreman: spec phase (Planner + Reviewer)"),
+    Labels.PLAN_APPROVED: ("0E8A16", "Foreman: spec approved, queued for Worker"),
+    Labels.MERGING_PLAN: ("FBCA04", "Foreman: attempting to merge the spec PR"),
+    Labels.SPEC_FIX: ("D93F0B", "Foreman: spec PR needs human follow-up"),
+    Labels.IMPL_REVIEW: ("FBCA04", "Foreman: impl PR ready for Reviewer"),
+    Labels.IMPL_APPROVED: ("0E8A16", "Foreman: impl approved, queued for merge"),
+    Labels.MERGING_IMPL: ("FBCA04", "Foreman: attempting to merge the impl PR"),
+    Labels.IMPL_FIX: ("D93F0B", "Foreman: impl PR needs Fixer follow-up"),
+    Labels.NEEDS_HELP: ("FBCA04", "Foreman: surfaced for human intervention"),
+    Labels.HOLD: ("BFD4F2", "Foreman: manual pause (blocks all rules)"),
+    Labels.DONE: ("6F42C1", "Foreman: ticket complete"),
+    Labels.FAILED: ("B60205", "Foreman: ticket exhausted retries (terminal)"),
+    Labels.IMPL_ATTEMPT_1: ("BFD4F2", "Foreman: impl cycle attempt 1 of 3"),
+    Labels.IMPL_ATTEMPT_2: ("BFD4F2", "Foreman: impl cycle attempt 2 of 3"),
+    Labels.IMPL_ATTEMPT_3: ("BFD4F2", "Foreman: impl cycle attempt 3 of 3"),
+    Labels.FIX_ATTEMPT_1: ("BFD4F2", "Foreman: fix cycle attempt 1 of 3"),
+    Labels.FIX_ATTEMPT_2: ("BFD4F2", "Foreman: fix cycle attempt 2 of 3"),
+    Labels.FIX_ATTEMPT_3: ("BFD4F2", "Foreman: fix cycle attempt 3 of 3"),
+}
+
+# The Foreman labels created on the target repo. Order is intentional:
+# state labels first (in v3 pipeline order), then modifier labels, then
+# attempt counters. The structure mirrors the operator's mental model of
+# the pipeline rather than alphabetic order — the order comes from
+# :meth:`Labels.all`, the single source of truth.
+_FOREMAN_LABELS: list[tuple[str, str, str]] = [
+    (name, _LABEL_METADATA[name][0], _LABEL_METADATA[name][1])
+    for name in Labels.all()
 ]
 
 # The four role names init knows about; mirrors :mod:`foreman.identity`.

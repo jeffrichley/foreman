@@ -44,6 +44,7 @@ from github.Repository import Repository
 from foreman.config import Config
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
+from foreman.labels import Labels
 from foreman.provider import ProviderFacade
 from foreman.schemas.reviewer import Finding, ReviewerOutput, ReviewerRunResult
 from foreman.worktree import WorktreeManager
@@ -62,12 +63,13 @@ REVIEWER_ALLOWED_TOOLS = ["Read", "Grep", "Glob", "Bash"]
 # Labels the Reviewer touches on the originating issue. The spec-PR labels
 # and impl-PR labels form parallel triples; ``run_reviewer`` picks one
 # triple based on the PR's head-branch shape.
-_LABEL_SPEC_REVIEW = "foreman:planning"
-_LABEL_SPEC_READY = "foreman:plan-approved"
-_LABEL_SPEC_FIX = "foreman:spec-fix"
-_LABEL_IMPL_REVIEW = "foreman:impl-review"
-_LABEL_READY_FOR_MERGE = "foreman:impl-approved"
-_LABEL_IMPL_FIX = "foreman:impl-fix"
+#
+# Issue #194: the per-module ``_LABEL_*`` constants previously declared
+# here are gone; consumers reach for :class:`foreman.labels.Labels`
+# directly. The spec-side review label is :attr:`Labels.PLANNING` (v3
+# has no distinct ``spec-review`` state); spec-side ready is
+# :attr:`Labels.PLAN_APPROVED`; impl-side ready is
+# :attr:`Labels.IMPL_APPROVED`.
 
 # foreman#78: per-target routing for the Reviewer. The role accepts
 # a ``target`` kwarg (added by foreman#41) that distinguishes spec
@@ -78,8 +80,8 @@ _LABEL_IMPL_FIX = "foreman:impl-fix"
 # ``release_pr``) requires updating the mappings deliberately, not
 # silently falling back to spec behavior.
 _REVIEWER_ENTRY_LABEL_BY_TARGET: dict[str, str] = {
-    "spec_pr": _LABEL_SPEC_REVIEW,
-    "impl_pr": _LABEL_IMPL_REVIEW,
+    "spec_pr": Labels.PLANNING,
+    "impl_pr": Labels.IMPL_REVIEW,
 }
 
 _REVIEWER_SUPERPOWERS_BY_TARGET: dict[str, list[str]] = {
@@ -374,11 +376,11 @@ async def run_reviewer(
 
     in_review_label = _REVIEWER_ENTRY_LABEL_BY_TARGET[target]
     if target == "impl_pr":
-        clean_label = _LABEL_READY_FOR_MERGE
-        fix_label = _LABEL_IMPL_FIX
+        clean_label = Labels.IMPL_APPROVED
+        fix_label = Labels.IMPL_FIX
     else:
-        clean_label = _LABEL_SPEC_READY
-        fix_label = _LABEL_SPEC_FIX
+        clean_label = Labels.PLAN_APPROVED
+        fix_label = Labels.SPEC_FIX
 
     issue = repo.get_issue(issue_number)
     issue_labels = {label.name for label in issue.labels}

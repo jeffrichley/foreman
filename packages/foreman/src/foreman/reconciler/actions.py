@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from foreman.config import MergeMechanism
+from foreman.labels import Labels
 from foreman.reconciler.exec_log import ExecutionLog
 from foreman.reconciler.host import ReconcilerHost
 from foreman.reconciler.state import IssueState, ProjectSnapshot, PRState
@@ -117,8 +118,8 @@ _DISPATCH_ROLE_FOR_ACTION: dict[Action, tuple[str, str | None]] = {
 # handler operates under. Reads from the focal issue's labels in the
 # rule; used here only for surface_help comment attribution.
 _MERGING_LABEL_FOR_TARGET: dict[str, str] = {
-    "plan": "foreman:merging-plan",
-    "impl": "foreman:merging-impl",
+    "plan": Labels.MERGING_PLAN,
+    "impl": Labels.MERGING_IMPL,
 }
 
 
@@ -262,7 +263,7 @@ def _surface_attempt_merge_needs_help(
         owner=ctx.snapshot.owner,
         repo=ctx.snapshot.repo,
         issue=ctx.issue.number,
-        label="foreman:needs-help",
+        label=Labels.NEEDS_HELP,
     )
     host.post_comment(
         owner=ctx.snapshot.owner,
@@ -272,7 +273,7 @@ def _surface_attempt_merge_needs_help(
             "Foreman v3 surfaced this ticket for human attention "
             f"(attempt_merge_{target}: {reason}; label {merging_label}). "
             "Investigate the PR's mergeable state and either fix or "
-            "remove the `foreman:needs-help` label to resume autonomous "
+            f"remove the `{Labels.NEEDS_HELP}` label to resume autonomous "
             "flow."
         ),
     )
@@ -330,7 +331,7 @@ def execute_action(
                 owner=ctx.snapshot.owner,
                 repo=ctx.snapshot.repo,
                 issue=ctx.issue.number,
-                label="foreman:needs-help",
+                label=Labels.NEEDS_HELP,
             )
             host.post_comment(
                 owner=ctx.snapshot.owner,
@@ -339,7 +340,7 @@ def execute_action(
                 body=(
                     "Foreman v3 surfaced this ticket for human attention. "
                     "Investigate state and either fix or remove the "
-                    "`foreman:needs-help` label to resume autonomous flow."
+                    f"`{Labels.NEEDS_HELP}` label to resume autonomous flow."
                 ),
             )
         elif action in _DISPATCH_ROLE_FOR_ACTION:
@@ -378,14 +379,14 @@ def execute_action(
                 owner=ctx.snapshot.owner,
                 repo=ctx.snapshot.repo,
                 issue=ctx.issue.number,
-                label="foreman:merging-plan",
+                label=Labels.MERGING_PLAN,
             )
         elif action is Action.ADVANCE_LABEL_TO_MERGING_IMPL:
             host.add_label(
                 owner=ctx.snapshot.owner,
                 repo=ctx.snapshot.repo,
                 issue=ctx.issue.number,
-                label="foreman:merging-impl",
+                label=Labels.MERGING_IMPL,
             )
         elif action is Action.ATTEMPT_MERGE_PLAN:
             _handle_attempt_merge(ctx, host, target="plan")
@@ -401,39 +402,39 @@ def execute_action(
                 owner=ctx.snapshot.owner,
                 repo=ctx.snapshot.repo,
                 issue=ctx.issue.number,
-                label="foreman:plan",
+                label=Labels.PLAN,
             )
             host.add_label(
                 owner=ctx.snapshot.owner,
                 repo=ctx.snapshot.repo,
                 issue=ctx.issue.number,
-                label="foreman:planning",
+                label=Labels.PLANNING,
             )
         elif action is Action.ADVANCE_LABEL_TO_PLAN_APPROVED:
             host.remove_label(
                 owner=ctx.snapshot.owner,
                 repo=ctx.snapshot.repo,
                 issue=ctx.issue.number,
-                label="foreman:planning",
+                label=Labels.PLANNING,
             )
             host.add_label(
                 owner=ctx.snapshot.owner,
                 repo=ctx.snapshot.repo,
                 issue=ctx.issue.number,
-                label="foreman:plan-approved",
+                label=Labels.PLAN_APPROVED,
             )
         elif action is Action.ADVANCE_LABEL_TO_DONE:
             host.remove_label(
                 owner=ctx.snapshot.owner,
                 repo=ctx.snapshot.repo,
                 issue=ctx.issue.number,
-                label="foreman:impl-approved",
+                label=Labels.IMPL_APPROVED,
             )
             host.add_label(
                 owner=ctx.snapshot.owner,
                 repo=ctx.snapshot.repo,
                 issue=ctx.issue.number,
-                label="foreman:done",
+                label=Labels.DONE,
             )
 
         # Some actions complete synchronously (label changes, merges,

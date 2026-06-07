@@ -10,6 +10,7 @@ import re
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
+from foreman.labels import Labels
 from foreman.reconciler.state import IssueState, ProjectSnapshot, PRState
 
 # Foreman branches follow ``foreman/issue-<N>`` for spec PRs and
@@ -46,49 +47,64 @@ class ObserverRateLimited(ObserverError):
     """GitHub returned a rate-limit signal."""
 
 
-_QUERY = """
-query ForemanProjectState($owner: String!, $repo: String!) {
-  repository(owner: $owner, name: $repo) {
+# The list of labels the observer filters issues by. Order + content
+# must remain byte-identical to the pre-#194 hand-written list — these
+# are the labels the v3 reconciler acts on, and any change here is a
+# behavioral change. Sourced from :class:`Labels` (issue #194) so a
+# rename of any of these labels propagates here automatically.
+_OBSERVER_FILTER_LABELS: tuple[str, ...] = (
+    Labels.PLAN,
+    Labels.PLANNING,
+    Labels.PLAN_APPROVED,
+    Labels.MERGING_PLAN,
+    Labels.SPEC_FIX,
+    Labels.IMPL_REVIEW,
+    Labels.IMPL_APPROVED,
+    Labels.MERGING_IMPL,
+    Labels.IMPL_FIX,
+    Labels.NEEDS_HELP,
+    Labels.HOLD,
+    Labels.FAILED,
+)
+
+# Indented as the labels appeared in the original triple-quoted query so
+# the rendered string is byte-identical to the hand-written version.
+_OBSERVER_FILTER_LABEL_LIST = ",\n".join(
+    f'        "{name}"' for name in _OBSERVER_FILTER_LABELS
+)
+
+_QUERY = f"""
+query ForemanProjectState($owner: String!, $repo: String!) {{
+  repository(owner: $owner, name: $repo) {{
     issues(
       first: 100,
       states: OPEN,
-      filterBy: { labels: [
-        "foreman:plan",
-        "foreman:planning",
-        "foreman:plan-approved",
-        "foreman:merging-plan",
-        "foreman:spec-fix",
-        "foreman:impl-review",
-        "foreman:impl-approved",
-        "foreman:merging-impl",
-        "foreman:impl-fix",
-        "foreman:needs-help",
-        "foreman:hold",
-        "foreman:failed"
-      ] }
-    ) {
-      nodes {
+      filterBy: {{ labels: [
+{_OBSERVER_FILTER_LABEL_LIST}
+      ] }}
+    ) {{
+      nodes {{
         number
         title
         body
         state
         updatedAt
-        labels(first: 30) { nodes { name } }
-        assignees(first: 10) { nodes { login } }
-      }
-    }
-    openPRs: pullRequests(first: 100, states: OPEN) {
-      nodes {
+        labels(first: 30) {{ nodes {{ name }} }}
+        assignees(first: 10) {{ nodes {{ login }} }}
+      }}
+    }}
+    openPRs: pullRequests(first: 100, states: OPEN) {{
+      nodes {{
         number
         headRefName
         body
         mergeable
         merged
         reviewDecision
-        statusCheckRollup { state }
-        closingIssuesReferences(first: 10) { nodes { number } }
-      }
-    }
+        statusCheckRollup {{ state }}
+        closingIssuesReferences(first: 10) {{ nodes {{ number }} }}
+      }}
+    }}
     recentMergedPRs: pullRequests(
       # Bounded window for lagging-label safety nets (e.g., the
       # ``retarget_impl_after_spec_merged`` family of rules). 50 buys ~2.5x
@@ -100,21 +116,21 @@ query ForemanProjectState($owner: String!, $repo: String!) {
       # poll_interval_seconds rather than add GraphQL pagination here.
       first: 50,
       states: MERGED,
-      orderBy: {field: UPDATED_AT, direction: DESC}
-    ) {
-      nodes {
+      orderBy: {{field: UPDATED_AT, direction: DESC}}
+    ) {{
+      nodes {{
         number
         headRefName
         body
         mergeable
         merged
         reviewDecision
-        statusCheckRollup { state }
-        closingIssuesReferences(first: 10) { nodes { number } }
-      }
-    }
-  }
-}
+        statusCheckRollup {{ state }}
+        closingIssuesReferences(first: 10) {{ nodes {{ number }} }}
+      }}
+    }}
+  }}
+}}
 """
 
 
