@@ -46,6 +46,24 @@ _FOREMAN_ENV_VARS_TO_SCRUB = (
     "FOREMAN_SHUTDOWN_SENTINEL_PATH",
     "FOREMAN_RELOAD_SENTINEL_PATH",
     "FOREMAN_LOCK_PATH",
+    # App-identity env vars — the resolver in config.py honors env var
+    # over the config-file literal, so leaking these from the container
+    # process (docker-compose `env_file: .env`) flips test assertions
+    # against the REAL App IDs. Surfaced 2026-06-07 in the autonomous-
+    # loop's first end-to-end dogfood: foreman#138's Worker
+    # verification-check ran the full foreman test suite inside the
+    # daemon container, and `test_mint_invoked_with_resolved_app_credentials`
+    # failed with `assert 3922445 == 123456` — the 3922445 is the real
+    # planner App ID picked up from the container env, the 123456 is
+    # the test's literal. Tests that genuinely need a specific App ID
+    # value still set it explicitly via ``monkeypatch.setenv`` inside
+    # the test body (this fixture runs first, so the test's setenv wins).
+    "FOREMAN_PLANNER_APP_ID",
+    "FOREMAN_REVIEWER_APP_ID",
+    "FOREMAN_FIXER_APP_ID",
+    "FOREMAN_WORKER_APP_ID",
+    "FOREMAN_ORCHESTRATOR_APP_ID",
+    "FOREMAN_ADMIN_TOKEN",
 )
 
 
