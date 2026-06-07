@@ -172,6 +172,25 @@ def _handle_attempt_merge(
             pr_number=ctx.pr.number,
             mechanism=ctx.merge_mechanism,
         )
+        # foreman#190: clear the corresponding ``foreman:merging-*`` label so
+        # downstream phase predicates see a clean post-merge label set.
+        # Without this, ``_advance_label_to_merging_impl_when_eligible``
+        # (rules.py:_advance_label_to_merging_impl_when_eligible) and
+        # ``_advance_label_to_merging_plan_when_eligible``
+        # (rules.py:_advance_label_to_merging_plan_when_eligible) refuse to
+        # fire — both predicates require BOTH ``merging-*`` labels absent.
+        # Placement: AFTER merge_pr (so a failed merge does not strip the
+        # label and force the retry rule to re-add it) and BEFORE return
+        # (so the cleanup is paired with the merge in a single action).
+        # The executor's except branch is the failure path: if merge_pr
+        # raises, control returns through there and this line never runs,
+        # preserving the retry-on-next-poll contract.
+        host.remove_label(
+            owner=ctx.snapshot.owner,
+            repo=ctx.snapshot.repo,
+            issue=ctx.issue.number,
+            label=_MERGING_LABEL_FOR_TARGET[target],
+        )
         return
 
     if state == "BEHIND":

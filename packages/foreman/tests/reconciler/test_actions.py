@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from foreman.reconciler.actions import Action, ActionContext, execute_action
 from foreman.reconciler.exec_log import ExecutionLog
 from foreman.reconciler.host import PRMergeability
@@ -583,7 +585,15 @@ def _attempt_merge_ctx(
 def test_attempt_merge_plan_clean_calls_host_merge_pr(tmp_path: Path) -> None:
     """CLEAN → call host.merge_pr with the configured merge_mechanism.
     No update_branch, no needs-help. Pins the spec's state-machine table
-    'all gates green → merge' row."""
+    'all gates green → merge' row.
+
+    foreman#190: also asserts the post-merge ``remove_label`` call that
+    clears ``foreman:merging-plan`` so the downstream phase predicates
+    (``_advance_label_to_merging_impl_when_eligible``) see a clean
+    label set. Ordering matters — ``remove_label`` MUST appear after
+    ``merge_pr`` so a failed merge does not strip the label and force
+    the retry rule to re-add it on every poll.
+    """
     ctx = _attempt_merge_ctx(tmp_path)
     host = _FakeHost()
     host.dispatch_mergeability_return = PRMergeability(
@@ -608,6 +618,26 @@ def test_attempt_merge_plan_clean_calls_host_merge_pr(tmp_path: Path) -> None:
     merge_call = next(c for c in host.calls if c[0] == "merge_pr")
     assert merge_call[1]["pr_number"] == 144
     assert merge_call[1]["mechanism"] == "direct"
+    # foreman#190: the merging-plan label must be removed AFTER merge_pr,
+    # not before — strict ordering protects the retry-on-failure contract.
+    merge_idx = next(
+        i for i, c in enumerate(host.calls) if c[0] == "merge_pr"
+    )
+    remove_idx = next(
+        (
+            i
+            for i, c in enumerate(host.calls)
+            if c[0] == "remove_label" and c[1]["label"] == "foreman:merging-plan"
+        ),
+        None,
+    )
+    assert remove_idx is not None, (
+        "expected remove_label(foreman:merging-plan) in host.calls after merge"
+    )
+    assert remove_idx > merge_idx, (
+        "remove_label must execute AFTER merge_pr — otherwise a failed "
+        "merge would strip the label and force the retry rule to re-add it"
+    )
 
 
 def test_attempt_merge_plan_behind_calls_host_update_branch_and_does_not_merge(
@@ -783,7 +813,12 @@ def test_attempt_merge_impl_clean_calls_host_merge_pr_on_impl_pr(
 ) -> None:
     """target=impl mirror: ATTEMPT_MERGE_IMPL calls host.merge_pr with the
     impl PR's number (not the spec PR's). One mirror test is enough — the
-    remaining branches share the body via target-parameterized helper."""
+    remaining branches share the body via target-parameterized helper.
+
+    foreman#190: also asserts the post-merge ``remove_label`` call that
+    clears ``foreman:merging-impl`` so subsequent ticks see a clean
+    label set (the bug-fixed predicate path).
+    """
     ctx = _attempt_merge_ctx(
         tmp_path, head_ref="foreman/impl-143", pr_number=200
     )
@@ -808,6 +843,304 @@ def test_attempt_merge_impl_clean_calls_host_merge_pr_on_impl_pr(
     # target-mixup regression where the handler reads pr_number from the
     # wrong source.
     assert merge_calls[0][1]["pr_number"] == 200
+    # foreman#190: post-merge cleanup of the merging-impl label, in
+    # that order — see test_attempt_merge_plan_clean_calls_host_merge_pr
+    # for the ordering rationale.
+    merge_idx = next(
+        i for i, c in enumerate(host.calls) if c[0] == "merge_pr"
+    )
+    remove_idx = next(
+        (
+            i
+            for i, c in enumerate(host.calls)
+            if c[0] == "remove_label" and c[1]["label"] == "foreman:merging-impl"
+        ),
+        None,
+    )
+    assert remove_idx is not None, (
+        "expected remove_label(foreman:merging-impl) in host.calls after merge"
+    )
+    assert remove_idx > merge_idx
+
+
+def _attempt_merge_ctx_with_merging_label(
+    tmp_path: Path,
+    *,
+    head_ref: str,
+    pr_number: int,
+    merging_label: str,
+) -> ActionContext:
+    """Like ``_attempt_merge_ctx`` but additionally seeds the issue's
+    labels with the corresponding ``foreman:merging-*`` label.
+
+    The production rule predicate guarantees the label is present when
+    the action fires (see ``_attempt_merge_plan_eligible`` /
+    ``_attempt_merge_impl_eligible`` in rules.py), so the tests for the
+    foreman#190 cleanup branch need that same precondition or they would
+    test an impossible state. The helper constructs a fresh ``IssueState``
+    rather than mutating the frozen dataclass returned by ``_snapshot``.
+    """
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    base_snap = _snapshot()
+    base_issue = base_snap.issues[0]
+    issue = IssueState(
+        number=base_issue.number,
+        title=base_issue.title,
+        labels=tuple(list(base_issue.labels) + [merging_label]),
+        assignees=base_issue.assignees,
+        body=base_issue.body,
+        updated_at=base_issue.updated_at,
+    )
+    snap = ProjectSnapshot(
+        project=base_snap.project,
+        owner=base_snap.owner,
+        repo=base_snap.repo,
+        issues=(issue,),
+        prs=base_snap.prs,
+        fetched_at=base_snap.fetched_at,
+    )
+    pr = PRState(
+        number=pr_number,
+        head_ref=head_ref,
+        mergeable="MERGEABLE",
+        ci_status="SUCCESS",
+        body="Implements #143",
+        linked_issue_numbers=(143,),
+        is_merged=False,
+    )
+    return ActionContext(snapshot=snap, issue=issue, pr=pr, log=log)
+
+
+def test_attempt_merge_plan_clean_removes_merging_plan_label_after_merge(
+    tmp_path: Path,
+) -> None:
+    """foreman#190 — the bug fix's primary unit test.
+
+    Pre-fix, the CLEAN branch of ``_handle_attempt_merge`` called
+    ``host.merge_pr`` and returned without touching the
+    ``foreman:merging-plan`` label. That stale label then blocked
+    ``_advance_label_to_merging_impl_when_eligible`` from firing once
+    the Worker produced an impl PR and the Reviewer approved it
+    (the predicate requires ``"foreman:merging-plan" not in labels``).
+
+    Post-fix, the CLEAN branch emits a ``remove_label`` for the
+    corresponding ``foreman:merging-*`` label so downstream phase
+    predicates see a clean post-merge label set.
+    """
+    ctx = _attempt_merge_ctx_with_merging_label(
+        tmp_path,
+        head_ref="foreman/issue-143",
+        pr_number=144,
+        merging_label="foreman:merging-plan",
+    )
+    host = _FakeHost()
+    host.dispatch_mergeability_return = PRMergeability(
+        state="CLEAN",
+        failing_required_check_count=0,
+        pending_required_check_count=0,
+    )
+
+    execute_action(
+        Action.ATTEMPT_MERGE_PLAN,
+        ctx,
+        host=host,
+        rule_name="attempt_merge_plan",
+        dry_run=False,
+    )
+
+    # The precise call shape: same owner / repo as the snapshot, same
+    # issue number as the focal issue, label exactly ``foreman:merging-plan``.
+    expected = (
+        "remove_label",
+        {
+            "owner": "jeffrichley",
+            "repo": "foreman",
+            "issue": 143,
+            "label": "foreman:merging-plan",
+        },
+    )
+    assert expected in host.calls, (
+        f"expected {expected!r} in host.calls; got {host.calls!r}"
+    )
+
+
+def test_attempt_merge_impl_clean_removes_merging_impl_label_after_merge(
+    tmp_path: Path,
+) -> None:
+    """Impl-side mirror of the foreman#190 fix. Same shape, different
+    target label (``foreman:merging-impl``) and impl-shaped head_ref."""
+    ctx = _attempt_merge_ctx_with_merging_label(
+        tmp_path,
+        head_ref="foreman/impl-143",
+        pr_number=200,
+        merging_label="foreman:merging-impl",
+    )
+    host = _FakeHost()
+    host.dispatch_mergeability_return = PRMergeability(
+        state="CLEAN",
+        failing_required_check_count=0,
+        pending_required_check_count=0,
+    )
+
+    execute_action(
+        Action.ATTEMPT_MERGE_IMPL,
+        ctx,
+        host=host,
+        rule_name="attempt_merge_impl",
+        dry_run=False,
+    )
+
+    expected = (
+        "remove_label",
+        {
+            "owner": "jeffrichley",
+            "repo": "foreman",
+            "issue": 143,
+            "label": "foreman:merging-impl",
+        },
+    )
+    assert expected in host.calls, (
+        f"expected {expected!r} in host.calls; got {host.calls!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "mergeability",
+    [
+        PRMergeability(
+            state="BEHIND",
+            failing_required_check_count=0,
+            pending_required_check_count=0,
+        ),
+        PRMergeability(
+            state="BLOCKED",
+            failing_required_check_count=0,
+            pending_required_check_count=2,
+        ),
+        PRMergeability(
+            state="BLOCKED",
+            failing_required_check_count=1,
+            pending_required_check_count=0,
+        ),
+        PRMergeability(
+            state="UNSTABLE",
+            failing_required_check_count=0,
+            pending_required_check_count=0,
+        ),
+        PRMergeability(
+            state="DIRTY",
+            failing_required_check_count=0,
+            pending_required_check_count=0,
+        ),
+        PRMergeability(
+            state="UNKNOWN",
+            failing_required_check_count=0,
+            pending_required_check_count=0,
+        ),
+    ],
+    ids=[
+        "BEHIND",
+        "BLOCKED_pending",
+        "BLOCKED_failing",
+        "UNSTABLE",
+        "DIRTY",
+        "UNKNOWN",
+    ],
+)
+def test_attempt_merge_plan_non_clean_paths_do_not_remove_merging_label(
+    tmp_path: Path, mergeability: PRMergeability
+) -> None:
+    """foreman#190 negative assertion: non-CLEAN branches must NOT emit
+    the post-merge ``remove_label`` for ``foreman:merging-plan``. If a
+    future refactor moves the cleanup outside the CLEAN branch (e.g.,
+    "always remove the label at the end"), the retry-on-next-poll
+    contract breaks — BEHIND, BLOCKED+pending, UNSTABLE, UNKNOWN all
+    require the label to stay so the rule re-fires on the next tick.
+    """
+    ctx = _attempt_merge_ctx_with_merging_label(
+        tmp_path,
+        head_ref="foreman/issue-143",
+        pr_number=144,
+        merging_label="foreman:merging-plan",
+    )
+    host = _FakeHost()
+    host.dispatch_mergeability_return = mergeability
+
+    execute_action(
+        Action.ATTEMPT_MERGE_PLAN,
+        ctx,
+        host=host,
+        rule_name="attempt_merge_plan",
+        dry_run=False,
+    )
+
+    assert not any(
+        c[0] == "remove_label" and c[1]["label"] == "foreman:merging-plan"
+        for c in host.calls
+    ), (
+        f"non-CLEAN path ({mergeability.state}) must NOT remove "
+        f"foreman:merging-plan; got host.calls={host.calls!r}"
+    )
+
+
+def test_attempt_merge_plan_clean_does_not_remove_label_when_merge_pr_raises(
+    tmp_path: Path,
+) -> None:
+    """foreman#190 — failure path: if ``host.merge_pr`` raises, the
+    cleanup must NOT run so the label stays on the issue and the next
+    poll re-enters ``_handle_attempt_merge`` to retry the merge.
+
+    Mirrors ``test_execute_action_handles_host_exception_and_logs_error``
+    in that the executor catches the exception and writes an ``error``
+    termination row; the handler never reaches the ``remove_label`` line
+    because control returns through the except branch.
+    """
+    ctx = _attempt_merge_ctx_with_merging_label(
+        tmp_path,
+        head_ref="foreman/issue-143",
+        pr_number=144,
+        merging_label="foreman:merging-plan",
+    )
+
+    class _MergePrRaisesHost(_FakeHost):
+        def merge_pr(self, **kwargs: Any) -> None:  # type: ignore[override]
+            # Record the attempt for the assertion below, then raise.
+            self.calls.append(("merge_pr", kwargs))
+            raise RuntimeError("boom")
+
+    host = _MergePrRaisesHost()
+    host.dispatch_mergeability_return = PRMergeability(
+        state="CLEAN",
+        failing_required_check_count=0,
+        pending_required_check_count=0,
+    )
+
+    execute_action(
+        Action.ATTEMPT_MERGE_PLAN,
+        ctx,
+        host=host,
+        rule_name="attempt_merge_plan",
+        dry_run=False,
+    )
+
+    # The failed merge_pr attempt was recorded.
+    assert any(c[0] == "merge_pr" for c in host.calls)
+    # The cleanup did NOT run — the label stays on the issue so the
+    # next poll re-enters the handler for a retry.
+    assert not any(
+        c[0] == "remove_label" and c[1]["label"] == "foreman:merging-plan"
+        for c in host.calls
+    ), (
+        "remove_label must NOT run when merge_pr raises — otherwise the "
+        "merging-plan label is gone and the retry rule cannot re-fire"
+    )
+    # And the executor wrote an ``error`` termination row.
+    with sqlite3.connect(tmp_path / "log.sqlite") as conn:
+        outcome = conn.execute(
+            "SELECT outcome FROM execution_log ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+    assert outcome == "error"
 
 
 def test_attempt_merge_plan_dry_run_skips_host(tmp_path: Path) -> None:

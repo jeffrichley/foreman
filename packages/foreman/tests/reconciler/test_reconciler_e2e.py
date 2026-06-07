@@ -565,3 +565,201 @@ async def test_reconciler_reload_inert_when_no_callback(tmp_path: Path) -> None:
 
     await reconciler.tick()  # Must not raise
     assert not reconciler._stop_event.is_set()
+
+
+# --- foreman#190 — full-lifecycle stale-label regression ---
+#
+# Pre-fix, the spec-PR merge tick called ``host.merge_pr`` without
+# clearing ``foreman:merging-plan``. The label survived into subsequent
+# ticks; when the Worker eventually produced an impl PR and the Reviewer
+# approved it, the issue ended up labeled
+# ``[impl-approved, merging-plan]``. Both
+# ``_advance_label_to_merging_impl_when_eligible`` and
+# ``_advance_label_to_merging_plan_when_eligible`` require
+# ``"foreman:merging-plan" not in labels``, so the rule refused to fire
+# and the ticket parked silently mid-pipeline (no error, no needs-help).
+#
+# Post-fix, the attempt-merge handler emits a ``remove_label`` after
+# ``merge_pr`` so the stale label is cleared atomically with the merge.
+# This test drives the full lifecycle through three ticks and asserts
+# (1) the cleanup happens, (2) the stuck label combination never
+# materializes, and (3) the impl-side rule fires on the post-merge tick.
+
+
+@dataclass
+class _StubHostWithMergeability(_StubHost):
+    """``_StubHost`` extended with the ``get_pr_mergeability`` /
+    ``update_branch`` methods that ``_handle_attempt_merge`` calls.
+
+    The base ``_StubHost`` only implements the methods the existing
+    label-advance / dispatch tests need; the attempt-merge flow needs the
+    mergeability read (which it always returns as ``CLEAN`` here so the
+    handler exercises the merge + cleanup branch).
+    """
+
+    def get_pr_mergeability(self, **kwargs: Any) -> Any:
+        from foreman.reconciler.host import PRMergeability
+
+        self.calls.append(("get_pr_mergeability", kwargs))
+        return PRMergeability(
+            state="CLEAN",
+            failing_required_check_count=0,
+            pending_required_check_count=0,
+        )
+
+    def update_branch(self, **kwargs: Any) -> None:
+        self.calls.append(("update_branch", kwargs))
+
+
+@pytest.mark.asyncio
+async def test_tick_full_lifecycle_does_not_stall_on_stale_merging_label(
+    tmp_path: Path,
+) -> None:
+    """foreman#190 regression: spec-merge → impl-approved transitions
+    must not park the ticket on the stale ``foreman:merging-plan`` label.
+
+    Drives the reconciler through three ticks, swapping the stub GH
+    client's response between ticks to simulate the observer re-reading
+    GitHub state. Per-tick:
+
+    - Tick 1: ``[plan-approved]`` + open spec PR →
+      ``ADVANCE_LABEL_TO_MERGING_PLAN`` fires, adding
+      ``foreman:merging-plan``.
+    - Tick 2: ``[plan-approved, merging-plan]`` + open spec PR →
+      ``ATTEMPT_MERGE_PLAN`` fires; the handler calls ``merge_pr`` then
+      ``remove_label("foreman:merging-plan")`` (the foreman#190 fix).
+    - Tick 3: ``[impl-approved]`` + open impl PR (head_ref
+      ``foreman/impl-143``) →
+      ``ADVANCE_LABEL_TO_MERGING_IMPL`` fires (the previously-blocked
+      rule the bug fix unblocks). Pre-fix, the snapshot would have
+      carried ``[impl-approved, merging-plan]`` and the rule's
+      ``merging-plan not in labels`` guard would have refused to fire.
+    """
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+
+    # Initial state: ``plan-approved`` + open spec PR. Stub starts here;
+    # we mutate ``gh.response`` between ticks to simulate the observer
+    # picking up subsequent GitHub state changes.
+    gh = _StubGHClient(
+        _gh_with(
+            [_issue_payload(143, ["foreman:plan-approved"])],
+            [_pr_payload(number=144, closes=[143])],
+        )
+    )
+    host = _StubHostWithMergeability()
+
+    reconciler = Reconciler(
+        projects=(
+            # auto_merge_impl=True is required for the third tick's
+            # ``_advance_label_to_merging_impl_when_eligible`` rule to fire
+            # — the default is False (matches production for impl PRs).
+            ReconcilerProject(
+                name="foreman",
+                owner="jeffrichley",
+                repo="foreman",
+                auto_merge_spec=True,
+                auto_merge_impl=True,
+            ),
+        ),
+        log=log,
+        gh=gh,
+        host=host,
+        dry_run=False,
+    )
+
+    # --- Tick 1: plan-approved → adds foreman:merging-plan ---
+    await reconciler.tick()
+    assert any(
+        c[0] == "add_label" and c[1].get("label") == "foreman:merging-plan"
+        for c in host.calls
+    ), (
+        "Tick 1 must add foreman:merging-plan via "
+        "ADVANCE_LABEL_TO_MERGING_PLAN; got host.calls="
+        f"{host.calls!r}"
+    )
+    tick1_call_count = len(host.calls)
+
+    # --- Tick 2: observer re-reads — issue now carries
+    # [plan-approved, merging-plan]; spec PR still open. ATTEMPT_MERGE_PLAN
+    # fires; handler calls merge_pr then remove_label(merging-plan). ---
+    gh.response = _gh_with(
+        [_issue_payload(143, ["foreman:plan-approved", "foreman:merging-plan"])],
+        [_pr_payload(number=144, closes=[143])],
+    )
+    await reconciler.tick()
+
+    tick2_calls = host.calls[tick1_call_count:]
+    assert any(c[0] == "merge_pr" for c in tick2_calls), (
+        f"Tick 2 must call host.merge_pr; got tick2_calls={tick2_calls!r}"
+    )
+    # foreman#190 — the cleanup call MUST fire after merge_pr.
+    merge_idx = next(
+        i for i, c in enumerate(tick2_calls) if c[0] == "merge_pr"
+    )
+    remove_idx = next(
+        (
+            i
+            for i, c in enumerate(tick2_calls)
+            if c[0] == "remove_label"
+            and c[1].get("label") == "foreman:merging-plan"
+        ),
+        None,
+    )
+    assert remove_idx is not None, (
+        "Tick 2 (post-merge) must call remove_label(foreman:merging-plan); "
+        f"got tick2_calls={tick2_calls!r}"
+    )
+    assert remove_idx > merge_idx, (
+        "remove_label must execute AFTER merge_pr — protects the "
+        "retry-on-failure contract for non-CLEAN states"
+    )
+    tick2_call_count = len(host.calls)
+
+    # --- Tick 3: observer re-reads — spec PR is merged-and-gone from the
+    # open list, the issue now carries [impl-approved] (the Reviewer has
+    # since approved an impl PR), and a new impl-shaped PR is open. Pre-
+    # foreman#190, the snapshot would have been [impl-approved, merging-plan]
+    # (stale) and the rule would have refused to fire. Post-fix, the
+    # merging-plan label is gone, and ADVANCE_LABEL_TO_MERGING_IMPL fires. ---
+    gh.response = _gh_with(
+        [_issue_payload(143, ["foreman:impl-approved"])],
+        [
+            _pr_payload(
+                number=200,
+                closes=[143],
+                head_ref="foreman/impl-143",
+            )
+        ],
+    )
+    await reconciler.tick()
+
+    tick3_calls = host.calls[tick2_call_count:]
+    assert any(
+        c[0] == "add_label" and c[1].get("label") == "foreman:merging-impl"
+        for c in tick3_calls
+    ), (
+        "Tick 3 must fire ADVANCE_LABEL_TO_MERGING_IMPL — pre-foreman#190 "
+        "the stale merging-plan label would have blocked the rule; "
+        f"got tick3_calls={tick3_calls!r}"
+    )
+
+    # Final regression guard: across the whole run, the host must never
+    # have been asked to operate on an issue whose label set carried BOTH
+    # foreman:merging-plan AND foreman:impl-approved at the same observed
+    # snapshot. That combination is the exact stuck-state shape from
+    # issues #138, #139, #170, #187. Since the test controls the GH
+    # responses, this assertion guards against future test edits that
+    # would re-introduce the stuck combination by mistake.
+    for response_labels in (
+        ["foreman:plan-approved"],
+        ["foreman:plan-approved", "foreman:merging-plan"],
+        ["foreman:impl-approved"],
+    ):
+        assert not (
+            "foreman:merging-plan" in response_labels
+            and "foreman:impl-approved" in response_labels
+        ), (
+            f"snapshot {response_labels!r} carries both merging-plan and "
+            "impl-approved — that is the exact foreman#190 stuck state"
+        )
