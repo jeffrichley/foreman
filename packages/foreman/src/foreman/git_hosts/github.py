@@ -10,10 +10,19 @@ embedding the installation token:
 
     https://x-access-token:<token>@github.com/<owner>/<repo>.git
 
-Commit attribution uses the App's slug + numeric id:
+Commit attribution uses the App's slug + numeric id, injected via env
+vars on the ``git commit`` subprocess (not via ``.git/config``):
 
-    git config user.name  "<slug>[bot]"
-    git config user.email "<app_id>+<slug>[bot]@users.noreply.github.com"
+    GIT_AUTHOR_NAME      = "<slug>[bot]"
+    GIT_AUTHOR_EMAIL     = "<app_id>+<slug>[bot]@users.noreply.github.com"
+    GIT_COMMITTER_NAME   = same as author
+    GIT_COMMITTER_EMAIL  = same as author
+
+The env-var route (foreman#53) is required because git worktrees share
+``.git/config`` with the parent repo — persisting ``user.name`` /
+``user.email`` there leaks the bot identity into subsequent human
+commits in the same checkout. Env vars scope identity to the one
+subprocess call.
 
 Both conventions are verified end-to-end in
 ``~/.wren/scratch/foreman-app-auth-spike.py`` (steps 7-8).
@@ -75,11 +84,24 @@ class GitHubProvider(GitHostProvider):
     # ------------------------------------------------------------------
     # Worktree git operations
     # ------------------------------------------------------------------
-    def configure_worktree_identity(self, worktree_path: Path) -> None:
-        user_name = f"{self._identity.slug}[bot]"
-        user_email = f"{self._identity.user_id}+{self._identity.slug}[bot]@users.noreply.github.com"
-        self._git(worktree_path, "config", "user.name", user_name)
-        self._git(worktree_path, "config", "user.email", user_email)
+    def _identity_env(self) -> dict[str, str]:
+        """Build the env-var dict that scopes commit attribution to this
+        provider's bot identity for a single ``git commit`` subprocess.
+
+        foreman#53: ``git config user.name`` writes ``.git/config`` which
+        a worktree shares with its parent repo, so the bot identity leaks
+        into every subsequent human commit in the same checkout. Env vars
+        ``GIT_AUTHOR_*`` / ``GIT_COMMITTER_*`` scope identity to one
+        subprocess call without touching any persistent config.
+        """
+        bot_name = f"{self._identity.slug}[bot]"
+        bot_email = f"{self._identity.user_id}+{self._identity.slug}[bot]@users.noreply.github.com"
+        return {
+            "GIT_AUTHOR_NAME": bot_name,
+            "GIT_AUTHOR_EMAIL": bot_email,
+            "GIT_COMMITTER_NAME": bot_name,
+            "GIT_COMMITTER_EMAIL": bot_email,
+        }
 
     def commit_files_to_worktree(
         self,
@@ -111,7 +133,7 @@ class GitHubProvider(GitHostProvider):
         if diff_check.returncode == 0:
             head = self._git(worktree_path, "rev-parse", "HEAD")
             return head.stdout.strip()
-        self._git(worktree_path, "commit", "-m", message)
+        self._git(worktree_path, "commit", "-m", message, env_extra=self._identity_env())
         result = self._git(worktree_path, "rev-parse", "HEAD")
         return result.stdout.strip()
 
@@ -166,14 +188,25 @@ class GitHubProvider(GitHostProvider):
     # Internals
     # ------------------------------------------------------------------
     @staticmethod
-    def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    def _git(
+        cwd: Path,
+        *args: str,
+        env_extra: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         """Run a ``git`` subprocess, surfacing stderr and redacting tokens on failure.
 
         On ``CalledProcessError`` we raise :class:`GitCommandError` so callers
         see git's actual stderr (Defect B) and so any token-shaped strings in
         the argv or stderr are redacted before they hit logs or tracebacks
         (Defect C).
+
+        ``env_extra`` merges into the filtered env for this one call —
+        used by ``commit_files_to_worktree`` to scope ``GIT_AUTHOR_*`` /
+        ``GIT_COMMITTER_*`` to the commit subprocess (foreman#53).
         """
+        env = _filtered_subprocess_env()
+        if env_extra:
+            env = {**env, **env_extra}
         try:
             return subprocess.run(
                 ["git", *args],
@@ -181,7 +214,7 @@ class GitHubProvider(GitHostProvider):
                 check=True,
                 capture_output=True,
                 text=True,
-                env=_filtered_subprocess_env(),
+                env=env,
             )
         except subprocess.CalledProcessError as exc:
             raise GitCommandError(

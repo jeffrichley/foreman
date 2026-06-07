@@ -10,16 +10,15 @@ host-platform operations through the
      (via :class:`~foreman.identity.IdentityRegistry`)
   3. Fetch :class:`~foreman.git_host.IssueRef` via ``host.get_issue``
   4. Create the per-ticket worktree (:class:`~foreman.worktree.WorktreeManager`)
-  5. Configure the worktree git identity (``host.configure_worktree_identity``)
-  6. Build LLM context and dispatch with READ-ONLY tools
-  7. Parse the ``PlannerOutput``
-  8. Commit the spec doc (``host.commit_files_to_worktree``)
-  9. Push the branch (``host.push_branch``)
-  10. Open the spec PR (``host.open_pull_request``). The issue stays at
-       ``foreman:planning`` so v3's reconciler (``dispatch_reviewer_spec``)
-       fires on ``foreman:planning`` + the open spec PR — no label mutation
-       needed here.
-  11. Return :class:`~foreman.schemas.planner.PlannerRunResult`
+  5. Build LLM context and dispatch with READ-ONLY tools
+  6. Parse the ``PlannerOutput``
+  7. Commit the spec doc (``host.commit_files_to_worktree``)
+  8. Push the branch (``host.push_branch``)
+  9. Open the spec PR (``host.open_pull_request``). The issue stays at
+      ``foreman:planning`` so v3's reconciler (``dispatch_reviewer_spec``)
+      fires on ``foreman:planning`` + the open spec PR — no label mutation
+      needed here.
+  10. Return :class:`~foreman.schemas.planner.PlannerRunResult`
 
 Decoupling rationale (Foreman issue #8 — the "Looper pattern"):
 the LLM is non-deterministic and host-agnostic; deterministic operations
@@ -192,7 +191,12 @@ async def run_planner(
         dev_base_branch=project.dev_base_branch,
         repo_url=f"https://github.com/{project.repo}.git",
     )
-    host.configure_worktree_identity(wt_path)
+
+    # foreman#53: bot identity is injected per-commit via env vars inside
+    # ``host.commit_files_to_worktree``; the legacy
+    # ``configure_worktree_identity`` call mutated ``.git/config`` which
+    # worktrees share with the parent repo, leaking the bot identity
+    # into subsequent human commits.
 
     instructions = load_project_instructions(Path(project.local_clone_path))
 

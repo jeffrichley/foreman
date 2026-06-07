@@ -140,7 +140,6 @@ class _FakeHostProvider(GitHostProvider):
         self.committed_files: dict[str, str] | None = None
         self.commit_message: str | None = None
         self.pushed_branch: str | None = None
-        self.configure_calls: list[Path] = []
         self.label_calls: list[tuple[str, int, list[str], list[str]]] = []
         # foreman#63: capture the body kwarg that arrives at
         # ``open_pull_request`` so the auto-close-strip integration test
@@ -161,9 +160,6 @@ class _FakeHostProvider(GitHostProvider):
 
     def get_default_branch(self, repo_slug: str) -> str:
         return self.default_branch
-
-    def configure_worktree_identity(self, worktree_path: Path) -> None:
-        self.configure_calls.append(worktree_path)
 
     def commit_files_to_worktree(
         self, worktree_path: Path, files: dict[str, str], message: str
@@ -326,8 +322,9 @@ async def test_run_planner_dispatches_and_advances_label(
     # No env injection (decoupled from gh CLI)
     assert "env" not in call_kwargs or call_kwargs["env"] is None
 
-    # Host operations all happened, in order
-    assert fake_host.configure_calls, "configure_worktree_identity must be called"
+    # Host operations all happened, in order. Note: foreman#53 removed
+    # the configure_worktree_identity call from Planner — bot identity is
+    # now injected per-commit via env vars inside commit_files_to_worktree.
     assert fake_host.committed_files == {
         "docs/superpowers/specs/foreman-issue-42-spec.md": (
             "# Spec: SSML support (issue #42)\n\n## Goal\nx\n"
