@@ -319,6 +319,7 @@ async def run_reviewer(
     worktrees_root: Path,
     provider: ProviderFacade,
     identity_registry: IdentityRegistry | None = None,
+    target: Literal["spec_pr", "impl_pr"] | None = None,
 ) -> ReviewerRunResult:
     """Run the Reviewer role end-to-end on one spec PR.
 
@@ -332,6 +333,10 @@ async def run_reviewer(
         identity_registry: Optional pre-built registry; defaults to a fresh
             :class:`~foreman.identity.IdentityRegistry` for the project.
             Tests inject a fake registry to bypass real App auth.
+        target: Optional caller-supplied target; when provided, cross-checked
+            against the head-branch-derived target and raises
+            ``RuntimeError`` on mismatch. ``None`` preserves the pre-#198
+            behavior where head ref is the only signal.
 
     Returns:
         A :class:`~foreman.schemas.reviewer.ReviewerRunResult` bundling
@@ -348,7 +353,10 @@ async def run_reviewer(
         RuntimeError: Source issue is missing the target-appropriate
             review label (``foreman:planning`` for spec PRs,
             ``foreman:impl-review`` for impl PRs) — we refuse to advance
-            PRs whose source issue was not queued for review.
+            PRs whose source issue was not queued for review. Also raised
+            when the caller-supplied ``target`` disagrees with the PR
+            head branch's derived target (defensive cross-check; see
+            issue #198).
     """
     owner, repo_name, pr_number = parse_pr_url(pr_url)
     project = config.projects[project_name]
@@ -370,10 +378,21 @@ async def run_reviewer(
     head_branch = pr.head.ref
     head_sha = pr.head.sha
     base_branch = pr.base.ref
-    issue_number, target = _parse_review_branch(head_branch)
+    issue_number, head_target = _parse_review_branch(head_branch)
 
-    in_review_label = _REVIEWER_ENTRY_LABEL_BY_TARGET[target]
-    if target == "impl_pr":
+    # foreman#198: role/action boundary safety net — if the dispatch
+    # action passes ``--target`` (v3 always does, for symmetry with
+    # the Fixer), cross-check it against the head-derived target so a
+    # mis-routed dispatch crashes immediately with an actionable error
+    # rather than silently reviewing the wrong PR shape.
+    if target is not None and target != head_target:
+        raise RuntimeError(
+            f"target mismatch: --target={target!r} but PR head_ref="
+            f"{head_branch!r} implies {head_target!r}"
+        )
+
+    in_review_label = _REVIEWER_ENTRY_LABEL_BY_TARGET[head_target]
+    if head_target == "impl_pr":
         clean_label = _LABEL_READY_FOR_MERGE
         fix_label = _LABEL_IMPL_FIX
     else:
@@ -401,7 +420,7 @@ async def run_reviewer(
     # ``role_token`` parameter is plumbed all the way down through the
     # module-level git helpers.
     wt_mgr = WorktreeManager(worktrees_root=worktrees_root, role_token=reviewer_token)
-    if target == "impl_pr":
+    if head_target == "impl_pr":
         wt_path = wt_mgr.attach_impl(
             clone_path=Path(project.local_clone_path),
             repo_slug=repo_name,
@@ -422,7 +441,7 @@ async def run_reviewer(
     spec_doc_content = _read_spec_doc(wt_path, issue_number)
     instructions = load_project_instructions(Path(project.local_clone_path))
 
-    system_prompt = _load_reviewer_prompt(target=target)
+    system_prompt = _load_reviewer_prompt(target=head_target)
     user_prompt = _build_user_prompt(
         issue_title=issue_title,
         issue_body=issue_body,

@@ -488,6 +488,139 @@ async def test_run_reviewer_clean_outcome_advances_to_plan_approved(
     assert result.final_labels == ["foreman:plan-approved"]
 
 
+# ----------------------------------------------------------------------
+# foreman#198 — caller-supplied ``target`` cross-check
+#
+# v3 dispatch actions emit ``--target {spec_pr,impl_pr}`` for symmetry
+# with the Fixer. Head-ref stays canonical at the role level, but the
+# Reviewer now cross-checks the caller-supplied target against the
+# head-derived target and raises ``RuntimeError`` on mismatch — a
+# defensive safety net at the role/action boundary against mis-routed
+# dispatches (the HIGH #7 class of bug).
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_reviewer_accepts_matching_target_arg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Caller-supplied ``target="spec_pr"`` matches the head-derived
+    target for a spec-shaped PR — normal flow proceeds end-to-end."""
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
+
+    cfg = _make_config(clone)
+    repo, pr, issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeReviewerClient(repo=repo)
+    registry = _make_registry(client)
+
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_make_clean_output())
+
+    result = await run_reviewer(
+        pr_url="https://github.com/jeffrichley/voice/pull/77",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+        target="spec_pr",
+    )
+
+    # LLM dispatched, review posted, label transitioned — same flow as
+    # the no-target test, proving the cross-check is a no-op when the
+    # caller-supplied target matches the head ref.
+    fake_provider.run_agent.assert_called_once()
+    assert result.llm_output.outcome == "clean"
+    assert len(pr.reviews_posted) == 1
+    assert issue.removed == ["foreman:planning"]
+    assert issue.added == ["foreman:plan-approved"]
+    assert result.final_labels == ["foreman:plan-approved"]
+
+
+@pytest.mark.asyncio
+async def test_run_reviewer_accepts_none_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Explicit ``target=None`` exercises the backward-compatible
+    default — no cross-check is performed, the role behaves identically
+    to the pre-#198 single-signal (head ref) path."""
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
+
+    cfg = _make_config(clone)
+    repo, pr, issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeReviewerClient(repo=repo)
+    registry = _make_registry(client)
+
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_make_clean_output())
+
+    result = await run_reviewer(
+        pr_url="https://github.com/jeffrichley/voice/pull/77",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+        target=None,
+    )
+
+    fake_provider.run_agent.assert_called_once()
+    assert result.llm_output.outcome == "clean"
+    assert len(pr.reviews_posted) == 1
+    assert issue.removed == ["foreman:planning"]
+    assert issue.added == ["foreman:plan-approved"]
+    assert result.final_labels == ["foreman:plan-approved"]
+
+
+@pytest.mark.asyncio
+async def test_run_reviewer_raises_on_target_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Caller-supplied ``target="impl_pr"`` against a spec-shaped PR
+    (head_ref ``foreman/issue-42``) — the role/action boundary safety
+    net fires and the role crashes with all three values named in the
+    error message. No side effects: no review posted, no label set
+    written."""
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
+
+    cfg = _make_config(clone)
+    repo, pr, issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeReviewerClient(repo=repo)
+    registry = _make_registry(client)
+
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_make_clean_output())
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await run_reviewer(
+            pr_url="https://github.com/jeffrichley/voice/pull/77",
+            config=cfg,
+            project_name="voice",
+            worktrees_root=tmp_path / "worktrees",
+            provider=fake_provider,
+            identity_registry=registry,
+            target="impl_pr",
+        )
+
+    message = str(exc_info.value)
+    # All three variables named in the error so the audit log is
+    # self-describing.
+    assert "impl_pr" in message
+    assert "foreman/issue-42" in message
+    assert "spec_pr" in message
+
+    # The guard fires before any side effects — no LLM dispatch, no
+    # review posted, no label transition.
+    assert pr.reviews_posted == []
+    assert issue.set_labels_calls == []
+
+
 @pytest.mark.asyncio
 async def test_run_reviewer_uses_atomic_set_labels_for_transition(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

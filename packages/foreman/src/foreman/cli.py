@@ -17,7 +17,7 @@ import signal
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 import click
 from github import Auth, Github
@@ -117,18 +117,18 @@ def review(
     PR opened by the Worker.
 
     The Reviewer derives spec-vs-impl from the PR's head branch shape
-    (foreman/issue-<N> vs foreman/impl-<N>); ``--target`` is accepted but
-    currently advisory (the role infers target from the PR itself).
+    (foreman/issue-<N> vs foreman/impl-<N>); when ``--target`` is supplied
+    (e.g., from the v3 dispatch action), the role cross-checks it against
+    the head-derived target and raises on mismatch.
     """
     cfg_path = config_path or _default_config_path()
     cfg = load_config(cfg_path)
     provider = AnthropicSDKProvider()
-    # ``target`` is accepted for symmetry with ``foreman fix`` and to keep
-    # the v3 dispatch argv shape uniform; ``run_reviewer`` itself does not
-    # take a ``target`` kwarg today (the Reviewer parses the PR head to
-    # decide spec vs impl). Forwarding the flag would require a role-side
-    # signature change — out of scope for the Stage-2 action split.
-    _ = target
+    # ``click.Choice(["spec_pr", "impl_pr"])`` already constrains ``target``
+    # to those two strings (or ``None`` when --target is omitted); mypy
+    # only sees ``str | None`` from the click decorator's general typing,
+    # so narrow with ``cast`` before handing to the role's Literal kwarg.
+    target_typed = cast(Literal["spec_pr", "impl_pr"] | None, target)
     result = asyncio.run(
         run_reviewer(
             pr_url=pr_url,
@@ -136,6 +136,7 @@ def review(
             project_name=project,
             worktrees_root=_default_worktrees_root(),
             provider=provider,
+            target=target_typed,
         )
     )
     llm = result.llm_output
