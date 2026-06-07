@@ -15,6 +15,7 @@ app_id_env = "FOREMAN_ORCHESTRATOR_APP_ID"
 private_key_path = "/run/secrets/orchestrator_pem"
 
 [reconciler]
+db_path = "/foreman/state/reconciler.sqlite"
 auto_merge_spec = true
 auto_merge_impl = false
 
