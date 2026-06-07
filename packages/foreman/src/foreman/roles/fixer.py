@@ -480,6 +480,18 @@ async def run_fixer(
 
     # Stamp the new attempt label IMMEDIATELY so it's visible even if
     # the LLM dispatch crashes mid-run. Audit-trail before audit-loss.
+    #
+    # Additive by design: ``add_to_labels``, not ``set_labels``.
+    # The Fixer's entry label (``foreman:spec-fix`` /
+    # ``foreman:impl-fix``, see ``_FIXER_ENTRY_LABEL_BY_TARGET``)
+    # persists across attempts, so there is no atomic transition
+    # to protect. Contrast Worker, whose ``foreman:plan-approved``
+    # entry label is consumed by dispatch — Worker uses
+    # ``set_labels`` (``worker.py:722``) plus a ``finally`` revert
+    # (``worker.py:1059-1083``) to avoid stranding the issue
+    # half-transitioned. Fixer has nothing to revert, so a
+    # pre-output crash burns an attempt against ``max_fix_attempts``
+    # (gated above) — three real crashes correctly escalate.
     attempt_label = f"foreman:fix-attempt-{attempt}"
     issue.add_to_labels(attempt_label)
     current_labels.add(attempt_label)
