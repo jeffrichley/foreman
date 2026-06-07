@@ -6,6 +6,8 @@ import json
 import logging
 from pathlib import Path
 
+import pytest
+
 from foreman.logging_setup import configure_daemon_logging
 
 
@@ -152,3 +154,48 @@ def test_configure_daemon_logging_idempotent_does_not_accumulate_own_handlers(
         )
     finally:
         foreman_logger.handlers.clear()
+
+
+# foreman#138 (rescue from PR #207): mirror daemon log to stdout as JSON
+# for docker logs. These two tests guard the stdout-mirror behavior that
+# `if console:` enables when configure_daemon_logging is called with
+# console=True. The orphaned PR #207 was the original carrier of these.
+def test_configure_daemon_logging_mirrors_to_stdout_as_json_when_console_true(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    log_path = tmp_path / "daemon.log"
+    configure_daemon_logging(log_path=log_path, level="INFO", console=True)
+
+    logger = logging.getLogger("foreman.daemon.test_stdout_mirror")
+    logger.info("stdout-mirror", extra={"ticket": 138, "project": "foreman"})
+
+    for handler in logging.getLogger("foreman").handlers:
+        handler.flush()
+
+    captured_out = capsys.readouterr().out
+    line = captured_out.strip().splitlines()[-1]
+    record = json.loads(line)
+    assert record["message"] == "stdout-mirror"
+    assert record["level"] == "INFO"
+    assert record["ticket"] == 138
+    assert record["project"] == "foreman"
+    assert "timestamp" in record
+
+
+def test_configure_daemon_logging_disk_and_stdout_payloads_match(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    log_path = tmp_path / "daemon.log"
+    configure_daemon_logging(log_path=log_path, level="INFO", console=True)
+
+    logger = logging.getLogger("foreman.daemon.test_payload_match")
+    logger.info("payload-match", extra={"ticket": 138, "phase": "dual-emit"})
+
+    for handler in logging.getLogger("foreman").handlers:
+        handler.flush()
+
+    disk_line = log_path.read_text().strip().splitlines()[-1]
+    stdout_line = capsys.readouterr().out.strip().splitlines()[-1]
+    disk_record = json.loads(disk_line)
+    stdout_record = json.loads(stdout_line)
+    assert disk_record == stdout_record
