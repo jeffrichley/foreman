@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -44,6 +45,29 @@ from foreman.schemas.worker import (
 # ----------------------------------------------------------------------
 # parse_issue_url
 # ----------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _no_op_verify_push_for_unrelated_tests(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """foreman#175 belt-and-suspenders bookkeeping.
+
+    The Worker now calls ``_verify_impl_branch_remote_state`` before
+    ``create_pull`` — but the existing ``test_run_worker_*`` integration
+    tests don't set up git worktrees that have the impl branch pushed
+    to the fake remote, and they aren't trying to test the verify-push
+    path. Auto-no-op the verify helper for every test in this module
+    EXCEPT the ones explicitly testing ``_verify_impl_branch_remote_state``
+    so we don't have to touch every existing test's setup just to
+    accommodate the new safety check.
+    """
+    if request.node.name.startswith("test_verify_impl_branch_"):
+        return  # let the verify-specific tests exercise the real implementation
+    monkeypatch.setattr(
+        "foreman.roles.worker._verify_impl_branch_remote_state",
+        lambda *args, **kwargs: None,
+    )
 
 
 def test_parse_issue_url_extracts_owner_repo_number() -> None:
@@ -250,6 +274,224 @@ def test_create_pull_with_base_fallback_re_raises_unrelated_github_exception() -
             head="foreman/impl-100",
         )
     assert len(repo.create_pull_calls) == 1
+
+
+# ----------------------------------------------------------------------
+# _verify_impl_branch_remote_state (foreman#175)
+# ----------------------------------------------------------------------
+
+
+class _StubBranchCommit:
+    def __init__(self, sha: str) -> None:
+        self.sha = sha
+
+
+class _StubBranch:
+    def __init__(self, sha: str) -> None:
+        self.commit = _StubBranchCommit(sha)
+
+
+class _StubRepoForVerify:
+    """Stand-in for ``github.Repository.Repository`` exposing the
+    surface ``_verify_impl_branch_remote_state`` touches: ``get_branch``.
+
+    Construct with ``branches={'name': 'sha'}`` for branches that exist
+    on remote. Missing branches raise ``GithubException(status=404)``.
+    ``get_branch_calls`` is a counter so tests can assert how many
+    re-checks happened.
+    """
+
+    def __init__(self, branches: dict[str, str] | None = None) -> None:
+        self.branches = dict(branches or {})
+        self.get_branch_calls = 0
+
+    def get_branch(self, name: str) -> _StubBranch:
+        self.get_branch_calls += 1
+        if name not in self.branches:
+            raise GithubException(
+                status=404, data={"message": "Branch not found"}, headers={}
+            )
+        return _StubBranch(self.branches[name])
+
+
+def _patched_subprocess_run(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    local_head_sha: str,
+    push_callback: Callable[[], None] | None = None,
+    push_returncode: int = 0,
+    push_stderr: str = "",
+) -> list[list[str]]:
+    """Patch ``subprocess.run`` inside ``foreman.roles.worker`` so the
+    verify helper sees a deterministic local HEAD and a mock push.
+
+    Returns a list of recorded argv vectors so tests can assert which
+    git commands ran in which order.
+    """
+    from unittest.mock import MagicMock
+
+    recorded: list[list[str]] = []
+
+    def _fake_run(cmd, **kwargs):
+        recorded.append(list(cmd))
+        result = MagicMock()
+        result.returncode = 0
+        result.stderr = ""
+        if cmd[:3] == ["git", "rev-parse", "HEAD"]:
+            result.stdout = local_head_sha + "\n"
+            return result
+        if cmd[:2] == ["git", "push"]:
+            if push_callback is not None:
+                push_callback()
+            result.returncode = push_returncode
+            result.stderr = push_stderr
+            result.stdout = ""
+            return result
+        result.stdout = ""
+        return result
+
+    monkeypatch.setattr("foreman.roles.worker.subprocess.run", _fake_run)
+    # Patch the env-filter import too so it returns a plain dict and
+    # doesn't require the real bot-token plumbing.
+    monkeypatch.setattr(
+        "foreman._env_filter.filtered_subprocess_env",
+        lambda role_token=None: {"PATH": "/usr/bin"},
+    )
+    return recorded
+
+
+def test_verify_impl_branch_no_op_when_remote_matches_local(tmp_path, monkeypatch) -> None:
+    """foreman#175: when the LLM did push and the remote already
+    matches local HEAD, the verify helper is a no-op — no push, no
+    log warning."""
+    from foreman.roles.worker import _verify_impl_branch_remote_state
+
+    local_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    repo = _StubRepoForVerify(branches={"foreman/impl-100": local_sha})
+    recorded = _patched_subprocess_run(monkeypatch, local_head_sha=local_sha)
+
+    _verify_impl_branch_remote_state(
+        repo,  # type: ignore[arg-type]
+        branch="foreman/impl-100",
+        worktree_path=tmp_path,
+        role_token="ghs_worker",
+    )
+
+    # One rev-parse call. No git push call.
+    assert recorded == [["git", "rev-parse", "HEAD"]]
+    # Only one get_branch call (no re-check).
+    assert repo.get_branch_calls == 1
+
+
+def test_verify_impl_branch_remote_missing_recovers_via_push(tmp_path, monkeypatch) -> None:
+    """foreman#175: if the LLM forgot to push, the remote branch is
+    404. The verify helper runs ``git push origin <branch>`` and then
+    re-verifies."""
+    from foreman.roles.worker import _verify_impl_branch_remote_state
+
+    local_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    repo = _StubRepoForVerify(branches={})  # remote branch missing
+
+    def _on_push() -> None:
+        # The push lands the branch on remote.
+        repo.branches["foreman/impl-100"] = local_sha
+
+    recorded = _patched_subprocess_run(
+        monkeypatch, local_head_sha=local_sha, push_callback=_on_push
+    )
+
+    _verify_impl_branch_remote_state(
+        repo,  # type: ignore[arg-type]
+        branch="foreman/impl-100",
+        worktree_path=tmp_path,
+        role_token="ghs_worker",
+    )
+
+    # rev-parse → git push → (helper does NOT re-rev-parse, only re-get_branch).
+    assert recorded == [
+        ["git", "rev-parse", "HEAD"],
+        ["git", "push", "origin", "foreman/impl-100"],
+    ]
+    # Two get_branch calls: initial (404) + post-push verify (now matches).
+    assert repo.get_branch_calls == 2
+
+
+def test_verify_impl_branch_sha_mismatch_recovers_via_push(tmp_path, monkeypatch) -> None:
+    """foreman#175: remote branch exists but at an older commit (LLM
+    pushed once, then committed more locally without re-pushing). The
+    verify helper runs ``git push origin <branch>`` to bring the
+    remote up to local HEAD."""
+    from foreman.roles.worker import _verify_impl_branch_remote_state
+
+    local_sha = "cccccccccccccccccccccccccccccccccccccccc"
+    older_sha = "0000000000000000000000000000000000000000"
+    repo = _StubRepoForVerify(branches={"foreman/impl-100": older_sha})
+
+    def _on_push() -> None:
+        repo.branches["foreman/impl-100"] = local_sha
+
+    recorded = _patched_subprocess_run(
+        monkeypatch, local_head_sha=local_sha, push_callback=_on_push
+    )
+
+    _verify_impl_branch_remote_state(
+        repo,  # type: ignore[arg-type]
+        branch="foreman/impl-100",
+        worktree_path=tmp_path,
+        role_token="ghs_worker",
+    )
+
+    # Push fired (mismatch triggers it just like 404 does).
+    assert ["git", "push", "origin", "foreman/impl-100"] in recorded
+    assert repo.get_branch_calls == 2
+
+
+def test_verify_impl_branch_raises_when_push_does_not_land(tmp_path, monkeypatch) -> None:
+    """foreman#175 unhappy path: the deterministic push completes
+    successfully (rc=0) but the remote STILL doesn't match local
+    afterward — branch protection rejected silently, or some other
+    structural problem. We must raise RuntimeError so the failure is
+    visible, NOT swallowed."""
+    from foreman.roles.worker import _verify_impl_branch_remote_state
+
+    local_sha = "dddddddddddddddddddddddddddddddddddddddd"
+    repo = _StubRepoForVerify(branches={})  # missing — and push doesn't add it
+
+    # push_callback intentionally does NOT mutate repo.branches.
+    _patched_subprocess_run(monkeypatch, local_head_sha=local_sha)
+
+    with pytest.raises(RuntimeError, match="did not land"):
+        _verify_impl_branch_remote_state(
+            repo,  # type: ignore[arg-type]
+            branch="foreman/impl-100",
+            worktree_path=tmp_path,
+            role_token="ghs_worker",
+        )
+
+
+def test_verify_impl_branch_raises_when_push_command_fails(tmp_path, monkeypatch) -> None:
+    """foreman#175: if ``git push`` itself returns a non-zero exit
+    code (e.g., auth failure, network), the verify helper surfaces it
+    as RuntimeError instead of pretending the recovery succeeded."""
+    from foreman.roles.worker import _verify_impl_branch_remote_state
+
+    local_sha = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    repo = _StubRepoForVerify(branches={})
+
+    _patched_subprocess_run(
+        monkeypatch,
+        local_head_sha=local_sha,
+        push_returncode=128,
+        push_stderr="fatal: Authentication failed",
+    )
+
+    with pytest.raises(RuntimeError, match="git push origin"):
+        _verify_impl_branch_remote_state(
+            repo,  # type: ignore[arg-type]
+            branch="foreman/impl-100",
+            worktree_path=tmp_path,
+            role_token="ghs_worker",
+        )
 
 
 # ----------------------------------------------------------------------
