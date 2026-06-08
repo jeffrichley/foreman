@@ -19,6 +19,8 @@ that. See foreman#50 + claude-agent-sdk #501.
 
 from __future__ import annotations
 
+import logging
+import shutil
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -29,12 +31,55 @@ from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
 from pydantic import BaseModel
 
 from foreman.provider import (
+    ProviderAuthError,
     ProviderFacade,
     StructuredOutputMissingError,
     StructuredOutputRetryError,
 )
 
 T = TypeVar("T", bound=BaseModel)
+
+log = logging.getLogger(__name__)
+
+# foreman#227 (2026-06-08): when the Claude Code subprocess fails to
+# authenticate (typically because the container's OAuth token expired
+# while the host's was rotated), the SDK surfaces the failure as a
+# generic ``Exception`` whose message starts with
+# ``"Claude Code returned an error result: ..."``. The underlying API
+# error is a 401, but the SDK's error-text fallback substitutes the
+# protocol ``subtype`` (which says "success") for the missing
+# ``errors`` field, producing the absurd
+# ``"Claude Code returned an error result: success"``. We pattern-match
+# the prefix so we don't depend on the (confusing) trailing word.
+_SDK_AUTH_ERROR_PREFIX = "Claude Code returned an error result"
+
+# Container-internal paths where the daemon's Compose secrets land. In
+# the dev/test environment these paths don't exist and the refresh
+# helper is a no-op.
+_CLAUDE_CREDS_LIVE_SRC = Path("/run/secrets/claude_credentials")
+_CLAUDE_CREDS_LOCAL_DST = Path("/root/.claude/.credentials.json")
+
+
+def _maybe_refresh_container_creds() -> bool:
+    """Re-copy the container's local Claude credentials from the live
+    Compose-secret bind mount.
+
+    Returns True if a fresh copy was installed; False otherwise (paths
+    don't exist outside the container, or the local copy is already at
+    least as new as the source). This pairs with the periodic refresh
+    loop in ``docker/entrypoint.sh`` — entrypoint loop catches expiry
+    proactively, this catches the rare in-flight expiry where a role
+    runner started a query just before the loop's next tick.
+    """
+    if not (_CLAUDE_CREDS_LIVE_SRC.exists() and _CLAUDE_CREDS_LOCAL_DST.exists()):
+        return False
+    src_mtime = _CLAUDE_CREDS_LIVE_SRC.stat().st_mtime
+    dst_mtime = _CLAUDE_CREDS_LOCAL_DST.stat().st_mtime
+    if src_mtime <= dst_mtime:
+        return False
+    shutil.copyfile(_CLAUDE_CREDS_LIVE_SRC, _CLAUDE_CREDS_LOCAL_DST)
+    _CLAUDE_CREDS_LOCAL_DST.chmod(0o600)
+    return True
 
 # Foreman-owned cache of role system prompts. Lives next to the other
 # foreman runtime dirs (``worktrees/``, ``keys/``, ``stats/``) so a
@@ -96,22 +141,75 @@ class AnthropicSDKProvider(ProviderFacade):
                 options_kwargs["env"] = env
             options = ClaudeAgentOptions(**options_kwargs)
 
-            async for message in query(prompt=user_prompt, options=options):
-                if not isinstance(message, ResultMessage):
-                    continue
-                # SDK subtype taxonomy (verified against
-                # claude_agent_sdk types.ResultMessage — `subtype: str`):
-                #   "success" + structured_output → validated instance
-                #   "error_max_structured_output_retries" → SDK gave up
-                #   anything else → keep looping; the SDK may emit more results
-                if message.subtype == "success" and message.structured_output is not None:
-                    return output_model.model_validate(message.structured_output)
-                if message.subtype == "error_max_structured_output_retries":
-                    raise StructuredOutputRetryError(
-                        "Anthropic Agent SDK exhausted its retry budget trying to "
-                        f"satisfy the schema for {output_model.__name__}. "
-                        f"Errors reported: {message.errors!r}"
+            # foreman#227 (2026-06-08): wrap the SDK iteration in a
+            # one-shot retry guarded on auth failure. When the
+            # container's local credentials file goes stale (the
+            # entrypoint's periodic loop hasn't caught it yet), the
+            # SDK raises a generic Exception whose message starts with
+            # ``"Claude Code returned an error result"`` (the underlying
+            # cause is a 401 auth failure). We attempt one refresh from
+            # the live Compose secret + one retry before surfacing as
+            # ``ProviderAuthError``. Non-auth exceptions propagate
+            # unchanged.
+            try:
+                return await self._iterate_query(
+                    user_prompt=user_prompt, options=options, output_model=output_model
+                )
+            except Exception as e:
+                if not str(e).startswith(_SDK_AUTH_ERROR_PREFIX):
+                    raise
+                refreshed = _maybe_refresh_container_creds()
+                log.warning(
+                    "Caught SDK auth-error pattern (%r); refreshed=%s; retrying once",
+                    str(e),
+                    refreshed,
+                )
+                try:
+                    return await self._iterate_query(
+                        user_prompt=user_prompt,
+                        options=options,
+                        output_model=output_model,
                     )
+                except Exception as retry_exc:
+                    if str(retry_exc).startswith(_SDK_AUTH_ERROR_PREFIX):
+                        raise ProviderAuthError(
+                            "Anthropic Agent SDK failed authentication twice "
+                            "in a row, including after a credentials refresh. "
+                            "The container's Compose-mounted secret is likely "
+                            "also stale on the host side. Original error: "
+                            f"{retry_exc!r}"
+                        ) from retry_exc
+                    raise
+
+    async def _iterate_query(
+        self,
+        *,
+        user_prompt: str,
+        options: ClaudeAgentOptions,
+        output_model: type[T],
+    ) -> T:
+        """Iterate the SDK query stream and validate the structured output.
+
+        Split out from ``run_agent`` so the auth-retry wrapper can call it
+        twice. Caller is responsible for the ``ClaudeAgentOptions``
+        construction + the system-prompt-file lifecycle.
+        """
+        async for message in query(prompt=user_prompt, options=options):
+            if not isinstance(message, ResultMessage):
+                continue
+            # SDK subtype taxonomy (verified against
+            # claude_agent_sdk types.ResultMessage — `subtype: str`):
+            #   "success" + structured_output → validated instance
+            #   "error_max_structured_output_retries" → SDK gave up
+            #   anything else → keep looping; the SDK may emit more results
+            if message.subtype == "success" and message.structured_output is not None:
+                return output_model.model_validate(message.structured_output)
+            if message.subtype == "error_max_structured_output_retries":
+                raise StructuredOutputRetryError(
+                    "Anthropic Agent SDK exhausted its retry budget trying to "
+                    f"satisfy the schema for {output_model.__name__}. "
+                    f"Errors reported: {message.errors!r}"
+                )
 
         raise StructuredOutputMissingError(
             "Anthropic Agent SDK did not return a successful ResultMessage "
