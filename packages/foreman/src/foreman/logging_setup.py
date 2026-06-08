@@ -15,6 +15,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+# foreman#131: marker attribute attached to handlers this module installs,
+# so re-calling ``configure_daemon_logging`` can drop ours-only and leave
+# pytest's ``LogCaptureHandler`` (or any other third-party attachment) in
+# place. Without this, a test_cli case that runs the daemon CLI strips
+# caplog's handler for the rest of the pytest session and downstream
+# tests that depend on ``caplog`` fail mysteriously.
+_FOREMAN_OWNED_HANDLER = "__foreman_owned_handler__"
+
 _STANDARD_RECORD_FIELDS = {
     "args",
     "asctime",
@@ -82,17 +90,29 @@ def configure_daemon_logging(
       (e.g., in tests that import this function but don't want terminal
       output).
 
-    Idempotent — re-calling replaces all existing handlers on the
-    'foreman' logger.
+    Idempotent — re-calling replaces foreman-installed handlers but
+    preserves any third-party handlers (notably pytest's
+    ``LogCaptureHandler`` for ``caplog``) so test capture isn't
+    disturbed by a CLI invocation. foreman#131: previously
+    ``handlers.clear()`` nuked caplog's handler when a test_cli case
+    ran the daemon CLI, breaking subsequent caplog-based assertions in
+    the same pytest session.
     """
     log_path = Path(log_path).expanduser()
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     foreman_logger = logging.getLogger("foreman")
-    foreman_logger.handlers.clear()
+    # Drop only handlers we installed (marked with _FOREMAN_OWNED_HANDLER);
+    # keep everything else (pytest LogCaptureHandler, user attachments, etc).
+    foreman_logger.handlers[:] = [
+        h
+        for h in foreman_logger.handlers
+        if not getattr(h, _FOREMAN_OWNED_HANDLER, False)
+    ]
 
     file_handler = logging.FileHandler(log_path, encoding="utf-8")
     file_handler.setFormatter(_JsonLinesFormatter())
+    setattr(file_handler, _FOREMAN_OWNED_HANDLER, True)
     foreman_logger.addHandler(file_handler)
 
     if console:
@@ -109,6 +129,7 @@ def configure_daemon_logging(
             markup=False,
         )
         rich_handler.setFormatter(logging.Formatter("%(message)s"))
+        setattr(rich_handler, _FOREMAN_OWNED_HANDLER, True)
         foreman_logger.addHandler(rich_handler)
 
     foreman_logger.setLevel(level.upper())
