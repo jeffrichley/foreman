@@ -137,6 +137,52 @@ class WorktreeManager:
         """
         return filtered_subprocess_env(role_token=self._role_token)
 
+    def _self_heal_orphaned_branch(self, *, clone_path: Path, branch_name: str) -> None:
+        """foreman#220: clear stranded local branch + stale worktree
+        metadata before a ``git worktree add -b <branch>`` call.
+
+        Failure mode the daemon hits after every ``docker compose
+        restart``: the clone (``/foreman/repos/<project>``) lives on a
+        persistent named volume, so its ``.git/worktrees/<name>/``
+        metadata and local ``foreman/{impl,issue}-N`` branches survive
+        rebuild. But worktree directories live on the ephemeral
+        container filesystem (``/root/.foreman/worktrees/``) and get
+        wiped. The next ``git worktree add -b <branch>`` exits 128/255
+        with "fatal: a branch named '<branch>' already exists" because
+        the branch name is taken by an orphan.
+
+        Two-step defensive cleanup:
+
+        1. ``git worktree prune`` — clears any worktree metadata entry
+           whose pointed-to directory no longer exists. Safe: git only
+           drops entries it already marks "prunable" (sees the missing
+           dir on its own); it never removes live worktrees.
+        2. ``git branch -D <branch>`` — deletes the orphan local branch
+           if present. Best-effort: ``-D`` is non-interactive and the
+           call uses ``check=False`` because the branch may legitimately
+           not exist (clean state, fresh ticket). The actual
+           ``git worktree add -b`` that follows will recreate the
+           branch from the same base ref.
+
+        The recovery is paired so callers don't have to think about
+        which fault mode (stale metadata, orphan branch, or both) they
+        might be hitting. Calling this in clean state is a cheap no-op.
+        """
+        subprocess.run(
+            ["git", "worktree", "prune"],
+            cwd=clone_path,
+            check=True,
+            capture_output=True,
+            env=self._env(),
+        )
+        subprocess.run(
+            ["git", "branch", "-D", branch_name],
+            cwd=clone_path,
+            check=False,
+            capture_output=True,
+            env=self._env(),
+        )
+
     def create(
         self,
         clone_path: Path,
@@ -206,6 +252,11 @@ class WorktreeManager:
             clone_path, role_token=self._role_token
         )
         _fetch_origin_branch(clone_path, base_branch, role_token=self._role_token)
+        # foreman#220: clear orphan branch + stale worktree metadata
+        # left over from a prior container generation (ephemeral
+        # worktree dir vs persistent clone state). Cheap no-op on a
+        # clean clone; recovers transparently when stranded.
+        self._self_heal_orphaned_branch(clone_path=clone_path, branch_name=branch)
         subprocess.run(
             [
                 "git",
@@ -330,6 +381,13 @@ class WorktreeManager:
             default_branch=default_branch,
         )
 
+        # foreman#220: clear orphan branch + stale worktree metadata
+        # left over from a prior container generation (ephemeral
+        # worktree dir vs persistent clone state). Cheap no-op on a
+        # clean clone; recovers transparently when stranded.
+        self._self_heal_orphaned_branch(
+            clone_path=clone_path, branch_name=impl_branch_name
+        )
         subprocess.run(
             [
                 "git",

@@ -766,6 +766,120 @@ def test_create_impl_separate_from_spec_worktree(tmp_path: Path) -> None:
     assert spec_wt.name == "issue-42"
 
 
+def test_create_impl_self_heals_after_container_rebuild(tmp_path: Path) -> None:
+    """foreman#220: simulate the stranded-state-after-container-rebuild
+    scenario that surfaced on foreman#170.
+
+    Before rebuild: ``create_impl`` ran, ``foreman/impl-42`` was created
+    locally with a worktree dir on the container's ephemeral filesystem.
+
+    Rebuild: the worktree dir was wiped (it lived on the container's
+    ephemeral fs, NOT on the persistent `foreman-repos` volume), but
+    the clone's `.git/worktrees/impl-42/` metadata file and the local
+    ``foreman/impl-42`` branch survived because they live in the
+    persistent clone.
+
+    After rebuild: a fresh ``create_impl`` call hits
+    ``git worktree add -b foreman/impl-42 ...`` and git refuses with
+    exit 128 because the branch name is taken locally. Without
+    self-heal, the Worker burns an impl-attempt budget slot on
+    infrastructure noise.
+
+    The self-heal contract: prune stale worktree metadata + delete the
+    orphan local branch BEFORE the worktree add, so this scenario
+    recovers transparently.
+    """
+    clone = tmp_path / "clone"
+    _seed_clone_with_spec_branch_pushed(clone, ticket_id=42)
+
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+
+    # Simulate the rebuild-leftover state: create the worktree on the
+    # first pass (this stamps both the branch and the metadata file),
+    # then physically delete the worktree dir to imitate the wiped
+    # ephemeral filesystem post-rebuild. The clone's `.git/worktrees/`
+    # entry is now stale and the local branch is orphaned.
+    first_result = mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
+    import shutil
+
+    shutil.rmtree(first_result.path)
+    # Sanity: the local branch and stale metadata should still exist.
+    branch_list = subprocess.run(
+        ["git", "branch", "--list", "foreman/impl-42"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "foreman/impl-42" in branch_list.stdout, (
+        "test precondition failed: orphan branch missing — the simulation "
+        "does not reflect the foreman#170 stranded state"
+    )
+
+    # Self-heal: fresh create_impl call MUST recover (this is the failure
+    # mode foreman#170 hit in production today on 2026-06-07).
+    result = mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    assert result.path.exists()
+    # After recovery the worktree should be checked out on
+    # ``foreman/impl-42`` again — the branch was recreated freshly off
+    # the spec branch tip.
+    branch_check = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=result.path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert branch_check.stdout.strip() == "foreman/impl-42"
+
+
+def test_create_self_heals_after_container_rebuild(tmp_path: Path) -> None:
+    """foreman#220: same stranded-state recovery contract, for the
+    ``create`` (spec / planning) worktree path. The
+    ``foreman/issue-<N>`` branch and worktree metadata strand the
+    same way after a container rebuild — Planner and Reviewer hit
+    this on a fresh container after the spec PR has been merged
+    once but the issue retains its plan-approved label and gets
+    re-dispatched.
+    """
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    _init_git_repo(clone, origin_path=clone.parent / "origin.git")
+
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+
+    # First pass: creates issue-42 worktree + foreman/issue-42 branch.
+    first_wt = mgr.create(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    import shutil
+
+    shutil.rmtree(first_wt)
+    branch_list = subprocess.run(
+        ["git", "branch", "--list", "foreman/issue-42"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "foreman/issue-42" in branch_list.stdout
+
+    # Self-heal: fresh create MUST recover.
+    wt = mgr.create(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    assert wt.exists()
+    branch_check = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=wt,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert branch_check.stdout.strip() == "foreman/issue-42"
+
+
 def test_create_impl_filters_env_on_git_subprocess_calls(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
