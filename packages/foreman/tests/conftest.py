@@ -115,3 +115,42 @@ def _isolate_foreman_env(
     for var in _FOREMAN_ENV_VARS_TO_SCRUB:
         monkeypatch.delenv(var, raising=False)
     return fake_home
+
+
+@pytest.fixture(autouse=True)
+def _restore_foreman_logger_state():
+    """Snapshot the ``foreman`` logger's handlers + level + propagate flag
+    before each test and restore after.
+
+    Why: ``configure_daemon_logging`` mutates the ``foreman`` logger
+    (replaces handlers, sets ``propagate=False``, sets level). When a
+    test that exercises the daemon CLI runs in the same pytest session
+    as a downstream test using ``caplog``, the persistent
+    ``propagate=False`` breaks caplog capture — records emitted under
+    the ``foreman.*`` hierarchy walk up to ``foreman``, hit
+    ``propagate=False``, and never reach the root logger where pytest's
+    ``LogCaptureHandler`` is attached.
+
+    Surfaced 2026-06-07 (foreman#131): the test
+    ``test_reconciler_reload_idempotent_when_unchanged_logs_info`` passes
+    in isolation and in the full sweep, but fails under the subset
+    ``test_cli.py + reconciler/`` because a test_cli case mutates
+    ``foreman.propagate``.
+
+    The snapshot-and-restore makes the mutation test-local instead of
+    session-persistent. Idempotent: tests that don't touch
+    ``configure_daemon_logging`` see no change.
+    """
+    import logging as _logging
+
+    foreman_logger = _logging.getLogger("foreman")
+    saved_handlers = list(foreman_logger.handlers)
+    saved_level = foreman_logger.level
+    saved_propagate = foreman_logger.propagate
+
+    try:
+        yield
+    finally:
+        foreman_logger.handlers[:] = saved_handlers
+        foreman_logger.level = saved_level
+        foreman_logger.propagate = saved_propagate

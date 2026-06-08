@@ -318,15 +318,20 @@ def _patched_subprocess_run(
     monkeypatch: pytest.MonkeyPatch,
     *,
     local_head_sha: str,
-    push_callback: Callable[[], None] | None = None,
-    push_returncode: int = 0,
-    push_stderr: str = "",
 ) -> list[list[str]]:
     """Patch ``subprocess.run`` inside ``foreman.roles.worker`` so the
-    verify helper sees a deterministic local HEAD and a mock push.
+    verify helper sees a deterministic local HEAD.
+
+    foreman#222: ``git push`` is no longer executed via subprocess in
+    ``_verify_impl_branch_remote_state`` — it now goes through
+    ``host.push_branch()`` (the authenticated tokenized-URL path used
+    by Planner). Tests that need to track push attempts should use the
+    ``_StubHost`` fixture and assert against its ``push_calls``
+    counter; this patcher only handles ``rev-parse``.
 
     Returns a list of recorded argv vectors so tests can assert which
-    git commands ran in which order.
+    git commands ran in which order. The list will contain only
+    ``rev-parse`` invocations after foreman#222.
     """
     from unittest.mock import MagicMock
 
@@ -339,13 +344,6 @@ def _patched_subprocess_run(
         result.stderr = ""
         if cmd[:3] == ["git", "rev-parse", "HEAD"]:
             result.stdout = local_head_sha + "\n"
-            return result
-        if cmd[:2] == ["git", "push"]:
-            if push_callback is not None:
-                push_callback()
-            result.returncode = push_returncode
-            result.stderr = push_stderr
-            result.stdout = ""
             return result
         result.stdout = ""
         return result
@@ -360,14 +358,51 @@ def _patched_subprocess_run(
     return recorded
 
 
+class _StubHost:
+    """Stand-in for ``GitHostProvider`` exposing just the surface
+    ``_verify_impl_branch_remote_state`` touches: ``push_branch``.
+
+    foreman#222: Worker's verify-helper now delegates the recovery
+    push to ``host.push_branch()`` (the authenticated tokenized-URL
+    path) instead of shelling out to ``git push origin``, which has
+    no credential helper to read in the docker-runtime container.
+
+    Construct with:
+      - ``raise_on_push``: an exception to raise from push_branch
+        (simulates auth failure, network, etc).
+      - ``on_push``: optional callback fired right before returning
+        from push_branch — used by tests to mutate a paired
+        ``_StubRepoForVerify`` so the post-push re-check sees the
+        branch land.
+    """
+
+    def __init__(
+        self,
+        *,
+        raise_on_push: Exception | None = None,
+        on_push: Callable[[], None] | None = None,
+    ) -> None:
+        self.raise_on_push = raise_on_push
+        self.on_push = on_push
+        self.push_calls: list[tuple[Path, str]] = []
+
+    def push_branch(self, *, worktree_path: Path, branch: str) -> None:
+        self.push_calls.append((worktree_path, branch))
+        if self.on_push is not None:
+            self.on_push()
+        if self.raise_on_push is not None:
+            raise self.raise_on_push
+
+
 def test_verify_impl_branch_no_op_when_remote_matches_local(tmp_path, monkeypatch) -> None:
-    """foreman#175: when the LLM did push and the remote already
-    matches local HEAD, the verify helper is a no-op — no push, no
-    log warning."""
+    """foreman#175: when the remote already matches local HEAD (the
+    primary host.push_branch call in run_worker landed it), the
+    verify helper is a no-op — no recovery push, no log warning."""
     from foreman.roles.worker import _verify_impl_branch_remote_state
 
     local_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     repo = _StubRepoForVerify(branches={"foreman/impl-100": local_sha})
+    host = _StubHost()
     recorded = _patched_subprocess_run(monkeypatch, local_head_sha=local_sha)
 
     _verify_impl_branch_remote_state(
@@ -375,52 +410,59 @@ def test_verify_impl_branch_no_op_when_remote_matches_local(tmp_path, monkeypatc
         branch="foreman/impl-100",
         worktree_path=tmp_path,
         role_token="ghs_worker",
+        host=host,  # type: ignore[arg-type]
     )
 
-    # One rev-parse call. No git push call.
+    # One rev-parse call. No recovery push.
     assert recorded == [["git", "rev-parse", "HEAD"]]
+    assert host.push_calls == []
     # Only one get_branch call (no re-check).
     assert repo.get_branch_calls == 1
 
 
-def test_verify_impl_branch_remote_missing_recovers_via_push(tmp_path, monkeypatch) -> None:
-    """foreman#175: if the LLM forgot to push, the remote branch is
-    404. The verify helper runs ``git push origin <branch>`` and then
-    re-verifies."""
+def test_verify_impl_branch_remote_missing_recovers_via_host_push(
+    tmp_path, monkeypatch
+) -> None:
+    """foreman#222: when the remote branch is missing (the primary
+    host.push_branch in run_worker didn't fire, or fired against a
+    different repo state), the verify helper recovers by calling
+    ``host.push_branch()`` — NOT by shelling out ``git push origin``.
+
+    The tokenized-URL path is the only thing that authenticates in
+    the docker-runtime container."""
     from foreman.roles.worker import _verify_impl_branch_remote_state
 
     local_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     repo = _StubRepoForVerify(branches={})  # remote branch missing
 
     def _on_push() -> None:
-        # The push lands the branch on remote.
+        # The recovery push lands the branch on remote.
         repo.branches["foreman/impl-100"] = local_sha
 
-    recorded = _patched_subprocess_run(
-        monkeypatch, local_head_sha=local_sha, push_callback=_on_push
-    )
+    host = _StubHost(on_push=_on_push)
+    recorded = _patched_subprocess_run(monkeypatch, local_head_sha=local_sha)
 
     _verify_impl_branch_remote_state(
         repo,  # type: ignore[arg-type]
         branch="foreman/impl-100",
         worktree_path=tmp_path,
         role_token="ghs_worker",
+        host=host,  # type: ignore[arg-type]
     )
 
-    # rev-parse → git push → (helper does NOT re-rev-parse, only re-get_branch).
-    assert recorded == [
-        ["git", "rev-parse", "HEAD"],
-        ["git", "push", "origin", "foreman/impl-100"],
-    ]
+    # rev-parse was called, but NOT `git push origin` — the recovery
+    # goes through host.push_branch, not subprocess.
+    assert recorded == [["git", "rev-parse", "HEAD"]]
+    assert host.push_calls == [(tmp_path, "foreman/impl-100")]
     # Two get_branch calls: initial (404) + post-push verify (now matches).
     assert repo.get_branch_calls == 2
 
 
-def test_verify_impl_branch_sha_mismatch_recovers_via_push(tmp_path, monkeypatch) -> None:
-    """foreman#175: remote branch exists but at an older commit (LLM
-    pushed once, then committed more locally without re-pushing). The
-    verify helper runs ``git push origin <branch>`` to bring the
-    remote up to local HEAD."""
+def test_verify_impl_branch_sha_mismatch_recovers_via_host_push(
+    tmp_path, monkeypatch
+) -> None:
+    """foreman#222: remote branch exists but at an older commit. The
+    verify helper recovers by calling ``host.push_branch()``."""
     from foreman.roles.worker import _verify_impl_branch_remote_state
 
     local_sha = "cccccccccccccccccccccccccccccccccccccccc"
@@ -430,25 +472,25 @@ def test_verify_impl_branch_sha_mismatch_recovers_via_push(tmp_path, monkeypatch
     def _on_push() -> None:
         repo.branches["foreman/impl-100"] = local_sha
 
-    recorded = _patched_subprocess_run(
-        monkeypatch, local_head_sha=local_sha, push_callback=_on_push
-    )
+    host = _StubHost(on_push=_on_push)
+    _patched_subprocess_run(monkeypatch, local_head_sha=local_sha)
 
     _verify_impl_branch_remote_state(
         repo,  # type: ignore[arg-type]
         branch="foreman/impl-100",
         worktree_path=tmp_path,
         role_token="ghs_worker",
+        host=host,  # type: ignore[arg-type]
     )
 
-    # Push fired (mismatch triggers it just like 404 does).
-    assert ["git", "push", "origin", "foreman/impl-100"] in recorded
+    # Recovery fired through host.push_branch (mismatch triggers it).
+    assert host.push_calls == [(tmp_path, "foreman/impl-100")]
     assert repo.get_branch_calls == 2
 
 
 def test_verify_impl_branch_raises_when_push_does_not_land(tmp_path, monkeypatch) -> None:
-    """foreman#175 unhappy path: the deterministic push completes
-    successfully (rc=0) but the remote STILL doesn't match local
+    """foreman#175 unhappy path: the recovery host.push_branch
+    returns cleanly but the remote STILL doesn't match local
     afterward — branch protection rejected silently, or some other
     structural problem. We must raise RuntimeError so the failure is
     visible, NOT swallowed."""
@@ -457,7 +499,8 @@ def test_verify_impl_branch_raises_when_push_does_not_land(tmp_path, monkeypatch
     local_sha = "dddddddddddddddddddddddddddddddddddddddd"
     repo = _StubRepoForVerify(branches={})  # missing — and push doesn't add it
 
-    # push_callback intentionally does NOT mutate repo.branches.
+    # on_push intentionally does NOT mutate repo.branches.
+    host = _StubHost()
     _patched_subprocess_run(monkeypatch, local_head_sha=local_sha)
 
     with pytest.raises(RuntimeError, match="did not land"):
@@ -466,31 +509,32 @@ def test_verify_impl_branch_raises_when_push_does_not_land(tmp_path, monkeypatch
             branch="foreman/impl-100",
             worktree_path=tmp_path,
             role_token="ghs_worker",
+            host=host,  # type: ignore[arg-type]
         )
 
+    # Confirm the recovery attempt did fire (the failure is post-push).
+    assert host.push_calls == [(tmp_path, "foreman/impl-100")]
 
-def test_verify_impl_branch_raises_when_push_command_fails(tmp_path, monkeypatch) -> None:
-    """foreman#175: if ``git push`` itself returns a non-zero exit
-    code (e.g., auth failure, network), the verify helper surfaces it
-    as RuntimeError instead of pretending the recovery succeeded."""
+
+def test_verify_impl_branch_propagates_host_push_failure(tmp_path, monkeypatch) -> None:
+    """foreman#222: if ``host.push_branch`` itself raises (auth
+    failure, network, etc.), the verify helper does NOT swallow the
+    error — it propagates so the dispatcher records ``outcome=error``
+    and the impl-attempt counter is honored correctly."""
     from foreman.roles.worker import _verify_impl_branch_remote_state
 
     local_sha = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
     repo = _StubRepoForVerify(branches={})
+    host = _StubHost(raise_on_push=RuntimeError("token rejected by github"))
+    _patched_subprocess_run(monkeypatch, local_head_sha=local_sha)
 
-    _patched_subprocess_run(
-        monkeypatch,
-        local_head_sha=local_sha,
-        push_returncode=128,
-        push_stderr="fatal: Authentication failed",
-    )
-
-    with pytest.raises(RuntimeError, match="git push origin"):
+    with pytest.raises(RuntimeError, match="token rejected by github"):
         _verify_impl_branch_remote_state(
             repo,  # type: ignore[arg-type]
             branch="foreman/impl-100",
             worktree_path=tmp_path,
             role_token="ghs_worker",
+            host=host,  # type: ignore[arg-type]
         )
 
 

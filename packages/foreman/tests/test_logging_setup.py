@@ -100,3 +100,55 @@ def test_configure_daemon_logging_omits_exception_key_when_absent(tmp_path: Path
     record = json.loads(line)
     assert "exception" not in record
     assert "stack_info" not in record
+
+
+def test_configure_daemon_logging_preserves_third_party_handlers(tmp_path: Path) -> None:
+    """foreman#131: a CLI invocation that calls configure_daemon_logging
+    must not strip handlers it doesn't own (e.g., pytest's
+    LogCaptureHandler installed for ``caplog`` capture). Without this
+    guarantee, any test that runs the daemon CLI breaks caplog capture
+    for every downstream test in the same pytest session.
+    """
+    foreman_logger = logging.getLogger("foreman")
+    # Simulate a third-party handler that was installed before
+    # configure_daemon_logging fires (e.g., pytest's LogCaptureHandler
+    # attaches to the ``foreman`` logger via propagation).
+    third_party = logging.NullHandler()
+    third_party.name = "third-party-sentinel"
+    foreman_logger.addHandler(third_party)
+
+    try:
+        configure_daemon_logging(log_path=tmp_path / "daemon.log", level="INFO", console=False)
+        names = [h.name for h in foreman_logger.handlers]
+        assert "third-party-sentinel" in names, (
+            "configure_daemon_logging stripped a third-party handler; "
+            "must only remove handlers it installed itself"
+        )
+        # And our handler is still there.
+        assert any(
+            isinstance(h, logging.FileHandler) for h in foreman_logger.handlers
+        ), "configure_daemon_logging did not install its file handler"
+    finally:
+        # Restore the foreman logger to a clean state so this test
+        # doesn't pollute siblings.
+        foreman_logger.handlers.clear()
+
+
+def test_configure_daemon_logging_idempotent_does_not_accumulate_own_handlers(
+    tmp_path: Path,
+) -> None:
+    """Re-calling configure_daemon_logging must replace its own handlers,
+    not accumulate them. (Regression guard for the foreman#131 fix: the
+    new ours-only filter must still strip ours on re-entry.)
+    """
+    foreman_logger = logging.getLogger("foreman")
+    foreman_logger.handlers.clear()
+    try:
+        configure_daemon_logging(log_path=tmp_path / "daemon.log", level="INFO", console=False)
+        configure_daemon_logging(log_path=tmp_path / "daemon.log", level="INFO", console=False)
+        file_handlers = [h for h in foreman_logger.handlers if isinstance(h, logging.FileHandler)]
+        assert len(file_handlers) == 1, (
+            f"expected exactly 1 FileHandler after re-entry, got {len(file_handlers)}"
+        )
+    finally:
+        foreman_logger.handlers.clear()

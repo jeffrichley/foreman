@@ -81,6 +81,7 @@ from github.Repository import Repository
 
 from foreman.branches import impl_branch, spec_branch
 from foreman.config import Config
+from foreman.git_host import GitHostProvider
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade
@@ -335,37 +336,44 @@ def _verify_impl_branch_remote_state(
     branch: str,
     worktree_path: Path,
     role_token: str,
+    host: GitHostProvider,
 ) -> None:
-    """Belt-and-suspenders for foreman#175 — verify the LLM actually
-    pushed before ``_create_pull_with_base_fallback`` runs.
+    """Belt-and-suspenders for foreman#175 — verify the impl branch is
+    on the remote with local HEAD before ``_create_pull_with_base_fallback``
+    runs.
 
-    The Worker delegates ``git push`` to the Claude SDK subagent via
-    Bash, then ``repo.create_pull(...)`` runs deterministically after
-    the subagent returns. If the LLM skipped or mis-ran the push step,
-    ``create_pull`` fails with GitHub 422 ``{"field": "head", "code":
-    "invalid"}`` — the head branch doesn't exist on the remote (or
-    points at an older commit). That failure burns an
-    impl-attempt budget slot for no real reason. Foreman#171 hit this
-    twice in production on 2026-06-07 before getting escalated to
-    ``foreman:needs-help``.
+    Worker pushes the impl branch from Python via ``host.push_branch``
+    (the authenticated tokenized-URL path) in :func:`run_worker` after
+    the Claude subprocess returns. If that primary push somehow
+    didn't land (race condition, partial network failure between
+    push completion and verify, or a future regression where the
+    primary push is skipped), ``create_pull`` would fail with GitHub
+    422 ``{"field": "head", "code": "invalid"}`` and burn an
+    impl-attempt budget slot for no real reason. This helper is the
+    safety net for that.
 
     This helper:
 
     1. Reads local HEAD on the worktree (``git rev-parse HEAD``).
     2. Reads the remote ref via PyGithub's ``repo.get_branch(branch)``.
     3. If the remote branch is missing, OR its tip SHA doesn't match
-       the local HEAD, runs ``git push origin <branch>`` from the
-       worktree using the worker bot's installation token (same env
-       shape as the LLM's own push path).
+       local HEAD, calls ``host.push_branch`` to deterministically
+       push the branch using the role's installation token via the
+       tokenized-URL mechanism (the only thing that authenticates
+       in the docker-runtime container — see foreman#222).
     4. Re-checks. If the remote is STILL missing/mismatched after the
        deterministic push, raises ``RuntimeError`` — at that point the
-       failure is structural (auth, network, permissions) and should
-       NOT be silently retried or attributed to the LLM.
+       failure is structural (branch protection, network, permissions)
+       and should NOT be silently retried.
 
-    The LLM prompt is intentionally unchanged — the subagent is still
-    responsible for stage / commit / push. This helper is a safety
-    net, not the primary path. Emits a ``logger.warning`` when Python
-    recovery fires so we can track LLM push-skip rate over time.
+    foreman#222: the previous implementation used
+    ``subprocess.run(["git", "push", "origin", branch])`` which has
+    no credential helper to read inside the foreman daemon container
+    (no ``gh``, no ``~/.gitconfig``, no credential helper). That
+    silently 401'd whenever a manual ``gh auth setup-git`` had not
+    been run in-container, which is the standard state after every
+    ``docker compose restart``. Using ``host.push_branch`` makes the
+    helper work without ad-hoc credential setup.
     """
     from foreman._env_filter import filtered_subprocess_env
 
@@ -390,42 +398,23 @@ def _verify_impl_branch_remote_state(
                 return None
             raise
 
-    def _push() -> None:
-        # Same env shape as _read_spec_doc_from_branch / _orchestrator
-        # check_command — role token threaded for any credential helper
-        # that needs to authenticate as the worker bot.
-        result = subprocess.run(
-            ["git", "push", "origin", branch],
-            cwd=worktree_path,
-            check=False,
-            capture_output=True,
-            text=True,
-            env=filtered_subprocess_env(role_token=role_token),
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"verify-push recovery: 'git push origin {branch}' "
-                f"failed (rc={result.returncode}): "
-                f"{(result.stderr or result.stdout or '').strip()[:400]}"
-            )
-
     local_sha = _local_head()
     remote_sha = _remote_sha()
 
     if remote_sha == local_sha:
         return  # match — proceed to create_pull (normal path)
 
-    # Mismatch or missing remote — fire the deterministic recovery.
+    # Mismatch or missing remote — fire the deterministic recovery
+    # via host.push_branch (authenticated tokenized URL).
     _log.warning(
         "foreman#175 push-verify recovery: local HEAD=%s, remote=%s for "
-        "branch=%r; running 'git push origin %s' from %s",
+        "branch=%r; calling host.push_branch from %s",
         local_sha,
         remote_sha or "<missing>",
         branch,
-        branch,
         worktree_path,
     )
-    _push()
+    host.push_branch(worktree_path=worktree_path, branch=branch)
 
     # Re-check. If the push completed cleanly but the remote STILL
     # doesn't match, something structural is wrong (e.g., branch
@@ -639,6 +628,11 @@ async def run_worker(
     registry = identity_registry if identity_registry is not None else IdentityRegistry(project)
     worker_client: Github = registry.get_worker_client()
     worker_token: str = registry.get_worker_token()
+    # foreman#222: acquire the authenticated GitHostProvider so we can
+    # push from Python via the tokenized-URL path that Planner already
+    # uses. The container has no git credential helper, so shell-out
+    # ``git push`` + Claude's Bash both fail auth.
+    host: GitHostProvider = registry.get_host_provider("worker")
 
     repo: Repository = worker_client.get_repo(actual_repo_slug)
     issue = repo.get_issue(issue_number)
@@ -884,14 +878,26 @@ async def run_worker(
             # `implemented` → `incomplete`, never the reverse.
             assert llm_output.pr_title is not None
             assert llm_output.pr_body is not None
-            # foreman#175: verify the LLM actually pushed before opening
-            # the PR. Recovers deterministically if not (avoids burning
-            # an impl-attempt budget slot on an LLM execution gap).
+            # foreman#222: deterministically push the impl branch from
+            # Python via host.push_branch (tokenized URL using the
+            # worker installation token). Previously this was delegated
+            # to the LLM's Bash via the prompt, but the container has
+            # no git credential helper so Claude's `git push` fails
+            # with a 401-shaped "could not read Username" whenever a
+            # manual gh-auth-setup-git hasn't been done. Now Python
+            # pushes deterministically using the same mechanism
+            # Planner uses (see git_hosts/github.py:push_branch).
+            host.push_branch(worktree_path=wt_path, branch=impl_branch_name)
+            # foreman#175: belt-and-suspenders verify that the push
+            # actually landed before opening the PR. Recovers via the
+            # same host.push_branch path if the primary attempt above
+            # somehow didn't take.
             _verify_impl_branch_remote_state(
                 repo,
                 branch=impl_branch_name,
                 worktree_path=wt_path,
                 role_token=worker_token,
+                host=host,
             )
             impl_pr = _create_pull_with_base_fallback(
                 repo,
