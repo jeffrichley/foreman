@@ -8,7 +8,12 @@ The init flow is a one-shot setup pass that:
   3. Writes a ``.foreman/INSTRUCTIONS.md`` template into the local clone
      (skipping if one already exists — even with ``--force``)
   4. Creates the Foreman state + modifier + attempt labels on the
-     target repo (idempotent: existing labels are left alone)
+     target repo (idempotent: existing labels are left alone). The
+     state labels include a "merging" phase
+     (``foreman:merging-plan`` / ``foreman:merging-impl``) that
+     surfaces between Reviewer-approval and final merge, while the
+     ``ATTEMPT_MERGE_*`` actions evaluate the PR's
+     ``mergeStateStatus``.
   5. Best-effort verifies that each role's GitHub App can mint an
      installation token against the target repo
   6. Appends the ``[projects.<name>]`` block to ``~/.foreman/config.toml``
