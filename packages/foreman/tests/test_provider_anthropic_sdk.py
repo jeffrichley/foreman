@@ -24,6 +24,7 @@ from claude_agent_sdk import ResultMessage
 from pydantic import BaseModel
 
 from foreman.provider import (
+    ProviderAuthError,
     ProviderFacade,
     StructuredOutputMissingError,
     StructuredOutputRetryError,
@@ -305,3 +306,176 @@ async def test_run_agent_cleans_up_prompt_file_when_query_raises(
     assert not captured_path[0].exists(), (
         "prompt file leaked after SDK transport raised — try/finally regressed"
     )
+
+
+# ----------------------------------------------------------------------
+# foreman#227: SDK auth-failure retry-once with credential refresh
+# ----------------------------------------------------------------------
+#
+# When the container's local Claude credentials file goes stale (the
+# entrypoint's periodic refresh loop hasn't caught it yet), the SDK
+# raises a generic Exception whose message starts with
+# ``"Claude Code returned an error result"`` (the underlying API error
+# is a 401 auth failure; the SDK substitutes the protocol ``subtype``
+# field for the missing ``errors`` field, producing the absurd
+# ``"...error result: success"`` string).
+#
+# The provider catches this specific exception, attempts one credential
+# refresh from the live Compose-mounted secret, and retries the query
+# once. If the second attempt also auth-fails, ``ProviderAuthError`` is
+# raised so the role runner can map to ``foreman:needs-help``. Non-auth
+# exceptions propagate unchanged with no retry.
+
+
+_AUTH_ERROR_MSG = "Claude Code returned an error result: success"
+
+
+def _patch_query_sequence(
+    monkeypatch: pytest.MonkeyPatch, behaviors: list[Any]
+) -> list[dict[str, Any]]:
+    """Make successive calls to ``query`` behave differently.
+
+    ``behaviors`` is a list whose Nth element drives the Nth call:
+        - An ``Exception`` instance → that exception is raised inside the
+          async iterator.
+        - A list of messages → the iterator yields them in order.
+
+    Returns the same calls list as ``_patch_query`` so tests can assert
+    how many times ``query`` was invoked.
+    """
+    calls: list[dict[str, Any]] = []
+
+    def fake_query(*, prompt: str, options: Any) -> AsyncIterator[Any]:
+        idx = len(calls)
+        calls.append({"prompt": prompt, "options": options})
+        behavior = behaviors[idx] if idx < len(behaviors) else behaviors[-1]
+
+        async def gen() -> AsyncIterator[Any]:
+            if isinstance(behavior, Exception):
+                raise behavior
+                yield  # pragma: no cover — unreachable
+            for m in behavior:
+                yield m
+
+        return gen()
+
+    monkeypatch.setattr(anthropic_sdk_module, "query", fake_query)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_run_agent_retries_once_on_sdk_auth_pattern_and_succeeds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """First call raises the SDK auth-pattern Exception; refresh attempt
+    + retry succeed. The provider returns the validated Pydantic instance
+    from the second attempt's successful result."""
+    refresh_attempts: list[bool] = []
+
+    def fake_refresh() -> bool:
+        refresh_attempts.append(True)
+        return False  # paths don't exist in the test env; that's fine
+
+    monkeypatch.setattr(
+        anthropic_sdk_module,
+        "_maybe_refresh_container_creds",
+        fake_refresh,
+    )
+
+    calls = _patch_query_sequence(
+        monkeypatch,
+        [
+            Exception(_AUTH_ERROR_MSG),
+            [_make_result(subtype="success", structured_output={"name": "ok", "count": 7})],
+        ],
+    )
+
+    provider = AnthropicSDKProvider()
+    result = await provider.run_agent(
+        system_prompt="sys",
+        user_prompt="usr",
+        allowed_tools=["Read"],
+        output_model=_DemoOutput,
+        cwd=tmp_path,
+    )
+
+    assert isinstance(result, _DemoOutput)
+    assert result.name == "ok"
+    assert result.count == 7
+    assert len(calls) == 2, "expected exactly one retry after auth-pattern catch"
+    assert len(refresh_attempts) == 1, "expected exactly one refresh attempt"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_raises_provider_auth_error_when_retry_also_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Both attempts hit the SDK auth-pattern Exception. After the
+    refresh + retry, the provider gives up and raises ``ProviderAuthError``
+    rather than propagating the raw generic Exception (which the
+    dispatcher's runaway-loop bug would have spammed)."""
+    monkeypatch.setattr(
+        anthropic_sdk_module,
+        "_maybe_refresh_container_creds",
+        lambda: False,
+    )
+
+    calls = _patch_query_sequence(
+        monkeypatch,
+        [
+            Exception(_AUTH_ERROR_MSG),
+            Exception(_AUTH_ERROR_MSG),
+        ],
+    )
+
+    provider = AnthropicSDKProvider()
+    with pytest.raises(ProviderAuthError, match="failed authentication twice"):
+        await provider.run_agent(
+            system_prompt="sys",
+            user_prompt="usr",
+            allowed_tools=["Read"],
+            output_model=_DemoOutput,
+            cwd=tmp_path,
+        )
+
+    assert len(calls) == 2, "expected exactly one retry, no third attempt"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_does_not_retry_on_non_auth_exception(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A non-auth-pattern Exception propagates unchanged — no refresh,
+    no retry. This keeps the retry guard tight: arbitrary SDK failures
+    are not silently retried (which could mask real bugs or waste
+    tokens)."""
+    refresh_called = False
+
+    def fake_refresh() -> bool:
+        nonlocal refresh_called
+        refresh_called = True
+        return False
+
+    monkeypatch.setattr(
+        anthropic_sdk_module,
+        "_maybe_refresh_container_creds",
+        fake_refresh,
+    )
+
+    calls = _patch_query_sequence(
+        monkeypatch,
+        [RuntimeError("not an auth error — totally different failure")],
+    )
+
+    provider = AnthropicSDKProvider()
+    with pytest.raises(RuntimeError, match="not an auth error"):
+        await provider.run_agent(
+            system_prompt="sys",
+            user_prompt="usr",
+            allowed_tools=["Read"],
+            output_model=_DemoOutput,
+            cwd=tmp_path,
+        )
+
+    assert len(calls) == 1, "no retry should have happened for non-auth exception"
+    assert not refresh_called, "refresh should not be attempted for non-auth exception"

@@ -46,6 +46,16 @@ class StructuredOutputMissingError(RuntimeError):
     """
 
 
+class ProviderAuthError(RuntimeError):
+    """The underlying provider rejected authentication.
+
+    Surfaced after a defensive credential refresh + single retry have
+    failed. The role runner should map this to a terminal blocking label
+    (``foreman:needs-help``) so the dispatcher doesn't retry-spiral.
+    foreman#227 (2026-06-08).
+    """
+
+
 class ProviderFacade(ABC):
     """Abstract base for agent provider adapters."""
 

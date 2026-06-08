@@ -26,6 +26,13 @@ set -euo pipefail
 # --- Claude credentials plumbing ----------------------------------------
 # Compose secrets default to 0400 root-only. Copy to the SDK's expected
 # location with 0600 so it can write a refreshed token.
+#
+# foreman#227 (2026-06-08): the initial copy goes stale after the host
+# rotates the OAuth token (~hourly). Background a refresh loop that
+# re-copies from the live bind-mounted secret whenever the host file is
+# newer than our local copy. Runs every 5 minutes; cheap (one stat +
+# possibly one copy). The reactive layer that handles in-flight 401s
+# lives in providers/anthropic_sdk.py — this is just the proactive belt.
 CLAUDE_DIR=/root/.claude
 CLAUDE_SECRET=/run/secrets/claude_credentials
 if [[ -r "$CLAUDE_SECRET" ]]; then
@@ -35,6 +42,22 @@ else
     echo "ERROR: $CLAUDE_SECRET not readable — Compose secret missing or perms wrong" >&2
     exit 1
 fi
+
+# Background periodic refresh. Detached via `&` and `disown` so SIGTERM
+# from `docker stop` cascades to the daemon (PID 1 child) and this loop
+# dies when the container does. Single-line JSON output lets the daemon's
+# structured log driver pick up refresh events.
+(
+    while true; do
+        if [[ "$CLAUDE_SECRET" -nt "$CLAUDE_DIR/.credentials.json" ]]; then
+            install -m 0600 "$CLAUDE_SECRET" "$CLAUDE_DIR/.credentials.json"
+            printf '{"event":"creds_refreshed","at":"%s"}\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
+        fi
+        sleep 300
+    done
+) &
+disown
 
 # --- Startup banner -----------------------------------------------------
 # IMAGE_SHA + ALLOW_DIRTY come in as build args via the Dockerfile.
