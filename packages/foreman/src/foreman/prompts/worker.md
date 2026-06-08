@@ -259,14 +259,16 @@ genuinely orthogonal (e.g., a spec sub-request adds a new module and
 another sub-request modifies an unrelated test). Splitting "because
 it looks cleaner" when changes share a theme is gold-plating.
 
-After committing, `git push origin foreman/impl-<N>` so the impl PR
-branch reflects your work. Record each commit's SHA + summary +
-files_changed in `commits_made`.
+**Do NOT run `git push`.** Foreman core pushes the impl branch
+deterministically after you return, using the worker bot's
+installation token (the only credential that authenticates in the
+container — see foreman#222). If you attempt `git push origin` from
+Bash, it will fail with "could not read Username" because there is
+no git credential helper configured in the daemon container. Commit
+cleanly and stop; Python handles the push.
 
-If `git push` fails (e.g., the remote rejected, hook failed), do NOT
-attempt `--force`. Surface the failure in `work_comment` and set
-`outcome: incomplete` with rationale "push failed, manual
-intervention required" in `check_output_summary`.
+Record each commit's SHA + summary + files_changed in
+`commits_made`.
 </commit_discipline>
 
 <outcome_derivation>
@@ -279,11 +281,10 @@ Apply mechanically, not by feel:
   - one or more sub-requests are skipped with a reason that blocks
     the spec's acceptance criteria (judgment call: a skipped
     `out_of_scope` doesn't block; a skipped `needs_info` on an
-    acceptance criterion does),
-  - the `git push` failed.
+    acceptance criterion does).
 - `outcome: implemented` otherwise — all spec-required sub-requests
-  landed, `check_command` passed (modulo baseline), and the push
-  succeeded.
+  landed and `check_command` passed (modulo baseline). The push is
+  Python's responsibility, not yours.
 
 Do NOT override this rule because the skipped sub-request "feels
 minor in context." If the spec lists it under Acceptance criteria

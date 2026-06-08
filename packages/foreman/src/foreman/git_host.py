@@ -87,14 +87,6 @@ class GitHostProvider(ABC):
         """Return the repository's default branch (e.g., ``"main"``)."""
 
     @abstractmethod
-    def configure_worktree_identity(self, worktree_path: Path) -> None:
-        """Set ``git user.email`` + ``user.name`` in the worktree.
-
-        Commits created in the worktree attribute to the role's bot
-        identity (e.g., ``foreman-planner[bot]``).
-        """
-
-    @abstractmethod
     def commit_files_to_worktree(
         self,
         worktree_path: Path,
@@ -103,7 +95,13 @@ class GitHostProvider(ABC):
     ) -> str:
         """Write ``files`` (relpath → content), ``git add`` + ``git commit``.
 
-        Returns the new commit SHA.
+        Returns the new commit SHA. The commit attributes to the role's
+        bot identity (e.g., ``foreman-planner[bot]``) via env-var
+        injection on the commit subprocess — implementations must NOT
+        persist ``user.name`` / ``user.email`` into ``.git/config``
+        because git worktrees share that file with the parent repo and
+        the leaked identity would mis-attribute subsequent human
+        commits (foreman#53).
         """
 
     @abstractmethod

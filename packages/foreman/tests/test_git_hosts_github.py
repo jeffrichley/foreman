@@ -167,7 +167,9 @@ def _init_worktree(tmp_path: Path) -> Path:
     repo = tmp_path / "wt"
     repo.mkdir()
     subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
-    # Seed identity so the seed commit succeeds even before configure_worktree_identity.
+    # Seed identity so the seed commit succeeds. Bot identity for commit_files_to_worktree
+    # is injected via env vars (foreman#53); this seed config is the "human-pre-set" state
+    # that the regression test below asserts is left untouched after a bot commit.
     subprocess.run(
         ["git", "config", "user.email", "seed@example.com"],
         cwd=repo,
@@ -183,10 +185,24 @@ def _init_worktree(tmp_path: Path) -> Path:
     return repo
 
 
-def test_configure_worktree_identity_sets_bot_attribution(tmp_path: Path) -> None:
+def test_commit_files_to_worktree_does_not_mutate_repo_local_config(
+    tmp_path: Path,
+) -> None:
+    """foreman#53 regression guard: after a bot commit, the worktree's
+    ``.git/config`` user.* fields are untouched. Worktrees share
+    ``.git/config`` with the parent repo, so any persistent mutation
+    here leaks the bot identity into subsequent human commits in the
+    same checkout. Identity must flow through env vars on the commit
+    subprocess, not through ``git config``.
+    """
     wt = _init_worktree(tmp_path)
     provider = GitHubProvider(identity=_identity(), client=MagicMock())
-    provider.configure_worktree_identity(wt)
+
+    provider.commit_files_to_worktree(
+        worktree_path=wt,
+        files={"docs/specs/x.md": "# Spec\n"},
+        message="spec: add x",
+    )
 
     name = subprocess.run(
         ["git", "config", "user.name"], cwd=wt, check=True, capture_output=True, text=True
@@ -194,8 +210,9 @@ def test_configure_worktree_identity_sets_bot_attribution(tmp_path: Path) -> Non
     email = subprocess.run(
         ["git", "config", "user.email"], cwd=wt, check=True, capture_output=True, text=True
     ).stdout.strip()
-    assert name == "foreman-planner[bot]"
-    assert email == "12345+foreman-planner[bot]@users.noreply.github.com"
+    # Seed values from _init_worktree must survive untouched.
+    assert name == "Seed"
+    assert email == "seed@example.com"
 
 
 def test_commit_files_to_worktree_writes_adds_commits_and_returns_sha(
@@ -203,7 +220,6 @@ def test_commit_files_to_worktree_writes_adds_commits_and_returns_sha(
 ) -> None:
     wt = _init_worktree(tmp_path)
     provider = GitHubProvider(identity=_identity(), client=MagicMock())
-    provider.configure_worktree_identity(wt)
 
     sha = provider.commit_files_to_worktree(
         worktree_path=wt,
@@ -248,7 +264,6 @@ def test_commit_files_to_worktree_is_idempotent_when_content_matches_head(
     """
     wt = _init_worktree(tmp_path)
     provider = GitHubProvider(identity=_identity(), client=MagicMock())
-    provider.configure_worktree_identity(wt)
 
     spec_relpath = "docs/specs/x.md"
     spec_content = "# Spec\n\nthe planner output for issue 117\n"
@@ -359,7 +374,7 @@ def test_git_failure_surfaces_stderr_message_on_push_branch(tmp_path: Path) -> N
     assert exc.returncode == 1
 
 
-def test_git_failure_preserves_stderr_attribute_on_configure_identity(
+def test_git_failure_preserves_stderr_attribute_on_non_push_op(
     tmp_path: Path,
 ) -> None:
     """Failures in non-push git ops must also raise GitCommandError with stderr."""
@@ -367,14 +382,20 @@ def test_git_failure_preserves_stderr_attribute_on_configure_identity(
     real_run = subprocess.run
 
     def fake_run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git" and cmd[1] == "config":
+        # Trigger on `git add` (early in commit_files_to_worktree) so the
+        # error surface is exercised before any commit env-var muddies the test.
+        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git" and cmd[1] == "add":
             raise _make_called_process_error(cmd, "fatal: not in a git repo")
         return real_run(cmd, *args, **kwargs)
 
     provider = GitHubProvider(identity=_identity(), client=MagicMock())
     with patch("foreman.git_hosts.github.subprocess.run", side_effect=fake_run):
         with pytest.raises(GitCommandError) as excinfo:
-            provider.configure_worktree_identity(wt)
+            provider.commit_files_to_worktree(
+                worktree_path=wt,
+                files={"x.md": "x\n"},
+                message="x",
+            )
 
     assert "not in a git repo" in excinfo.value.stderr
     assert excinfo.value.returncode == 1

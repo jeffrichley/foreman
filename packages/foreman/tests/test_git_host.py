@@ -66,9 +66,6 @@ class _FakeProvider(GitHostProvider):
         self.calls.append(("get_default_branch", (repo_slug,)))
         return "main"
 
-    def configure_worktree_identity(self, worktree_path: Path) -> None:
-        self.calls.append(("configure_worktree_identity", (worktree_path,)))
-
     def commit_files_to_worktree(
         self, worktree_path: Path, files: dict[str, str], message: str
     ) -> str:
