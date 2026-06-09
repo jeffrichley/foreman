@@ -2730,3 +2730,204 @@ async def test_run_worker_reverts_entry_labels_when_create_impl_crashes(
         "Revert must drop the foreman:impl-attempt-N that the entry "
         f"transition just added; got {revert_labels!r}"
     )
+
+
+# ----------------------------------------------------------------------
+# foreman#238 — failure-path stats logging
+#
+# Before #238, ``log_worker_run`` was only called on the happy path. If
+# anything after the body wrap raised (WorktreeManager.create_impl,
+# host.push_branch, _create_pull_with_base_fallback, issue.set_labels,
+# etc.) the exception propagated up to the daemon dispatcher and NO
+# JSONL row was written for the failed run. Cost telemetry for failed
+# Worker runs vanished. #238 wraps the body in a try/except so the
+# failure path also writes a row — with whatever partial ``usage`` state
+# was captured before the failure.
+#
+# Note: ``provider.run_agent`` raising is already handled by the D5
+# in-band recovery above (synthesized as ``outcome=incomplete``) and is
+# NOT a #238 case. #238 covers exceptions that escape that recovery.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_worker_logs_worker_failed_with_partial_usage_when_push_branch_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """foreman#238: when ``host.push_branch`` raises after
+    ``provider.run_agent`` has already returned a UsageInfo,
+    ``run_worker`` must:
+
+    1. Re-raise the original exception unchanged so the daemon
+       dispatcher's error handling stays in charge.
+    2. Append a ``worker.jsonl`` row with ``outcome="worker_failed"``,
+       ``pr_number=None`` (the PR never opened), and the
+       ``input_tokens`` / ``output_tokens`` that the successful prior
+       ``provider.run_agent`` call reported. Cost telemetry for failed
+       runs must survive even when the failure happens mid-run.
+    """
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
+    stats_root = tmp_path / "stats"
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(stats_root))
+
+    cfg = _make_config(clone)
+    repo, _spec_pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeWorkerClient(repo=repo)
+    registry = _make_registry(client)
+
+    # Make ``host.push_branch`` raise. Everything before it
+    # (worktree.create_impl, provider.run_agent) succeeds, so ``usage``
+    # from the LLM call should be captured and reach the
+    # ``worker_failed`` row.
+    class _PushBoom(RuntimeError):
+        pass
+
+    fake_host = MagicMock()
+    fake_host.push_branch = MagicMock(side_effect=_PushBoom("github push exploded"))
+    registry.get_host_provider.return_value = fake_host
+
+    # UsageInfo with non-zero token counts so we can prove the partial
+    # capture actually carries the prior run_agent's values (vs the
+    # safe-default zeros).
+    partial_usage = UsageInfo(
+        input_tokens=1234,
+        output_tokens=567,
+        total_cost_usd=0.012,
+        duration_ms=4321,
+        num_turns=3,
+    )
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(
+        return_value=(_implemented_output(), partial_usage)
+    )
+    _make_passing_check_command(monkeypatch)
+
+    with pytest.raises(_PushBoom, match="github push exploded"):
+        await run_worker(
+            issue_url="https://github.com/jeffrichley/voice/issues/42",
+            config=cfg,
+            project_name="voice",
+            worktrees_root=tmp_path / "worktrees",
+            provider=fake_provider,
+            identity_registry=registry,
+        )
+
+    # JSONL row landed for the failed run.
+    jsonl = stats_root / "jeffrichley__voice" / "worker.jsonl"
+    assert jsonl.exists(), (
+        "worker_failed run must still append a row to worker.jsonl; #238 "
+        "fixes the silent-disappearance bug where exceptions before the "
+        "success-path log call skipped the write entirely"
+    )
+    rows = [json.loads(line) for line in jsonl.read_text().splitlines() if line.strip()]
+    assert len(rows) == 1, f"exactly one row expected, got {len(rows)}: {rows!r}"
+    row = rows[0]
+
+    # Outcome + pr_number reflect the failed-mid-run state.
+    assert row["outcome"] == "worker_failed"
+    assert row["pr_number"] is None
+    assert row["role"] == "worker"
+    assert row["issue_number"] == 42
+
+    # Partial usage from the successful prior run_agent call survived.
+    assert row["input_tokens"] == 1234
+    assert row["output_tokens"] == 567
+    assert row["total_cost_usd"] == 0.012
+    assert row["duration_ms"] == 4321
+    assert row["num_turns"] == 3
+    # duration_seconds is non-negative wall-clock — we can't pin an exact
+    # value but it must be present and a real float.
+    assert isinstance(row["duration_seconds"], (int, float))
+    assert row["duration_seconds"] >= 0.0
+
+    # Safe defaults for role-specific fields (no Worker output was
+    # actionable — push_branch raised before any PR opened).
+    assert row["total_sub_requests"] == 0
+    assert row["implemented_count"] == 0
+    assert row["skipped_count"] == 0
+    assert row["skipped_by_reason"] == {}
+    assert row["did_check_pass"] is False
+    assert row["confidence"] == "low"
+    assert row["baseline_failures_count"] == 0
+    assert row["new_failures_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_run_worker_logs_worker_failed_with_safe_defaults_when_create_impl_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """foreman#238: when ``WorktreeManager.create_impl`` raises before
+    ``provider.run_agent`` is ever called, the worker_failed row still
+    lands — with the safe-default zeros for token / cost / duration
+    fields (the spec's "fall back to safe defaults" branch). pr_number
+    is also ``None`` because the PR never opened.
+    """
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
+    stats_root = tmp_path / "stats"
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(stats_root))
+
+    def crashing_create_impl(
+        self: Any,
+        *,
+        clone_path: Path,
+        repo_slug: str,
+        ticket_id: int,
+        repo_url: str | None = None,
+    ) -> Any:
+        raise FileNotFoundError(
+            "[Errno 2] No such file or directory: "
+            f"PosixPath('{clone_path}')"
+        )
+
+    monkeypatch.setattr(
+        "foreman.roles.worker.WorktreeManager.create_impl", crashing_create_impl
+    )
+
+    cfg = _make_config(clone)
+    repo, _spec_pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeWorkerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
+    _make_passing_check_command(monkeypatch)
+
+    with pytest.raises(FileNotFoundError):
+        await run_worker(
+            issue_url="https://github.com/jeffrichley/voice/issues/42",
+            config=cfg,
+            project_name="voice",
+            worktrees_root=tmp_path / "worktrees",
+            provider=fake_provider,
+            identity_registry=registry,
+        )
+
+    jsonl = stats_root / "jeffrichley__voice" / "worker.jsonl"
+    assert jsonl.exists()
+    rows = [json.loads(line) for line in jsonl.read_text().splitlines() if line.strip()]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["outcome"] == "worker_failed"
+    assert row["pr_number"] is None
+    # Safe-default zeros (no UsageInfo captured because create_impl
+    # raised before run_agent ever ran).
+    assert row["input_tokens"] == 0
+    assert row["output_tokens"] == 0
+    assert row["total_cost_usd"] is None
+    assert row["model_usage"] is None
+    assert row["duration_ms"] == 0
+    assert row["num_turns"] == 0
+    # Safe defaults for role-specific fields.
+    assert row["total_sub_requests"] == 0
+    assert row["implemented_count"] == 0
+    assert row["skipped_count"] == 0
+    assert row["skipped_by_reason"] == {}
+    assert row["did_check_pass"] is False
+    assert row["confidence"] == "low"
+    assert row["baseline_failures_count"] == 0
+    assert row["new_failures_count"] == 0
+    # provider.run_agent was never called.
+    fake_provider.run_agent.assert_not_called()

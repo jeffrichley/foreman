@@ -168,9 +168,9 @@ def log_fixer_run(
     *,
     repo_slug: str,
     issue_number: int,
-    pr_number: int,
+    pr_number: int | None,
     attempt: int,
-    outcome: Literal["fixed", "incomplete"],
+    outcome: Literal["fixed", "incomplete", "fixer_failed"],
     total_findings: int,
     addressed_count: int,
     unaddressed_count: int,
@@ -192,11 +192,20 @@ def log_fixer_run(
         repo_slug: ``"owner/repo"`` — used to derive the per-repo
             stats subdirectory.
         issue_number: Originating issue # (label-triggered the Fixer).
-        pr_number: Spec PR # the Fixer edited.
+        pr_number: Spec PR # the Fixer edited. ``None`` on
+            ``"fixer_failed"`` runs that crashed before the spec PR
+            could be resolved.
         attempt: 1-based fix-attempt counter (matches the
             ``foreman:fix-attempt-N`` label set on entry).
         outcome: ``"fixed"`` or ``"incomplete"`` per
-            :class:`~foreman.schemas.fixer.FixerOutput.outcome`.
+            :class:`~foreman.schemas.fixer.FixerOutput.outcome`, or
+            ``"fixer_failed"`` (foreman#239) when ``run_fixer`` itself
+            raised an exception before producing a FixerOutput.
+            ``"incomplete"`` is the Fixer's SELF-REPORTED outcome (LLM
+            said it didn't finish); ``"fixer_failed"`` is a different
+            shape — an uncaught exception in the role runner. Keeping
+            them distinct lets cost-rollup queries answer "how many
+            Fixer runs crashed vs how many the LLM gave up on?".
         total_findings: Sum of addressed + unaddressed; matches the
             Reviewer's finding count.
         addressed_count: ``len(addressed_findings)``.
@@ -258,7 +267,7 @@ def log_worker_run(
     issue_number: int,
     pr_number: int | None,
     attempt: int,
-    outcome: Literal["implemented", "incomplete", "spec_invalid"],
+    outcome: Literal["implemented", "incomplete", "spec_invalid", "worker_failed"],
     total_sub_requests: int,
     implemented_count: int,
     skipped_count: int,
@@ -287,11 +296,19 @@ def log_worker_run(
         attempt: 1-based impl-attempt counter (matches the
             ``foreman:impl-attempt-N`` label set on entry).
         outcome: One of ``implemented`` / ``incomplete`` /
-            ``spec_invalid`` per :class:`~foreman.schemas.worker.WorkerOutput.outcome`.
-            This is the FINAL outcome after orchestrator-side override:
-            if the Worker claimed ``implemented`` but the orchestrator's
-            post-Worker verification found new failures, log
-            ``incomplete`` here (not the Worker's original claim).
+            ``spec_invalid`` per :class:`~foreman.schemas.worker.WorkerOutput.outcome`,
+            OR ``worker_failed`` (foreman#238) when an uncaught exception
+            escaped ``run_worker``'s body wrap. ``worker_failed`` is
+            distinct from ``incomplete`` (the Worker's self-reported
+            "I couldn't finish") and ``spec_invalid`` (the Worker's
+            self-reported "the spec is wrong") — both of those are LLM
+            outputs. ``worker_failed`` means the run never produced a
+            structured output at all.
+            The non-failed outcomes are the FINAL value after
+            orchestrator-side override: if the Worker claimed
+            ``implemented`` but the orchestrator's post-Worker
+            verification found new failures, log ``incomplete`` here
+            (not the Worker's original claim).
         total_sub_requests: ``len(implemented_sub_requests) +
             len(skipped_sub_requests)``. Matches the spec doc's
             Sub-requests count when no silent drops occurred.

@@ -1690,3 +1690,186 @@ async def test_run_fixer_calls_update_before_write_site_label_read(
     # And the role's verdict still landed.
     assert "foreman:spec-fix" not in final
     assert "foreman:planning" in final
+
+
+# ----------------------------------------------------------------------
+# foreman#239 — failure-path stats logging (mirrors foreman#235 for Planner)
+#
+# Before #239, ``log_fixer_run`` was only called on the success path —
+# after ``pr.create_issue_comment`` + the atomic label set. If anything
+# between ``provider.run_agent`` returning and the success log call
+# raised (e.g., ``create_issue_comment`` crashed, ``issue.set_labels``
+# 5xx'd, ``issue.update`` raised), the exception propagated up to the
+# daemon and NO JSONL row was written for the failed Fixer run. Cost
+# telemetry for failures vanished. #239 wraps the body in try/except
+# so the failure path also writes a row tagged ``outcome="fixer_failed"``
+# with whatever partial ``usage`` was captured before the failure.
+#
+# Note: ``"incomplete"`` is the Fixer's SELF-REPORTED outcome (LLM said
+# it didn't finish) — a different shape from an uncaught exception in
+# the role runner. Keeping ``fixer_failed`` distinct lets cost-rollup
+# queries answer "how many Fixer runs crashed vs how many the LLM
+# gave up on?".
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_fixer_logs_fixer_failed_with_partial_usage_when_post_llm_step_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """foreman#239: when a step AFTER ``provider.run_agent`` succeeds
+    raises (here: ``pr.create_issue_comment``), ``run_fixer`` must:
+
+    1. Re-raise the original exception unchanged so the daemon
+       dispatcher's error handling stays in charge.
+    2. Append a ``fixer.jsonl`` row with ``outcome="fixer_failed"`` and
+       the ``input_tokens`` / ``output_tokens`` / ``total_cost_usd`` /
+       ``duration_ms`` / ``num_turns`` from the successful prior
+       ``provider.run_agent`` call. Cost telemetry for failed runs
+       must survive even when the failure happens mid-run.
+    """
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
+    stats_root = tmp_path / "stats"
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(stats_root))
+
+    cfg = _make_config(clone)
+    repo, pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+
+    # Make ``create_issue_comment`` fail. Everything before it
+    # (worktree.attach, provider.run_agent) succeeds — so ``usage`` from
+    # the LLM call should be captured and reach the ``fixer_failed`` row.
+    class _CommentBoom(RuntimeError):
+        pass
+
+    def _boom(body: str) -> None:
+        raise _CommentBoom("github API exploded posting fix_comment")
+
+    pr.create_issue_comment = _boom  # type: ignore[method-assign]
+
+    client = _FakeFixerClient(repo=repo)
+    registry = _make_registry(client)
+
+    # UsageInfo with non-zero token counts so we can prove the partial
+    # capture actually carries the prior run_agent's values (vs the
+    # safe-default zeros).
+    partial_usage = UsageInfo(
+        input_tokens=4321,
+        output_tokens=765,
+        total_cost_usd=0.034,
+        duration_ms=8765,
+        num_turns=5,
+    )
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=(_fixed_output(), partial_usage))
+
+    with pytest.raises(_CommentBoom, match="github API exploded"):
+        await run_fixer(
+            issue_url="https://github.com/jeffrichley/voice/issues/42",
+            config=cfg,
+            project_name="voice",
+            worktrees_root=tmp_path / "worktrees",
+            provider=fake_provider,
+            identity_registry=registry,
+        )
+
+    # JSONL row landed for the failed run.
+    jsonl = stats_root / "jeffrichley__voice" / "fixer.jsonl"
+    assert jsonl.exists(), (
+        "fixer_failed run must still append a row to fixer.jsonl; #239 "
+        "fixes the silent-disappearance bug where exceptions before the "
+        "success-path log call skipped the write entirely"
+    )
+    rows = [json.loads(line) for line in jsonl.read_text().splitlines() if line.strip()]
+    assert len(rows) == 1, f"exactly one row expected, got {len(rows)}: {rows!r}"
+    row = rows[0]
+
+    # Outcome reflects the failed-mid-run state.
+    assert row["outcome"] == "fixer_failed"
+    assert row["role"] == "fixer"
+    assert row["issue_number"] == 42
+    # PR was resolved before the failure, so pr_number is the real PR.
+    assert row["pr_number"] == 77
+    # Attempt counter was stamped at entry — should reflect attempt 1.
+    assert row["attempt"] == 1
+
+    # Partial usage from the successful prior run_agent call survived.
+    assert row["input_tokens"] == 4321
+    assert row["output_tokens"] == 765
+    assert row["total_cost_usd"] == 0.034
+    assert row["duration_ms"] == 8765
+    assert row["num_turns"] == 5
+    # duration_seconds is non-negative wall-clock — we can't pin an exact
+    # value but it must be present and a real float.
+    assert isinstance(row["duration_seconds"], (int, float))
+    assert row["duration_seconds"] >= 0.0
+
+    # Safe defaults for role-specific fields (no FixerOutput consumed
+    # because the failure landed before downstream histogram computation
+    # was trusted).
+    assert row["total_findings"] == 0
+    assert row["addressed_count"] == 0
+    assert row["unaddressed_count"] == 0
+    assert row["unaddressed_by_reason"] == {}
+    assert row["disagreed_count"] == 0
+    assert row["confidence"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_run_fixer_logs_fixer_failed_with_safe_defaults_when_run_agent_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """foreman#239: when ``provider.run_agent`` raises before producing
+    a ``UsageInfo``, the fixer_failed row still lands — with the
+    safe-default zeros for token / cost / duration fields (the spec's
+    "fall back to safe defaults" branch).
+    """
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
+    stats_root = tmp_path / "stats"
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(stats_root))
+
+    cfg = _make_config(clone)
+    repo, _pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeFixerClient(repo=repo)
+    registry = _make_registry(client)
+
+    class _RunAgentBoom(RuntimeError):
+        pass
+
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(side_effect=_RunAgentBoom("LLM transport failed"))
+
+    with pytest.raises(_RunAgentBoom, match="LLM transport failed"):
+        await run_fixer(
+            issue_url="https://github.com/jeffrichley/voice/issues/42",
+            config=cfg,
+            project_name="voice",
+            worktrees_root=tmp_path / "worktrees",
+            provider=fake_provider,
+            identity_registry=registry,
+        )
+
+    jsonl = stats_root / "jeffrichley__voice" / "fixer.jsonl"
+    assert jsonl.exists()
+    rows = [json.loads(line) for line in jsonl.read_text().splitlines() if line.strip()]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["outcome"] == "fixer_failed"
+    assert row["role"] == "fixer"
+    # Safe-default zeros (no UsageInfo captured because run_agent raised).
+    assert row["input_tokens"] == 0
+    assert row["output_tokens"] == 0
+    assert row["total_cost_usd"] is None
+    assert row["model_usage"] is None
+    assert row["duration_ms"] == 0
+    assert row["num_turns"] == 0
+    # Role-specific safe defaults.
+    assert row["total_findings"] == 0
+    assert row["addressed_count"] == 0
+    assert row["unaddressed_count"] == 0
+    assert row["unaddressed_by_reason"] == {}
+    assert row["disagreed_count"] == 0
+    assert row["confidence"] == "low"
