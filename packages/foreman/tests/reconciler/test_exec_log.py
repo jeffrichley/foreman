@@ -8,7 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from foreman.reconciler.exec_log import ExecutionLog
+from foreman.reconciler.exec_log import (
+    _COST_COLUMNS,
+    CURRENT_SCHEMA_VERSION,
+    ExecutionLog,
+)
 
 
 def test_init_creates_schema_and_indexes(tmp_path: Path) -> None:
@@ -373,6 +377,132 @@ def test_count_completed_excludes_skipped_capacity_by_default(tmp_path: Path) ->
         )
         == 3
     )
+
+
+def test_init_adds_eight_cost_columns(tmp_path: Path) -> None:
+    """foreman#251 (Phase 1): schema bumps to version 1 and adds eight
+    nullable cost columns to ``execution_log``. The columns are
+    NULL-by-default so existing rows (start rows, lifecycle markers)
+    stay valid; only ``DispatchRecorder`` writes ever populate them."""
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+
+    with sqlite3.connect(tmp_path / "log.sqlite") as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(execution_log)").fetchall()}
+        user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+
+    expected_cost_columns = {name for name, _type in _COST_COLUMNS}
+    assert expected_cost_columns <= columns
+    assert int(user_version) == CURRENT_SCHEMA_VERSION
+
+
+def test_migration_is_idempotent_across_repeated_init(tmp_path: Path) -> None:
+    """foreman#251 (Phase 1): re-running ``init()`` against an
+    already-migrated DB must NOT raise on duplicate-column. This
+    protects the daemon-restart path where a crashed daemon left the
+    DB in an unknown state."""
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    log.init()  # second call: must be a no-op.
+    log.init()  # third call: still a no-op.
+
+    with sqlite3.connect(tmp_path / "log.sqlite") as conn:
+        # No duplicate columns (PRAGMA returns distinct rows even if
+        # the table had been re-altered; the guard is the no-raise).
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(execution_log)").fetchall()]
+    assert len(columns) == len(set(columns))
+
+
+def test_migration_recovers_from_partial_alter_table_state(tmp_path: Path) -> None:
+    """foreman#251 (Phase 1): if a previous init() crashed after
+    adding SOME of the cost columns but before bumping user_version,
+    the next init() finishes the migration without raising."""
+    db_path = tmp_path / "log.sqlite"
+    # Manually create a v0 schema with some cost columns already there.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE execution_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                ticket_id TEXT NOT NULL,
+                project TEXT NOT NULL,
+                rule_name TEXT,
+                action TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                details TEXT,
+                parent_log_id INTEGER REFERENCES execution_log(id)
+            )
+            """
+        )
+        # Pretend a partial migration added only the first two cost columns.
+        conn.execute("ALTER TABLE execution_log ADD COLUMN input_tokens INTEGER")
+        conn.execute("ALTER TABLE execution_log ADD COLUMN output_tokens INTEGER")
+        # user_version stays 0 so the migration runs from the top.
+
+    # Now init() must complete the migration without raising
+    # "duplicate column name" for input_tokens / output_tokens.
+    log = ExecutionLog(db_path)
+    log.init()
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(execution_log)").fetchall()}
+        user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+    expected_cost_columns = {name for name, _type in _COST_COLUMNS}
+    assert expected_cost_columns <= columns
+    assert int(user_version) == CURRENT_SCHEMA_VERSION
+
+
+def test_write_action_persists_cost_columns_when_supplied(tmp_path: Path) -> None:
+    """foreman#251 (Phase 1): ``write_action`` accepts an optional
+    ``usage_columns`` dict whose keys are the cost-column names; the
+    INSERT carries them through. Old call sites that pass nothing get
+    the existing seven-column INSERT unchanged."""
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+
+    row_id = log.write_action(
+        ticket_id="jeffrichley/foreman#143",
+        project="foreman",
+        rule_name="dispatch_worker",
+        action="dispatch_worker",
+        outcome="running",
+        details={},
+        usage_columns={
+            "input_tokens": 1000,
+            "output_tokens": 500,
+            "total_cost_usd": 0.42,
+        },
+    )
+
+    with sqlite3.connect(tmp_path / "log.sqlite") as conn:
+        row = conn.execute(
+            "SELECT input_tokens, output_tokens, total_cost_usd, num_turns "
+            "FROM execution_log WHERE id = ?",
+            (row_id,),
+        ).fetchone()
+    assert row[0] == 1000
+    assert row[1] == 500
+    assert row[2] == pytest.approx(0.42)
+    # Unspecified column stays NULL.
+    assert row[3] is None
+
+
+def test_write_action_rejects_unknown_usage_column_keys(tmp_path: Path) -> None:
+    """Silent-typo guard: a misspelled cost column key raises rather
+    than silently inserting NULLs."""
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    with pytest.raises(ValueError, match="unknown cost columns"):
+        log.write_action(
+            ticket_id="jeffrichley/foreman#143",
+            project="foreman",
+            rule_name="dispatch_worker",
+            action="dispatch_worker",
+            outcome="running",
+            details={},
+            usage_columns={"input_token": 1000},  # typo: missing 's'
+        )
 
 
 def test_count_completed_default_still_counts_errors_and_successes(tmp_path: Path) -> None:
