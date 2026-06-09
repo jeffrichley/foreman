@@ -722,6 +722,19 @@ async def run_worker(
     # so the next reconciler tick can re-dispatch via _plan_approved_no_impl_pr,
     # advancing count_completed each crash until _impl_attempts_exhausted fires.
     outcome_labels_committed = False
+    # foreman#238: stamp ``start_time`` BEFORE the body wrap and
+    # initialize ``usage`` to ``None`` so the except branch below can
+    # log the worker_failed row with whatever partial state was
+    # captured before the failure surfaced. ``WorktreeManager.create_impl``,
+    # ``host.push_branch``, ``_create_pull_with_base_fallback``, and
+    # the final ``issue.set_labels`` are all inside the wrap; pre-#238
+    # any of those raising silently dropped the run's cost telemetry
+    # because the success-path ``log_worker_run`` call below never
+    # executed. (``provider.run_agent`` raising is already handled by
+    # the D5 in-band recovery further down — synthesized as
+    # ``outcome=incomplete`` — and is NOT a #238 case.)
+    start_time = time.monotonic()
+    usage: UsageInfo | None = None
     try:
 
         # Resolve the spec branch + spec PR (PR may be None — implementation
@@ -789,9 +802,14 @@ async def run_worker(
             instructions=instructions,
         )
 
-        start_time = time.monotonic()
+        # foreman#238: ``start_time`` was hoisted above the outer
+        # try-wrap so the except branch can compute ``duration_seconds``
+        # from the same anchor. ``usage`` is hoisted to outer scope here
+        # IMMEDIATELY on success so a failure in any later step
+        # (push_branch, create_pull, set_labels) still records the
+        # per-call token cost in the worker_failed row.
         try:
-            llm_output, usage = await provider.run_agent(
+            llm_output, run_usage = await provider.run_agent(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 allowed_tools=WORKER_ALLOWED_TOOLS,
@@ -799,6 +817,7 @@ async def run_worker(
                 cwd=wt_path,
                 env={**os.environ, "GH_TOKEN": worker_token},
             )
+            usage = run_usage
         except Exception as exc:
             # D5: SDK errors (timeout, network, validation, anything) MUST NOT
             # crash the orchestrator silently. Synthesize an incomplete-shaped
@@ -1079,6 +1098,60 @@ async def run_worker(
             final_did_check_pass=final_did_check_pass,
             final_labels=sorted(current_labels),
         )
+    except Exception:
+        # foreman#238: any exception that escapes the body wrap (push
+        # auth failure, create_pull 422 not in the fallback set,
+        # issue.set_labels 5xx, etc.) MUST still produce a JSONL row.
+        # Failed Worker runs are exactly the cost-telemetry data points
+        # operators need; silently dropping them — as pre-#238 did —
+        # made the audit log lie.
+        #
+        # Defaults below match the spec: zeroed counters / empty
+        # histograms / ``did_check_pass=False`` / ``confidence="low"``.
+        # Partial ``usage`` from a successful prior ``provider.run_agent``
+        # call (if any) flows through; otherwise the spec-mandated
+        # ``UsageInfo()`` zeros land. ``pr_number`` is always ``None`` on
+        # this path — by definition the PR did not open or we wouldn't
+        # be here.
+        duration_seconds = time.monotonic() - start_time
+        # Inner try/except (pattern from foreman#235 / PR #236): a
+        # disk-full / permission error on the JSONL write itself MUST
+        # NOT mask the original Worker exception the dispatcher needs
+        # to see.
+        try:
+            log_worker_run(
+                repo_slug=actual_repo_slug,
+                issue_number=issue_number,
+                pr_number=None,
+                attempt=attempt,
+                outcome="worker_failed",
+                total_sub_requests=0,
+                implemented_count=0,
+                skipped_count=0,
+                skipped_by_reason={},
+                did_check_pass=False,
+                confidence="low",
+                duration_seconds=duration_seconds,
+                baseline_failures_count=0,
+                new_failures_count=0,
+                input_tokens=usage.input_tokens if usage is not None else 0,
+                output_tokens=usage.output_tokens if usage is not None else 0,
+                total_cost_usd=usage.total_cost_usd if usage is not None else None,
+                model_usage=usage.model_usage if usage is not None else None,
+                duration_ms=usage.duration_ms if usage is not None else 0,
+                num_turns=usage.num_turns if usage is not None else 0,
+            )
+        except Exception:
+            _log.exception(
+                "foreman#238 worker_failed stats write failed for issue=%d; "
+                "original exception will still propagate to the dispatcher",
+                issue_number,
+            )
+        # Bare ``raise`` re-propagates the original exception unchanged
+        # — the daemon dispatcher's error handling stays in charge, and
+        # the ``finally`` block below still runs to revert the entry
+        # labels.
+        raise
     finally:
         if not outcome_labels_committed:
             # Worker crashed before the outcome set_labels. Best-effort revert:
