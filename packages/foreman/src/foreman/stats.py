@@ -433,9 +433,9 @@ def log_reviewer_run(
     *,
     repo_slug: str,
     issue_number: int,
-    pr_number: int,
+    pr_number: int | None,
     target: Literal["spec_pr", "impl_pr"],
-    outcome: Literal["clean", "needs_fix"],
+    outcome: Literal["clean", "needs_fix", "review_failed"],
     duration_seconds: float,
     input_tokens: int = 0,
     output_tokens: int = 0,
@@ -456,11 +456,20 @@ def log_reviewer_run(
         repo_slug: ``"owner/repo"`` — used to derive the per-repo
             stats subdirectory.
         issue_number: Originating issue # (the source of the PR).
-        pr_number: PR # the Reviewer reviewed.
+        pr_number: PR # the Reviewer reviewed. ``None`` is permitted
+            for failed-run rows where the exception fired before the
+            Reviewer resolved the PR number (defensive — today the PR
+            number is resolved from the URL before any failure-prone
+            step, but the type allows the partial-state pattern that
+            foreman#235 / PR #236 established for the Planner).
         target: ``"spec_pr"`` or ``"impl_pr"`` per foreman#78/#79
             target-aware routing.
-        outcome: ``"clean"`` or ``"needs_fix"`` per
-            :class:`~foreman.schemas.reviewer.ReviewerOutput.outcome`.
+        outcome: ``"clean"`` / ``"needs_fix"`` per
+            :class:`~foreman.schemas.reviewer.ReviewerOutput.outcome`
+            on success, or ``"review_failed"`` when ``run_reviewer``
+            caught an exception mid-run. foreman#237 extended the
+            Literal additively so failed Reviewer runs no longer
+            silently vanish from ``reviewer.jsonl``.
         duration_seconds: Wall-clock time the Reviewer run took.
         input_tokens: Provider-reported input token count.
         output_tokens: Provider-reported output token count.

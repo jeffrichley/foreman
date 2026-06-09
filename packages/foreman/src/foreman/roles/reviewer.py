@@ -45,7 +45,7 @@ from github.Repository import Repository
 from foreman.config import Config
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
-from foreman.provider import ProviderFacade
+from foreman.provider import ProviderFacade, UsageInfo
 from foreman.schemas.reviewer import Finding, ReviewerOutput, ReviewerRunResult
 from foreman.stats import log_reviewer_run
 from foreman.worktree import WorktreeManager
@@ -395,141 +395,209 @@ async def run_reviewer(
     issue_title = issue.title or ""
     issue_body = issue.body or ""
 
-    # WorktreeManager's git subprocesses (fetch / worktree add) must
-    # authenticate as the reviewer bot — without the explicit token they
-    # inherit the daemon's parent ``GH_TOKEN`` (CI runner, dev shell)
-    # and attribute identity to the daemon's identity on private repos.
-    # Same anti-leak motivation as :func:`_get_pr_diff` above; the
-    # ``role_token`` parameter is plumbed all the way down through the
-    # module-level git helpers.
-    wt_mgr = WorktreeManager(worktrees_root=worktrees_root, role_token=reviewer_token)
-    if target == "impl_pr":
-        wt_path = wt_mgr.attach_impl(
-            clone_path=Path(project.local_clone_path),
-            repo_slug=repo_name,
-            ticket_id=issue_number,
-            repo_url=f"https://github.com/{project.repo}.git",
-        )
-    else:
-        wt_path = wt_mgr.attach(
-            clone_path=Path(project.local_clone_path),
-            repo_slug=repo_name,
-            ticket_id=issue_number,
-            repo_url=f"https://github.com/{project.repo}.git",
-        )
-
-    pr_diff = _get_pr_diff(
-        wt_path, base_branch=base_branch, head_sha=head_sha, role_token=reviewer_token
-    )
-    spec_doc_content = _read_spec_doc(wt_path, issue_number)
-    instructions = load_project_instructions(Path(project.local_clone_path))
-
-    system_prompt = _load_reviewer_prompt(target=target)
-    user_prompt = _build_user_prompt(
-        issue_title=issue_title,
-        issue_body=issue_body,
-        pr_title=pr.title or "",
-        pr_body=pr.body or "",
-        spec_doc_content=spec_doc_content,
-        pr_diff=pr_diff,
-        instructions=instructions,
-    )
-
+    # foreman#237: stamp ``start_time`` BEFORE the body wrap and
+    # initialize ``usage`` to ``None`` so the except branch below can
+    # log partial state regardless of where in the pipeline a failure
+    # surfaces. ``WorktreeManager.attach`` / ``attach_impl``,
+    # ``_get_pr_diff``, ``provider.run_agent``, ``pr.create_review``,
+    # ``issue.update`` / ``set_labels`` are all inside the wrap; pre-#237
+    # any of those raising silently dropped the run's cost telemetry
+    # because the success-path ``log_reviewer_run`` call below never
+    # executed (same shape as the Planner bug fixed in foreman#235 /
+    # PR #236).
     start_time = time.monotonic()
-    llm_output, usage = await provider.run_agent(
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        allowed_tools=REVIEWER_ALLOWED_TOOLS,
-        output_model=ReviewerOutput,
-        cwd=wt_path,
-        env={**os.environ, "GH_TOKEN": reviewer_token},
-    )
-    duration_seconds = time.monotonic() - start_time
+    usage: UsageInfo | None = None
+    try:
+        # WorktreeManager's git subprocesses (fetch / worktree add) must
+        # authenticate as the reviewer bot — without the explicit token they
+        # inherit the daemon's parent ``GH_TOKEN`` (CI runner, dev shell)
+        # and attribute identity to the daemon's identity on private repos.
+        # Same anti-leak motivation as :func:`_get_pr_diff` above; the
+        # ``role_token`` parameter is plumbed all the way down through the
+        # module-level git helpers.
+        wt_mgr = WorktreeManager(worktrees_root=worktrees_root, role_token=reviewer_token)
+        if target == "impl_pr":
+            wt_path = wt_mgr.attach_impl(
+                clone_path=Path(project.local_clone_path),
+                repo_slug=repo_name,
+                ticket_id=issue_number,
+                repo_url=f"https://github.com/{project.repo}.git",
+            )
+        else:
+            wt_path = wt_mgr.attach(
+                clone_path=Path(project.local_clone_path),
+                repo_slug=repo_name,
+                ticket_id=issue_number,
+                repo_url=f"https://github.com/{project.repo}.git",
+            )
 
-    # Post the review comment as the reviewer bot. ``event="COMMENT"``
-    # (not ``"APPROVE"``) — the bot doesn't have write access on the head
-    # branch and approval is a human decision in v1 anyway.
-    #
-    # We append a marker-fenced JSON block carrying the structured findings
-    # to the review body so the Fixer can recover them by parsing what
-    # GitHub actually stored. Without this, the Fixer's "every edit must
-    # trace to a structured finding" rule produces 0 actions: the structured
-    # ``findings`` list lives only in this in-memory ``ReviewerOutput``, and
-    # by the time the Fixer runs (in a separate process / later) all it has
-    # is the posted review prose. ``llm_output`` is treated as immutable —
-    # we build a fresh ``enriched_body`` string instead of mutating it.
-    findings_block = _build_findings_block(llm_output.findings)
-    enriched_body = f"{llm_output.review_comment}\n\n{findings_block}"
-    pr.create_review(body=enriched_body, event="COMMENT")
+        pr_diff = _get_pr_diff(
+            wt_path, base_branch=base_branch, head_sha=head_sha, role_token=reviewer_token
+        )
+        spec_doc_content = _read_spec_doc(wt_path, issue_number)
+        instructions = load_project_instructions(Path(project.local_clone_path))
 
-    # Advance the originating ISSUE's label (not the PR's) — same pattern
-    # the Planner uses.
-    if llm_output.outcome == "clean":
-        add_label = clean_label
-    else:
-        add_label = fix_label
+        system_prompt = _load_reviewer_prompt(target=target)
+        user_prompt = _build_user_prompt(
+            issue_title=issue_title,
+            issue_body=issue_body,
+            pr_title=pr.title or "",
+            pr_body=pr.body or "",
+            spec_doc_content=spec_doc_content,
+            pr_diff=pr_diff,
+            instructions=instructions,
+        )
 
-    # Atomic label transition (foreman#? — adversarial review MEDIUM #12):
-    # use ``issue.set_labels(...)`` (single PUT /issues/{N}/labels) instead
-    # of sequential ``remove_from_labels`` + ``add_to_labels``. A subprocess
-    # crash between the two PyGithub calls leaves the issue with neither
-    # the entry label nor the outcome label — it then falls out of the v3
-    # observer's GraphQL ``filterBy.labels`` filter and the reconciler
-    # never sees it again (silent stall). ``set_labels`` replaces the full
-    # label set in one API call, so the transition is either fully applied
-    # or not applied at all.
-    #
-    # Namespace-scoped merge (Pass 2 HIGH): ``set_labels`` REPLACES the
-    # full label set on GitHub, so we must preserve every label the role
-    # is not actively touching. Re-read labels NOW (not from the pre-LLM
-    # snapshot) to minimize the race window for operator-added labels —
-    # the LLM call took minutes, but the re-read → API call window is
-    # only the round-trip (~hundreds of ms). The role declares the
-    # foreman labels it is removing (``removed_foreman``) and adding
-    # (``added_foreman``); everything else — non-foreman labels like
-    # ``priority:high`` AND foreman labels the role isn't touching like
-    # ``foreman:hold`` — passes through.
-    #
-    # Pass 3 CRITICAL: PyGithub's ``Issue.labels`` is a cached property
-    # — ``_completeIfNotSet(self._labels)`` only fetches on FIRST access
-    # (see ``.venv/Lib/site-packages/github/Issue.py:266`` +
-    # ``GithubObject.py:618``). Subsequent reads return the same snapshot
-    # taken at the top of ``run_reviewer`` — operator-added labels during
-    # the LLM call would be silently dropped. ``issue.update()`` issues a
-    # conditional GET and re-stores the attributes (see
-    # ``GithubObject.py:638``), invalidating the cache so the next
-    # ``issue.labels`` access reflects the real remote state.
-    removed_foreman = {in_review_label}
-    added_foreman = {add_label}
-    issue.update()
-    current_label_names = {label.name for label in issue.labels}
-    final_labels = sorted((current_label_names - removed_foreman) | added_foreman)
-    issue.set_labels(*final_labels)
+        llm_output, run_usage = await provider.run_agent(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            allowed_tools=REVIEWER_ALLOWED_TOOLS,
+            output_model=ReviewerOutput,
+            cwd=wt_path,
+            env={**os.environ, "GH_TOKEN": reviewer_token},
+        )
+        # foreman#237: hoist ``usage`` to the outer scope IMMEDIATELY
+        # so a failure in any later step (review post, label
+        # transition) still records the per-call token cost in the
+        # review_failed row.
+        usage = run_usage
 
-    # foreman#227: append the per-call token usage + cost to the
-    # Reviewer JSONL stats file. New file under
-    # ``~/.foreman/stats/<owner>__<repo>/reviewer.jsonl`` — previously
-    # the Reviewer had no audit log; the envelope captures target
-    # (spec_pr vs impl_pr) + outcome (clean vs needs_fix) + the new
-    # usage fields.
-    log_reviewer_run(
-        repo_slug=actual_repo_slug,
-        issue_number=issue_number,
-        pr_number=pr_number,
-        target=target,
-        outcome=llm_output.outcome,
-        duration_seconds=duration_seconds,
-        input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
-        total_cost_usd=usage.total_cost_usd,
-        model_usage=usage.model_usage,
-        duration_ms=usage.duration_ms,
-        num_turns=usage.num_turns,
-    )
+        # Post the review comment as the reviewer bot. ``event="COMMENT"``
+        # (not ``"APPROVE"``) — the bot doesn't have write access on the head
+        # branch and approval is a human decision in v1 anyway.
+        #
+        # We append a marker-fenced JSON block carrying the structured findings
+        # to the review body so the Fixer can recover them by parsing what
+        # GitHub actually stored. Without this, the Fixer's "every edit must
+        # trace to a structured finding" rule produces 0 actions: the structured
+        # ``findings`` list lives only in this in-memory ``ReviewerOutput``, and
+        # by the time the Fixer runs (in a separate process / later) all it has
+        # is the posted review prose. ``llm_output`` is treated as immutable —
+        # we build a fresh ``enriched_body`` string instead of mutating it.
+        findings_block = _build_findings_block(llm_output.findings)
+        enriched_body = f"{llm_output.review_comment}\n\n{findings_block}"
+        pr.create_review(body=enriched_body, event="COMMENT")
 
-    # foreman#91: ``final_labels`` is the authoritative post-transition
-    # set, computed in-process from the pre-mutation snapshot + the role's
-    # known transitions — not via a post-mutation host re-read (which
-    # raced its own write and produced stale-snapshot dispatches at the
-    # next worker iteration).
-    return ReviewerRunResult(llm_output=llm_output, final_labels=final_labels)
+        # Advance the originating ISSUE's label (not the PR's) — same pattern
+        # the Planner uses.
+        if llm_output.outcome == "clean":
+            add_label = clean_label
+        else:
+            add_label = fix_label
+
+        # Atomic label transition (foreman#? — adversarial review MEDIUM #12):
+        # use ``issue.set_labels(...)`` (single PUT /issues/{N}/labels) instead
+        # of sequential ``remove_from_labels`` + ``add_to_labels``. A subprocess
+        # crash between the two PyGithub calls leaves the issue with neither
+        # the entry label nor the outcome label — it then falls out of the v3
+        # observer's GraphQL ``filterBy.labels`` filter and the reconciler
+        # never sees it again (silent stall). ``set_labels`` replaces the full
+        # label set in one API call, so the transition is either fully applied
+        # or not applied at all.
+        #
+        # Namespace-scoped merge (Pass 2 HIGH): ``set_labels`` REPLACES the
+        # full label set on GitHub, so we must preserve every label the role
+        # is not actively touching. Re-read labels NOW (not from the pre-LLM
+        # snapshot) to minimize the race window for operator-added labels —
+        # the LLM call took minutes, but the re-read → API call window is
+        # only the round-trip (~hundreds of ms). The role declares the
+        # foreman labels it is removing (``removed_foreman``) and adding
+        # (``added_foreman``); everything else — non-foreman labels like
+        # ``priority:high`` AND foreman labels the role isn't touching like
+        # ``foreman:hold`` — passes through.
+        #
+        # Pass 3 CRITICAL: PyGithub's ``Issue.labels`` is a cached property
+        # — ``_completeIfNotSet(self._labels)`` only fetches on FIRST access
+        # (see ``.venv/Lib/site-packages/github/Issue.py:266`` +
+        # ``GithubObject.py:618``). Subsequent reads return the same snapshot
+        # taken at the top of ``run_reviewer`` — operator-added labels during
+        # the LLM call would be silently dropped. ``issue.update()`` issues a
+        # conditional GET and re-stores the attributes (see
+        # ``GithubObject.py:638``), invalidating the cache so the next
+        # ``issue.labels`` access reflects the real remote state.
+        removed_foreman = {in_review_label}
+        added_foreman = {add_label}
+        issue.update()
+        current_label_names = {label.name for label in issue.labels}
+        final_labels = sorted((current_label_names - removed_foreman) | added_foreman)
+        issue.set_labels(*final_labels)
+
+        duration_seconds = time.monotonic() - start_time
+
+        # foreman#227: append the per-call token usage + cost to the
+        # Reviewer JSONL stats file. New file under
+        # ``~/.foreman/stats/<owner>__<repo>/reviewer.jsonl`` — previously
+        # the Reviewer had no audit log; the envelope captures target
+        # (spec_pr vs impl_pr) + outcome (clean vs needs_fix) + the new
+        # usage fields.
+        # foreman#237: the ``review_failed`` mirror lands in the
+        # ``except`` branch below; reaching this line means the LLM
+        # returned and the host transition succeeded — by definition
+        # the outcome is the LLM's own ``clean`` / ``needs_fix``.
+        log_reviewer_run(
+            repo_slug=actual_repo_slug,
+            issue_number=issue_number,
+            pr_number=pr_number,
+            target=target,
+            outcome=llm_output.outcome,
+            duration_seconds=duration_seconds,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            total_cost_usd=usage.total_cost_usd,
+            model_usage=usage.model_usage,
+            duration_ms=usage.duration_ms,
+            num_turns=usage.num_turns,
+        )
+
+        # foreman#91: ``final_labels`` is the authoritative post-transition
+        # set, computed in-process from the pre-mutation snapshot + the role's
+        # known transitions — not via a post-mutation host re-read (which
+        # raced its own write and produced stale-snapshot dispatches at the
+        # next worker iteration).
+        return ReviewerRunResult(llm_output=llm_output, final_labels=final_labels)
+    except Exception:
+        # foreman#237: capture cost telemetry for failed Reviewer runs.
+        # Pre-#237 any exception from worktree attach / _get_pr_diff /
+        # provider.run_agent / pr.create_review / issue.set_labels
+        # propagated straight up and the JSONL row was never written —
+        # failed runs vanished from ``reviewer.jsonl`` and cross-role
+        # cost rollups under-counted by exactly the failure rate (same
+        # shape Planner had pre-#235 / PR #236).
+        #
+        # Partial state captured so far:
+        #   - ``usage`` is set iff ``provider.run_agent`` returned
+        #     successfully (input/output tokens, cost, model usage).
+        #     A failure mid-review-post or mid-label-transition still
+        #     gets the LLM's per-call cost recorded.
+        # ``raise`` (bare) re-propagates the original exception
+        # unchanged: the daemon dispatcher's error handling must NOT
+        # be altered. The stats write is fire-and-forget telemetry,
+        # not a control-flow gate — wrapped in its own try/except so a
+        # disk-full or permissions failure during the log write cannot
+        # mask the original Reviewer exception. A stats-write failure
+        # here is strictly less bad than the original failure being
+        # silently replaced.
+        duration_seconds = time.monotonic() - start_time
+        try:
+            log_reviewer_run(
+                repo_slug=actual_repo_slug,
+                issue_number=issue_number,
+                pr_number=pr_number,
+                target=target,
+                outcome="review_failed",
+                duration_seconds=duration_seconds,
+                input_tokens=usage.input_tokens if usage is not None else 0,
+                output_tokens=usage.output_tokens if usage is not None else 0,
+                total_cost_usd=usage.total_cost_usd if usage is not None else None,
+                model_usage=usage.model_usage if usage is not None else None,
+                duration_ms=usage.duration_ms if usage is not None else 0,
+                num_turns=usage.num_turns if usage is not None else 0,
+            )
+        except Exception:
+            # Best-effort telemetry — swallow and continue to the
+            # bare ``raise`` so the daemon dispatcher sees the
+            # ORIGINAL exception, not whatever the stats writer
+            # raised. Surfacing the stats failure here would mask
+            # the actual Reviewer failure that triggered this branch.
+            pass
+        raise
