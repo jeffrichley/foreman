@@ -35,6 +35,7 @@ from foreman.provider import (
     ProviderFacade,
     StructuredOutputMissingError,
     StructuredOutputRetryError,
+    UsageInfo,
 )
 
 T = TypeVar("T", bound=BaseModel)
@@ -125,7 +126,7 @@ class AnthropicSDKProvider(ProviderFacade):
         cwd: Path,
         max_turns: int = 1000,
         env: dict[str, str] | None = None,
-    ) -> T:
+    ) -> tuple[T, UsageInfo]:
         schema = output_model.model_json_schema()
         hint = cwd.name or "role"
         with _system_prompt_file(system_prompt, hint=hint) as sp_path:
@@ -187,12 +188,16 @@ class AnthropicSDKProvider(ProviderFacade):
         user_prompt: str,
         options: ClaudeAgentOptions,
         output_model: type[T],
-    ) -> T:
+    ) -> tuple[T, UsageInfo]:
         """Iterate the SDK query stream and validate the structured output.
 
         Split out from ``run_agent`` so the auth-retry wrapper can call it
         twice. Caller is responsible for the ``ClaudeAgentOptions``
         construction + the system-prompt-file lifecycle.
+
+        Returns ``(validated_output, usage_info)`` where ``usage_info``
+        is reconstructed from the same ``ResultMessage`` that carried
+        the structured output (foreman#227).
         """
         async for message in query(prompt=user_prompt, options=options):
             if not isinstance(message, ResultMessage):
@@ -203,7 +208,9 @@ class AnthropicSDKProvider(ProviderFacade):
             #   "error_max_structured_output_retries" → SDK gave up
             #   anything else → keep looping; the SDK may emit more results
             if message.subtype == "success" and message.structured_output is not None:
-                return output_model.model_validate(message.structured_output)
+                validated = output_model.model_validate(message.structured_output)
+                usage = _build_usage_info(message)
+                return validated, usage
             if message.subtype == "error_max_structured_output_retries":
                 raise StructuredOutputRetryError(
                     "Anthropic Agent SDK exhausted its retry budget trying to "
@@ -215,3 +222,28 @@ class AnthropicSDKProvider(ProviderFacade):
             "Anthropic Agent SDK did not return a successful ResultMessage "
             f"carrying structured_output for {output_model.__name__}"
         )
+
+
+def _build_usage_info(message: ResultMessage) -> UsageInfo:
+    """Construct a :class:`UsageInfo` from a successful ``ResultMessage``.
+
+    foreman#227: the SDK's ``ResultMessage.usage`` is a free-form
+    ``dict[str, Any] | None`` carrying the Anthropic API's usage shape
+    (``input_tokens`` / ``output_tokens`` / cache-related counters).
+    We read the two fields we care about with ``.get(..., 0)`` defaults
+    so a partial / unexpected SDK shape doesn't crash the role runner —
+    losing one stats field is strictly better than losing the whole
+    run. Same defensiveness for the wall-clock counters at the
+    envelope level: they're typed ``int`` on the dataclass but absent
+    in some degenerate ``is_error=True`` paths.
+    """
+    usage_dict = message.usage or {}
+    return UsageInfo(
+        input_tokens=int(usage_dict.get("input_tokens", 0) or 0),
+        output_tokens=int(usage_dict.get("output_tokens", 0) or 0),
+        total_cost_usd=message.total_cost_usd,
+        model_usage=message.model_usage,
+        duration_ms=int(message.duration_ms or 0),
+        duration_api_ms=int(message.duration_api_ms or 0),
+        num_turns=int(message.num_turns or 0),
+    )

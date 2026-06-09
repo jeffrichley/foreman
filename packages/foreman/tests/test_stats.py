@@ -73,7 +73,11 @@ def test_log_fixer_run_appends_each_call(tmp_path: Path) -> None:
 
 
 def test_log_fixer_run_schema_stable_fields(tmp_path: Path) -> None:
-    """Pin the field set so downstream tooling can rely on the schema."""
+    """Pin the field set so downstream tooling can rely on the schema.
+
+    foreman#227: the schema is additive — the per-call usage / cost
+    fields land alongside the existing audit dimensions.
+    """
     log_fixer_run(stats_root=tmp_path, **_base_kwargs())  # type: ignore[arg-type]
     out_path = tmp_path / "jeffrichley__voice" / "fixer.jsonl"
     payload = json.loads(out_path.read_text(encoding="utf-8").strip())
@@ -90,6 +94,13 @@ def test_log_fixer_run_schema_stable_fields(tmp_path: Path) -> None:
         "disagreed_count",
         "confidence",
         "duration_seconds",
+        # foreman#227: provider-reported usage + cost.
+        "input_tokens",
+        "output_tokens",
+        "total_cost_usd",
+        "model_usage",
+        "duration_ms",
+        "num_turns",
     }
     assert set(payload.keys()) == expected_keys
 

@@ -26,6 +26,7 @@ import pytest
 from github.GithubException import GithubException
 
 from foreman.config import AppsConfig, Config, ProjectConfig
+from foreman.provider import UsageInfo
 from foreman.roles.worker import (
     WORKER_ALLOWED_TOOLS,
     _count_impl_attempts,
@@ -41,6 +42,14 @@ from foreman.schemas.worker import (
     SkippedSubRequest,
     WorkerOutput,
 )
+
+
+def _with_usage(output: Any) -> tuple[Any, UsageInfo]:
+    """Wrap a WorkerOutput in ``(output, UsageInfo())`` for AsyncMock.
+
+    foreman#227: provider returns a tuple now; mocks mirror that.
+    """
+    return output, UsageInfo()
 
 # ----------------------------------------------------------------------
 # parse_issue_url
@@ -1016,7 +1025,7 @@ async def test_run_worker_implemented_opens_impl_pr_and_advances_label(
     registry = _make_registry(client)
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
     check_calls = _make_passing_check_command(monkeypatch)
 
     result = await run_worker(
@@ -1096,7 +1105,7 @@ async def test_run_worker_uses_atomic_set_labels_for_dispatch_and_outcome(
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
     _make_check_command_pair(monkeypatch, baseline=set(), post=set(), post_rc=0)
 
     await run_worker(
@@ -1146,7 +1155,7 @@ async def test_run_worker_incomplete_keeps_implementing_adds_needs_help(
     registry = _make_registry(client)
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_incomplete_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_incomplete_output()))
     # Post-Worker check fails (rc=1 + 1 new failure) — consistent with Worker's claim
     _make_check_command_pair(
         monkeypatch,
@@ -1203,7 +1212,7 @@ async def test_run_worker_incomplete_at_attempt_3_also_adds_failed(
     registry = _make_registry(client)
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_incomplete_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_incomplete_output()))
     _make_check_command_pair(
         monkeypatch,
         baseline=set(),
@@ -1248,7 +1257,7 @@ async def test_run_worker_spec_invalid_posts_comment_on_spec_pr_not_issue(
     registry = _make_registry(client)
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_spec_invalid_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_spec_invalid_output()))
     _make_passing_check_command(monkeypatch)
 
     result = await run_worker(
@@ -1306,7 +1315,7 @@ async def test_run_worker_new_failures_override_implemented_to_incomplete(
 
     # Worker LIES — claims implemented + did_check_pass=True
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
 
     # Orchestrator sees new failures the Worker didn't disclose.
     _make_check_command_pair(
@@ -1362,7 +1371,7 @@ async def test_run_worker_implemented_with_only_baseline_failures_trusts_worker(
     registry = _make_registry(client)
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
     _make_check_command_pair(
         monkeypatch,
         baseline={"tests/test_existing.py::test_pre_existing"},
@@ -1416,7 +1425,7 @@ async def test_run_worker_attempt_counter_increments_with_existing_labels(
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
     _make_passing_check_command(monkeypatch)
 
     result = await run_worker(
@@ -1453,7 +1462,7 @@ async def test_run_worker_missing_plan_approved_label_raises(
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
     _make_passing_check_command(monkeypatch)
 
     with pytest.raises(RuntimeError, match=r"foreman:plan-approved"):
@@ -1495,7 +1504,7 @@ async def test_run_worker_accepts_plan_approved_entry_label(
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
     _make_passing_check_command(monkeypatch)
 
     await run_worker(
@@ -1540,7 +1549,7 @@ async def test_run_worker_max_attempts_gate_raises_before_llm(
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
     _make_passing_check_command(monkeypatch)
 
     with pytest.raises(RuntimeError, match="max 3 impl-attempts"):
@@ -1584,7 +1593,7 @@ async def test_run_worker_honors_project_max_impl_attempts_override(
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
     _make_passing_check_command(monkeypatch)
 
     with pytest.raises(RuntimeError, match="max 1 impl-attempts"):
@@ -1613,7 +1622,7 @@ async def test_run_worker_rejects_url_pointing_at_wrong_project(
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
 
     with pytest.raises(ValueError, match="does not match project"):
         await run_worker(
@@ -1648,7 +1657,7 @@ async def test_run_worker_creates_impl_worktree_not_spec_worktree(
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
     _make_passing_check_command(monkeypatch)
 
     await run_worker(
@@ -1697,7 +1706,7 @@ async def test_run_worker_baseline_preflight_runs_before_llm(
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
 
     baseline_failures = {"tests/test_pre.py::test_already_failing"}
     _make_check_command_pair(
@@ -1739,7 +1748,7 @@ async def test_run_worker_clean_baseline_uses_none_message(
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
     _make_passing_check_command(monkeypatch)
 
     await run_worker(
@@ -1776,7 +1785,7 @@ async def test_run_worker_uses_project_check_command_override(
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
     calls = _make_passing_check_command(monkeypatch)
 
     await run_worker(
@@ -1825,7 +1834,7 @@ async def test_run_worker_passes_env_with_worker_token_and_parent_env(
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client, token="ghs_specific_worker_token")
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
     _make_passing_check_command(monkeypatch)
 
     await run_worker(
@@ -1866,7 +1875,7 @@ async def test_run_worker_check_command_receives_worker_token_not_parent(
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client, token="ghs_specific_worker_token")
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
     calls = _make_passing_check_command(monkeypatch)
 
     await run_worker(
@@ -1918,7 +1927,7 @@ async def test_run_worker_git_subprocess_uses_worker_token_not_parent(
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client, token="ghs_specific_worker_token")
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
     _make_passing_check_command(monkeypatch)
 
     captured: list[dict[str, Any]] = []
@@ -1996,7 +2005,7 @@ async def test_run_worker_writes_stats_jsonl_line(
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
     _make_passing_check_command(monkeypatch)
 
     await run_worker(
@@ -2043,7 +2052,7 @@ async def test_run_worker_stats_logs_overridden_outcome_not_worker_claim(
     registry = _make_registry(client)
     fake_provider = MagicMock()
     # Worker lies (implemented + did_check_pass=True), orchestrator catches it
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
     _make_check_command_pair(
         monkeypatch,
         baseline=set(),
@@ -2101,7 +2110,7 @@ async def test_run_worker_embeds_project_instructions_in_user_prompt(
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
     _make_passing_check_command(monkeypatch)
 
     await run_worker(
@@ -2134,7 +2143,7 @@ async def test_run_worker_omits_instructions_section_when_file_absent(
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
     _make_passing_check_command(monkeypatch)
 
     await run_worker(
@@ -2242,7 +2251,7 @@ async def test_worker_opens_impl_pr_with_base_from_create_impl_result(
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
     _make_passing_check_command(monkeypatch)
 
     await run_worker(
@@ -2334,7 +2343,7 @@ async def test_run_worker_returns_authoritative_final_labels(
         "spec_invalid": _spec_invalid_output,
     }
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=output_map[output_factory]())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(output_map[output_factory]()))
 
     if check_setup == "pass":
         _make_passing_check_command(monkeypatch)
@@ -2388,7 +2397,7 @@ async def test_run_worker_preserves_non_foreman_labels_added_during_window(
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client)
 
-    async def _mutate_then_return(*args: Any, **kwargs: Any) -> WorkerOutput:
+    async def _mutate_then_return(*args: Any, **kwargs: Any) -> tuple[WorkerOutput, UsageInfo]:
         # Operator adds two non-foreman labels + one foreman label NOT
         # under the Worker's control during the LLM call. All three
         # must be preserved by the post-LLM outcome transition.
@@ -2399,7 +2408,7 @@ async def test_run_worker_preserves_non_foreman_labels_added_during_window(
         issue._remote_labels.append("priority:high")
         issue._remote_labels.append("team:backend")
         issue._remote_labels.append("foreman:hold")
-        return _implemented_output()
+        return _with_usage(_implemented_output())
 
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(side_effect=_mutate_then_return)
@@ -2457,7 +2466,7 @@ async def test_run_worker_implemented_clears_stale_foreman_failed(
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
     _make_check_command_pair(monkeypatch, baseline=set(), post=set(), post_rc=0)
 
     result = await run_worker(
@@ -2511,9 +2520,11 @@ async def test_run_worker_calls_update_before_post_llm_write_site_label_read(
     # snapshot from the top of ``run_worker`` (which carried only
     # ``foreman:plan-approved``) is reused and the operator label is
     # silently dropped.
-    async def _operator_adds_label_during_llm(*args: Any, **kwargs: Any) -> WorkerOutput:
+    async def _operator_adds_label_during_llm(
+        *args: Any, **kwargs: Any
+    ) -> tuple[WorkerOutput, UsageInfo]:
         issue._remote_labels.append("priority:high")
-        return _implemented_output()
+        return _with_usage(_implemented_output())
 
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(side_effect=_operator_adds_label_during_llm)
@@ -2608,7 +2619,7 @@ async def test_run_worker_passes_repo_url_to_create_impl(
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
     _make_passing_check_command(monkeypatch)
 
     await run_worker(
@@ -2679,7 +2690,7 @@ async def test_run_worker_reverts_entry_labels_when_create_impl_crashes(
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_implemented_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
     _make_passing_check_command(monkeypatch)
 
     issue = repo.get_issue(42)

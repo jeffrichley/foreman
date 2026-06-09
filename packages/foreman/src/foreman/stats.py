@@ -33,7 +33,7 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 # Reasons that contribute to ``disagreed_count`` in fixer stats — kept
 # in sync with the ``UnaddressedReason`` literal in
@@ -69,6 +69,12 @@ def log_fixer_run(
     disagreed_count: int,
     confidence: Literal["high", "medium", "low"],
     duration_seconds: float,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    total_cost_usd: float | None = None,
+    model_usage: dict[str, Any] | None = None,
+    duration_ms: int = 0,
+    num_turns: int = 0,
     stats_root: Path | None = None,
 ) -> Path:
     """Append one JSONL line to the Fixer stats file for ``repo_slug``.
@@ -122,6 +128,14 @@ def log_fixer_run(
         "disagreed_count": disagreed_count,
         "confidence": confidence,
         "duration_seconds": round(duration_seconds, 3),
+        # foreman#227: provider-reported token usage + SDK-computed cost.
+        # ADDITIVE: existing audit-log readers ignore unknown keys.
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_cost_usd": total_cost_usd,
+        "model_usage": model_usage,
+        "duration_ms": duration_ms,
+        "num_turns": num_turns,
     }
     with stats_file.open("a", encoding="utf-8") as f:
         f.write(json.dumps(line) + "\n")
@@ -144,6 +158,12 @@ def log_worker_run(
     duration_seconds: float,
     baseline_failures_count: int,
     new_failures_count: int,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    total_cost_usd: float | None = None,
+    model_usage: dict[str, Any] | None = None,
+    duration_ms: int = 0,
+    num_turns: int = 0,
     stats_root: Path | None = None,
 ) -> Path:
     """Append one JSONL line to the Worker stats file for ``repo_slug``.
@@ -213,10 +233,157 @@ def log_worker_run(
         "duration_seconds": round(duration_seconds, 3),
         "baseline_failures_count": baseline_failures_count,
         "new_failures_count": new_failures_count,
+        # foreman#227: provider-reported token usage + SDK-computed cost.
+        # ADDITIVE: existing audit-log readers ignore unknown keys.
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_cost_usd": total_cost_usd,
+        "model_usage": model_usage,
+        "duration_ms": duration_ms,
+        "num_turns": num_turns,
     }
     with stats_file.open("a", encoding="utf-8") as f:
         f.write(json.dumps(line) + "\n")
     return stats_file
 
 
-__all__ = ["log_fixer_run", "log_worker_run", "_DISAGREEMENT_REASON"]
+def log_planner_run(
+    *,
+    repo_slug: str,
+    issue_number: int,
+    pr_number: int | None,
+    duration_seconds: float,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    total_cost_usd: float | None = None,
+    model_usage: dict[str, Any] | None = None,
+    duration_ms: int = 0,
+    num_turns: int = 0,
+    stats_root: Path | None = None,
+) -> Path:
+    """Append one JSONL line to the Planner stats file for ``repo_slug``.
+
+    foreman#227: Planner had no JSONL audit log before this ticket —
+    it's added here so per-call token usage + SDK-computed cost lands
+    in ``~/.foreman/stats/<owner>__<repo>/planner.jsonl`` alongside
+    the other roles. The base envelope (timestamp / issue_number /
+    pr_number / duration) is intentionally narrow; rich per-role
+    fields (spec doc length, etc.) can land in a follow-up.
+
+    Args:
+        repo_slug: ``"owner/repo"`` — used to derive the per-repo
+            stats subdirectory.
+        issue_number: Originating issue # (the Planner runs on issues).
+        pr_number: Spec PR # opened by the Planner (None on failed runs).
+        duration_seconds: Wall-clock time the Planner run took.
+        input_tokens: Provider-reported input token count.
+        output_tokens: Provider-reported output token count.
+        total_cost_usd: Provider-computed cost for the call.
+        model_usage: Per-model breakdown when the provider supplies one.
+        duration_ms: Provider-reported wall-clock duration.
+        num_turns: Number of agent-loop turns the provider executed.
+        stats_root: Override for the stats root directory.
+
+    Returns:
+        The absolute path of the JSONL file the line was appended to.
+    """
+    root = stats_root if stats_root is not None else _default_stats_root()
+    repo_dir = root / _repo_slug_to_dirname(repo_slug)
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    stats_file = repo_dir / "planner.jsonl"
+
+    line = {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "issue_number": issue_number,
+        "pr_number": pr_number,
+        "duration_seconds": round(duration_seconds, 3),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_cost_usd": total_cost_usd,
+        "model_usage": model_usage,
+        "duration_ms": duration_ms,
+        "num_turns": num_turns,
+    }
+    with stats_file.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(line) + "\n")
+    return stats_file
+
+
+def log_reviewer_run(
+    *,
+    repo_slug: str,
+    issue_number: int,
+    pr_number: int,
+    target: Literal["spec_pr", "impl_pr"],
+    outcome: Literal["clean", "needs_fix"],
+    duration_seconds: float,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    total_cost_usd: float | None = None,
+    model_usage: dict[str, Any] | None = None,
+    duration_ms: int = 0,
+    num_turns: int = 0,
+    stats_root: Path | None = None,
+) -> Path:
+    """Append one JSONL line to the Reviewer stats file for ``repo_slug``.
+
+    foreman#227: Reviewer had no JSONL audit log before this ticket —
+    it's added here so per-call token usage + SDK-computed cost lands
+    in ``~/.foreman/stats/<owner>__<repo>/reviewer.jsonl`` alongside
+    the other roles. The base envelope (timestamp / issue_number /
+    pr_number / target / outcome / duration) is intentionally narrow;
+    rich per-role fields (findings count, severity histogram) can
+    land in a follow-up.
+
+    Args:
+        repo_slug: ``"owner/repo"`` — used to derive the per-repo
+            stats subdirectory.
+        issue_number: Originating issue # (the source of the PR).
+        pr_number: PR # the Reviewer reviewed.
+        target: ``"spec_pr"`` or ``"impl_pr"`` per foreman#78/#79
+            target-aware routing.
+        outcome: ``"clean"`` or ``"needs_fix"`` per
+            :class:`~foreman.schemas.reviewer.ReviewerOutput.outcome`.
+        duration_seconds: Wall-clock time the Reviewer run took.
+        input_tokens: Provider-reported input token count.
+        output_tokens: Provider-reported output token count.
+        total_cost_usd: Provider-computed cost for the call.
+        model_usage: Per-model breakdown when the provider supplies one.
+        duration_ms: Provider-reported wall-clock duration.
+        num_turns: Number of agent-loop turns the provider executed.
+        stats_root: Override for the stats root directory.
+
+    Returns:
+        The absolute path of the JSONL file the line was appended to.
+    """
+    root = stats_root if stats_root is not None else _default_stats_root()
+    repo_dir = root / _repo_slug_to_dirname(repo_slug)
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    stats_file = repo_dir / "reviewer.jsonl"
+
+    line = {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "issue_number": issue_number,
+        "pr_number": pr_number,
+        "target": target,
+        "outcome": outcome,
+        "duration_seconds": round(duration_seconds, 3),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_cost_usd": total_cost_usd,
+        "model_usage": model_usage,
+        "duration_ms": duration_ms,
+        "num_turns": num_turns,
+    }
+    with stats_file.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(line) + "\n")
+    return stats_file
+
+
+__all__ = [
+    "log_fixer_run",
+    "log_planner_run",
+    "log_reviewer_run",
+    "log_worker_run",
+    "_DISAGREEMENT_REASON",
+]

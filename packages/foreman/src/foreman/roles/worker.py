@@ -84,7 +84,7 @@ from foreman.config import Config
 from foreman.git_host import GitHostProvider
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
-from foreman.provider import ProviderFacade
+from foreman.provider import ProviderFacade, UsageInfo
 from foreman.schemas.worker import WorkerOutput, WorkerRunResult
 from foreman.stats import log_worker_run
 from foreman.worktree import WorktreeManager
@@ -791,7 +791,7 @@ async def run_worker(
 
         start_time = time.monotonic()
         try:
-            llm_output = await provider.run_agent(
+            llm_output, usage = await provider.run_agent(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 allowed_tools=WORKER_ALLOWED_TOOLS,
@@ -821,6 +821,13 @@ async def run_worker(
                 check_output_summary=(f"provider.run_agent raised {type(exc).__name__}: {exc}"),
                 confidence="low",
             )
+            # foreman#227: no usage info available on the exception path —
+            # the provider crashed before producing a ResultMessage, so we
+            # default to a zeroed UsageInfo so the JSONL stats write below
+            # still has consistent fields (zero tokens, no cost, no model
+            # breakdown). Logged-incomplete-with-zero-usage is the right
+            # shape; pretending we know token counts when we don't is worse.
+            usage = UsageInfo()
             # Post-Worker verification still runs below — but since no LLM
             # work landed, post == baseline, so new_failures will be empty
             # and the outcome stays `incomplete`. The label transitions
@@ -1049,6 +1056,16 @@ async def run_worker(
             duration_seconds=duration_seconds,
             baseline_failures_count=len(baseline_failures),
             new_failures_count=len(new_failures),
+            # foreman#227: provider-reported usage from the ResultMessage.
+            # On the provider-error path above, ``usage`` is a zeroed
+            # UsageInfo (we never saw a ResultMessage) — JSONL still
+            # carries consistent fields.
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            total_cost_usd=usage.total_cost_usd,
+            model_usage=usage.model_usage,
+            duration_ms=usage.duration_ms,
+            num_turns=usage.num_turns,
         )
         # Discard the combined-output buffer from the post-check run so it
         # doesn't sit in memory across the rest of the lifetime of the
