@@ -81,6 +81,7 @@ from github.Repository import Repository
 
 from foreman.branches import impl_branch, spec_branch
 from foreman.config import Config
+from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
 from foreman.git_host import GitHostProvider
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
@@ -584,6 +585,8 @@ async def run_worker(
     worktrees_root: Path,
     provider: ProviderFacade,
     identity_registry: IdentityRegistry | None = None,
+    dispatch_recorder: DispatchRecorder | None = None,
+    dispatch_trace_id: int | None = None,
 ) -> WorkerRunResult:
     """Run the Worker role end-to-end on one spec-ready issue.
 
@@ -1093,6 +1096,39 @@ async def run_worker(
             duration_ms=usage.duration_ms,
             num_turns=usage.num_turns,
         )
+        # foreman#251 (Phase 1): dual-write through the Recorder.
+        # ``role_data`` carries the Worker-specific JSONL fields so
+        # :class:`RoleStatsSubscriber` can fan out to
+        # ``log_worker_run`` with matching values. The success-path
+        # ``log_worker_run`` above stays for Phase 1 (see ticket
+        # acceptance criterion); Phase 2 will collapse it.
+        emit_recorder_complete(
+            dispatch_recorder=dispatch_recorder,
+            dispatch_trace_id=dispatch_trace_id,
+            role="worker",
+            repo_slug=actual_repo_slug,
+            ticket_id=f"{actual_repo_slug}#{issue_number}",
+            project=project_name,
+            issue_number=issue_number,
+            pr_number=impl_pr_number,
+            outcome=final_outcome,
+            usage=usage,
+            role_data={
+                "attempt": attempt,
+                "total_sub_requests": (
+                    len(llm_output.implemented_sub_requests)
+                    + len(llm_output.skipped_sub_requests)
+                ),
+                "implemented_count": len(llm_output.implemented_sub_requests),
+                "skipped_count": len(llm_output.skipped_sub_requests),
+                "skipped_by_reason": skipped_hist,
+                "did_check_pass": final_did_check_pass,
+                "confidence": llm_output.confidence,
+                "baseline_failures_count": len(baseline_failures),
+                "new_failures_count": len(new_failures),
+            },
+            duration_seconds=duration_seconds,
+        )
         # Discard the combined-output buffer from the post-check run so it
         # doesn't sit in memory across the rest of the lifetime of the
         # async result (the orchestrator returns to its caller after this).
@@ -1160,6 +1196,33 @@ async def run_worker(
                 "original exception will still propagate to the dispatcher",
                 issue_number,
             )
+        # foreman#251 (Phase 1): mirror the failure-path dual-write.
+        # Safe defaults match the existing log_worker_run failure-path
+        # call above so the two ledgers agree on shape.
+        emit_recorder_complete(
+            dispatch_recorder=dispatch_recorder,
+            dispatch_trace_id=dispatch_trace_id,
+            role="worker",
+            repo_slug=actual_repo_slug,
+            ticket_id=f"{actual_repo_slug}#{issue_number}",
+            project=project_name,
+            issue_number=issue_number,
+            pr_number=None,
+            outcome="worker_failed",
+            usage=usage if usage is not None else UsageInfo(),
+            role_data={
+                "attempt": attempt,
+                "total_sub_requests": 0,
+                "implemented_count": 0,
+                "skipped_count": 0,
+                "skipped_by_reason": {},
+                "did_check_pass": False,
+                "confidence": "low",
+                "baseline_failures_count": 0,
+                "new_failures_count": 0,
+            },
+            duration_seconds=duration_seconds,
+        )
         # Bare ``raise`` re-propagates the original exception unchanged
         # — the daemon dispatcher's error handling stays in charge, and
         # the ``finally`` block below still runs to revert the entry

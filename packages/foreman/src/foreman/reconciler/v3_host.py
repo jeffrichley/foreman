@@ -25,14 +25,25 @@ import logging
 import os
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import IO, Any, Protocol
+from typing import IO, TYPE_CHECKING, Any, Protocol
 
 from foreman.config import MergeMechanism
 from foreman.reconciler.exec_log import ExecutionLog
 from foreman.reconciler.host import PRMergeability
+
+# foreman#251 (Phase 1): the DispatchRecorder lives in
+# ``foreman.dispatch_recorder`` which imports ``ExecutionLog`` from
+# ``foreman.reconciler.exec_log``. Importing it at module top here
+# would trigger the ``foreman.reconciler`` package __init__ during
+# dispatch_recorder's own import, completing a cycle. Pull it in via
+# TYPE_CHECKING for annotations + a runtime import for the env-var
+# constant inside ``dispatch_role`` to break the cycle.
+if TYPE_CHECKING:
+    from foreman.dispatch_recorder import DispatchRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -206,10 +217,12 @@ _QUEUE_NEEDS_HELP_STATES = frozenset({"UNMERGEABLE", "LOCKED"})
 SubprocessRunner = Callable[..., _SubprocessLike]
 """Callable that spawns a subprocess and returns a ``_SubprocessLike`` wrapper.
 
-Production runner accepts ``(argv, *, log_path: Path | None = None)``.
-Test fakes may accept the same signature, but the ``log_path`` kwarg is
-optional from the caller's side: ``dispatch_role`` only passes it when
-``V3GitHubHost`` was constructed with ``log_dir`` set."""
+Production runner accepts ``(argv, *, log_path: Path | None = None,
+extra_env: dict[str, str] | None = None)``. Test fakes may accept the
+same signature, but both ``log_path`` and ``extra_env`` are optional
+from the caller's side: ``dispatch_role`` only passes ``log_path`` when
+``V3GitHubHost`` was constructed with ``log_dir`` set, and only passes
+``extra_env`` when forwarding the foreman#251 trace_id env var."""
 
 
 class _PopenWrapper:
@@ -327,7 +340,10 @@ def _build_role_subprocess_env(base_env: Mapping[str, str]) -> dict[str, str]:
 
 
 def _default_subprocess_runner(
-    argv: list[str], *, log_path: Path | None = None
+    argv: list[str],
+    *,
+    log_path: Path | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> _SubprocessLike:
     """Production runner. Spawn synchronously via subprocess.Popen.
 
@@ -348,8 +364,15 @@ def _default_subprocess_runner(
     the daemon's env minus state/log dir vars, with sentinel + lock paths
     rewritten to constant tmp paths the daemon does not watch. See that
     helper's docstring for the full rationale.
+
+    foreman#251 (Phase 1): ``extra_env`` adds keys (typically the
+    ``FOREMAN_DISPATCH_TRACE_ID`` env var) the daemon needs the role
+    subprocess to see. Applied AFTER ``_build_role_subprocess_env`` so a
+    deliberate override wins over the inherited env's scrubbed value.
     """
     env = _build_role_subprocess_env(os.environ)
+    if extra_env:
+        env.update(extra_env)
     if log_path is None:
         proc = subprocess.Popen(
             argv,
@@ -386,11 +409,23 @@ class V3GitHubHost:
         max_concurrent_dispatches: int = 1,
         log_dir: Path | None = None,
         gh_queue_client: _GraphQLClientLike | None = None,
+        dispatch_recorder: DispatchRecorder | None = None,
     ) -> None:
         self._v2 = v2_host
         self._log = log
         self._runner = subprocess_runner if subprocess_runner is not None else _default_subprocess_runner
         self._timeout_seconds = role_dispatch_timeout_seconds
+        # foreman#251 (Phase 1): the daemon-side DispatchRecorder. When
+        # set, ``_track_subprocess_completion`` calls
+        # ``record_subprocess_terminated`` on all four exit paths so
+        # the Recorder can decide whether to write a
+        # ``subprocess_killed`` cost row (subprocess died before
+        # emitting its own completion) or skip (the subprocess's
+        # in-band completion is already in the DB). Optional so that
+        # the existing test fixtures that build a V3GitHubHost without
+        # plumbing a Recorder stay green; production wiring in
+        # ``cli.py`` always supplies one.
+        self._recorder = dispatch_recorder
         # Global cap on concurrent dispatched role subprocesses. acquired() in
         # dispatch_role (non-blocking — raises when full), released in
         # _track_subprocess_completion's finally so the slot is held for the
@@ -816,16 +851,33 @@ class V3GitHubHost:
         # and the runner falls back to DEVNULL.
         log_path = self._build_dispatch_log_path(role=role, issue=issue)
 
+        # foreman#251 (Phase 1): propagate the trace_id to the role
+        # subprocess via env so the role's in-process DispatchRecorder
+        # tags every event with the same trace_id the parent will use
+        # in ``record_subprocess_terminated``. Without this, in-band
+        # cost rows from the subprocess and the parent's subprocess-
+        # killed row would target different trace_ids and the
+        # CostSubscriber's DB-lookup dedup would never catch them.
+        # Local import breaks the dispatch_recorder ⇄ reconciler.__init__
+        # cycle (see the TYPE_CHECKING block above).
+        extra_env: dict[str, str] | None = None
+        if self._recorder is not None:
+            from foreman.dispatch_recorder import TRACE_ID_ENV_VAR
+
+            extra_env = {TRACE_ID_ENV_VAR: str(start_log_id)}
+
         # Wrap runner + task creation in try/except so the capacity slot is
         # released on any spawn-time failure (uv missing → FileNotFoundError,
         # fork failure → OSError, loop scheduling failure, etc.). Without
         # this, repeated spawn failures would permanently consume slots until
         # the daemon restart triggers recover_orphaned + slot reset.
         try:
-            if log_path is None:
-                proc = self._runner(argv)
-            else:
-                proc = self._runner(argv, log_path=log_path)
+            runner_kwargs: dict[str, Any] = {}
+            if log_path is not None:
+                runner_kwargs["log_path"] = log_path
+            if extra_env is not None:
+                runner_kwargs["extra_env"] = extra_env
+            proc = self._runner(argv, **runner_kwargs) if runner_kwargs else self._runner(argv)
         except Exception:
             self._dispatch_capacity.release()
             raise
@@ -848,9 +900,23 @@ class V3GitHubHost:
             self._dispatch_capacity.release()
             return proc.pid
 
+        # foreman#251 (Phase 1): include role + ticket + project + issue
+        # in the tracker so the parent's Recorder can build a complete
+        # ``record_subprocess_terminated`` envelope. ``ticket_id`` and
+        # ``project`` are needed because the Recorder's JSONL writer
+        # fans out to ``log_<role>_run`` which keys on repo_slug +
+        # issue_number.
         try:
             loop.create_task(
-                self._track_subprocess_completion(proc, role, start_log_id=start_log_id)
+                self._track_subprocess_completion(
+                    proc,
+                    role,
+                    start_log_id=start_log_id,
+                    owner=owner,
+                    repo=repo,
+                    issue=issue,
+                    project=project,
+                )
             )
         except Exception:
             self._dispatch_capacity.release()
@@ -863,6 +929,10 @@ class V3GitHubHost:
         role: str,
         *,
         start_log_id: int,
+        owner: str | None = None,
+        repo: str | None = None,
+        issue: int | None = None,
+        project: str | None = None,
     ) -> None:
         """Await subprocess exit and write the termination row.
 
@@ -870,12 +940,25 @@ class V3GitHubHost:
         released on every exit path (success, returncode!=0, timeout, error)
         so a stuck or crashed background task can never permanently consume
         a slot.
+
+        foreman#251 (Phase 1): each of the four exit paths
+        (timeout / error / returncode!=0 / returncode==0) ALSO calls
+        ``self._recorder.record_subprocess_terminated`` so the
+        Recorder can write a ``subprocess_killed`` cost row when the
+        subprocess died before emitting its own ``dispatch_complete``.
+        ``owner`` / ``repo`` / ``issue`` / ``project`` carry through
+        so the Recorder can build the ticket_id + repo_slug it needs
+        for the JSONL fan-out. Defaults are ``None`` for
+        back-compatibility with the existing tests that drive
+        ``_track_subprocess_completion`` directly without going
+        through ``dispatch_role``.
         """
         # foreman#119: surface the per-dispatch log path in every
         # termination row so post-mortem doesn't need to grep the daemon
         # log to find which file to read. None for the no-capture path.
         log_path = getattr(proc, "log_path", None)
         log_path_str = str(log_path) if log_path is not None else None
+        start_time = time.monotonic()
         try:
             try:
                 returncode = await asyncio.wait_for(proc.wait(), timeout=self._timeout_seconds)
@@ -904,6 +987,16 @@ class V3GitHubHost:
                     outcome="timeout",
                     details=timeout_details,
                 )
+                self._notify_recorder_terminated(
+                    role=role,
+                    owner=owner,
+                    repo=repo,
+                    issue=issue,
+                    project=project,
+                    start_log_id=start_log_id,
+                    exit_outcome="subprocess_timeout",
+                    duration_seconds=time.monotonic() - start_time,
+                )
                 return
             except Exception as exc:
                 logger.exception("subprocess for role=%s pid=%d errored awaiting", role, proc.pid)
@@ -914,6 +1007,16 @@ class V3GitHubHost:
                     start_log_id=start_log_id,
                     outcome="error",
                     details=err_details,
+                )
+                self._notify_recorder_terminated(
+                    role=role,
+                    owner=owner,
+                    repo=repo,
+                    issue=issue,
+                    project=project,
+                    start_log_id=start_log_id,
+                    exit_outcome="subprocess_error",
+                    duration_seconds=time.monotonic() - start_time,
                 )
                 return
 
@@ -926,8 +1029,68 @@ class V3GitHubHost:
                 outcome=outcome,
                 details=term_details,
             )
+            self._notify_recorder_terminated(
+                role=role,
+                owner=owner,
+                repo=repo,
+                issue=issue,
+                project=project,
+                start_log_id=start_log_id,
+                exit_outcome="success" if returncode == 0 else "subprocess_nonzero_exit",
+                duration_seconds=time.monotonic() - start_time,
+            )
         finally:
             self._dispatch_capacity.release()
+
+    def _notify_recorder_terminated(
+        self,
+        *,
+        role: str,
+        owner: str | None,
+        repo: str | None,
+        issue: int | None,
+        project: str | None,
+        start_log_id: int,
+        exit_outcome: str,
+        duration_seconds: float,
+    ) -> None:
+        """Forward a subprocess-exit event to the Phase 1 DispatchRecorder.
+
+        Best-effort: no-op when the host was built without a recorder
+        (existing test fixtures) or when the dispatched context is
+        incomplete (defensive guard for callers driving the host
+        directly). A Recorder exception is logged and swallowed — the
+        ``terminate_dispatch`` write above is the load-bearing row,
+        not this one.
+        """
+        if self._recorder is None:
+            return
+        if owner is None or repo is None or issue is None or project is None:
+            # Defensive: the dispatch_role path always passes all four;
+            # this guard exists for direct ``_track_subprocess_completion``
+            # callers (test seam) so partial-context calls don't crash.
+            return
+        repo_slug = f"{owner}/{repo}"
+        ticket_id = f"{repo_slug}#{issue}"
+        try:
+            self._recorder.record_subprocess_terminated(
+                trace_id=start_log_id,
+                role=role,
+                repo_slug=repo_slug,
+                ticket_id=ticket_id,
+                project=project,
+                issue_number=issue,
+                exit_outcome=exit_outcome,
+                duration_seconds=duration_seconds,
+            )
+        except Exception:
+            logger.exception(
+                "DispatchRecorder.record_subprocess_terminated raised for "
+                "trace_id=%d role=%s exit_outcome=%s; ignoring (telemetry-only)",
+                start_log_id,
+                role,
+                exit_outcome,
+            )
 
     def _build_dispatch_log_path(self, *, role: str, issue: int) -> Path | None:
         """Compute the per-dispatch log file path, or ``None`` when log

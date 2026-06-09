@@ -43,6 +43,7 @@ from github import Github
 from github.Repository import Repository
 
 from foreman.config import Config
+from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
@@ -321,6 +322,8 @@ async def run_reviewer(
     worktrees_root: Path,
     provider: ProviderFacade,
     identity_registry: IdentityRegistry | None = None,
+    dispatch_recorder: DispatchRecorder | None = None,
+    dispatch_trace_id: int | None = None,
 ) -> ReviewerRunResult:
     """Run the Reviewer role end-to-end on one spec PR.
 
@@ -550,6 +553,24 @@ async def run_reviewer(
             duration_ms=usage.duration_ms,
             num_turns=usage.num_turns,
         )
+        # foreman#251 (Phase 1): dual-write through the Recorder.
+        # ``target`` lands in ``role_data`` because it's reviewer-
+        # specific JSONL — :class:`RoleStatsSubscriber` reads it back
+        # when fanning out to ``log_reviewer_run``.
+        emit_recorder_complete(
+            dispatch_recorder=dispatch_recorder,
+            dispatch_trace_id=dispatch_trace_id,
+            role="reviewer",
+            repo_slug=actual_repo_slug,
+            ticket_id=f"{actual_repo_slug}#{issue_number}",
+            project=project_name,
+            issue_number=issue_number,
+            pr_number=pr_number,
+            outcome=llm_output.outcome,
+            usage=usage,
+            role_data={"target": target},
+            duration_seconds=duration_seconds,
+        )
 
         # foreman#91: ``final_labels`` is the authoritative post-transition
         # set, computed in-process from the pre-mutation snapshot + the role's
@@ -608,4 +629,19 @@ async def run_reviewer(
             # raised. Surfacing the stats failure here would mask
             # the actual Reviewer failure that triggered this branch.
             pass
+        # foreman#251 (Phase 1): mirror the failure-path dual-write.
+        emit_recorder_complete(
+            dispatch_recorder=dispatch_recorder,
+            dispatch_trace_id=dispatch_trace_id,
+            role="reviewer",
+            repo_slug=actual_repo_slug,
+            ticket_id=f"{actual_repo_slug}#{issue_number}",
+            project=project_name,
+            issue_number=issue_number,
+            pr_number=pr_number,
+            outcome="review_failed",
+            usage=usage if usage is not None else UsageInfo(),
+            role_data={"target": target},
+            duration_seconds=duration_seconds,
+        )
         raise

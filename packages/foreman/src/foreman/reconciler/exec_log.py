@@ -21,6 +21,28 @@ from typing import Any
 _OUTCOME_RUNNING = "running"
 _OUTCOME_ERRORED_RECOVERY = "errored:recovery"
 
+# foreman#251 (Phase 1 of dispatch-recorder design): the execution_log
+# becomes the canonical cost ledger. ``CURRENT_SCHEMA_VERSION`` bumps
+# whenever the table layout changes; ``init()`` reads the live
+# ``PRAGMA user_version`` and runs forward-only migrations until it
+# matches. Version 0 → 1 adds the eight cost columns.
+CURRENT_SCHEMA_VERSION = 1
+
+# foreman#251: the eight nullable cost columns added at schema version 1.
+# Single source of truth so the migration and the writer share the same
+# spelling — a typo at one site would silently produce a NULL column at
+# the other and break "cost in execution_log == cost in JSONL" parity.
+_COST_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("input_tokens", "INTEGER"),
+    ("output_tokens", "INTEGER"),
+    ("cache_creation_input_tokens", "INTEGER"),
+    ("cache_read_input_tokens", "INTEGER"),
+    ("total_cost_usd", "REAL"),
+    ("model_usage_json", "TEXT"),
+    ("duration_ms", "INTEGER"),
+    ("num_turns", "INTEGER"),
+)
+
 _SCHEMA = [
     """
     CREATE TABLE IF NOT EXISTS execution_log (
@@ -45,6 +67,54 @@ _SCHEMA = [
 ]
 
 
+def _existing_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    """Return the live column-name set for ``table``.
+
+    Used by the migration runner to make ``ADD COLUMN`` idempotent —
+    re-running ``init()`` against an already-migrated DB must be a
+    no-op, not a duplicate-column error.
+    """
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    # PRAGMA table_info columns: cid, name, type, notnull, dflt_value, pk.
+    return {row[1] for row in rows}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Apply forward-only schema migrations until ``user_version`` matches
+    :data:`CURRENT_SCHEMA_VERSION`.
+
+    Each migration step is idempotent on a partially-migrated DB — re-running
+    ``init()`` against a DB that already carries the cost columns (e.g.,
+    a daemon that crashed mid-migration and restarted) must not raise on
+    duplicate-column. We re-read ``PRAGMA table_info`` after each step
+    rather than trust the bookkeeping, because the bookkeeping (``PRAGMA
+    user_version``) is a single integer with no transaction guarantee
+    across the ``ALTER TABLE`` statements that change the actual schema.
+    """
+    current = int(conn.execute("PRAGMA user_version").fetchone()[0])
+
+    if current < 1:
+        # Phase 1 of foreman#251: add the eight cost columns. All nullable
+        # so existing rows (start-of-action rows, non-role-dispatch rows)
+        # stay valid; only ``record_dispatch_complete`` writes ever
+        # populate them. The migration uses ``ADD COLUMN`` rather than a
+        # table rebuild — sqlite has supported ``ADD COLUMN`` since 3.2.0
+        # and it's a metadata-only change with no row rewrite.
+        existing = _existing_columns(conn, "execution_log")
+        for col_name, col_type in _COST_COLUMNS:
+            if col_name in existing:
+                # Idempotency guard: if a previous init() partially
+                # ran (added some columns then crashed before bumping
+                # user_version), skip the ones already present.
+                continue
+            conn.execute(
+                f"ALTER TABLE execution_log ADD COLUMN {col_name} {col_type}"
+            )
+
+    if current != CURRENT_SCHEMA_VERSION:
+        conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
+
+
 class ExecutionLog:
     """Append-only sqlite log of reconciler decisions and their outcomes."""
 
@@ -52,11 +122,20 @@ class ExecutionLog:
         self.db_path = Path(db_path)
 
     def init(self) -> None:
-        """Create schema + indexes. Idempotent."""
+        """Create schema + indexes, run migrations. Idempotent.
+
+        foreman#251 (Phase 1 of the dispatch-recorder design): after the
+        base schema lands, ``_migrate`` advances the live DB to
+        :data:`CURRENT_SCHEMA_VERSION` by running forward-only steps.
+        Each step is idempotent on a partially-migrated DB so a daemon
+        that crashed mid-migration and restarted ends up in the same
+        state as one that didn't.
+        """
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             for stmt in _SCHEMA:
                 conn.execute(stmt)
+            _migrate(conn)
 
     def _connect(self) -> sqlite3.Connection:
         # Each call returns a fresh connection — matches v2's Storage pattern.
@@ -75,17 +154,46 @@ class ExecutionLog:
         outcome: str,
         details: dict[str, Any],
         parent_log_id: int | None = None,
+        usage_columns: dict[str, Any] | None = None,
     ) -> int:
-        """Insert a row. Returns the new row id."""
+        """Insert a row. Returns the new row id.
+
+        foreman#251 (Phase 1): ``usage_columns`` carries the eight cost
+        fields when the caller is a :class:`DispatchRecorder` cost
+        subscriber. Keys must be a subset of the schema's cost column
+        names (:data:`_COST_COLUMNS`); unknown keys are rejected to
+        catch typos at the call site rather than as silent NULLs.
+        ``None`` keeps the existing eight-positional INSERT — old
+        callers don't pay any new cost.
+        """
         details_json = json.dumps(details, sort_keys=True)
         with self._connect() as conn:
+            if usage_columns:
+                self._validate_usage_columns(usage_columns)
+                col_names = list(usage_columns.keys())
+                extra_columns = ", " + ", ".join(col_names)
+                extra_placeholders = ", " + ", ".join("?" for _ in col_names)
+                extra_values: tuple[Any, ...] = tuple(usage_columns[k] for k in col_names)
+            else:
+                extra_columns = ""
+                extra_placeholders = ""
+                extra_values = ()
             cur = conn.execute(
-                """
+                f"""
                 INSERT INTO execution_log
-                    (ticket_id, project, rule_name, action, outcome, details, parent_log_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (ticket_id, project, rule_name, action, outcome, details, parent_log_id{extra_columns})
+                VALUES (?, ?, ?, ?, ?, ?, ?{extra_placeholders})
                 """,
-                (ticket_id, project, rule_name, action, outcome, details_json, parent_log_id),
+                (
+                    ticket_id,
+                    project,
+                    rule_name,
+                    action,
+                    outcome,
+                    details_json,
+                    parent_log_id,
+                    *extra_values,
+                ),
             )
             assert cur.lastrowid is not None
             return cur.lastrowid
@@ -96,11 +204,18 @@ class ExecutionLog:
         parent_log_id: int,
         outcome: str,
         details: dict[str, Any],
+        usage_columns: dict[str, Any] | None = None,
     ) -> int:
         """Write a termination row pointing at the start row.
 
         Inherits ticket_id / project / action / rule_name from the parent so
         the pair is queryable as one unit. Outcome reflects success | error.
+
+        foreman#251 (Phase 1): ``usage_columns`` accepts the same eight
+        cost fields :meth:`write_action` does, for the (b) variant in
+        the design (terminate row carries cost rather than a sibling
+        ``<role>_complete`` row). The existing ``terminate_dispatch``
+        flow keeps passing ``None`` and is untouched.
         """
         with self._connect() as conn:
             parent = conn.execute(
@@ -114,16 +229,53 @@ class ExecutionLog:
                 raise ValueError(f"No log row with id={parent_log_id}")
             ticket_id, project, rule_name, action = parent
             details_json = json.dumps(details, sort_keys=True)
+            if usage_columns:
+                self._validate_usage_columns(usage_columns)
+                col_names = list(usage_columns.keys())
+                extra_columns = ", " + ", ".join(col_names)
+                extra_placeholders = ", " + ", ".join("?" for _ in col_names)
+                extra_values: tuple[Any, ...] = tuple(usage_columns[k] for k in col_names)
+            else:
+                extra_columns = ""
+                extra_placeholders = ""
+                extra_values = ()
             cur = conn.execute(
-                """
+                f"""
                 INSERT INTO execution_log
-                    (ticket_id, project, rule_name, action, outcome, details, parent_log_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (ticket_id, project, rule_name, action, outcome, details, parent_log_id{extra_columns})
+                VALUES (?, ?, ?, ?, ?, ?, ?{extra_placeholders})
                 """,
-                (ticket_id, project, rule_name, action, outcome, details_json, parent_log_id),
+                (
+                    ticket_id,
+                    project,
+                    rule_name,
+                    action,
+                    outcome,
+                    details_json,
+                    parent_log_id,
+                    *extra_values,
+                ),
             )
             assert cur.lastrowid is not None
             return cur.lastrowid
+
+    @staticmethod
+    def _validate_usage_columns(usage_columns: dict[str, Any]) -> None:
+        """Raise if ``usage_columns`` has keys not in the cost-column set.
+
+        foreman#251: silent-typo guard. A caller that misspells
+        ``input_tokens`` as ``input_token`` would otherwise write the
+        scalar into a nowhere column and ``write_action`` would
+        silently insert NULLs. Raising loudly here surfaces the bug at
+        the call site rather than at a later query.
+        """
+        allowed = {name for name, _type in _COST_COLUMNS}
+        unknown = set(usage_columns.keys()) - allowed
+        if unknown:
+            raise ValueError(
+                f"unknown cost columns in usage_columns: {sorted(unknown)!r}; "
+                f"allowed: {sorted(allowed)!r}"
+            )
 
     def has_unterminated(self, action: str, ticket_id: str) -> bool:
         """True iff there is an outcome='running' row for (action, ticket_id)
