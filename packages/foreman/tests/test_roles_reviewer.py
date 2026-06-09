@@ -1431,3 +1431,173 @@ async def test_run_reviewer_calls_update_before_write_site_label_read(
     # And the role's verdict still landed.
     assert "foreman:planning" not in final
     assert "foreman:plan-approved" in final
+
+
+# ----------------------------------------------------------------------
+# foreman#237 — failure-path stats logging
+#
+# Before #237, ``log_reviewer_run`` was only called on the happy path.
+# If anything inside ``run_reviewer`` raised after ``start_time`` (
+# ``WorktreeManager.attach`` / ``attach_impl``, ``_get_pr_diff``,
+# ``provider.run_agent``, ``pr.create_review``, ``issue.update`` /
+# ``set_labels``), the exception propagated up to the daemon dispatcher
+# and NO JSONL row was written for the failed run. Cost telemetry for
+# failed Reviewer runs vanished. #237 wraps the body in a try/except so
+# the failure path also writes a row — with whatever partial ``usage``
+# state was captured before the failure. Mirrors the Planner fix in
+# foreman#235 / PR #236.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_reviewer_logs_review_failed_with_partial_usage_when_create_review_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """foreman#237: when ``pr.create_review`` raises after the LLM call
+    has already returned, ``run_reviewer`` must:
+
+    1. Re-raise the original exception unchanged so the daemon
+       dispatcher's error handling stays in charge.
+    2. Append a ``reviewer.jsonl`` row with ``outcome="review_failed"``,
+       ``target`` preserved from the resolved branch, and the
+       ``input_tokens`` / ``output_tokens`` that the successful prior
+       ``provider.run_agent`` call reported. Cost telemetry for failed
+       runs must survive even when the failure happens mid-run.
+    """
+    import json as _json
+
+    stats_root = tmp_path / "stats"
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(stats_root))
+
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
+
+    cfg = _make_config(clone)
+    repo, pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+
+    # Make ``pr.create_review`` fail. Everything before it
+    # (worktree.attach, _get_pr_diff, provider.run_agent) succeeds —
+    # so ``usage`` from the LLM call should be captured and reach the
+    # ``review_failed`` row.
+    class _CreateReviewBoom(RuntimeError):
+        pass
+
+    def _boom(*args: Any, **kwargs: Any) -> None:
+        raise _CreateReviewBoom("github review API exploded")
+
+    pr.create_review = _boom  # type: ignore[method-assign]
+
+    client = _FakeReviewerClient(repo=repo)
+    registry = _make_registry(client)
+
+    # UsageInfo with non-zero token counts so we can prove the partial
+    # capture actually carries the prior run_agent's values (vs the
+    # safe-default zeros).
+    partial_usage = UsageInfo(
+        input_tokens=2222,
+        output_tokens=888,
+        total_cost_usd=0.034,
+        duration_ms=5678,
+        num_turns=4,
+    )
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=(_make_clean_output(), partial_usage))
+
+    with pytest.raises(_CreateReviewBoom, match="github review API exploded"):
+        await run_reviewer(
+            pr_url="https://github.com/jeffrichley/voice/pull/77",
+            config=cfg,
+            project_name="voice",
+            worktrees_root=tmp_path / "worktrees",
+            provider=fake_provider,
+            identity_registry=registry,
+        )
+
+    # JSONL row landed for the failed run.
+    jsonl = stats_root / "jeffrichley__voice" / "reviewer.jsonl"
+    assert jsonl.exists(), (
+        "review_failed run must still append a row to reviewer.jsonl; #237 "
+        "fixes the silent-disappearance bug where exceptions before the "
+        "success-path log call skipped the write entirely"
+    )
+    rows = [_json.loads(line) for line in jsonl.read_text().splitlines() if line.strip()]
+    assert len(rows) == 1, f"exactly one row expected, got {len(rows)}: {rows!r}"
+    row = rows[0]
+
+    # Outcome reflects the failed-mid-run state. target / issue_number /
+    # pr_number / role survive from the pre-failure resolution.
+    assert row["outcome"] == "review_failed"
+    assert row["role"] == "reviewer"
+    assert row["issue_number"] == 42
+    assert row["pr_number"] == 77
+    assert row["target"] == "spec_pr"
+
+    # Partial usage from the successful prior run_agent call survived.
+    assert row["input_tokens"] == 2222
+    assert row["output_tokens"] == 888
+    assert row["total_cost_usd"] == 0.034
+    assert row["duration_ms"] == 5678
+    assert row["num_turns"] == 4
+    # duration_seconds is non-negative wall-clock — we can't pin an exact
+    # value but it must be present and a real float.
+    assert isinstance(row["duration_seconds"], (int, float))
+    assert row["duration_seconds"] >= 0.0
+
+
+@pytest.mark.asyncio
+async def test_run_reviewer_logs_review_failed_with_safe_defaults_when_run_agent_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """foreman#237: when ``provider.run_agent`` raises before producing
+    a ``UsageInfo``, the review_failed row still lands — with the
+    safe-default zeros for token / cost / duration fields (the spec's
+    "fall back to safe defaults" branch).
+    """
+    import json as _json
+
+    stats_root = tmp_path / "stats"
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(stats_root))
+
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
+
+    cfg = _make_config(clone)
+    repo, _pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeReviewerClient(repo=repo)
+    registry = _make_registry(client)
+
+    class _RunAgentBoom(RuntimeError):
+        pass
+
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(side_effect=_RunAgentBoom("LLM transport failed"))
+
+    with pytest.raises(_RunAgentBoom, match="LLM transport failed"):
+        await run_reviewer(
+            pr_url="https://github.com/jeffrichley/voice/pull/77",
+            config=cfg,
+            project_name="voice",
+            worktrees_root=tmp_path / "worktrees",
+            provider=fake_provider,
+            identity_registry=registry,
+        )
+
+    jsonl = stats_root / "jeffrichley__voice" / "reviewer.jsonl"
+    assert jsonl.exists()
+    rows = [_json.loads(line) for line in jsonl.read_text().splitlines() if line.strip()]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["outcome"] == "review_failed"
+    assert row["role"] == "reviewer"
+    assert row["issue_number"] == 42
+    assert row["pr_number"] == 77
+    assert row["target"] == "spec_pr"
+    # Safe-default zeros (no UsageInfo captured because run_agent raised).
+    assert row["input_tokens"] == 0
+    assert row["output_tokens"] == 0
+    assert row["total_cost_usd"] is None
+    assert row["model_usage"] is None
+    assert row["duration_ms"] == 0
+    assert row["num_turns"] == 0
