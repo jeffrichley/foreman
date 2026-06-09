@@ -101,6 +101,9 @@ def test_log_fixer_run_schema_stable_fields(tmp_path: Path) -> None:
         # foreman#227: provider-reported usage + cost.
         "input_tokens",
         "output_tokens",
+        # foreman#244: prompt-cache token counters.
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
         "total_cost_usd",
         "model_usage",
         "duration_ms",
@@ -185,6 +188,11 @@ _COMMON_ENVELOPE_KEYS: tuple[str, ...] = (
     "duration_seconds",
     "input_tokens",
     "output_tokens",
+    # foreman#244: prompt-cache token counters sit between
+    # ``output_tokens`` and ``total_cost_usd`` so the four token
+    # counters cluster together in the on-disk row.
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
     "total_cost_usd",
     "model_usage",
     "duration_ms",

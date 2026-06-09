@@ -543,6 +543,8 @@ async def run_reviewer(
             duration_seconds=duration_seconds,
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
+            cache_creation_input_tokens=usage.cache_creation_input_tokens,
+            cache_read_input_tokens=usage.cache_read_input_tokens,
             total_cost_usd=usage.total_cost_usd,
             model_usage=usage.model_usage,
             duration_ms=usage.duration_ms,
@@ -588,6 +590,12 @@ async def run_reviewer(
                 duration_seconds=duration_seconds,
                 input_tokens=usage.input_tokens if usage is not None else 0,
                 output_tokens=usage.output_tokens if usage is not None else 0,
+                cache_creation_input_tokens=(
+                    usage.cache_creation_input_tokens if usage is not None else 0
+                ),
+                cache_read_input_tokens=(
+                    usage.cache_read_input_tokens if usage is not None else 0
+                ),
                 total_cost_usd=usage.total_cost_usd if usage is not None else None,
                 model_usage=usage.model_usage if usage is not None else None,
                 duration_ms=usage.duration_ms if usage is not None else 0,
