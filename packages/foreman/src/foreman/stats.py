@@ -526,9 +526,103 @@ def log_reviewer_run(
     return stats_file
 
 
+def log_killed_run(
+    *,
+    repo_slug: str,
+    role: Literal["planner", "reviewer", "worker", "fixer"],
+    issue_number: int,
+    pr_number: int | None,
+    outcome: Literal[
+        "subprocess_timeout", "subprocess_error", "subprocess_nonzero_exit"
+    ],
+    duration_seconds: float,
+    stats_root: Path | None = None,
+) -> Path:
+    """Append one JSONL line to ``<role>.jsonl`` for a parent-killed run.
+
+    foreman#245: when the parent reconciler kills a role subprocess
+    before that subprocess's in-band ``log_<role>_run`` call fires, the
+    role-specific ``log_*_run`` helper never runs. Tokens were consumed
+    but NO JSONL row lands; cost dashboards undercount entirely. The
+    parent still writes an ``execution_log`` termination row with
+    outcome ``timeout`` / ``error`` so we know the dispatch died, but
+    cost telemetry has no row.
+
+    This helper writes a minimal CommonEnvelope row to the role's JSONL
+    so the row count + outcome tally cross-reference the
+    ``execution_log`` audit trail. We can't recover the token usage
+    that the killed subprocess had consumed (that's bookkeeping the
+    child process owned — we only know it died), so every usage /
+    cost field lands at zero / None. Operators reading the file see
+    the row, see ``outcome=subprocess_*``, and know to treat the
+    zeros as "killed before token-count was known," not as
+    "the run was free."
+
+    Distinct from the role's own self-reported failure outcomes
+    (``spec_failed`` / ``worker_failed`` / ``fixer_failed`` /
+    ``review_failed``) — those are written by ``run_<role>`` when it
+    caught its own exception. The ``subprocess_*`` outcomes are
+    written by the PARENT when the role subprocess never reached
+    its in-band logger at all (timeout, OOM, SIGTERM, etc.).
+
+    Args:
+        repo_slug: ``"owner/repo"`` — used to derive the per-repo
+            stats subdirectory.
+        role: Which role's JSONL to append to (``planner.jsonl`` /
+            ``reviewer.jsonl`` / ``worker.jsonl`` / ``fixer.jsonl``).
+        issue_number: Originating issue # the dispatch was attached to.
+        pr_number: PR # the dispatch was attached to; ``None`` when
+            the role's action doesn't target a PR (Planner) or the
+            PR wasn't resolved yet.
+        outcome: One of
+            ``"subprocess_timeout"`` (parent's wait-for-exit timer
+            elapsed and the child was terminated),
+            ``"subprocess_error"`` (the parent's ``proc.wait()`` itself
+            raised — IO error, OS-level failure, etc.), or
+            ``"subprocess_nonzero_exit"`` (the child exited with a
+            non-zero returncode — written AFTER the existing
+            ``terminate_dispatch`` so both ledgers agree on the
+            failure).
+        duration_seconds: Wall-clock time from parent-side timer
+            (subprocess spawn → kill/exit), rounded to 3 decimals.
+        stats_root: Override for the stats root directory; defaults to
+            ``$FOREMAN_STATS_ROOT`` or ``~/.foreman/stats``. Test-only
+            knob.
+
+    Returns:
+        The absolute path of the JSONL file the line was appended to.
+    """
+    root = stats_root if stats_root is not None else _default_stats_root()
+    repo_dir = root / _repo_slug_to_dirname(repo_slug)
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    stats_file = repo_dir / f"{role}.jsonl"
+
+    envelope = _envelope_dict(
+        role=role,
+        issue_number=issue_number,
+        pr_number=pr_number,
+        outcome=outcome,
+        duration_seconds=duration_seconds,
+        input_tokens=0,
+        output_tokens=0,
+        total_cost_usd=None,
+        model_usage=None,
+        duration_ms=0,
+        num_turns=0,
+    )
+    # No role-specific fields — the parent has no way to recover the
+    # role's structured output for a killed subprocess. Only the
+    # CommonEnvelope prefix lands.
+    line = envelope
+    with stats_file.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(line) + "\n")
+    return stats_file
+
+
 __all__ = [
     "CommonEnvelope",
     "log_fixer_run",
+    "log_killed_run",
     "log_planner_run",
     "log_reviewer_run",
     "log_worker_run",

@@ -1399,3 +1399,375 @@ def test_build_role_subprocess_env_does_not_mutate_base_env() -> None:
         "Helper mutated its base_env argument — the daemon's own env "
         "would be corrupted if base_env is os.environ."
     )
+
+
+# ---------------------------------------------------------------------------
+# foreman#245 — subprocess-killed JSONL row
+# ---------------------------------------------------------------------------
+#
+# Goal: when the parent reconciler kills a role subprocess before that
+# subprocess's in-band ``log_<role>_run`` call fires, write a minimal
+# CommonEnvelope row to ``<role>.jsonl`` so cost dashboards can see the
+# killed run instead of silently undercounting.
+#
+# Three kill branches in ``_track_subprocess_completion``:
+#   1. Timeout (parent's wait-for-exit timer elapsed)
+#   2. proc.wait() raised an unexpected exception
+#   3. Subprocess exited with non-zero returncode (written AFTER
+#      ``terminate_dispatch`` so the execution-log row exists first).
+
+
+def _read_role_jsonl_row(
+    stats_root: Path, repo_slug: str, role: str
+) -> dict[str, Any]:
+    """Read the single JSONL row written by ``log_killed_run`` and return
+    it as a dict. Asserts exactly one row landed."""
+    jsonl_path = stats_root / repo_slug.replace("/", "__") / f"{role}.jsonl"
+    assert jsonl_path.exists(), f"{role}.jsonl was never created at {jsonl_path}"
+    lines = jsonl_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1, f"expected 1 row in {jsonl_path}, got {len(lines)}"
+    return json.loads(lines[0])  # type: ignore[no-any-return]
+
+
+@pytest.mark.asyncio
+async def test_track_subprocess_completion_writes_killed_jsonl_row_on_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """foreman#245: timeout branch writes a CommonEnvelope row to
+    ``planner.jsonl`` with ``outcome="subprocess_timeout"`` so cost
+    dashboards see the killed run."""
+    stats_root = tmp_path / "stats"
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(stats_root))
+
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+
+    class _HangingProc:
+        def __init__(self) -> None:
+            self.pid = 11111
+            self._terminated = False
+            self._proc = self
+
+        def terminate(self) -> None:
+            self._terminated = True
+
+        async def wait(self) -> int:
+            while not self._terminated:
+                await asyncio.sleep(0.01)
+            return -15
+
+    proc = _HangingProc()
+
+    host = V3GitHubHost(
+        v2_host=_FakeV2Host(),
+        log=log,
+        subprocess_runner=lambda argv, **_kw: proc,  # type: ignore[arg-type, return-value]
+        role_dispatch_timeout_seconds=1,
+    )
+
+    start_id = log.write_action(
+        ticket_id="jeffrichley/foreman#245",
+        project="foreman",
+        rule_name="dispatch_planner",
+        action="dispatch_planner",
+        outcome="running",
+        details={},
+    )
+
+    await host._track_subprocess_completion(
+        proc,
+        "planner",
+        start_log_id=start_id,
+        owner="jeffrichley",
+        repo="foreman",
+        issue_number=245,
+        pr_number=None,
+    )
+
+    # The execution_log termination row still landed.
+    assert proc._terminated is True
+
+    # New: a JSONL row landed at planner.jsonl with outcome=subprocess_timeout.
+    row = _read_role_jsonl_row(stats_root, "jeffrichley/foreman", "planner")
+    assert row["role"] == "planner"
+    assert row["outcome"] == "subprocess_timeout"
+    assert row["issue_number"] == 245
+    assert row["pr_number"] is None
+    assert row["input_tokens"] == 0
+    assert row["output_tokens"] == 0
+    assert row["total_cost_usd"] is None
+    assert row["model_usage"] is None
+    assert row["duration_ms"] == 0
+    assert row["num_turns"] == 0
+    # Parent-side timer landed something non-negative.
+    assert isinstance(row["duration_seconds"], (int, float))
+    assert row["duration_seconds"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_track_subprocess_completion_writes_killed_jsonl_row_on_wait_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """foreman#245: when ``proc.wait()`` itself raises, write a
+    CommonEnvelope row to the role JSONL with
+    ``outcome="subprocess_error"``."""
+    stats_root = tmp_path / "stats"
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(stats_root))
+
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+
+    class _ErroringProc:
+        def __init__(self) -> None:
+            self.pid = 22222
+            self._proc = self
+
+        async def wait(self) -> int:
+            raise RuntimeError("simulated wait failure")
+
+    proc = _ErroringProc()
+
+    host = V3GitHubHost(
+        v2_host=_FakeV2Host(),
+        log=log,
+        subprocess_runner=lambda argv, **_kw: proc,  # type: ignore[arg-type, return-value]
+        role_dispatch_timeout_seconds=30,
+    )
+
+    start_id = log.write_action(
+        ticket_id="jeffrichley/foreman#245",
+        project="foreman",
+        rule_name="dispatch_reviewer_impl",
+        action="dispatch_reviewer",
+        outcome="running",
+        details={},
+    )
+
+    await host._track_subprocess_completion(
+        proc,
+        "reviewer",
+        start_log_id=start_id,
+        owner="jeffrichley",
+        repo="foreman",
+        issue_number=245,
+        pr_number=999,
+    )
+
+    # JSONL row lands at reviewer.jsonl with outcome=subprocess_error.
+    row = _read_role_jsonl_row(stats_root, "jeffrichley/foreman", "reviewer")
+    assert row["role"] == "reviewer"
+    assert row["outcome"] == "subprocess_error"
+    assert row["issue_number"] == 245
+    assert row["pr_number"] == 999
+    assert row["input_tokens"] == 0
+    assert row["output_tokens"] == 0
+    assert row["total_cost_usd"] is None
+
+
+@pytest.mark.asyncio
+async def test_track_subprocess_completion_writes_killed_jsonl_row_on_nonzero_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """foreman#245: when the subprocess exits with a non-zero returncode,
+    write a CommonEnvelope row to the role JSONL with
+    ``outcome="subprocess_nonzero_exit"`` AFTER the existing
+    ``terminate_dispatch`` (so the execution_log row exists first and
+    both ledgers agree on the failure)."""
+    stats_root = tmp_path / "stats"
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(stats_root))
+
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+
+    class _NonzeroProc:
+        def __init__(self) -> None:
+            self.pid = 33333
+            self._proc = self
+
+        async def wait(self) -> int:
+            return 137  # conventional SIGKILL / OOM-kill returncode
+
+    proc = _NonzeroProc()
+
+    host = V3GitHubHost(
+        v2_host=_FakeV2Host(),
+        log=log,
+        subprocess_runner=lambda argv, **_kw: proc,  # type: ignore[arg-type, return-value]
+        role_dispatch_timeout_seconds=30,
+    )
+
+    start_id = log.write_action(
+        ticket_id="jeffrichley/foreman#245",
+        project="foreman",
+        rule_name="dispatch_worker",
+        action="dispatch_worker",
+        outcome="running",
+        details={},
+    )
+
+    await host._track_subprocess_completion(
+        proc,
+        "worker",
+        start_log_id=start_id,
+        owner="jeffrichley",
+        repo="foreman",
+        issue_number=245,
+        pr_number=None,
+    )
+
+    # The execution_log termination row landed (outcome=error for
+    # returncode != 0) — and the JSONL row landed afterwards.
+    with sqlite3.connect(tmp_path / "log.sqlite") as conn:
+        outcome = conn.execute(
+            "SELECT outcome FROM execution_log WHERE parent_log_id = ?",
+            (start_id,),
+        ).fetchone()[0]
+    assert outcome == "error"
+
+    row = _read_role_jsonl_row(stats_root, "jeffrichley/foreman", "worker")
+    assert row["role"] == "worker"
+    assert row["outcome"] == "subprocess_nonzero_exit"
+    assert row["issue_number"] == 245
+    assert row["pr_number"] is None
+    assert row["input_tokens"] == 0
+    assert row["output_tokens"] == 0
+    assert row["total_cost_usd"] is None
+
+
+@pytest.mark.asyncio
+async def test_track_subprocess_completion_does_not_write_killed_row_on_clean_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Negative case: when the subprocess exits cleanly (returncode == 0),
+    the parent does NOT write a kill row — the in-band ``log_<role>_run``
+    inside the subprocess is the source of truth for successful runs.
+    Writing a parent-side row here would double-count the run."""
+    stats_root = tmp_path / "stats"
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(stats_root))
+
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+
+    class _CleanProc:
+        def __init__(self) -> None:
+            self.pid = 44444
+            self._proc = self
+
+        async def wait(self) -> int:
+            return 0
+
+    proc = _CleanProc()
+
+    host = V3GitHubHost(
+        v2_host=_FakeV2Host(),
+        log=log,
+        subprocess_runner=lambda argv, **_kw: proc,  # type: ignore[arg-type, return-value]
+        role_dispatch_timeout_seconds=30,
+    )
+
+    start_id = log.write_action(
+        ticket_id="jeffrichley/foreman#245",
+        project="foreman",
+        rule_name="dispatch_planner",
+        action="dispatch_planner",
+        outcome="running",
+        details={},
+    )
+
+    await host._track_subprocess_completion(
+        proc,
+        "planner",
+        start_log_id=start_id,
+        owner="jeffrichley",
+        repo="foreman",
+        issue_number=245,
+        pr_number=None,
+    )
+
+    jsonl_path = stats_root / "jeffrichley__foreman" / "planner.jsonl"
+    assert not jsonl_path.exists(), (
+        "Parent must NOT write a kill row on clean exit — the in-band "
+        f"log_<role>_run is the source of truth. Found {jsonl_path}."
+    )
+
+
+@pytest.mark.asyncio
+async def test_track_subprocess_completion_stats_write_failure_does_not_mask_termination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defense in depth (spec acceptance): if the stats write itself
+    fails (disk full, permission error, etc.), the original termination
+    logic — execution_log row + dispatch_capacity release — must still
+    fire. The stats write is a leaf concern.
+    """
+    stats_root = tmp_path / "stats"
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(stats_root))
+
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+
+    class _NonzeroProc:
+        def __init__(self) -> None:
+            self.pid = 55555
+            self._proc = self
+
+        async def wait(self) -> int:
+            return 137
+
+    proc = _NonzeroProc()
+
+    host = V3GitHubHost(
+        v2_host=_FakeV2Host(),
+        log=log,
+        subprocess_runner=lambda argv, **_kw: proc,  # type: ignore[arg-type, return-value]
+        role_dispatch_timeout_seconds=30,
+        max_concurrent_dispatches=1,
+    )
+    # Hold the slot the way dispatch_role would, so the finally must release it.
+    host._dispatch_capacity.acquire(blocking=False)
+
+    start_id = log.write_action(
+        ticket_id="jeffrichley/foreman#245",
+        project="foreman",
+        rule_name="dispatch_worker",
+        action="dispatch_worker",
+        outcome="running",
+        details={},
+    )
+
+    # Monkey-patch log_killed_run to always raise — simulates disk-full
+    # or permission-denied at the JSONL write itself.
+    import foreman.reconciler.v3_host as v3_host_mod
+
+    def _exploding_log_killed_run(**_kw: Any) -> Path:
+        raise OSError("simulated disk-full")
+
+    monkeypatch.setattr(v3_host_mod, "log_killed_run", _exploding_log_killed_run)
+
+    # Must NOT raise — the inner try/except must swallow the stats failure.
+    await host._track_subprocess_completion(
+        proc,
+        "worker",
+        start_log_id=start_id,
+        owner="jeffrichley",
+        repo="foreman",
+        issue_number=245,
+        pr_number=None,
+    )
+
+    # execution_log termination row still landed.
+    with sqlite3.connect(tmp_path / "log.sqlite") as conn:
+        outcome = conn.execute(
+            "SELECT outcome FROM execution_log WHERE parent_log_id = ?",
+            (start_id,),
+        ).fetchone()[0]
+    assert outcome == "error"
+
+    # dispatch_capacity slot was released — try to acquire it back without
+    # blocking. If the finally block in _track_subprocess_completion ran,
+    # this succeeds; if the stats failure leaked through, it fails.
+    acquired = host._dispatch_capacity.acquire(blocking=False)
+    assert acquired, (
+        "dispatch_capacity slot was NOT released after stats write failed "
+        "— inner try/except did not protect the finally block."
+    )

@@ -25,14 +25,16 @@ import logging
 import os
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import IO, Any, Protocol
+from typing import IO, Any, Literal, Protocol
 
 from foreman.config import MergeMechanism
 from foreman.reconciler.exec_log import ExecutionLog
 from foreman.reconciler.host import PRMergeability
+from foreman.stats import log_killed_run
 
 logger = logging.getLogger(__name__)
 
@@ -850,7 +852,19 @@ class V3GitHubHost:
 
         try:
             loop.create_task(
-                self._track_subprocess_completion(proc, role, start_log_id=start_log_id)
+                self._track_subprocess_completion(
+                    proc,
+                    role,
+                    start_log_id=start_log_id,
+                    # foreman#245: thread the repo + issue identity through
+                    # so the tracker can write a CommonEnvelope kill row to
+                    # ``<role>.jsonl`` when the subprocess dies before its
+                    # in-band ``log_<role>_run`` call fires.
+                    owner=owner,
+                    repo=repo,
+                    issue_number=issue,
+                    pr_number=pr_number,
+                )
             )
         except Exception:
             self._dispatch_capacity.release()
@@ -863,6 +877,10 @@ class V3GitHubHost:
         role: str,
         *,
         start_log_id: int,
+        owner: str | None = None,
+        repo: str | None = None,
+        issue_number: int | None = None,
+        pr_number: int | None = None,
     ) -> None:
         """Await subprocess exit and write the termination row.
 
@@ -870,12 +888,38 @@ class V3GitHubHost:
         released on every exit path (success, returncode!=0, timeout, error)
         so a stuck or crashed background task can never permanently consume
         a slot.
+
+        foreman#245: when the parent kills the subprocess (timeout, OOM,
+        SIGTERM, returncode != 0), the in-subprocess ``log_<role>_run``
+        call inside the role runner never fires — tokens were consumed
+        but NO JSONL row lands. Cost dashboards undercount entirely. We
+        now write a minimal CommonEnvelope row via ``log_killed_run`` in
+        each kill branch so the row count + outcome tally cross-reference
+        the ``execution_log`` audit trail.
+
+        The kill-row write is wrapped in an inner ``try / except Exception``
+        so a disk-full / permission failure at the JSONL write CANNOT mask
+        the original termination logic (parent must still write the
+        ``execution_log`` row and release the dispatch_capacity slot via
+        the outer ``finally``).
+
+        ``owner`` / ``repo`` / ``issue_number`` / ``pr_number`` are
+        ``None``-defaulted to keep the signature backward-compatible with
+        the small number of existing tests that drive the tracker directly
+        without the dispatch_role plumbing. When any of ``owner`` / ``repo``
+        / ``issue_number`` is missing we skip the JSONL write (we can't
+        derive the path).
         """
         # foreman#119: surface the per-dispatch log path in every
         # termination row so post-mortem doesn't need to grep the daemon
         # log to find which file to read. None for the no-capture path.
         log_path = getattr(proc, "log_path", None)
         log_path_str = str(log_path) if log_path is not None else None
+        # foreman#245: parent-side timer for the kill-row's
+        # ``duration_seconds`` — we can't read the role's self-reported
+        # timing for a killed subprocess. Anchored at the top so timeout
+        # / error / nonzero branches all measure from the same point.
+        start_monotonic = time.monotonic()
         try:
             try:
                 returncode = await asyncio.wait_for(proc.wait(), timeout=self._timeout_seconds)
@@ -904,6 +948,16 @@ class V3GitHubHost:
                     outcome="timeout",
                     details=timeout_details,
                 )
+                # foreman#245: parent kill row for cost telemetry.
+                self._write_killed_jsonl_row(
+                    role=role,
+                    outcome="subprocess_timeout",
+                    duration_seconds=time.monotonic() - start_monotonic,
+                    owner=owner,
+                    repo=repo,
+                    issue_number=issue_number,
+                    pr_number=pr_number,
+                )
                 return
             except Exception as exc:
                 logger.exception("subprocess for role=%s pid=%d errored awaiting", role, proc.pid)
@@ -914,6 +968,16 @@ class V3GitHubHost:
                     start_log_id=start_log_id,
                     outcome="error",
                     details=err_details,
+                )
+                # foreman#245: parent kill row for cost telemetry.
+                self._write_killed_jsonl_row(
+                    role=role,
+                    outcome="subprocess_error",
+                    duration_seconds=time.monotonic() - start_monotonic,
+                    owner=owner,
+                    repo=repo,
+                    issue_number=issue_number,
+                    pr_number=pr_number,
                 )
                 return
 
@@ -926,8 +990,81 @@ class V3GitHubHost:
                 outcome=outcome,
                 details=term_details,
             )
+            # foreman#245: parent kill row AFTER the existing
+            # ``terminate_dispatch`` so both ledgers agree on the failure.
+            # Only on non-zero returncode — a clean exit means the in-band
+            # ``log_<role>_run`` inside the subprocess is the source of
+            # truth; writing here too would double-count the run.
+            if returncode != 0:
+                self._write_killed_jsonl_row(
+                    role=role,
+                    outcome="subprocess_nonzero_exit",
+                    duration_seconds=time.monotonic() - start_monotonic,
+                    owner=owner,
+                    repo=repo,
+                    issue_number=issue_number,
+                    pr_number=pr_number,
+                )
         finally:
             self._dispatch_capacity.release()
+
+    def _write_killed_jsonl_row(
+        self,
+        *,
+        role: str,
+        outcome: Literal[
+            "subprocess_timeout",
+            "subprocess_error",
+            "subprocess_nonzero_exit",
+        ],
+        duration_seconds: float,
+        owner: str | None,
+        repo: str | None,
+        issue_number: int | None,
+        pr_number: int | None,
+    ) -> None:
+        """foreman#245: write a minimal CommonEnvelope kill row to
+        ``<role>.jsonl`` via :func:`foreman.stats.log_killed_run`.
+
+        Wrapped in ``try / except Exception`` because the original
+        termination logic in ``_track_subprocess_completion`` (the
+        ``execution_log`` row write + ``dispatch_capacity`` release in
+        the outer ``finally``) must ALWAYS run — even if the JSONL
+        write hits a disk-full, permission, or filesystem error. A
+        stats-write failure is a leaf concern; it must not mask the
+        dispatcher's bookkeeping.
+
+        When any of ``owner`` / ``repo`` / ``issue_number`` is ``None``
+        (tests that drive the tracker directly without the full
+        dispatch_role plumbing), skip the write — we can't derive the
+        JSONL path without the repo slug + issue number.
+        """
+        if owner is None or repo is None or issue_number is None:
+            return
+        # Defense in depth: a typed-narrow guard on ``role`` so the
+        # CommonEnvelope literal won't drift if a future role is added
+        # to ``_ROLE_TO_SUBCOMMAND`` without also being added to the
+        # JSONL surface. Silently skipping is preferable to crashing
+        # the tracker's termination path on an unknown role.
+        if role not in ("planner", "reviewer", "worker", "fixer"):
+            return
+        try:
+            log_killed_run(
+                repo_slug=f"{owner}/{repo}",
+                role=role,  # type: ignore[arg-type]
+                issue_number=issue_number,
+                pr_number=pr_number,
+                outcome=outcome,
+                duration_seconds=duration_seconds,
+            )
+        except Exception:
+            logger.exception(
+                "failed to write killed-run JSONL row for role=%s issue=%s outcome=%s "
+                "— original termination logic continues",
+                role,
+                issue_number,
+                outcome,
+            )
 
     def _build_dispatch_log_path(self, *, role: str, issue: int) -> Path | None:
         """Compute the per-dispatch log file path, or ``None`` when log
