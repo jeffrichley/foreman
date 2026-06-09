@@ -538,7 +538,7 @@ async def run_fixer(
     )
 
     start_time = time.monotonic()
-    llm_output = await provider.run_agent(
+    llm_output, usage = await provider.run_agent(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         allowed_tools=FIXER_ALLOWED_TOOLS,
@@ -659,6 +659,13 @@ async def run_fixer(
         disagreed_count=disagreed_count,
         confidence=llm_output.confidence,
         duration_seconds=duration_seconds,
+        # foreman#227: provider-reported usage from the ResultMessage.
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        total_cost_usd=usage.total_cost_usd,
+        model_usage=usage.model_usage,
+        duration_ms=usage.duration_ms,
+        num_turns=usage.num_turns,
     )
 
     return FixerRunResult(

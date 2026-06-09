@@ -28,6 +28,7 @@ from foreman.provider import (
     ProviderFacade,
     StructuredOutputMissingError,
     StructuredOutputRetryError,
+    UsageInfo,
 )
 from foreman.providers import anthropic_sdk as anthropic_sdk_module
 from foreman.providers.anthropic_sdk import AnthropicSDKProvider
@@ -45,22 +46,33 @@ def _make_result(
     subtype: str,
     structured_output: dict[str, Any] | None = None,
     errors: list[str] | None = None,
+    duration_ms: int = 0,
+    duration_api_ms: int = 0,
+    num_turns: int = 0,
+    total_cost_usd: float | None = None,
+    usage: dict[str, Any] | None = None,
+    model_usage: dict[str, Any] | None = None,
 ) -> ResultMessage:
     """Build a minimal valid ``ResultMessage`` for the test stub.
 
     Mirrors the real SDK dataclass shape — the production parser fills
     these same fields; faking ones the production code reads keeps the
-    test grounded.
+    test grounded. The usage / cost / duration / model_usage kwargs
+    were added for foreman#227's UsageInfo extraction tests; older
+    tests can leave them at the zeroed defaults.
     """
     return ResultMessage(
         subtype=subtype,
-        duration_ms=0,
-        duration_api_ms=0,
+        duration_ms=duration_ms,
+        duration_api_ms=duration_api_ms,
         is_error=subtype != "success",
-        num_turns=0,
+        num_turns=num_turns,
         session_id="test-session",
         structured_output=structured_output,
         errors=errors,
+        total_cost_usd=total_cost_usd,
+        usage=usage,
+        model_usage=model_usage,
     )
 
 
@@ -116,7 +128,7 @@ async def test_run_agent_returns_validated_pydantic_instance(
     )
 
     provider = AnthropicSDKProvider()
-    result = await provider.run_agent(
+    result, usage = await provider.run_agent(
         system_prompt="sys",
         user_prompt="usr",
         allowed_tools=["Read"],
@@ -127,6 +139,8 @@ async def test_run_agent_returns_validated_pydantic_instance(
     assert isinstance(result, _DemoOutput)
     assert result.name == "ok"
     assert result.count == 3
+    # foreman#227: provider returns a UsageInfo alongside the output.
+    assert isinstance(usage, UsageInfo)
 
     # The schema passed to the SDK came from the Pydantic model
     options = calls[0]["options"]
@@ -253,7 +267,7 @@ async def test_run_agent_routes_system_prompt_through_file_and_cleans_up(
     monkeypatch.setattr(anthropic_sdk_module, "query", fake_query)
 
     provider = AnthropicSDKProvider()
-    result = await provider.run_agent(
+    result, _usage = await provider.run_agent(
         system_prompt=prompt_text,
         user_prompt="usr",
         allowed_tools=["Read"],
@@ -391,7 +405,7 @@ async def test_run_agent_retries_once_on_sdk_auth_pattern_and_succeeds(
     )
 
     provider = AnthropicSDKProvider()
-    result = await provider.run_agent(
+    result, _usage = await provider.run_agent(
         system_prompt="sys",
         user_prompt="usr",
         allowed_tools=["Read"],
@@ -479,3 +493,114 @@ async def test_run_agent_does_not_retry_on_non_auth_exception(
 
     assert len(calls) == 1, "no retry should have happened for non-auth exception"
     assert not refresh_called, "refresh should not be attempted for non-auth exception"
+
+
+# ----------------------------------------------------------------------
+# foreman#227: per-call token usage + cost extraction from ResultMessage
+# ----------------------------------------------------------------------
+#
+# The Claude Agent SDK's ResultMessage carries usage / total_cost_usd /
+# model_usage / duration_ms / duration_api_ms / num_turns. Before this
+# ticket those fields were silently dropped on the success path. The
+# provider now constructs a ``UsageInfo`` from them and returns it
+# alongside the validated output. These tests pin two paths:
+#
+#   1. Fully-populated ResultMessage → every field forwarded verbatim.
+#   2. ``usage is None`` (degenerate transport / partial failure) →
+#      int fields default to 0, ``total_cost_usd`` stays None, no crash.
+
+
+@pytest.mark.asyncio
+async def test_run_agent_forwards_usage_info_from_populated_result_message(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Happy path: the SDK reports a fully-populated ResultMessage. The
+    provider extracts every usage field into a UsageInfo and returns
+    it alongside the validated output. No round-trip data loss."""
+    model_usage_payload = {
+        "claude-sonnet-4-5": {
+            "input_tokens": 12_345,
+            "output_tokens": 678,
+            "cost_usd": 0.0421,
+        }
+    }
+    _patch_query(
+        monkeypatch,
+        [
+            _make_result(
+                subtype="success",
+                structured_output={"name": "ok", "count": 1},
+                duration_ms=8_421,
+                duration_api_ms=7_900,
+                num_turns=5,
+                total_cost_usd=0.0421,
+                usage={"input_tokens": 12_345, "output_tokens": 678},
+                model_usage=model_usage_payload,
+            )
+        ],
+    )
+
+    provider = AnthropicSDKProvider()
+    _result, usage = await provider.run_agent(
+        system_prompt="sys",
+        user_prompt="usr",
+        allowed_tools=["Read"],
+        output_model=_DemoOutput,
+        cwd=tmp_path,
+    )
+
+    assert isinstance(usage, UsageInfo)
+    assert usage.input_tokens == 12_345
+    assert usage.output_tokens == 678
+    assert usage.total_cost_usd == pytest.approx(0.0421)
+    assert usage.model_usage == model_usage_payload
+    assert usage.duration_ms == 8_421
+    assert usage.duration_api_ms == 7_900
+    assert usage.num_turns == 5
+
+
+@pytest.mark.asyncio
+async def test_run_agent_defaults_usage_info_when_result_message_usage_is_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Defensive path: ``ResultMessage.usage`` is None (degenerate SDK
+    state). The provider must NOT crash — it constructs a UsageInfo
+    with int fields defaulting to 0 and ``total_cost_usd`` left as
+    None. ``model_usage`` also passes through as None."""
+    _patch_query(
+        monkeypatch,
+        [
+            _make_result(
+                subtype="success",
+                structured_output={"name": "ok", "count": 1},
+                duration_ms=0,
+                duration_api_ms=0,
+                num_turns=0,
+                total_cost_usd=None,
+                usage=None,
+                model_usage=None,
+            )
+        ],
+    )
+
+    provider = AnthropicSDKProvider()
+    result, usage = await provider.run_agent(
+        system_prompt="sys",
+        user_prompt="usr",
+        allowed_tools=["Read"],
+        output_model=_DemoOutput,
+        cwd=tmp_path,
+    )
+
+    # Output still validates and returns normally.
+    assert isinstance(result, _DemoOutput)
+    # Usage falls back to zeroed defaults — no crash, no fabricated
+    # values, no swallowed exception.
+    assert isinstance(usage, UsageInfo)
+    assert usage.input_tokens == 0
+    assert usage.output_tokens == 0
+    assert usage.total_cost_usd is None
+    assert usage.model_usage is None
+    assert usage.duration_ms == 0
+    assert usage.duration_api_ms == 0
+    assert usage.num_turns == 0

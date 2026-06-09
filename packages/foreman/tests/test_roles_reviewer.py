@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from foreman.config import AppsConfig, Config, ProjectConfig
+from foreman.provider import UsageInfo
 from foreman.roles.reviewer import (
     FINDINGS_BEGIN_MARKER,
     FINDINGS_END_MARKER,
@@ -28,6 +29,14 @@ from foreman.roles.reviewer import (
     run_reviewer,
 )
 from foreman.schemas.reviewer import Finding, ReviewerOutput, ReviewerRunResult
+
+
+def _with_usage(output: Any) -> tuple[Any, UsageInfo]:
+    """Wrap a ReviewerOutput in ``(output, UsageInfo())`` for AsyncMock.
+
+    foreman#227: provider returns a tuple now; mocks mirror that.
+    """
+    return output, UsageInfo()
 
 # ----------------------------------------------------------------------
 # parse_pr_url
@@ -429,7 +438,7 @@ async def test_run_reviewer_clean_outcome_advances_to_plan_approved(
     registry = _make_registry(client)
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_clean_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_clean_output()))
 
     result = await run_reviewer(
         pr_url="https://github.com/jeffrichley/voice/pull/77",
@@ -514,7 +523,7 @@ async def test_run_reviewer_uses_atomic_set_labels_for_transition(
     client = _FakeReviewerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_clean_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_clean_output()))
 
     await run_reviewer(
         pr_url="https://github.com/jeffrichley/voice/pull/77",
@@ -555,7 +564,7 @@ async def test_run_reviewer_embeds_structured_findings_json_in_review_body(
     registry = _make_registry(client)
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_needs_fix_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_needs_fix_output()))
 
     await run_reviewer(
         pr_url="https://github.com/jeffrichley/voice/pull/77",
@@ -605,7 +614,7 @@ async def test_run_reviewer_embeds_empty_findings_list_when_clean(
     client = _FakeReviewerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_clean_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_clean_output()))
 
     await run_reviewer(
         pr_url="https://github.com/jeffrichley/voice/pull/77",
@@ -637,7 +646,7 @@ async def test_run_reviewer_needs_fix_outcome_advances_to_spec_fix(
     registry = _make_registry(client)
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_needs_fix_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_needs_fix_output()))
 
     result = await run_reviewer(
         pr_url="https://github.com/jeffrichley/voice/pull/77",
@@ -680,7 +689,7 @@ async def test_run_reviewer_reuses_existing_branch_does_not_create_new(
     registry = _make_registry(client)
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_clean_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_clean_output()))
 
     await run_reviewer(
         pr_url="https://github.com/jeffrichley/voice/pull/77",
@@ -733,7 +742,7 @@ async def test_run_reviewer_missing_planning_label_raises(
     registry = _make_registry(client)
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_clean_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_clean_output()))
 
     with pytest.raises(RuntimeError, match="foreman:planning"):
         await run_reviewer(
@@ -763,7 +772,7 @@ async def test_run_reviewer_rejects_url_pointing_at_wrong_project(
     client = _FakeReviewerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_clean_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_clean_output()))
 
     with pytest.raises(ValueError, match="does not match project"):
         await run_reviewer(
@@ -801,7 +810,7 @@ async def test_run_reviewer_embeds_project_instructions_in_user_prompt(
     client = _FakeReviewerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_clean_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_clean_output()))
 
     await run_reviewer(
         pr_url="https://github.com/jeffrichley/voice/pull/77",
@@ -832,7 +841,7 @@ async def test_run_reviewer_omits_instructions_section_when_file_absent(
     client = _FakeReviewerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_clean_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_clean_output()))
 
     await run_reviewer(
         pr_url="https://github.com/jeffrichley/voice/pull/77",
@@ -875,7 +884,7 @@ async def test_run_reviewer_passes_env_with_reviewer_token_and_parent_env(
     registry = _make_registry(client, token="ghs_specific_reviewer_token")
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_clean_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_clean_output()))
 
     await run_reviewer(
         pr_url="https://github.com/jeffrichley/voice/pull/77",
@@ -929,7 +938,7 @@ async def test_run_reviewer_git_subprocess_uses_reviewer_token_not_parent(
     registry = _make_registry(client, token="ghs_specific_reviewer_token")
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_clean_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_clean_output()))
 
     captured: list[dict[str, Any]] = []
 
@@ -999,7 +1008,7 @@ async def test_run_reviewer_impl_clean_outcome_advances_to_impl_approved(
     registry = _make_registry(client)
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_clean_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_clean_output()))
 
     result = await run_reviewer(
         pr_url="https://github.com/jeffrichley/voice/pull/99",
@@ -1052,7 +1061,7 @@ async def test_run_reviewer_impl_needs_fix_outcome_advances_to_impl_fix(
     registry = _make_registry(client)
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_needs_fix_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_needs_fix_output()))
 
     result = await run_reviewer(
         pr_url="https://github.com/jeffrichley/voice/pull/99",
@@ -1096,7 +1105,7 @@ async def test_run_reviewer_missing_impl_review_label_raises(
     registry = _make_registry(client)
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_clean_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_clean_output()))
 
     with pytest.raises(RuntimeError, match="foreman:impl-review"):
         await run_reviewer(
@@ -1259,7 +1268,7 @@ async def test_run_reviewer_returns_authoritative_final_labels(
         _make_clean_output() if outcome == "clean" else _make_needs_fix_output()
     )
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=llm_output)
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(llm_output))
 
     result = await run_reviewer(
         pr_url=pr_url,
@@ -1303,7 +1312,7 @@ async def test_run_reviewer_preserves_non_foreman_labels_added_during_window(
     client = _FakeReviewerClient(repo=repo)
     registry = _make_registry(client)
 
-    async def _mutate_then_return(*args: Any, **kwargs: Any) -> ReviewerOutput:
+    async def _mutate_then_return(*args: Any, **kwargs: Any) -> tuple[ReviewerOutput, UsageInfo]:
         # Operator adds two non-foreman labels + one foreman label NOT
         # under the Reviewer's control (e.g., a manual pause) during
         # the LLM call. All three must be preserved by the transition.
@@ -1314,7 +1323,7 @@ async def test_run_reviewer_preserves_non_foreman_labels_added_during_window(
         issue._remote_labels.append("priority:high")
         issue._remote_labels.append("team:backend")
         issue._remote_labels.append("foreman:hold")
-        return _make_clean_output()
+        return _with_usage(_make_clean_output())
 
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(side_effect=_mutate_then_return)
@@ -1391,7 +1400,7 @@ async def test_run_reviewer_calls_update_before_write_site_label_read(
     issue.update = tracked_update  # type: ignore[method-assign]
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_clean_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_clean_output()))
 
     await run_reviewer(
         pr_url="https://github.com/jeffrichley/voice/pull/77",

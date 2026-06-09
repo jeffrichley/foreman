@@ -20,6 +20,7 @@ import pytest
 from foreman.config import AppsConfig, Config, ProjectConfig
 from foreman.git_host import GitHostProvider, IssueRef, PRRef
 from foreman.prompts import load_role_prompt
+from foreman.provider import UsageInfo
 from foreman.roles.planner import (
     PLANNER_ALLOWED_TOOLS,
     _strip_auto_close_keywords,
@@ -27,6 +28,16 @@ from foreman.roles.planner import (
     run_planner,
 )
 from foreman.schemas.planner import PlannerOutput
+
+
+def _with_usage(output: Any) -> tuple[Any, UsageInfo]:
+    """Wrap a role-output with a default zeroed UsageInfo.
+
+    foreman#227: ``ProviderFacade.run_agent`` now returns
+    ``tuple[T, UsageInfo]`` so role runners can persist per-call token
+    usage. Test mocks return the tuple shape via this helper.
+    """
+    return output, UsageInfo()
 
 # ----------------------------------------------------------------------
 # _strip_auto_close_keywords
@@ -301,7 +312,7 @@ async def test_run_planner_dispatches_and_advances_label(
     fake_registry.get_planner_token.return_value = "fake-planner-token"
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_llm_output()))
 
     result = await run_planner(
         issue_url="https://github.com/jeffrichley/voice/issues/42",
@@ -390,7 +401,7 @@ async def test_run_planner_does_not_attempt_legacy_plan_label_removal_on_fresh_v
     fake_registry.get_planner_token.return_value = "fake-planner-token"
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_llm_output()))
 
     result = await run_planner(
         issue_url="https://github.com/jeffrichley/voice/issues/42",
@@ -448,8 +459,10 @@ async def test_run_planner_strips_auto_close_keywords_from_pr_body(
 
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(
-        return_value=_make_llm_output(
-            pr_body="Drafted SSML support spec. Closes #42. See spec doc."
+        return_value=_with_usage(
+            _make_llm_output(
+                pr_body="Drafted SSML support spec. Closes #42. See spec doc."
+            )
         )
     )
 
@@ -503,7 +516,7 @@ async def test_run_planner_does_not_inject_env_into_provider(
     fake_registry.get_planner_token.return_value = "fake-planner-token"
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_llm_output()))
 
     await run_planner(
         issue_url="https://github.com/jeffrichley/voice/issues/42",
@@ -555,7 +568,7 @@ async def test_run_planner_embeds_project_instructions_in_user_prompt(
     # contain strings", so pin it to a string.
     fake_registry.get_planner_token.return_value = "fake-planner-token"
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_llm_output()))
 
     await run_planner(
         issue_url="https://github.com/jeffrichley/voice/issues/42",
@@ -598,7 +611,7 @@ async def test_run_planner_omits_instructions_section_when_file_absent(
     # contain strings", so pin it to a string.
     fake_registry.get_planner_token.return_value = "fake-planner-token"
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_llm_output()))
 
     await run_planner(
         issue_url="https://github.com/jeffrichley/voice/issues/42",
@@ -629,7 +642,7 @@ async def test_run_planner_rejects_url_pointing_at_wrong_project(
     # contain strings", so pin it to a string.
     fake_registry.get_planner_token.return_value = "fake-planner-token"
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_llm_output()))
 
     with pytest.raises(ValueError, match="does not match project"):
         await run_planner(
@@ -689,7 +702,7 @@ async def test_run_planner_threads_dev_base_branch_when_set(
     # contain strings", so pin it to a string.
     fake_registry.get_planner_token.return_value = "fake-planner-token"
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_llm_output()))
 
     # Stub create — pre-make the worktree dir so identity-config + later
     # commit/push ops can still run against a real path. We're testing
@@ -745,7 +758,7 @@ async def test_run_planner_passes_none_when_dev_base_branch_unset(
     # contain strings", so pin it to a string.
     fake_registry.get_planner_token.return_value = "fake-planner-token"
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_llm_output()))
 
     captured: dict[str, Any] = {}
     wt_path = tmp_path / "worktrees" / "voice" / "issue-42"
@@ -817,7 +830,7 @@ async def test_run_planner_returns_authoritative_final_labels(
     fake_registry.get_planner_token.return_value = "fake-planner-token"
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_make_llm_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_llm_output()))
 
     result = await run_planner(
         issue_url="https://github.com/jeffrichley/voice/issues/42",

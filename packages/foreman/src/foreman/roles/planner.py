@@ -34,6 +34,7 @@ the PR).
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 
 from foreman.branches import spec_branch
@@ -43,6 +44,7 @@ from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade
 from foreman.schemas.planner import PlannerOutput, PlannerRunResult
+from foreman.stats import log_planner_run
 from foreman.worktree import WorktreeManager
 
 _ISSUE_URL_RE = re.compile(
@@ -203,13 +205,15 @@ async def run_planner(
     system_prompt = _load_planner_prompt()
     user_prompt = _build_user_prompt(issue=issue, instructions=instructions)
 
-    llm_output = await provider.run_agent(
+    start_time = time.monotonic()
+    llm_output, usage = await provider.run_agent(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         allowed_tools=PLANNER_ALLOWED_TOOLS,
         output_model=PlannerOutput,
         cwd=wt_path,
     )
+    duration_seconds = time.monotonic() - start_time
 
     branch = spec_branch(issue_number)
     host.commit_files_to_worktree(
@@ -253,5 +257,24 @@ async def run_planner(
     # v3: the Planner makes no label changes, so the final set is just
     # the pre-mutation set (sorted for stability).
     final_labels = sorted(set(issue.labels))
+
+    # foreman#227: append the per-call token usage + cost to the
+    # Planner JSONL stats file. New file under
+    # ``~/.foreman/stats/<owner>__<repo>/planner.jsonl`` — previously
+    # the Planner had no audit log; the run-level envelope is narrow
+    # (timestamp / issue / pr / duration) and the usage fields are
+    # the load-bearing reason it exists.
+    log_planner_run(
+        repo_slug=actual_repo_slug,
+        issue_number=issue_number,
+        pr_number=pr.number,
+        duration_seconds=duration_seconds,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        total_cost_usd=usage.total_cost_usd,
+        model_usage=usage.model_usage,
+        duration_ms=usage.duration_ms,
+        num_turns=usage.num_turns,
+    )
 
     return PlannerRunResult(llm_output=llm_output, pr=pr, final_labels=final_labels)

@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from foreman.config import AppsConfig, Config, ProjectConfig
+from foreman.provider import UsageInfo
 from foreman.roles.fixer import (
     FIXER_ALLOWED_TOOLS,
     _count_fix_attempts,
@@ -36,6 +37,14 @@ from foreman.schemas.fixer import (
     FixerOutput,
     UnaddressedFinding,
 )
+
+
+def _with_usage(output: Any) -> tuple[Any, UsageInfo]:
+    """Wrap a FixerOutput in ``(output, UsageInfo())`` for AsyncMock.
+
+    foreman#227: provider returns a tuple now; mocks mirror that.
+    """
+    return output, UsageInfo()
 
 # ----------------------------------------------------------------------
 # parse_issue_url
@@ -413,7 +422,7 @@ async def test_run_fixer_fixed_outcome_advances_back_to_planning(
     registry = _make_registry(client)
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
 
     result = await run_fixer(
         issue_url="https://github.com/jeffrichley/voice/issues/42",
@@ -481,7 +490,7 @@ async def test_run_fixer_uses_atomic_set_labels_for_outcome_transition(
     registry = _make_registry(client)
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
 
     await run_fixer(
         issue_url="https://github.com/jeffrichley/voice/issues/42",
@@ -523,7 +532,7 @@ async def test_run_fixer_incomplete_outcome_keeps_spec_fix_adds_needs_help(
     registry = _make_registry(client)
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_incomplete_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_incomplete_output()))
 
     result = await run_fixer(
         issue_url="https://github.com/jeffrichley/voice/issues/42",
@@ -577,7 +586,7 @@ async def test_run_fixer_incomplete_at_attempt_3_also_adds_failed(
     registry = _make_registry(client)
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_incomplete_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_incomplete_output()))
 
     result = await run_fixer(
         issue_url="https://github.com/jeffrichley/voice/issues/42",
@@ -622,7 +631,7 @@ async def test_run_fixer_attempt_counter_increments_with_existing_labels(
     client = _FakeFixerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
 
     result = await run_fixer(
         issue_url="https://github.com/jeffrichley/voice/issues/42",
@@ -656,7 +665,7 @@ async def test_run_fixer_missing_spec_fix_label_raises(
     client = _FakeFixerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
 
     with pytest.raises(RuntimeError, match="foreman:spec-fix"):
         await run_fixer(
@@ -700,7 +709,7 @@ async def test_run_fixer_max_attempts_gate_raises_before_llm(
     client = _FakeFixerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
 
     with pytest.raises(RuntimeError, match="max 3 fix-attempts"):
         await run_fixer(
@@ -746,7 +755,7 @@ async def test_run_fixer_honors_project_max_fix_attempts_override(
     client = _FakeFixerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
 
     with pytest.raises(RuntimeError, match="max 1 fix-attempts"):
         await run_fixer(
@@ -773,7 +782,7 @@ async def test_run_fixer_rejects_url_pointing_at_wrong_project(
     client = _FakeFixerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
 
     with pytest.raises(ValueError, match="does not match project"):
         await run_fixer(
@@ -807,7 +816,7 @@ async def test_run_fixer_attaches_existing_branch_does_not_create_new(
     client = _FakeFixerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
 
     await run_fixer(
         issue_url="https://github.com/jeffrichley/voice/issues/42",
@@ -860,7 +869,7 @@ async def test_run_fixer_uses_create_issue_comment_not_create_review(
     client = _FakeFixerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
 
     await run_fixer(
         issue_url="https://github.com/jeffrichley/voice/issues/42",
@@ -906,7 +915,7 @@ async def test_run_fixer_passes_env_with_fixer_token_and_parent_env(
     client = _FakeFixerClient(repo=repo)
     registry = _make_registry(client, token="ghs_specific_fixer_token")
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
 
     await run_fixer(
         issue_url="https://github.com/jeffrichley/voice/issues/42",
@@ -943,7 +952,7 @@ async def test_run_fixer_writes_stats_jsonl_line(
     client = _FakeFixerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
 
     await run_fixer(
         issue_url="https://github.com/jeffrichley/voice/issues/42",
@@ -1014,7 +1023,7 @@ async def test_run_fixer_stats_disagreed_count_tracks_needed_remediation_wrong(
     )
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=mixed_output)
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(mixed_output))
 
     await run_fixer(
         issue_url="https://github.com/jeffrichley/voice/issues/42",
@@ -1060,7 +1069,7 @@ async def test_run_fixer_raises_when_no_open_spec_pr(
     client = _FakeFixerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
 
     with pytest.raises(RuntimeError, match="No open PR"):
         await run_fixer(
@@ -1088,7 +1097,7 @@ async def test_run_fixer_raises_when_pr_has_no_reviews(
     client = _FakeFixerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
 
     with pytest.raises(RuntimeError, match="no reviews"):
         await run_fixer(
@@ -1258,7 +1267,7 @@ async def test_run_fixer_passes_extracted_findings_into_user_prompt(
     client = _FakeFixerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
 
     await run_fixer(
         issue_url="https://github.com/jeffrichley/voice/issues/42",
@@ -1310,7 +1319,7 @@ async def test_run_fixer_embeds_project_instructions_in_user_prompt(
     client = _FakeFixerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
 
     await run_fixer(
         issue_url="https://github.com/jeffrichley/voice/issues/42",
@@ -1342,7 +1351,7 @@ async def test_run_fixer_omits_instructions_section_when_file_absent(
     client = _FakeFixerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
 
     await run_fixer(
         issue_url="https://github.com/jeffrichley/voice/issues/42",
@@ -1380,7 +1389,7 @@ async def test_run_fixer_uses_empty_findings_when_review_body_lacks_block(
     client = _FakeFixerClient(repo=repo)
     registry = _make_registry(client)
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_fixed_output())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
 
     await run_fixer(
         issue_url="https://github.com/jeffrichley/voice/issues/42",
@@ -1529,7 +1538,7 @@ async def test_run_fixer_returns_authoritative_final_labels(
     registry = _make_registry(client)
 
     fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=output_factory())
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(output_factory()))
 
     result = await run_fixer(
         issue_url="https://github.com/jeffrichley/voice/issues/42",
@@ -1571,7 +1580,7 @@ async def test_run_fixer_preserves_non_foreman_labels_added_during_window(
     client = _FakeFixerClient(repo=repo)
     registry = _make_registry(client)
 
-    async def _mutate_then_return(*args: Any, **kwargs: Any) -> FixerOutput:
+    async def _mutate_then_return(*args: Any, **kwargs: Any) -> tuple[FixerOutput, UsageInfo]:
         # Operator adds two non-foreman labels + one foreman label NOT
         # under the Fixer's control during the LLM call. All three
         # must be preserved by the transition.
@@ -1582,7 +1591,7 @@ async def test_run_fixer_preserves_non_foreman_labels_added_during_window(
         issue._remote_labels.append("priority:high")
         issue._remote_labels.append("team:backend")
         issue._remote_labels.append("foreman:hold")
-        return _fixed_output()
+        return _with_usage(_fixed_output())
 
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(side_effect=_mutate_then_return)
@@ -1646,9 +1655,11 @@ async def test_run_fixer_calls_update_before_write_site_label_read(
     # call ``issue.update()`` before reading labels at the WRITE site,
     # the cached snapshot from the top of ``run_fixer`` is reused and
     # ``priority:high`` is silently dropped.
-    async def _operator_adds_label_during_llm(*args: Any, **kwargs: Any) -> FixerOutput:
+    async def _operator_adds_label_during_llm(
+        *args: Any, **kwargs: Any
+    ) -> tuple[FixerOutput, UsageInfo]:
         issue._remote_labels.append("priority:high")
-        return _fixed_output()
+        return _with_usage(_fixed_output())
 
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(side_effect=_operator_adds_label_during_llm)

@@ -13,17 +13,49 @@ boilerplate.
 
 This matches Anthropic's official claude-agent-sdk structured-output pattern
 (see https://code.claude.com/docs/en/agent-sdk/structured-outputs).
+
+foreman#227 (2026-06-08): ``run_agent`` returns ``tuple[T, UsageInfo]``
+instead of just ``T`` so role runners can persist per-call token usage +
+SDK-computed cost into their JSONL stats files. The Claude Agent SDK's
+``ResultMessage`` already carries this data — we were dropping it on the
+floor. This is the baseline before a second provider (Codex CLI) lands.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
 T = TypeVar("T", bound=BaseModel)
+
+
+class UsageInfo(BaseModel):
+    """Per-call token-usage + cost reported by the provider's SDK.
+
+    Foreman role runners log these fields per JSONL stats entry so we
+    can roll up cost / token consumption per role / per project / per
+    issue without re-parsing in-flight state. The shape follows the
+    Anthropic Agent SDK's ``ResultMessage`` directly (foreman#227); a
+    future Codex provider will populate the same fields from its own
+    SDK envelope.
+
+    Defaults follow the "defensive when None" rule from the spec: if
+    the SDK didn't report ``usage`` for a particular call (rare — only
+    truly degenerate transport failures), ``input_tokens`` /
+    ``output_tokens`` default to 0 and ``total_cost_usd`` stays
+    ``None``. We never crash on a missing-usage path.
+    """
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_cost_usd: float | None = None
+    model_usage: dict[str, Any] | None = None
+    duration_ms: int = 0
+    duration_api_ms: int = 0
+    num_turns: int = 0
 
 
 class StructuredOutputRetryError(RuntimeError):
@@ -70,8 +102,8 @@ class ProviderFacade(ABC):
         cwd: Path,
         max_turns: int = 1000,
         env: dict[str, str] | None = None,
-    ) -> T:
-        """Run an agent and return a validated instance of ``output_model``.
+    ) -> tuple[T, UsageInfo]:
+        """Run an agent and return ``(validated_output, usage_info)``.
 
         Args:
             system_prompt: System-level instructions for the agent.
@@ -96,8 +128,13 @@ class ProviderFacade(ABC):
                 agent's ``gh`` calls act as the bot identity, not the parent.
 
         Returns:
-            An instance of ``output_model`` validated against the agent's
-            structured output.
+            A tuple ``(output, usage)``. ``output`` is an instance of
+            ``output_model`` validated against the agent's structured
+            output. ``usage`` is a :class:`UsageInfo` carrying per-call
+            token consumption + SDK-computed cost for downstream
+            audit-log persistence (foreman#227). Callers MUST unpack
+            both fields — the role runners append the usage fields to
+            their JSONL stats entries.
 
         Raises:
             StructuredOutputRetryError: The SDK exhausted retries trying to

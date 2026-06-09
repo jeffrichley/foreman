@@ -35,6 +35,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Literal
 
@@ -46,6 +47,7 @@ from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade
 from foreman.schemas.reviewer import Finding, ReviewerOutput, ReviewerRunResult
+from foreman.stats import log_reviewer_run
 from foreman.worktree import WorktreeManager
 
 _PR_URL_RE = re.compile(
@@ -433,7 +435,8 @@ async def run_reviewer(
         instructions=instructions,
     )
 
-    llm_output = await provider.run_agent(
+    start_time = time.monotonic()
+    llm_output, usage = await provider.run_agent(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         allowed_tools=REVIEWER_ALLOWED_TOOLS,
@@ -441,6 +444,7 @@ async def run_reviewer(
         cwd=wt_path,
         env={**os.environ, "GH_TOKEN": reviewer_token},
     )
+    duration_seconds = time.monotonic() - start_time
 
     # Post the review comment as the reviewer bot. ``event="COMMENT"``
     # (not ``"APPROVE"``) — the bot doesn't have write access on the head
@@ -501,6 +505,27 @@ async def run_reviewer(
     current_label_names = {label.name for label in issue.labels}
     final_labels = sorted((current_label_names - removed_foreman) | added_foreman)
     issue.set_labels(*final_labels)
+
+    # foreman#227: append the per-call token usage + cost to the
+    # Reviewer JSONL stats file. New file under
+    # ``~/.foreman/stats/<owner>__<repo>/reviewer.jsonl`` — previously
+    # the Reviewer had no audit log; the envelope captures target
+    # (spec_pr vs impl_pr) + outcome (clean vs needs_fix) + the new
+    # usage fields.
+    log_reviewer_run(
+        repo_slug=actual_repo_slug,
+        issue_number=issue_number,
+        pr_number=pr_number,
+        target=target,
+        outcome=llm_output.outcome,
+        duration_seconds=duration_seconds,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        total_cost_usd=usage.total_cost_usd,
+        model_usage=usage.model_usage,
+        duration_ms=usage.duration_ms,
+        num_turns=usage.num_turns,
+    )
 
     # foreman#91: ``final_labels`` is the authoritative post-transition
     # set, computed in-process from the pre-mutation snapshot + the role's
