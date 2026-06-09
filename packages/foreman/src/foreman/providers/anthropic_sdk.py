@@ -230,17 +230,29 @@ def _build_usage_info(message: ResultMessage) -> UsageInfo:
     foreman#227: the SDK's ``ResultMessage.usage`` is a free-form
     ``dict[str, Any] | None`` carrying the Anthropic API's usage shape
     (``input_tokens`` / ``output_tokens`` / cache-related counters).
-    We read the two fields we care about with ``.get(..., 0)`` defaults
+    We read the fields we care about with ``.get(..., 0)`` defaults
     so a partial / unexpected SDK shape doesn't crash the role runner —
     losing one stats field is strictly better than losing the whole
     run. Same defensiveness for the wall-clock counters at the
     envelope level: they're typed ``int`` on the dataclass but absent
     in some degenerate ``is_error=True`` paths.
+
+    foreman#244: also extract ``cache_creation_input_tokens`` and
+    ``cache_read_input_tokens`` — the Anthropic API charges these at
+    25% and 10% of the regular input rate respectively. They're
+    absent on the first turn of a fresh agent loop and on older API
+    versions; the ``.get(..., 0)`` default keeps the no-cache path
+    clean. Without these, JSONL per-token columns drift from the
+    SDK-computed cost (cost stays right; tokens undercounted).
     """
     usage_dict = message.usage or {}
     return UsageInfo(
         input_tokens=int(usage_dict.get("input_tokens", 0) or 0),
         output_tokens=int(usage_dict.get("output_tokens", 0) or 0),
+        cache_creation_input_tokens=int(
+            usage_dict.get("cache_creation_input_tokens", 0) or 0
+        ),
+        cache_read_input_tokens=int(usage_dict.get("cache_read_input_tokens", 0) or 0),
         total_cost_usd=message.total_cost_usd,
         model_usage=message.model_usage,
         duration_ms=int(message.duration_ms or 0),

@@ -1081,6 +1081,13 @@ async def run_worker(
             # carries consistent fields.
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
+            # foreman#244: prompt-cache token counters from the SDK
+            # (billed at 25% / 10% of regular input rate). Without
+            # these the JSONL per-token columns drift from the
+            # SDK-computed total_cost_usd on multi-turn loops where
+            # prompt caching is the default.
+            cache_creation_input_tokens=usage.cache_creation_input_tokens,
+            cache_read_input_tokens=usage.cache_read_input_tokens,
             total_cost_usd=usage.total_cost_usd,
             model_usage=usage.model_usage,
             duration_ms=usage.duration_ms,
@@ -1136,6 +1143,12 @@ async def run_worker(
                 new_failures_count=0,
                 input_tokens=usage.input_tokens if usage is not None else 0,
                 output_tokens=usage.output_tokens if usage is not None else 0,
+                cache_creation_input_tokens=(
+                    usage.cache_creation_input_tokens if usage is not None else 0
+                ),
+                cache_read_input_tokens=(
+                    usage.cache_read_input_tokens if usage is not None else 0
+                ),
                 total_cost_usd=usage.total_cost_usd if usage is not None else None,
                 model_usage=usage.model_usage if usage is not None else None,
                 duration_ms=usage.duration_ms if usage is not None else 0,
