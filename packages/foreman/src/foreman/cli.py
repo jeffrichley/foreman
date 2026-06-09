@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
+import re
 import shutil
 import signal
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +48,187 @@ def _default_worktrees_root() -> Path:
     )
 
 
+# --- foreman#246: ad-hoc CLI execution_log rows -------------------------
+#
+# When a human runs ``foreman plan / review / implement / fix`` directly
+# from the CLI (skipping daemon dispatch), the role runners write their
+# JSONL stats row but ``execution_log`` got NO row at all — leaving the
+# SQL ledger blind to ad-hoc invocations. Cross-correlation queries
+# missed every manual run.
+#
+# Path A from the spec: each ad-hoc subcommand instantiates an
+# ExecutionLog, writes a start row tagged ``rule_name="manual-cli"``
+# with ``details.actor="manual-cli"`` (or
+# ``"manual-cli-during-daemon"`` if a daemon lock file is present),
+# wraps the role runner in try/except/finally, and writes a terminate
+# row with ``outcome="success"`` or ``"error"`` (re-raising the
+# exception unchanged in the error branch).
+#
+# Daemon-detection call: PROCEED-with-distinct-tag, not hard-refuse.
+# A hard refuse would block legitimate dev workflow (an operator
+# debugging a single ticket while the daemon also runs); the distinct
+# actor tag + stderr warning preserves auditability of the
+# dual-writer scenario without breaking the workflow.
+#
+# Graceful-fallback contract: if the reconciler db_path is unreachable
+# (parent dir blocked, fs permissions, etc.) the CLI logs a warning,
+# skips the execution_log write, and STILL runs the role. The JSONL
+# stats stream remains canonical for cost; execution_log is a
+# supplemental cross-correlation surface.
+
+_ISSUE_NUMBER_RE = re.compile(
+    r"https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/"
+    r"(?:issues|pull)/(?P<number>\d+)"
+)
+
+
+def _derive_ticket_id(url: str) -> str:
+    """Render the canonical ``{owner}/{repo}#{number}`` ticket_id from a
+    GitHub issue OR PR URL. Falls back to the raw url string when the
+    URL doesn't match — the start row still lands (the audit value is
+    in the row existing, not in perfect string parsing)."""
+    m = _ISSUE_NUMBER_RE.match(url.strip())
+    if m is None:
+        return url
+    return f"{m['owner']}/{m['repo']}#{m['number']}"
+
+
+def _is_daemon_running(config: Config | None) -> bool:
+    """True iff a daemon lock file exists at the resolved path.
+
+    Used to pick the distinct ``manual-cli-during-daemon`` actor tag.
+    We intentionally do NOT probe whether the PID inside the lock is
+    alive — a stale lock + live manual-CLI is exactly the case where
+    operators want loud auditing, and the lock-existence check is the
+    cheapest signal we can read without acquiring anything.
+    """
+    try:
+        return _resolve_lock_path(config).exists()
+    except (OSError, ValueError):
+        return False
+
+
+@contextlib.contextmanager
+def _manual_cli_execution_log(
+    *,
+    config: Config,
+    project: str,
+    ticket_id: str,
+    action: str,
+) -> Iterator[None]:
+    """Wrap a CLI-driven role-runner call with execution_log start +
+    terminate rows.
+
+    On enter: writes a start row with ``rule_name="manual-cli"``,
+    ``outcome="running"``, and ``details`` carrying ``actor`` (one of
+    ``"manual-cli"`` / ``"manual-cli-during-daemon"``) plus the argv
+    snapshot. If the reconciler db_path is unwritable, logs a warning
+    via ``click.echo(err=True)`` and yields without writing — the
+    role runner still executes.
+
+    On normal exit: writes a terminate row with ``outcome="success"``.
+
+    On exception: writes a terminate row with ``outcome="error"`` and
+    ``details.error=str(exc)``, then re-raises the original exception
+    unchanged. Defense-in-depth: a failure during the terminate-row
+    write is itself swallowed (logged via stderr) so a disk-full at
+    teardown cannot mask the role's original exception.
+    """
+    import sqlite3
+
+    from foreman.reconciler.exec_log import ExecutionLog
+
+    logger = logging.getLogger("foreman.cli")
+
+    db_path_raw = config.reconciler.db_path
+    db_path = Path(os.path.expanduser(db_path_raw))
+
+    daemon_running = _is_daemon_running(config)
+    actor = "manual-cli-during-daemon" if daemon_running else "manual-cli"
+    if daemon_running:
+        # Re-resolve the path for the warning message; defended against
+        # the unlikely race where the lock file vanishes between the
+        # existence-check and now by suppressing OSError.
+        try:
+            lock_display = str(_resolve_lock_path(config))
+        except (OSError, ValueError):
+            lock_display = "<unresolved>"
+        click.echo(
+            f"warning: daemon lock file present at "
+            f"{lock_display}; manual CLI is running concurrently "
+            f"with the daemon — execution_log row tagged "
+            f"actor='manual-cli-during-daemon'.",
+            err=True,
+        )
+
+    # Snapshot argv WITHOUT the executable path — small payload, easy to
+    # parse downstream. ``sys.argv[0]`` is wrapper-dependent (uv,
+    # console script, python -m) and adds noise.
+    argv_tail = list(sys.argv[1:])
+
+    log: ExecutionLog | None = None
+    start_log_id: int | None = None
+    try:
+        log = ExecutionLog(db_path)
+        log.init()
+        start_log_id = log.write_action(
+            ticket_id=ticket_id,
+            project=project,
+            rule_name="manual-cli",
+            action=action,
+            outcome="running",
+            details={"actor": actor, "argv": argv_tail},
+        )
+    except (OSError, sqlite3.Error) as exc:
+        click.echo(
+            f"warning: could not initialize execution_log at {db_path} "
+            f"({exc}); skipping manual-cli row (JSONL stats remain canonical).",
+            err=True,
+        )
+        logger.warning("manual-cli execution_log skipped: %s", exc)
+        log = None
+        start_log_id = None
+
+    try:
+        yield
+    except BaseException as exc:
+        # Terminate-row write happens BEFORE re-raise so the row lands
+        # even if downstream handlers (Click's exception formatter, the
+        # caller's finally, etc.) abort the process. Wrap the terminate
+        # write in its own try/except so a disk-full at teardown cannot
+        # mask the original exception the operator needs to see.
+        if log is not None and start_log_id is not None:
+            try:
+                log.terminate_action(
+                    parent_log_id=start_log_id,
+                    outcome="error",
+                    details={"actor": actor, "error": str(exc)},
+                )
+            except Exception as term_exc:
+                click.echo(
+                    f"warning: failed to write execution_log error row "
+                    f"({term_exc}); original exception preserved.",
+                    err=True,
+                )
+                logger.warning("manual-cli terminate-row write failed: %s", term_exc)
+        raise
+    else:
+        if log is not None and start_log_id is not None:
+            try:
+                log.terminate_action(
+                    parent_log_id=start_log_id,
+                    outcome="success",
+                    details={"actor": actor},
+                )
+            except Exception as term_exc:
+                click.echo(
+                    f"warning: failed to write execution_log success row "
+                    f"({term_exc}); role completed successfully.",
+                    err=True,
+                )
+                logger.warning("manual-cli terminate-row write failed: %s", term_exc)
+
+
 @click.group()
 def cli() -> None:
     """foreman — multi-identity GitHub-issue-to-PR orchestrator."""
@@ -65,15 +249,23 @@ def plan(issue_url: str, project: str, config_path: Path | None) -> None:
     cfg_path = config_path or _default_config_path()
     cfg = load_config(cfg_path)
     provider = AnthropicSDKProvider()
-    result = asyncio.run(
-        run_planner(
-            issue_url=issue_url,
-            config=cfg,
-            project_name=project,
-            worktrees_root=_default_worktrees_root(),
-            provider=provider,
+    # foreman#246: wrap the ad-hoc role-runner call in a start/terminate
+    # execution_log pair so the SQL ledger sees manual-cli runs.
+    with _manual_cli_execution_log(
+        config=cfg,
+        project=project,
+        ticket_id=_derive_ticket_id(issue_url),
+        action="plan",
+    ):
+        result = asyncio.run(
+            run_planner(
+                issue_url=issue_url,
+                config=cfg,
+                project_name=project,
+                worktrees_root=_default_worktrees_root(),
+                provider=provider,
+            )
         )
-    )
     pr = result.pr
     llm = result.llm_output
     click.echo(f"Planner complete — PR #{pr.number} at {pr.url}")
@@ -129,15 +321,23 @@ def review(
     # decide spec vs impl). Forwarding the flag would require a role-side
     # signature change — out of scope for the Stage-2 action split.
     _ = target
-    result = asyncio.run(
-        run_reviewer(
-            pr_url=pr_url,
-            config=cfg,
-            project_name=project,
-            worktrees_root=_default_worktrees_root(),
-            provider=provider,
+    # foreman#246: wrap the ad-hoc role-runner call in a start/terminate
+    # execution_log pair so the SQL ledger sees manual-cli runs.
+    with _manual_cli_execution_log(
+        config=cfg,
+        project=project,
+        ticket_id=_derive_ticket_id(pr_url),
+        action="review",
+    ):
+        result = asyncio.run(
+            run_reviewer(
+                pr_url=pr_url,
+                config=cfg,
+                project_name=project,
+                worktrees_root=_default_worktrees_root(),
+                provider=provider,
+            )
         )
-    )
     llm = result.llm_output
     click.echo(f"{llm.outcome}: {len(llm.findings)} findings, confidence={llm.confidence}")
 
@@ -210,16 +410,24 @@ def fix(
     # Stage-2 action split). Keep the read so linters don't flag it as
     # an unused arg.
     _ = pr_url
-    result = asyncio.run(
-        run_fixer(
-            issue_url=issue_url,
-            config=cfg,
-            project_name=project,
-            worktrees_root=_default_worktrees_root(),
-            provider=provider,
-            target=target,
+    # foreman#246: wrap the ad-hoc role-runner call in a start/terminate
+    # execution_log pair so the SQL ledger sees manual-cli runs.
+    with _manual_cli_execution_log(
+        config=cfg,
+        project=project,
+        ticket_id=_derive_ticket_id(issue_url),
+        action="fix",
+    ):
+        result = asyncio.run(
+            run_fixer(
+                issue_url=issue_url,
+                config=cfg,
+                project_name=project,
+                worktrees_root=_default_worktrees_root(),
+                provider=provider,
+                target=target,
+            )
         )
-    )
     llm = result.llm_output
     addressed = len(llm.addressed_findings)
     unaddressed = len(llm.unaddressed_findings)
@@ -252,15 +460,23 @@ def implement(issue_url: str, project: str, config_path: Path | None) -> None:
     cfg_path = config_path or _default_config_path()
     cfg = load_config(cfg_path)
     provider = AnthropicSDKProvider()
-    result = asyncio.run(
-        run_worker(
-            issue_url=issue_url,
-            config=cfg,
-            project_name=project,
-            worktrees_root=_default_worktrees_root(),
-            provider=provider,
+    # foreman#246: wrap the ad-hoc role-runner call in a start/terminate
+    # execution_log pair so the SQL ledger sees manual-cli runs.
+    with _manual_cli_execution_log(
+        config=cfg,
+        project=project,
+        ticket_id=_derive_ticket_id(issue_url),
+        action="implement",
+    ):
+        result = asyncio.run(
+            run_worker(
+                issue_url=issue_url,
+                config=cfg,
+                project_name=project,
+                worktrees_root=_default_worktrees_root(),
+                provider=provider,
+            )
         )
-    )
     llm = result.llm_output
     implemented = len(llm.implemented_sub_requests)
     skipped = len(llm.skipped_sub_requests)

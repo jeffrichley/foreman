@@ -1688,3 +1688,454 @@ def test_daemon_subprocess_writes_pid_and_releases_lock_on_exit(
 
     with DaemonLock(lock_path):
         pass
+
+
+# --- foreman#246: ad-hoc CLI execution_log rows ---
+#
+# When a human runs `foreman plan / review / implement / fix` directly
+# from the CLI without going through daemon dispatch, the role runner
+# writes its JSONL row but `execution_log` got no row at all — leaving
+# the SQL ledger blind to ad-hoc invocations. The CLI subcommands now
+# write a start row tagged ``rule_name="manual-cli"`` with
+# ``details.actor="manual-cli"`` (or ``"manual-cli-during-daemon"`` if
+# the daemon's lock file is present), then a termination row on
+# success / error. Implementer's call per the spec: proceed when the
+# daemon is running, but distinguish the actor tag and warn — a hard
+# refuse would block legitimate dev workflow.
+
+
+def _write_basic_config(
+    config_file: Path,
+    *,
+    tmp_path: Path,
+    db_path: Path | None = None,
+    extra: str = "",
+) -> Path:
+    """Build a minimal config TOML that points the v3 reconciler at a
+    tmp-path db so the manual-cli logger doesn't pollute the dev box's
+    ``~/.foreman/reconciler.sqlite``."""
+    if db_path is None:
+        db_path = tmp_path / "reconciler.sqlite"
+    config_file.write_text(
+        f"""
+[projects.voice]
+repo = "jeffrichley/voice"
+local_clone_path = "/tmp/voice"
+
+[projects.voice.apps]
+planner_app_id_env = "FOREMAN_PLANNER_APP_ID"
+planner_app_id = 123456
+planner_private_key_path = "/tmp/planner.pem"
+reviewer_app_id_env = "FOREMAN_REVIEWER_APP_ID"
+reviewer_app_id = 654321
+reviewer_private_key_path = "/tmp/reviewer.pem"
+fixer_app_id_env = "FOREMAN_FIXER_APP_ID"
+fixer_app_id = 777777
+fixer_private_key_path = "/tmp/fixer.pem"
+worker_app_id_env = "FOREMAN_WORKER_APP_ID"
+worker_app_id = 444444
+worker_private_key_path = "/tmp/worker.pem"
+
+[reconciler]
+db_path = "{db_path.as_posix()}"
+{extra}
+"""
+    )
+    return db_path
+
+
+def _read_exec_log_rows(db_path: Path) -> list[dict]:
+    """Return all execution_log rows as dicts, oldest first."""
+    import json
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, ticket_id, project, rule_name, action, outcome, "
+            "details, parent_log_id FROM execution_log ORDER BY id ASC"
+        ).fetchall()
+    out: list[dict] = []
+    for row in rows:
+        d = dict(row)
+        d["details_parsed"] = json.loads(d["details"]) if d["details"] else {}
+        out.append(d)
+    return out
+
+
+def _planner_fake_result() -> PlannerRunResult:
+    return PlannerRunResult(
+        llm_output=PlannerOutput(
+            spec_doc_content="# Spec",
+            pr_title="spec: x",
+            pr_body="body",
+            summary="ok",
+            considered_alternatives=[],
+            confidence="medium",
+        ),
+        pr=PRRef(
+            number=99,
+            url="https://github.com/jeffrichley/voice/pull/99",
+            title="spec: x",
+            body="body",
+            branch="foreman/issue-42",
+            base_branch="main",
+            repo_slug="jeffrichley/voice",
+        ),
+        final_labels=["foreman:spec-review"],
+    )
+
+
+def _reviewer_fake_result() -> ReviewerRunResult:
+    return ReviewerRunResult(
+        llm_output=ReviewerOutput(
+            outcome="clean",
+            review_comment="clean",
+            findings=[],
+            confidence="high",
+        ),
+        final_labels=["foreman:plan-approved"],
+    )
+
+
+def _fixer_fake_result() -> FixerRunResult:
+    return FixerRunResult(
+        llm_output=FixerOutput(
+            outcome="fixed",
+            fix_comment="fixed",
+            commits_made=[],
+            addressed_findings=[],
+            unaddressed_findings=[],
+            confidence="high",
+        ),
+        attempt=1,
+        final_labels=["foreman:spec-review"],
+    )
+
+
+def _worker_fake_result() -> WorkerRunResult:
+    return WorkerRunResult(
+        llm_output=WorkerOutput(
+            outcome="implemented",
+            work_comment="ok",
+            pr_title="feat: x",
+            pr_body="body",
+            commits_made=[],
+            implemented_sub_requests=[],
+            skipped_sub_requests=[],
+            did_check_pass=True,
+            confidence="high",
+        ),
+        attempt=1,
+        pr_url="https://github.com/jeffrichley/voice/pull/101",
+        final_did_check_pass=True,
+        final_labels=["foreman:impl-review"],
+    )
+
+
+def test_cli_plan_writes_execution_log_start_and_terminate_on_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`foreman plan` writes a start row (rule_name='manual-cli',
+    outcome='running', details.actor='manual-cli') and a terminate row
+    (outcome='success') on a successful role-runner return.
+
+    Closes foreman#246's primary acceptance criterion for the Planner CLI.
+    """
+    config_file = tmp_path / "config.toml"
+    db_path = _write_basic_config(config_file, tmp_path=tmp_path)
+    # No daemon lock — the CLI is the only writer.
+    monkeypatch.setenv("FOREMAN_LOCK_PATH", str(tmp_path / "missing.lock"))
+
+    runner = CliRunner()
+    with patch("foreman.cli.run_planner", new=AsyncMock(return_value=_planner_fake_result())):
+        result = runner.invoke(
+            cli,
+            [
+                "plan",
+                "https://github.com/jeffrichley/voice/issues/42",
+                "--project",
+                "voice",
+                "--config",
+                str(config_file),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+
+    rows = _read_exec_log_rows(db_path)
+    assert len(rows) == 2, rows
+
+    start, term = rows
+    assert start["rule_name"] == "manual-cli"
+    assert start["action"] == "plan"
+    assert start["outcome"] == "running"
+    assert start["ticket_id"] == "jeffrichley/voice#42"
+    assert start["project"] == "voice"
+    assert start["details_parsed"]["actor"] == "manual-cli"
+    assert start["parent_log_id"] is None
+
+    assert term["rule_name"] == "manual-cli"
+    assert term["action"] == "plan"
+    assert term["outcome"] == "success"
+    assert term["parent_log_id"] == start["id"]
+
+
+def test_cli_review_writes_execution_log_start_and_terminate_on_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file = tmp_path / "config.toml"
+    db_path = _write_basic_config(config_file, tmp_path=tmp_path)
+    monkeypatch.setenv("FOREMAN_LOCK_PATH", str(tmp_path / "missing.lock"))
+
+    runner = CliRunner()
+    with patch(
+        "foreman.cli.run_reviewer", new=AsyncMock(return_value=_reviewer_fake_result())
+    ):
+        result = runner.invoke(
+            cli,
+            [
+                "review",
+                "https://github.com/jeffrichley/voice/pull/77",
+                "--project",
+                "voice",
+                "--config",
+                str(config_file),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+
+    rows = _read_exec_log_rows(db_path)
+    assert len(rows) == 2, rows
+
+    start, term = rows
+    assert start["rule_name"] == "manual-cli"
+    assert start["action"] == "review"
+    assert start["outcome"] == "running"
+    # Reviewer takes a PR URL — the ticket_id captures the PR number,
+    # which is the addressable artifact the manual run worked on.
+    assert start["ticket_id"] == "jeffrichley/voice#77"
+    assert start["project"] == "voice"
+    assert start["details_parsed"]["actor"] == "manual-cli"
+
+    assert term["outcome"] == "success"
+    assert term["parent_log_id"] == start["id"]
+
+
+def test_cli_implement_writes_execution_log_start_and_terminate_on_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file = tmp_path / "config.toml"
+    db_path = _write_basic_config(config_file, tmp_path=tmp_path)
+    monkeypatch.setenv("FOREMAN_LOCK_PATH", str(tmp_path / "missing.lock"))
+
+    runner = CliRunner()
+    with patch(
+        "foreman.cli.run_worker", new=AsyncMock(return_value=_worker_fake_result())
+    ):
+        result = runner.invoke(
+            cli,
+            [
+                "implement",
+                "https://github.com/jeffrichley/voice/issues/42",
+                "--project",
+                "voice",
+                "--config",
+                str(config_file),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+
+    rows = _read_exec_log_rows(db_path)
+    assert len(rows) == 2, rows
+
+    start, term = rows
+    assert start["rule_name"] == "manual-cli"
+    assert start["action"] == "implement"
+    assert start["outcome"] == "running"
+    assert start["ticket_id"] == "jeffrichley/voice#42"
+    assert start["details_parsed"]["actor"] == "manual-cli"
+
+    assert term["outcome"] == "success"
+    assert term["parent_log_id"] == start["id"]
+
+
+def test_cli_fix_writes_execution_log_start_and_terminate_on_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file = tmp_path / "config.toml"
+    db_path = _write_basic_config(config_file, tmp_path=tmp_path)
+    monkeypatch.setenv("FOREMAN_LOCK_PATH", str(tmp_path / "missing.lock"))
+
+    runner = CliRunner()
+    with patch(
+        "foreman.cli.run_fixer", new=AsyncMock(return_value=_fixer_fake_result())
+    ):
+        result = runner.invoke(
+            cli,
+            [
+                "fix",
+                "--issue-url",
+                "https://github.com/jeffrichley/voice/issues/42",
+                "--project",
+                "voice",
+                "--config",
+                str(config_file),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+
+    rows = _read_exec_log_rows(db_path)
+    assert len(rows) == 2, rows
+
+    start, term = rows
+    assert start["rule_name"] == "manual-cli"
+    assert start["action"] == "fix"
+    assert start["outcome"] == "running"
+    assert start["ticket_id"] == "jeffrichley/voice#42"
+    assert start["details_parsed"]["actor"] == "manual-cli"
+
+    assert term["outcome"] == "success"
+    assert term["parent_log_id"] == start["id"]
+
+
+def test_cli_plan_writes_terminate_row_on_exception_and_reraises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the role runner raises, the CLI must write a terminate row
+    with ``outcome='error'`` AND re-raise the original exception so the
+    operator sees it and any wrapping shell exits non-zero.
+
+    Pre-fix behavior: the JSONL stats logger captured the failure but
+    ``execution_log`` got nothing, so cross-correlation queries missed
+    every failed ad-hoc run.
+    """
+    config_file = tmp_path / "config.toml"
+    db_path = _write_basic_config(config_file, tmp_path=tmp_path)
+    monkeypatch.setenv("FOREMAN_LOCK_PATH", str(tmp_path / "missing.lock"))
+
+    boom = RuntimeError("planner exploded")
+
+    runner = CliRunner()
+    with patch("foreman.cli.run_planner", new=AsyncMock(side_effect=boom)):
+        result = runner.invoke(
+            cli,
+            [
+                "plan",
+                "https://github.com/jeffrichley/voice/issues/42",
+                "--project",
+                "voice",
+                "--config",
+                str(config_file),
+            ],
+        )
+
+    # CliRunner captures the raised exception in result.exception and
+    # propagates a non-zero exit code. The contract: the original
+    # exception is re-raised unchanged (not swallowed, not wrapped).
+    assert result.exit_code != 0
+    assert isinstance(result.exception, RuntimeError)
+    assert str(result.exception) == "planner exploded"
+
+    rows = _read_exec_log_rows(db_path)
+    assert len(rows) == 2, rows
+
+    start, term = rows
+    assert start["outcome"] == "running"
+    assert start["rule_name"] == "manual-cli"
+    assert start["details_parsed"]["actor"] == "manual-cli"
+
+    assert term["outcome"] == "error"
+    assert term["parent_log_id"] == start["id"]
+    assert "planner exploded" in term["details_parsed"].get("error", "")
+
+
+def test_cli_plan_falls_back_gracefully_when_db_path_unwritable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the reconciler db path is unavailable (parent dir cannot be
+    created), the CLI logs a warning, skips the execution_log write,
+    and still runs the role to completion. The JSONL stats stream
+    remains canonical for cost — execution_log is a supplemental
+    cross-correlation surface.
+    """
+    config_file = tmp_path / "config.toml"
+    # Point db_path at a location whose parent is a FILE — mkdir parents
+    # will fail. This simulates a misconfigured deployment (or a fresh
+    # operator who hasn't initialized foreman's state dir yet).
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    bad_db = blocker / "child" / "reconciler.sqlite"
+    _write_basic_config(config_file, tmp_path=tmp_path, db_path=bad_db)
+    monkeypatch.setenv("FOREMAN_LOCK_PATH", str(tmp_path / "missing.lock"))
+
+    runner = CliRunner()
+    with patch(
+        "foreman.cli.run_planner", new=AsyncMock(return_value=_planner_fake_result())
+    ) as mock_run:
+        result = runner.invoke(
+            cli,
+            [
+                "plan",
+                "https://github.com/jeffrichley/voice/issues/42",
+                "--project",
+                "voice",
+                "--config",
+                str(config_file),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    # The role runner ran despite the db being unreachable.
+    mock_run.assert_called_once()
+    # A warning surfaced — operators must know the row was skipped.
+    assert "manual-cli" in result.output.lower() or "execution_log" in result.output.lower()
+    # No db file was created at the bad path (the fallback didn't try
+    # to write a sibling file or anything similarly clever).
+    assert not bad_db.exists()
+
+
+def test_cli_plan_tags_actor_when_daemon_lock_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the daemon's lock file is present, the manual CLI proceeds
+    (per the implementer's call documented in the commit body) but tags
+    ``actor="manual-cli-during-daemon"`` and emits a warning so the
+    dual-writer scenario is auditable.
+    """
+    config_file = tmp_path / "config.toml"
+    db_path = _write_basic_config(config_file, tmp_path=tmp_path)
+    # Plant a lock file at the path the CLI resolves via _resolve_lock_path.
+    daemon_lock = tmp_path / "reconciler.lock"
+    daemon_lock.write_text(str(os.getpid()))
+    monkeypatch.setenv("FOREMAN_LOCK_PATH", str(daemon_lock))
+
+    runner = CliRunner()
+    with patch(
+        "foreman.cli.run_planner", new=AsyncMock(return_value=_planner_fake_result())
+    ):
+        result = runner.invoke(
+            cli,
+            [
+                "plan",
+                "https://github.com/jeffrichley/voice/issues/42",
+                "--project",
+                "voice",
+                "--config",
+                str(config_file),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+
+    rows = _read_exec_log_rows(db_path)
+    assert len(rows) == 2, rows
+    start, term = rows
+    assert start["details_parsed"]["actor"] == "manual-cli-during-daemon"
+    # The warning IS the audit surface — operators running manual CLI
+    # against a live daemon need to see this in their terminal.
+    assert "daemon" in result.output.lower()
+    assert term["outcome"] == "success"
