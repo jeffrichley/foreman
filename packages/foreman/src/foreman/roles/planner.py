@@ -259,15 +259,20 @@ async def run_planner(
     final_labels = sorted(set(issue.labels))
 
     # foreman#227: append the per-call token usage + cost to the
-    # Planner JSONL stats file. New file under
-    # ``~/.foreman/stats/<owner>__<repo>/planner.jsonl`` — previously
-    # the Planner had no audit log; the run-level envelope is narrow
-    # (timestamp / issue / pr / duration) and the usage fields are
-    # the load-bearing reason it exists.
+    # Planner JSONL stats file at
+    # ``~/.foreman/stats/<owner>__<repo>/planner.jsonl``.
+    # foreman#233: include the required ``outcome`` field. Reaching
+    # this line means ``host.open_pull_request`` returned a ``pr`` —
+    # by definition that's ``spec_written``. The ``spec_failed`` path
+    # currently has no in-process handler (run_planner raises and the
+    # daemon's dispatcher records the failure separately); when an
+    # exception-catching wrapper around the Planner LLM call lands, it
+    # will pass ``outcome="spec_failed"`` from inside its except branch.
     log_planner_run(
         repo_slug=actual_repo_slug,
         issue_number=issue_number,
         pr_number=pr.number,
+        outcome="spec_written",
         duration_seconds=duration_seconds,
         input_tokens=usage.input_tokens,
         output_tokens=usage.output_tokens,

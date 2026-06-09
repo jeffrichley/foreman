@@ -7,7 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from foreman.stats import _repo_slug_to_dirname, log_fixer_run
+from foreman.stats import (
+    _repo_slug_to_dirname,
+    log_fixer_run,
+    log_planner_run,
+    log_reviewer_run,
+    log_worker_run,
+)
 
 
 def _base_kwargs(**overrides: object) -> dict[str, object]:
@@ -77,22 +83,20 @@ def test_log_fixer_run_schema_stable_fields(tmp_path: Path) -> None:
 
     foreman#227: the schema is additive — the per-call usage / cost
     fields land alongside the existing audit dimensions.
+    foreman#233: the row now starts with the CommonEnvelope prefix
+    (adds ``role``); cross-role order is asserted separately in
+    ``test_common_envelope_uniform_across_roles``.
     """
     log_fixer_run(stats_root=tmp_path, **_base_kwargs())  # type: ignore[arg-type]
     out_path = tmp_path / "jeffrichley__voice" / "fixer.jsonl"
     payload = json.loads(out_path.read_text(encoding="utf-8").strip())
     expected_keys = {
+        # foreman#233: CommonEnvelope prefix.
         "timestamp",
+        "role",
         "issue_number",
         "pr_number",
-        "attempt",
         "outcome",
-        "total_findings",
-        "addressed_count",
-        "unaddressed_count",
-        "unaddressed_by_reason",
-        "disagreed_count",
-        "confidence",
         "duration_seconds",
         # foreman#227: provider-reported usage + cost.
         "input_tokens",
@@ -101,6 +105,14 @@ def test_log_fixer_run_schema_stable_fields(tmp_path: Path) -> None:
         "model_usage",
         "duration_ms",
         "num_turns",
+        # Fixer-specific role fields.
+        "attempt",
+        "total_findings",
+        "addressed_count",
+        "unaddressed_count",
+        "unaddressed_by_reason",
+        "disagreed_count",
+        "confidence",
     }
     assert set(payload.keys()) == expected_keys
 
@@ -155,3 +167,160 @@ def test_log_fixer_run_separate_repos_separate_files(tmp_path: Path) -> None:
     foreman = tmp_path / "jeffrichley__foreman" / "fixer.jsonl"
     assert voice.exists()
     assert foreman.exists()
+
+
+# ----------------------------------------------------------------------
+# Cross-role CommonEnvelope (foreman#233)
+# ----------------------------------------------------------------------
+
+# Authoritative order — must match foreman.stats.CommonEnvelope field order.
+# Downstream `head`-style queries rely on this ordering being identical across
+# every role's JSONL file.
+_COMMON_ENVELOPE_KEYS: tuple[str, ...] = (
+    "timestamp",
+    "role",
+    "issue_number",
+    "pr_number",
+    "outcome",
+    "duration_seconds",
+    "input_tokens",
+    "output_tokens",
+    "total_cost_usd",
+    "model_usage",
+    "duration_ms",
+    "num_turns",
+)
+
+
+def test_common_envelope_uniform_across_roles(tmp_path: Path) -> None:
+    """Every role's JSONL row starts with the same 12 envelope keys in the
+    same order, then role-specific fields after.
+
+    foreman#233: locks the CommonEnvelope contract. Cross-role queries
+    (``cat *.jsonl | jq ...``) and ``head -c`` peeks depend on the prefix
+    being byte-identical in shape across planner / reviewer / worker /
+    fixer files.
+    """
+    # Planner — minimal envelope, no role-specific fields.
+    log_planner_run(
+        stats_root=tmp_path,
+        repo_slug="acme/widgets",
+        issue_number=1,
+        pr_number=10,
+        outcome="spec_written",
+        duration_seconds=1.5,
+    )
+    # Reviewer — adds ``target`` after the envelope.
+    log_reviewer_run(
+        stats_root=tmp_path,
+        repo_slug="acme/widgets",
+        issue_number=2,
+        pr_number=20,
+        target="spec_pr",
+        outcome="clean",
+        duration_seconds=2.5,
+    )
+    # Worker — adds attempt + sub-request histogram + check-pass + baselines.
+    log_worker_run(
+        stats_root=tmp_path,
+        repo_slug="acme/widgets",
+        issue_number=3,
+        pr_number=30,
+        attempt=1,
+        outcome="implemented",
+        total_sub_requests=2,
+        implemented_count=2,
+        skipped_count=0,
+        skipped_by_reason={},
+        did_check_pass=True,
+        confidence="high",
+        duration_seconds=3.5,
+        baseline_failures_count=0,
+        new_failures_count=0,
+    )
+    # Fixer — adds finding histogram + disagreement count.
+    log_fixer_run(
+        stats_root=tmp_path,
+        repo_slug="acme/widgets",
+        issue_number=4,
+        pr_number=40,
+        attempt=1,
+        outcome="fixed",
+        total_findings=1,
+        addressed_count=1,
+        unaddressed_count=0,
+        unaddressed_by_reason={},
+        disagreed_count=0,
+        confidence="high",
+        duration_seconds=4.5,
+    )
+
+    repo_dir = tmp_path / "acme__widgets"
+    files = {
+        "planner": repo_dir / "planner.jsonl",
+        "reviewer": repo_dir / "reviewer.jsonl",
+        "worker": repo_dir / "worker.jsonl",
+        "fixer": repo_dir / "fixer.jsonl",
+    }
+    for role, path in files.items():
+        assert path.exists(), f"{role} jsonl was not written"
+        payload = json.loads(path.read_text(encoding="utf-8").strip())
+        actual_keys = tuple(payload.keys())
+        # The first 12 keys MUST be the CommonEnvelope keys, in CommonEnvelope
+        # order. Anything after is role-specific and is not constrained here.
+        assert actual_keys[: len(_COMMON_ENVELOPE_KEYS)] == _COMMON_ENVELOPE_KEYS, (
+            f"{role} envelope prefix drifted: {actual_keys[: len(_COMMON_ENVELOPE_KEYS)]!r} "
+            f"vs expected {_COMMON_ENVELOPE_KEYS!r}"
+        )
+        # And every row self-identifies its role via the literal hard-coded
+        # in the writer — callers can't get it wrong.
+        assert payload["role"] == role, (
+            f"{role} jsonl row carried role={payload['role']!r}; the writer "
+            f"must hard-code its own role literal"
+        )
+
+
+def test_log_planner_run_requires_outcome(tmp_path: Path) -> None:
+    """foreman#233: ``outcome`` is a required kwarg on log_planner_run."""
+    with pytest.raises(TypeError):
+        log_planner_run(  # type: ignore[call-arg]
+            stats_root=tmp_path,
+            repo_slug="acme/widgets",
+            issue_number=1,
+            pr_number=10,
+            duration_seconds=1.0,
+        )
+
+
+def test_log_planner_run_emits_role_planner(tmp_path: Path) -> None:
+    log_planner_run(
+        stats_root=tmp_path,
+        repo_slug="acme/widgets",
+        issue_number=1,
+        pr_number=10,
+        outcome="spec_written",
+        duration_seconds=1.0,
+    )
+    payload = json.loads(
+        (tmp_path / "acme__widgets" / "planner.jsonl").read_text(encoding="utf-8").strip()
+    )
+    assert payload["role"] == "planner"
+    assert payload["outcome"] == "spec_written"
+
+
+def test_log_planner_run_accepts_spec_failed_outcome(tmp_path: Path) -> None:
+    """``spec_failed`` is the other allowed Planner outcome literal — pinned
+    here so the Literal can't be silently narrowed."""
+    log_planner_run(
+        stats_root=tmp_path,
+        repo_slug="acme/widgets",
+        issue_number=2,
+        pr_number=None,
+        outcome="spec_failed",
+        duration_seconds=0.5,
+    )
+    payload = json.loads(
+        (tmp_path / "acme__widgets" / "planner.jsonl").read_text(encoding="utf-8").strip()
+    )
+    assert payload["outcome"] == "spec_failed"
+    assert payload["pr_number"] is None

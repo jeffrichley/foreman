@@ -5,10 +5,18 @@ Each role run produces one JSON line under
 schema-stable, and one-per-run so downstream tooling can sum / group /
 chart without re-parsing in-flight state.
 
-This is a scoped proto: only Fixer logs today. Worker / Planner /
-Reviewer will get their own ``log_<role>_run`` functions as those slices
-land, all sharing this module's path discipline so an ``ls`` of
-``~/.foreman/stats/`` mirrors the pipeline.
+Cross-role envelope (foreman#233)
+---------------------------------
+Every role's JSONL row starts with the same 12-key
+:class:`CommonEnvelope` prefix, in CommonEnvelope's declared field
+order, followed by role-specific fields. The shared prefix lets
+operators ``cat *.jsonl | jq ...`` across all four files without
+deriving ``role`` from the filename, and lets ``head``-style queries
+peek at the load-bearing fields (role / outcome / cost) in a
+byte-identical position.
+
+The ``role`` field is hard-coded inside each ``log_*_run`` function —
+callers cannot pass the wrong role for a given file.
 
 Path slug
 ---------
@@ -35,10 +43,74 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from pydantic import BaseModel
+
 # Reasons that contribute to ``disagreed_count`` in fixer stats — kept
 # in sync with the ``UnaddressedReason`` literal in
 # :mod:`foreman.schemas.fixer`.
 _DISAGREEMENT_REASON = "needed_remediation_wrong"
+
+
+class CommonEnvelope(BaseModel):
+    """The 12-field prefix that every role's JSONL row starts with.
+
+    foreman#233: previously each role's JSONL had its own bespoke key
+    order, and Planner had no ``outcome`` field at all. Downstream
+    tooling that wants to ``cat *.jsonl | jq '.outcome'`` across all
+    four files needs a uniform shape; deriving ``role`` from the
+    filename is fragile (file gets renamed, gets concatenated into a
+    bigger log, etc.).
+
+    The field order declared on this model IS the on-disk key order —
+    every ``log_*_run`` function emits these keys first, in this order,
+    before any role-specific fields. The ordering is asserted in
+    ``test_common_envelope_uniform_across_roles``.
+
+    Fields
+    ------
+    timestamp:
+        ISO-8601 UTC instant the row was written (``datetime.now(UTC).isoformat()``).
+    role:
+        One of ``planner`` / ``reviewer`` / ``worker`` / ``fixer`` —
+        hard-coded inside the matching ``log_*_run`` function so the
+        caller cannot get it wrong.
+    issue_number:
+        Originating issue # the run was attached to.
+    pr_number:
+        The PR the run produced / reviewed / edited. ``None`` when the
+        run produced no PR (Planner spec_failed, Worker incomplete, etc.).
+    outcome:
+        Per-role enum value — see each ``log_*_run`` docstring for the
+        allowed literals.
+    duration_seconds:
+        Wall-clock time the role run took, end to end, rounded to 3
+        decimals at write time.
+    input_tokens / output_tokens / total_cost_usd / model_usage /
+    duration_ms / num_turns:
+        Provider-reported per-call usage + SDK-computed cost. Defaults
+        match what AnthropicSDKProvider emits when no ResultMessage
+        arrived (zeros for ints, ``None`` for cost / model_usage).
+    """
+
+    timestamp: str
+    role: Literal["planner", "reviewer", "worker", "fixer"]
+    issue_number: int
+    pr_number: int | None
+    outcome: str
+    duration_seconds: float
+    input_tokens: int
+    output_tokens: int
+    total_cost_usd: float | None
+    model_usage: dict[str, Any] | None
+    duration_ms: int
+    num_turns: int
+
+
+# Frozen tuple of CommonEnvelope keys in declaration order. Used to
+# construct the on-disk JSONL line so the prefix shape is single-sourced
+# from the Pydantic model — if the model gains / loses / reorders a
+# field, the JSONL writers move with it.
+_COMMON_ENVELOPE_FIELDS: tuple[str, ...] = tuple(CommonEnvelope.model_fields.keys())
 
 
 def _default_stats_root() -> Path:
@@ -53,6 +125,43 @@ def _default_stats_root() -> Path:
 def _repo_slug_to_dirname(repo_slug: str) -> str:
     """Convert ``owner/repo`` → ``owner__repo`` for filesystem use."""
     return repo_slug.replace("/", "__")
+
+
+def _envelope_dict(
+    *,
+    role: Literal["planner", "reviewer", "worker", "fixer"],
+    issue_number: int,
+    pr_number: int | None,
+    outcome: str,
+    duration_seconds: float,
+    input_tokens: int,
+    output_tokens: int,
+    total_cost_usd: float | None,
+    model_usage: dict[str, Any] | None,
+    duration_ms: int,
+    num_turns: int,
+) -> dict[str, Any]:
+    """Build the CommonEnvelope key/value dict in declared order.
+
+    Returns a plain ``dict`` rather than a Pydantic model so the caller
+    can ``{**envelope, **role_specific}`` without going through
+    ``model_dump`` on every write. Python 3.7+ dicts preserve insertion
+    order, so the key sequence here is the on-disk JSONL key sequence.
+    """
+    return {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "role": role,
+        "issue_number": issue_number,
+        "pr_number": pr_number,
+        "outcome": outcome,
+        "duration_seconds": round(duration_seconds, 3),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_cost_usd": total_cost_usd,
+        "model_usage": model_usage,
+        "duration_ms": duration_ms,
+        "num_turns": num_turns,
+    }
 
 
 def log_fixer_run(
@@ -115,28 +224,29 @@ def log_fixer_run(
     repo_dir.mkdir(parents=True, exist_ok=True)
     stats_file = repo_dir / "fixer.jsonl"
 
-    line = {
-        "timestamp": datetime.now(UTC).isoformat(),
-        "issue_number": issue_number,
-        "pr_number": pr_number,
+    envelope = _envelope_dict(
+        role="fixer",
+        issue_number=issue_number,
+        pr_number=pr_number,
+        outcome=outcome,
+        duration_seconds=duration_seconds,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_cost_usd=total_cost_usd,
+        model_usage=model_usage,
+        duration_ms=duration_ms,
+        num_turns=num_turns,
+    )
+    role_specific = {
         "attempt": attempt,
-        "outcome": outcome,
         "total_findings": total_findings,
         "addressed_count": addressed_count,
         "unaddressed_count": unaddressed_count,
         "unaddressed_by_reason": dict(unaddressed_by_reason),
         "disagreed_count": disagreed_count,
         "confidence": confidence,
-        "duration_seconds": round(duration_seconds, 3),
-        # foreman#227: provider-reported token usage + SDK-computed cost.
-        # ADDITIVE: existing audit-log readers ignore unknown keys.
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "total_cost_usd": total_cost_usd,
-        "model_usage": model_usage,
-        "duration_ms": duration_ms,
-        "num_turns": num_turns,
     }
+    line = {**envelope, **role_specific}
     with stats_file.open("a", encoding="utf-8") as f:
         f.write(json.dumps(line) + "\n")
     return stats_file
@@ -218,30 +328,31 @@ def log_worker_run(
     repo_dir.mkdir(parents=True, exist_ok=True)
     stats_file = repo_dir / "worker.jsonl"
 
-    line = {
-        "timestamp": datetime.now(UTC).isoformat(),
-        "issue_number": issue_number,
-        "pr_number": pr_number,
+    envelope = _envelope_dict(
+        role="worker",
+        issue_number=issue_number,
+        pr_number=pr_number,
+        outcome=outcome,
+        duration_seconds=duration_seconds,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_cost_usd=total_cost_usd,
+        model_usage=model_usage,
+        duration_ms=duration_ms,
+        num_turns=num_turns,
+    )
+    role_specific = {
         "attempt": attempt,
-        "outcome": outcome,
         "total_sub_requests": total_sub_requests,
         "implemented_count": implemented_count,
         "skipped_count": skipped_count,
         "skipped_by_reason": dict(skipped_by_reason),
         "did_check_pass": did_check_pass,
         "confidence": confidence,
-        "duration_seconds": round(duration_seconds, 3),
         "baseline_failures_count": baseline_failures_count,
         "new_failures_count": new_failures_count,
-        # foreman#227: provider-reported token usage + SDK-computed cost.
-        # ADDITIVE: existing audit-log readers ignore unknown keys.
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "total_cost_usd": total_cost_usd,
-        "model_usage": model_usage,
-        "duration_ms": duration_ms,
-        "num_turns": num_turns,
     }
+    line = {**envelope, **role_specific}
     with stats_file.open("a", encoding="utf-8") as f:
         f.write(json.dumps(line) + "\n")
     return stats_file
@@ -252,6 +363,7 @@ def log_planner_run(
     repo_slug: str,
     issue_number: int,
     pr_number: int | None,
+    outcome: Literal["spec_written", "spec_failed"],
     duration_seconds: float,
     input_tokens: int = 0,
     output_tokens: int = 0,
@@ -263,18 +375,21 @@ def log_planner_run(
 ) -> Path:
     """Append one JSONL line to the Planner stats file for ``repo_slug``.
 
-    foreman#227: Planner had no JSONL audit log before this ticket —
-    it's added here so per-call token usage + SDK-computed cost lands
-    in ``~/.foreman/stats/<owner>__<repo>/planner.jsonl`` alongside
-    the other roles. The base envelope (timestamp / issue_number /
-    pr_number / duration) is intentionally narrow; rich per-role
-    fields (spec doc length, etc.) can land in a follow-up.
+    foreman#227 added the file; foreman#233 standardized its envelope
+    against the other three roles and added the ``outcome`` field
+    (Planner previously had no per-row outcome; cross-role queries like
+    "how many runs failed today" couldn't be written).
 
     Args:
         repo_slug: ``"owner/repo"`` — used to derive the per-repo
             stats subdirectory.
         issue_number: Originating issue # (the Planner runs on issues).
-        pr_number: Spec PR # opened by the Planner (None on failed runs).
+        pr_number: Spec PR # opened by the Planner (None on failed runs
+            that returned before opening a PR).
+        outcome: ``"spec_written"`` when the run produced a spec PR;
+            ``"spec_failed"`` when the run exited without one. Required
+            kwarg — foreman#233 deliberately does NOT default this, so
+            callers can't silently regress by omitting it.
         duration_seconds: Wall-clock time the Planner run took.
         input_tokens: Provider-reported input token count.
         output_tokens: Provider-reported output token count.
@@ -292,18 +407,23 @@ def log_planner_run(
     repo_dir.mkdir(parents=True, exist_ok=True)
     stats_file = repo_dir / "planner.jsonl"
 
-    line = {
-        "timestamp": datetime.now(UTC).isoformat(),
-        "issue_number": issue_number,
-        "pr_number": pr_number,
-        "duration_seconds": round(duration_seconds, 3),
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "total_cost_usd": total_cost_usd,
-        "model_usage": model_usage,
-        "duration_ms": duration_ms,
-        "num_turns": num_turns,
-    }
+    envelope = _envelope_dict(
+        role="planner",
+        issue_number=issue_number,
+        pr_number=pr_number,
+        outcome=outcome,
+        duration_seconds=duration_seconds,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_cost_usd=total_cost_usd,
+        model_usage=model_usage,
+        duration_ms=duration_ms,
+        num_turns=num_turns,
+    )
+    # Planner has no role-specific fields yet; rich per-role telemetry
+    # (spec_doc_length, considered_alternatives_count, ...) is a
+    # deliberately-deferred follow-up.
+    line = envelope
     with stats_file.open("a", encoding="utf-8") as f:
         f.write(json.dumps(line) + "\n")
     return stats_file
@@ -327,13 +447,10 @@ def log_reviewer_run(
 ) -> Path:
     """Append one JSONL line to the Reviewer stats file for ``repo_slug``.
 
-    foreman#227: Reviewer had no JSONL audit log before this ticket —
-    it's added here so per-call token usage + SDK-computed cost lands
-    in ``~/.foreman/stats/<owner>__<repo>/reviewer.jsonl`` alongside
-    the other roles. The base envelope (timestamp / issue_number /
-    pr_number / target / outcome / duration) is intentionally narrow;
-    rich per-role fields (findings count, severity histogram) can
-    land in a follow-up.
+    foreman#227 added the file; foreman#233 standardized its envelope
+    against the other three roles. ``target`` (``spec_pr`` vs
+    ``impl_pr``, per foreman#78/#79 target-aware routing) lands after
+    the CommonEnvelope prefix as a Reviewer-specific field.
 
     Args:
         repo_slug: ``"owner/repo"`` — used to derive the per-repo
@@ -361,26 +478,30 @@ def log_reviewer_run(
     repo_dir.mkdir(parents=True, exist_ok=True)
     stats_file = repo_dir / "reviewer.jsonl"
 
-    line = {
-        "timestamp": datetime.now(UTC).isoformat(),
-        "issue_number": issue_number,
-        "pr_number": pr_number,
+    envelope = _envelope_dict(
+        role="reviewer",
+        issue_number=issue_number,
+        pr_number=pr_number,
+        outcome=outcome,
+        duration_seconds=duration_seconds,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_cost_usd=total_cost_usd,
+        model_usage=model_usage,
+        duration_ms=duration_ms,
+        num_turns=num_turns,
+    )
+    role_specific = {
         "target": target,
-        "outcome": outcome,
-        "duration_seconds": round(duration_seconds, 3),
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "total_cost_usd": total_cost_usd,
-        "model_usage": model_usage,
-        "duration_ms": duration_ms,
-        "num_turns": num_turns,
     }
+    line = {**envelope, **role_specific}
     with stats_file.open("a", encoding="utf-8") as f:
         f.write(json.dumps(line) + "\n")
     return stats_file
 
 
 __all__ = [
+    "CommonEnvelope",
     "log_fixer_run",
     "log_planner_run",
     "log_reviewer_run",
