@@ -168,9 +168,9 @@ def log_fixer_run(
     *,
     repo_slug: str,
     issue_number: int,
-    pr_number: int,
+    pr_number: int | None,
     attempt: int,
-    outcome: Literal["fixed", "incomplete"],
+    outcome: Literal["fixed", "incomplete", "fixer_failed"],
     total_findings: int,
     addressed_count: int,
     unaddressed_count: int,
@@ -192,11 +192,20 @@ def log_fixer_run(
         repo_slug: ``"owner/repo"`` — used to derive the per-repo
             stats subdirectory.
         issue_number: Originating issue # (label-triggered the Fixer).
-        pr_number: Spec PR # the Fixer edited.
+        pr_number: Spec PR # the Fixer edited. ``None`` on
+            ``"fixer_failed"`` runs that crashed before the spec PR
+            could be resolved.
         attempt: 1-based fix-attempt counter (matches the
             ``foreman:fix-attempt-N`` label set on entry).
         outcome: ``"fixed"`` or ``"incomplete"`` per
-            :class:`~foreman.schemas.fixer.FixerOutput.outcome`.
+            :class:`~foreman.schemas.fixer.FixerOutput.outcome`, or
+            ``"fixer_failed"`` (foreman#239) when ``run_fixer`` itself
+            raised an exception before producing a FixerOutput.
+            ``"incomplete"`` is the Fixer's SELF-REPORTED outcome (LLM
+            said it didn't finish); ``"fixer_failed"`` is a different
+            shape — an uncaught exception in the role runner. Keeping
+            them distinct lets cost-rollup queries answer "how many
+            Fixer runs crashed vs how many the LLM gave up on?".
         total_findings: Sum of addressed + unaddressed; matches the
             Reviewer's finding count.
         addressed_count: ``len(addressed_findings)``.
