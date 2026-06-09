@@ -848,3 +848,168 @@ async def test_run_planner_returns_authoritative_final_labels(
     assert result.final_labels == sorted(
         ["external-tag", "foreman:plan", "foreman:planning"]
     )
+
+
+# ----------------------------------------------------------------------
+# foreman#235 — failure-path stats logging
+#
+# Before #235, ``log_planner_run`` was only called on the happy path. If
+# anything after ``start_time`` raised (WorktreeManager.create,
+# provider.run_agent, host.commit_files_to_worktree, host.push_branch,
+# host.open_pull_request), the exception propagated up to the daemon
+# dispatcher and NO JSONL row was written for the failed run. Cost
+# telemetry for failed Planner runs vanished. #235 wraps the body in a
+# try/except so the failure path also writes a row — with whatever
+# partial ``usage`` / ``pr_number`` state was captured before the
+# failure.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_planner_logs_spec_failed_with_partial_usage_when_open_pr_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """foreman#235: when ``host.open_pull_request`` raises after the LLM
+    call has already returned, ``run_planner`` must:
+
+    1. Re-raise the original exception unchanged so the daemon
+       dispatcher's error handling stays in charge.
+    2. Append a ``planner.jsonl`` row with ``outcome="spec_failed"``,
+       ``pr_number=None`` (the PR never opened), and the
+       ``input_tokens`` / ``output_tokens`` that the successful prior
+       ``provider.run_agent`` call reported. Cost telemetry for failed
+       runs must survive even when the failure happens mid-run.
+    """
+    import json as _json
+
+    stats_root = tmp_path / "stats"
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(stats_root))
+    clone = tmp_path / "clone"
+    _seed_clone(clone, origin_path=tmp_path / "origin.git")
+    monkeypatch.setenv("FOREMAN_PLANNER_APP_ID", "123456")
+
+    cfg = _make_config(clone)
+    fake_host = _FakeHostProvider()
+
+    # Make ``open_pull_request`` fail. Everything before it
+    # (worktree.create, provider.run_agent, commit, push) succeeds — so
+    # ``usage`` from the LLM call should be captured and reach the
+    # ``spec_failed`` row.
+    class _OpenPRBoom(RuntimeError):
+        pass
+
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise _OpenPRBoom("github API exploded")
+
+    fake_host.open_pull_request = _boom  # type: ignore[method-assign]
+
+    fake_registry = MagicMock()
+    fake_registry.get_host_provider.return_value = fake_host
+    fake_registry.get_planner_token.return_value = "fake-planner-token"
+
+    # UsageInfo with non-zero token counts so we can prove the partial
+    # capture actually carries the prior run_agent's values (vs the
+    # safe-default zeros).
+    partial_usage = UsageInfo(
+        input_tokens=1234,
+        output_tokens=567,
+        total_cost_usd=0.012,
+        duration_ms=4321,
+        num_turns=3,
+    )
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=(_make_llm_output(), partial_usage))
+
+    with pytest.raises(_OpenPRBoom, match="github API exploded"):
+        await run_planner(
+            issue_url="https://github.com/jeffrichley/voice/issues/42",
+            config=cfg,
+            project_name="voice",
+            worktrees_root=tmp_path / "worktrees",
+            provider=fake_provider,
+            identity_registry=fake_registry,
+        )
+
+    # JSONL row landed for the failed run.
+    jsonl = stats_root / "jeffrichley__voice" / "planner.jsonl"
+    assert jsonl.exists(), (
+        "spec_failed run must still append a row to planner.jsonl; #235 "
+        "fixes the silent-disappearance bug where exceptions before the "
+        "success-path log call skipped the write entirely"
+    )
+    rows = [_json.loads(line) for line in jsonl.read_text().splitlines() if line.strip()]
+    assert len(rows) == 1, f"exactly one row expected, got {len(rows)}: {rows!r}"
+    row = rows[0]
+
+    # Outcome + pr_number reflect the failed-mid-run state.
+    assert row["outcome"] == "spec_failed"
+    assert row["pr_number"] is None
+    assert row["role"] == "planner"
+    assert row["issue_number"] == 42
+
+    # Partial usage from the successful prior run_agent call survived.
+    assert row["input_tokens"] == 1234
+    assert row["output_tokens"] == 567
+    assert row["total_cost_usd"] == 0.012
+    assert row["duration_ms"] == 4321
+    assert row["num_turns"] == 3
+    # duration_seconds is non-negative wall-clock — we can't pin an exact
+    # value but it must be present and a real float.
+    assert isinstance(row["duration_seconds"], (int, float))
+    assert row["duration_seconds"] >= 0.0
+
+
+@pytest.mark.asyncio
+async def test_run_planner_logs_spec_failed_with_safe_defaults_when_run_agent_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """foreman#235: when ``provider.run_agent`` raises before producing
+    a ``UsageInfo``, the spec_failed row still lands — with the
+    safe-default zeros for token / cost / duration fields (the spec's
+    "fall back to safe defaults" branch). pr_number is also ``None``
+    because the PR never opened.
+    """
+    import json as _json
+
+    stats_root = tmp_path / "stats"
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(stats_root))
+    clone = tmp_path / "clone"
+    _seed_clone(clone, origin_path=tmp_path / "origin.git")
+    monkeypatch.setenv("FOREMAN_PLANNER_APP_ID", "123456")
+
+    cfg = _make_config(clone)
+    fake_host = _FakeHostProvider()
+    fake_registry = MagicMock()
+    fake_registry.get_host_provider.return_value = fake_host
+    fake_registry.get_planner_token.return_value = "fake-planner-token"
+
+    class _RunAgentBoom(RuntimeError):
+        pass
+
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(side_effect=_RunAgentBoom("LLM transport failed"))
+
+    with pytest.raises(_RunAgentBoom, match="LLM transport failed"):
+        await run_planner(
+            issue_url="https://github.com/jeffrichley/voice/issues/42",
+            config=cfg,
+            project_name="voice",
+            worktrees_root=tmp_path / "worktrees",
+            provider=fake_provider,
+            identity_registry=fake_registry,
+        )
+
+    jsonl = stats_root / "jeffrichley__voice" / "planner.jsonl"
+    assert jsonl.exists()
+    rows = [_json.loads(line) for line in jsonl.read_text().splitlines() if line.strip()]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["outcome"] == "spec_failed"
+    assert row["pr_number"] is None
+    # Safe-default zeros (no UsageInfo captured because run_agent raised).
+    assert row["input_tokens"] == 0
+    assert row["output_tokens"] == 0
+    assert row["total_cost_usd"] is None
+    assert row["model_usage"] is None
+    assert row["duration_ms"] == 0
+    assert row["num_turns"] == 0

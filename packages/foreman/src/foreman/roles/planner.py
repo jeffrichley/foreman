@@ -42,7 +42,7 @@ from foreman.config import Config
 from foreman.git_host import GitHostProvider, IssueRef
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
-from foreman.provider import ProviderFacade
+from foreman.provider import ProviderFacade, UsageInfo
 from foreman.schemas.planner import PlannerOutput, PlannerRunResult
 from foreman.stats import log_planner_run
 from foreman.worktree import WorktreeManager
@@ -179,107 +179,174 @@ async def run_planner(
     issue = host.get_issue(actual_repo_slug, issue_number)
     default_branch = host.get_default_branch(actual_repo_slug)
 
-    # WorktreeManager's git subprocesses (fetch / worktree add) must
-    # authenticate as the planner bot — without the explicit token they
-    # inherit the daemon's parent ``GH_TOKEN`` (CI runner, dev shell)
-    # and attribute identity to the daemon's identity on private repos.
-    # Same anti-leak motivation as the Stage 3e role-module subprocess
-    # fix; WorktreeManager was scoped out at the time as a follow-up.
-    wt_mgr = WorktreeManager(worktrees_root=worktrees_root, role_token=planner_token)
-    wt_path = wt_mgr.create(
-        clone_path=Path(project.local_clone_path),
-        repo_slug=repo_name,
-        ticket_id=issue_number,
-        dev_base_branch=project.dev_base_branch,
-        repo_url=f"https://github.com/{project.repo}.git",
-    )
-
-    # foreman#53: bot identity is injected per-commit via env vars inside
-    # ``host.commit_files_to_worktree``; the legacy
-    # ``configure_worktree_identity`` call mutated ``.git/config`` which
-    # worktrees share with the parent repo, leaking the bot identity
-    # into subsequent human commits.
-
-    instructions = load_project_instructions(Path(project.local_clone_path))
-
-    system_prompt = _load_planner_prompt()
-    user_prompt = _build_user_prompt(issue=issue, instructions=instructions)
-
+    # foreman#235: stamp ``start_time`` BEFORE the body wrap and
+    # initialize ``usage`` / ``pr_number`` to ``None`` so the except
+    # branch below can log partial state regardless of where in the
+    # pipeline a failure surfaces. ``WorktreeManager.create``,
+    # ``provider.run_agent``, ``host.commit_files_to_worktree``,
+    # ``host.push_branch``, and ``host.open_pull_request`` are all
+    # inside the wrap; pre-#235 any of those raising silently dropped
+    # the run's cost telemetry because the success-path
+    # ``log_planner_run`` call below never executed.
     start_time = time.monotonic()
-    llm_output, usage = await provider.run_agent(
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        allowed_tools=PLANNER_ALLOWED_TOOLS,
-        output_model=PlannerOutput,
-        cwd=wt_path,
-    )
-    duration_seconds = time.monotonic() - start_time
+    usage: UsageInfo | None = None
+    pr_number: int | None = None
+    try:
+        # WorktreeManager's git subprocesses (fetch / worktree add) must
+        # authenticate as the planner bot — without the explicit token they
+        # inherit the daemon's parent ``GH_TOKEN`` (CI runner, dev shell)
+        # and attribute identity to the daemon's identity on private repos.
+        # Same anti-leak motivation as the Stage 3e role-module subprocess
+        # fix; WorktreeManager was scoped out at the time as a follow-up.
+        wt_mgr = WorktreeManager(worktrees_root=worktrees_root, role_token=planner_token)
+        wt_path = wt_mgr.create(
+            clone_path=Path(project.local_clone_path),
+            repo_slug=repo_name,
+            ticket_id=issue_number,
+            dev_base_branch=project.dev_base_branch,
+            repo_url=f"https://github.com/{project.repo}.git",
+        )
 
-    branch = spec_branch(issue_number)
-    host.commit_files_to_worktree(
-        worktree_path=wt_path,
-        files={_spec_doc_relpath(issue_number): llm_output.spec_doc_content},
-        message=llm_output.pr_title,
-    )
-    host.push_branch(worktree_path=wt_path, branch=branch)
-    # foreman#63: strip GitHub auto-close keywords (Closes / Fixes /
-    # Resolves + #N) from the PR body before opening. Issue closure
-    # routes through daemon_runners.merge_impl_pr; an auto-close in the
-    # spec PR's body would short-circuit that gate. Defense in depth —
-    # the Planner prompt also forbids these keywords. The original
-    # ``llm_output.pr_body`` is preserved on the audit-log copy.
-    pr = host.open_pull_request(
-        repo_slug=actual_repo_slug,
-        title=llm_output.pr_title,
-        body=_strip_auto_close_keywords(llm_output.pr_body),
-        base=default_branch,
-        head=branch,
-    )
-    # v3 label vocabulary: Planner writes ZERO labels. The issue stays
-    # at ``foreman:planning`` (the entry label) after the spec PR opens;
-    # v3's reconciler ``dispatch_reviewer_spec`` rule then fires on
-    # ``foreman:planning`` + an open spec PR. No host label mutation
-    # happens here.
-    #
-    # Historical note: a prior revision attempted a best-effort cleanup
-    # of the legacy ``foreman:plan`` entry label on v2-era tickets. That
-    # cleanup raised PyGithub ``GithubException(404)`` on every fresh v3
-    # ticket (which never carries ``foreman:plan``) because
-    # ``issue.remove_from_labels`` 404s when the label is absent. Since
-    # ``foreman init`` no longer creates ``foreman:plan`` (PR #111), the
-    # cleanup is a back-compat tail that's no longer worth its crash
-    # surface. v2-era tickets that still carry the label must be
-    # cleaned up manually.
+        # foreman#53: bot identity is injected per-commit via env vars inside
+        # ``host.commit_files_to_worktree``; the legacy
+        # ``configure_worktree_identity`` call mutated ``.git/config`` which
+        # worktrees share with the parent repo, leaking the bot identity
+        # into subsequent human commits.
 
-    # foreman#91: compute final_labels deterministically from the
-    # pre-mutation set (``issue.labels`` is the snapshot taken by
-    # ``host.get_issue`` above) + the role's known transitions.
-    # v3: the Planner makes no label changes, so the final set is just
-    # the pre-mutation set (sorted for stability).
-    final_labels = sorted(set(issue.labels))
+        instructions = load_project_instructions(Path(project.local_clone_path))
 
-    # foreman#227: append the per-call token usage + cost to the
-    # Planner JSONL stats file at
-    # ``~/.foreman/stats/<owner>__<repo>/planner.jsonl``.
-    # foreman#233: include the required ``outcome`` field. Reaching
-    # this line means ``host.open_pull_request`` returned a ``pr`` —
-    # by definition that's ``spec_written``. The ``spec_failed`` path
-    # currently has no in-process handler (run_planner raises and the
-    # daemon's dispatcher records the failure separately); when an
-    # exception-catching wrapper around the Planner LLM call lands, it
-    # will pass ``outcome="spec_failed"`` from inside its except branch.
-    log_planner_run(
-        repo_slug=actual_repo_slug,
-        issue_number=issue_number,
-        pr_number=pr.number,
-        outcome="spec_written",
-        duration_seconds=duration_seconds,
-        input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
-        total_cost_usd=usage.total_cost_usd,
-        model_usage=usage.model_usage,
-        duration_ms=usage.duration_ms,
-        num_turns=usage.num_turns,
-    )
+        system_prompt = _load_planner_prompt()
+        user_prompt = _build_user_prompt(issue=issue, instructions=instructions)
 
-    return PlannerRunResult(llm_output=llm_output, pr=pr, final_labels=final_labels)
+        llm_output, run_usage = await provider.run_agent(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            allowed_tools=PLANNER_ALLOWED_TOOLS,
+            output_model=PlannerOutput,
+            cwd=wt_path,
+        )
+        # foreman#235: hoist ``usage`` to the outer scope IMMEDIATELY
+        # so a failure in any later step (commit/push/open_pull_request)
+        # still records the per-call token cost in the spec_failed row.
+        usage = run_usage
+
+        branch = spec_branch(issue_number)
+        host.commit_files_to_worktree(
+            worktree_path=wt_path,
+            files={_spec_doc_relpath(issue_number): llm_output.spec_doc_content},
+            message=llm_output.pr_title,
+        )
+        host.push_branch(worktree_path=wt_path, branch=branch)
+        # foreman#63: strip GitHub auto-close keywords (Closes / Fixes /
+        # Resolves + #N) from the PR body before opening. Issue closure
+        # routes through daemon_runners.merge_impl_pr; an auto-close in the
+        # spec PR's body would short-circuit that gate. Defense in depth —
+        # the Planner prompt also forbids these keywords. The original
+        # ``llm_output.pr_body`` is preserved on the audit-log copy.
+        pr = host.open_pull_request(
+            repo_slug=actual_repo_slug,
+            title=llm_output.pr_title,
+            body=_strip_auto_close_keywords(llm_output.pr_body),
+            base=default_branch,
+            head=branch,
+        )
+        # foreman#235: hoist ``pr_number`` to the outer scope right
+        # after ``open_pull_request`` returns. If a later step raises
+        # (today there are none, but defense in depth) the spec_failed
+        # row still reports the PR number — non-zero signal that the
+        # PR opened before whatever broke.
+        pr_number = pr.number
+        # v3 label vocabulary: Planner writes ZERO labels. The issue stays
+        # at ``foreman:planning`` (the entry label) after the spec PR opens;
+        # v3's reconciler ``dispatch_reviewer_spec`` rule then fires on
+        # ``foreman:planning`` + an open spec PR. No host label mutation
+        # happens here.
+        #
+        # Historical note: a prior revision attempted a best-effort cleanup
+        # of the legacy ``foreman:plan`` entry label on v2-era tickets. That
+        # cleanup raised PyGithub ``GithubException(404)`` on every fresh v3
+        # ticket (which never carries ``foreman:plan``) because
+        # ``issue.remove_from_labels`` 404s when the label is absent. Since
+        # ``foreman init`` no longer creates ``foreman:plan`` (PR #111), the
+        # cleanup is a back-compat tail that's no longer worth its crash
+        # surface. v2-era tickets that still carry the label must be
+        # cleaned up manually.
+
+        # foreman#91: compute final_labels deterministically from the
+        # pre-mutation set (``issue.labels`` is the snapshot taken by
+        # ``host.get_issue`` above) + the role's known transitions.
+        # v3: the Planner makes no label changes, so the final set is just
+        # the pre-mutation set (sorted for stability).
+        final_labels = sorted(set(issue.labels))
+
+        duration_seconds = time.monotonic() - start_time
+
+        # foreman#227: append the per-call token usage + cost to the
+        # Planner JSONL stats file at
+        # ``~/.foreman/stats/<owner>__<repo>/planner.jsonl``.
+        # foreman#233: include the required ``outcome`` field. Reaching
+        # this line means ``host.open_pull_request`` returned a ``pr`` —
+        # by definition that's ``spec_written``. The ``spec_failed``
+        # mirror lands in the ``except`` branch below (foreman#235).
+        log_planner_run(
+            repo_slug=actual_repo_slug,
+            issue_number=issue_number,
+            pr_number=pr_number,
+            outcome="spec_written",
+            duration_seconds=duration_seconds,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            total_cost_usd=usage.total_cost_usd,
+            model_usage=usage.model_usage,
+            duration_ms=usage.duration_ms,
+            num_turns=usage.num_turns,
+        )
+
+        return PlannerRunResult(llm_output=llm_output, pr=pr, final_labels=final_labels)
+    except Exception:
+        # foreman#235: capture cost telemetry for failed Planner runs.
+        # Pre-#235 any exception from worktree.create / provider.run_agent
+        # / commit_files_to_worktree / push_branch / open_pull_request
+        # propagated straight up and the JSONL row was never written —
+        # failed runs vanished from ``planner.jsonl`` and cross-role
+        # cost rollups under-counted by exactly the failure rate.
+        #
+        # Partial state captured so far:
+        #   - ``usage`` is set iff ``provider.run_agent`` returned
+        #     successfully (input/output tokens, cost, model usage).
+        #   - ``pr_number`` is set iff ``host.open_pull_request``
+        #     returned (today the only step after PR open is the success
+        #     ``log_planner_run`` call itself, so if pr_number is set
+        #     here something exotic broke between the PR opening and
+        #     the success log — still cheaper to record what we know).
+        # ``raise`` (bare) re-propagates the original exception
+        # unchanged: the daemon dispatcher's error handling must NOT
+        # be altered. The stats write is fire-and-forget telemetry,
+        # not a control-flow gate — wrapped in its own try/except so a
+        # disk-full or permissions failure during the log write cannot
+        # mask the original Planner exception. A stats-write failure
+        # here is strictly less bad than the original failure being
+        # silently replaced.
+        duration_seconds = time.monotonic() - start_time
+        try:
+            log_planner_run(
+                repo_slug=actual_repo_slug,
+                issue_number=issue_number,
+                pr_number=pr_number,
+                outcome="spec_failed",
+                duration_seconds=duration_seconds,
+                input_tokens=usage.input_tokens if usage is not None else 0,
+                output_tokens=usage.output_tokens if usage is not None else 0,
+                total_cost_usd=usage.total_cost_usd if usage is not None else None,
+                model_usage=usage.model_usage if usage is not None else None,
+                duration_ms=usage.duration_ms if usage is not None else 0,
+                num_turns=usage.num_turns if usage is not None else 0,
+            )
+        except Exception:
+            # Best-effort telemetry — swallow and continue to the
+            # bare ``raise`` so the daemon dispatcher sees the
+            # ORIGINAL exception, not whatever the stats writer
+            # raised. Surfacing the stats failure here would mask
+            # the actual Planner failure that triggered this branch.
+            pass
+        raise
