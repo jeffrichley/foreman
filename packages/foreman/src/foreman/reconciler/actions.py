@@ -271,6 +271,13 @@ def _handle_rate_limit_trip(
     The dispatch-action key the trip relates to is encoded in
     ``rule_name`` via the :data:`_RATE_LIMIT_RULE_PREFIX` convention
     (e.g., ``rate_limit_consecutive_failures:dispatch_planner``).
+
+    All four side effects are independently try-wrapped (mirroring
+    ``foreman.roles.handle_unhandled_role_exception``): a transient
+    failure of any one (GitHub 5xx, race-window 404, sentinel-write
+    hiccup) is logged and the remaining steps still run. The order is
+    chosen so the most-load-bearing step (``needs-help`` label add)
+    runs first.
     """
     dispatch_action = _parse_rate_limit_rule_name(rule_name)
     if dispatch_action is None:
@@ -305,48 +312,97 @@ def _handle_rate_limit_trip(
         window_seconds=ctx.rate_limit_window_seconds,
         recent=recent,
     )
-    # Add needs-help BEFORE removing the in-flight label so the safety
-    # rules at higher precedence land first if the daemon crashes
-    # between the two host calls — better to be over-help-labeled than
-    # in a label-free no-mans-land where forward-progress could re-fire.
-    host.add_label(
-        owner=ctx.snapshot.owner,
-        repo=ctx.snapshot.repo,
-        issue=ctx.issue.number,
-        label=TERMINAL_NEEDS_HELP_LABEL,
-    )
-    # Only attempt to remove the in-flight label if the issue actually
-    # carries it (defensive: the rate-limit rule predicate already
-    # requires it, but a label-edit race between predicate-eval and
-    # execute_action could make this a no-op-with-warning instead of
-    # a host-side 404).
-    if in_flight_label in ctx.issue.labels:
-        host.remove_label(
+    # Each side effect is wrapped INDEPENDENTLY so a single host hiccup
+    # (GitHub 5xx on the comment, race-window 404 on remove_label, disk
+    # write hiccup on the sentinel) cannot leave the others undone. This
+    # mirrors the pattern from ``handle_unhandled_role_exception`` in
+    # ``foreman.roles`` (#229) — Pepper called the independent wrapping
+    # load-bearing because the rate-limit's contract depends on each
+    # of these landing.
+    #
+    # The semantic priorities, in order:
+    #   1. ``add_label(needs-help)`` — the load-bearing safety move.
+    #      Without it the rate-limit rule predicate's `needs-help in
+    #      labels: return False` short-circuit cannot fire and the
+    #      trip's protection is broken. Wrap and log loudly, but do
+    #      NOT abort the remaining steps — a label-add failure today
+    #      is far more recoverable than a permanently-stuck loop.
+    #   2. ``remove_label(in_flight)`` — hygiene. A failed remove
+    #      leaves the ticket double-labeled (in-flight + needs-help);
+    #      the higher-precedence ``needs_help_label`` rule wins, so
+    #      forward-progress dispatch stays gated.
+    #   3. ``post_comment`` — diagnostic. Operator loses the last-N
+    #      failure summary if this fails; the label transition (and
+    #      the structural protection) still holds.
+    #   4. ``write_rate_limit_reset`` — load-bearing for the contract.
+    #      Without the sentinel, a same-window human re-queue trips
+    #      immediately at N=1 (the re-trip whiplash Pepper warned
+    #      about). Log loudly on failure: this is the one to wake
+    #      somebody for.
+    try:
+        host.add_label(
             owner=ctx.snapshot.owner,
             repo=ctx.snapshot.repo,
             issue=ctx.issue.number,
-            label=in_flight_label,
+            label=TERMINAL_NEEDS_HELP_LABEL,
         )
-    host.post_comment(
-        owner=ctx.snapshot.owner,
-        repo=ctx.snapshot.repo,
-        issue=ctx.issue.number,
-        body=body,
-    )
-    # Reset sentinel: every subsequent ``count_recent_failures`` for
-    # (dispatch_action, ticket_id) reads as 0 until a new failure
-    # lands. That's the structural promise the contract makes — human
-    # re-queue gives a fresh window.
-    ctx.log.write_rate_limit_reset(
-        action=dispatch_action,
-        ticket_id=ctx.ticket_id,
-        details={
-            "tripped_by_rule": rule_name,
-            "failure_count_at_trip": failure_count,
-            "window_seconds": ctx.rate_limit_window_seconds,
-            "issue": ctx.issue.number,
-        },
-    )
+    except Exception:
+        logger.exception(
+            "RATE_LIMIT_TRIP: failed to add %s on issue %d (rule=%s); "
+            "continuing with remaining trip side effects but the rate-limit "
+            "predicate's short-circuit may not fire on the next poll",
+            TERMINAL_NEEDS_HELP_LABEL,
+            ctx.issue.number,
+            rule_name,
+        )
+    if in_flight_label in ctx.issue.labels:
+        try:
+            host.remove_label(
+                owner=ctx.snapshot.owner,
+                repo=ctx.snapshot.repo,
+                issue=ctx.issue.number,
+                label=in_flight_label,
+            )
+        except Exception:
+            logger.exception(
+                "RATE_LIMIT_TRIP: failed to remove %s on issue %d; ticket "
+                "will carry both labels until the next reconcile cycle",
+                in_flight_label,
+                ctx.issue.number,
+            )
+    try:
+        host.post_comment(
+            owner=ctx.snapshot.owner,
+            repo=ctx.snapshot.repo,
+            issue=ctx.issue.number,
+            body=body,
+        )
+    except Exception:
+        logger.exception(
+            "RATE_LIMIT_TRIP: failed to post diagnostic comment on issue %d "
+            "(rule=%s); operator will see needs-help label but no comment",
+            ctx.issue.number,
+            rule_name,
+        )
+    try:
+        ctx.log.write_rate_limit_reset(
+            action=dispatch_action,
+            ticket_id=ctx.ticket_id,
+            details={
+                "tripped_by_rule": rule_name,
+                "failure_count_at_trip": failure_count,
+                "window_seconds": ctx.rate_limit_window_seconds,
+                "issue": ctx.issue.number,
+            },
+        )
+    except Exception:
+        logger.exception(
+            "RATE_LIMIT_TRIP: failed to write reset sentinel for "
+            "(action=%s, ticket=%s) — human re-queue may re-trip "
+            "immediately at N=1 within W. Investigate the execution log.",
+            dispatch_action,
+            ctx.ticket_id,
+        )
 
 
 def _handle_attempt_merge(

@@ -212,6 +212,36 @@ def test_count_recent_failures_resets_after_success(tmp_path: Path) -> None:
     )
 
 
+def test_count_recent_failures_counts_errored_recovery_outcomes(tmp_path: Path) -> None:
+    """`recover_orphaned` writes `outcome='errored:recovery'` terminator rows
+    for any `running` start rows orphaned by a daemon crash. Those terminators
+    ARE counted as failures by the rate-limit predicate — intentional, per the
+    `count_recent_failures` docstring. A daemon crash during a busy ticket can
+    therefore pre-load the failure counter and cause an early trip on the
+    first poll after restart. Pins the over-count-is-safer-than-under-count
+    contract so a future tuple-tidying refactor doesn't accidentally add
+    `errored:recovery` to `_NON_FAILURE_OUTCOMES`.
+    """
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    ticket = "foo/bar#1"
+    for _ in range(3):
+        _record_failure(
+            log,
+            ticket_id=ticket,
+            action="dispatch_planner",
+            outcome="errored:recovery",
+        )
+    assert (
+        log.count_recent_failures(
+            action="dispatch_planner",
+            ticket_id=ticket,
+            within_seconds=1800,
+        )
+        == 3
+    )
+
+
 def test_count_recent_failures_excludes_old_rows_outside_window(tmp_path: Path) -> None:
     log = ExecutionLog(tmp_path / "log.sqlite")
     log.init()
@@ -677,6 +707,114 @@ def test_executor_rate_limit_trip_comment_names_role_and_count(
     assert "foreman:needs-help" in comment
     # foreman#228 attribution lives in the comment for audit trail.
     assert "228" in comment or "rate-limit" in comment.lower()
+
+
+@dataclass
+class _PartiallyFailingHost:
+    """Variant of ``_FakeHost`` that raises on selected methods. Used to
+    pin the independent-try-wrapping contract: each side effect of
+    ``RATE_LIMIT_TRIP`` must survive a failure in a different side effect.
+    """
+
+    fail_methods: tuple[str, ...] = ()
+    calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+
+    def _maybe_raise(self, name: str) -> None:
+        if name in self.fail_methods:
+            raise RuntimeError(f"simulated failure in {name}")
+
+    def add_label(self, *, owner: str, repo: str, issue: int, label: str) -> None:
+        self.calls.append(("add_label", {"label": label}))
+        self._maybe_raise("add_label")
+
+    def remove_label(self, *, owner: str, repo: str, issue: int, label: str) -> None:
+        self.calls.append(("remove_label", {"label": label}))
+        self._maybe_raise("remove_label")
+
+    def post_comment(self, *, owner: str, repo: str, issue: int, body: str) -> None:
+        self.calls.append(("post_comment", {"body": body}))
+        self._maybe_raise("post_comment")
+
+    def merge_pr(self, **_: Any) -> None:
+        raise AssertionError("merge_pr should not be called by RATE_LIMIT_TRIP")
+
+    def get_pr_mergeability(self, **_: Any) -> PRMergeability:
+        raise AssertionError("get_pr_mergeability should not be called by RATE_LIMIT_TRIP")
+
+    def update_branch(self, **_: Any) -> None:
+        raise AssertionError("update_branch should not be called by RATE_LIMIT_TRIP")
+
+    def dispatch_role(self, **_: Any) -> int | None:
+        raise AssertionError("dispatch_role should not be called by RATE_LIMIT_TRIP")
+
+
+def test_executor_rate_limit_trip_post_comment_failure_does_not_block_sentinel(
+    tmp_path: Path,
+) -> None:
+    """If GitHub 5xx's the diagnostic comment, the load-bearing reset
+    sentinel write still happens — otherwise a human re-queue would
+    re-trip immediately at N=1 within W (the whiplash Pepper warned
+    about during criterion-check). Pins the independent-try-wrap on
+    `post_comment` introduced after the adversarial review."""
+    issue = _issue(labels=("foreman:planning",))
+    ctx = _ctx(tmp_path, issue)
+    for _ in range(3):
+        _record_failure(ctx.log, ticket_id=ctx.ticket_id, action="dispatch_planner")
+    host = _PartiallyFailingHost(fail_methods=("post_comment",))
+    # No exception escapes the executor: the trip's invariants must
+    # survive transient host failures.
+    execute_action(
+        Action.RATE_LIMIT_TRIP,
+        ctx,
+        host=host,
+        rule_name="rate_limit_consecutive_failures:dispatch_planner",
+        dry_run=False,
+    )
+    # The load-bearing label transition still ran.
+    added = [c[1]["label"] for c in host.calls if c[0] == "add_label"]
+    assert "foreman:needs-help" in added, host.calls
+    # The load-bearing sentinel still ran: counter reads 0.
+    assert (
+        ctx.log.count_recent_failures(
+            action="dispatch_planner",
+            ticket_id=ctx.ticket_id,
+            within_seconds=1800,
+        )
+        == 0
+    )
+
+
+def test_executor_rate_limit_trip_add_label_failure_does_not_block_sentinel(
+    tmp_path: Path,
+) -> None:
+    """Even if the ``add_label(needs-help)`` step fails (rare — GitHub
+    5xx on label edit), the remaining side effects still run. The
+    sentinel write in particular must not be skipped: without it a
+    transient add_label failure would lock the ticket into a state where
+    the counter never resets even after operator intervention."""
+    issue = _issue(labels=("foreman:planning",))
+    ctx = _ctx(tmp_path, issue)
+    for _ in range(3):
+        _record_failure(ctx.log, ticket_id=ctx.ticket_id, action="dispatch_planner")
+    host = _PartiallyFailingHost(fail_methods=("add_label",))
+    execute_action(
+        Action.RATE_LIMIT_TRIP,
+        ctx,
+        host=host,
+        rule_name="rate_limit_consecutive_failures:dispatch_planner",
+        dry_run=False,
+    )
+    # Comment still posted (diagnostic preserved).
+    assert any(c[0] == "post_comment" for c in host.calls), host.calls
+    # Sentinel still written.
+    assert (
+        ctx.log.count_recent_failures(
+            action="dispatch_planner",
+            ticket_id=ctx.ticket_id,
+            within_seconds=1800,
+        )
+        == 0
+    )
 
 
 # ---------------------------------------------------------------------------

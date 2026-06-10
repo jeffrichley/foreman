@@ -422,6 +422,19 @@ class ExecutionLog:
         The query uses string comparison against SQLite's
         ``CURRENT_TIMESTAMP`` format (``YYYY-MM-DD HH:MM:SS``) so it
         matches the existing ``has_recent`` convention.
+
+        **Post-daemon-restart semantics.** ``recover_orphaned`` writes
+        ``outcome='errored:recovery'`` rows for any ``running`` start
+        rows orphaned by a daemon crash. Those rows ARE terminator rows
+        and ``errored:recovery`` is NOT in :data:`_NON_FAILURE_OUTCOMES`,
+        so they count as failures here. Intentional: a crashed daemon
+        that was mid-dispatch represents a real (incomplete) attempt,
+        and over-counting is safer than under-counting for runaway
+        protection. The practical consequence is that a daemon crash
+        during a busy ticket can pre-load the failure counter and
+        cause an early rate-limit trip on the first poll after restart
+        — operators can re-queue normally (the trip writes the reset
+        sentinel, so needs-help removal clears the counter).
         """
         cutoff = datetime.now(UTC) - timedelta(seconds=within_seconds)
         cutoff_sql = cutoff.strftime("%Y-%m-%d %H:%M:%S")
