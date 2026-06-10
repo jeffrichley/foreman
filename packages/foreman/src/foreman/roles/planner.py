@@ -44,6 +44,7 @@ from foreman.git_host import GitHostProvider, IssueRef
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
+from foreman.roles import TERMINAL_BLOCKING_LABEL, handle_unhandled_role_exception
 from foreman.schemas.planner import PlannerOutput, PlannerRunResult
 from foreman.stats import log_planner_run
 from foreman.worktree import WorktreeManager
@@ -328,13 +329,23 @@ async def run_planner(
         )
 
         return PlannerRunResult(llm_output=llm_output, pr=pr, final_labels=final_labels)
-    except Exception:
-        # foreman#235: capture cost telemetry for failed Planner runs.
+    except Exception as exc:
+        # foreman#235 + foreman#229: capture cost telemetry AND defend
+        # against the runaway-burn pattern.
+        #
         # Pre-#235 any exception from worktree.create / provider.run_agent
         # / commit_files_to_worktree / push_branch / open_pull_request
         # propagated straight up and the JSONL row was never written —
         # failed runs vanished from ``planner.jsonl`` and cross-role
         # cost rollups under-counted by exactly the failure rate.
+        #
+        # Pre-#229 the issue's in-flight label (``foreman:planning``)
+        # was NOT transitioned. The dispatcher's next poll then
+        # re-dispatched the SAME role on the SAME ticket — the runaway
+        # (foreman#227 = 171 dispatches in 2h52m). The defensive
+        # ``handle_unhandled_role_exception`` call below transitions
+        # the issue to ``foreman:needs-help`` so the dispatcher stops
+        # re-dispatching until an operator removes the label.
         #
         # Partial state captured so far:
         #   - ``usage`` is set iff ``provider.run_agent`` returned
@@ -358,7 +369,7 @@ async def run_planner(
                 repo_slug=actual_repo_slug,
                 issue_number=issue_number,
                 pr_number=pr_number,
-                outcome="spec_failed",
+                outcome="exception",
                 duration_seconds=duration_seconds,
                 input_tokens=usage.input_tokens if usage is not None else 0,
                 output_tokens=usage.output_tokens if usage is not None else 0,
@@ -394,9 +405,27 @@ async def run_planner(
             project=project_name,
             issue_number=issue_number,
             pr_number=pr_number,
-            outcome="spec_failed",
+            outcome="exception",
             usage=usage if usage is not None else UsageInfo(),
             role_data={},
             duration_seconds=duration_seconds,
+        )
+        # foreman#229: runaway-burn defense. Post the traceback as a
+        # comment on the originating issue and transition it to
+        # ``foreman:needs-help`` so the dispatcher's poll loop stops
+        # re-dispatching the same role on the same ticket.
+        handle_unhandled_role_exception(
+            role="planner",
+            issue_number=issue_number,
+            exc=exc,
+            post_comment=lambda body: host.post_issue_comment(
+                actual_repo_slug, issue_number, body
+            ),
+            set_needs_help_label=lambda: host.update_issue_labels(
+                actual_repo_slug,
+                issue_number,
+                add=[TERMINAL_BLOCKING_LABEL],
+                remove=[],
+            ),
         )
         raise

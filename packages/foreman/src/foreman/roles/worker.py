@@ -86,6 +86,7 @@ from foreman.git_host import GitHostProvider
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
+from foreman.roles import TERMINAL_BLOCKING_LABEL, handle_unhandled_role_exception
 from foreman.schemas.worker import WorkerOutput, WorkerRunResult
 from foreman.stats import log_worker_run
 from foreman.worktree import WorktreeManager
@@ -1141,13 +1142,18 @@ async def run_worker(
             final_did_check_pass=final_did_check_pass,
             final_labels=sorted(current_labels),
         )
-    except Exception:
-        # foreman#238: any exception that escapes the body wrap (push
-        # auth failure, create_pull 422 not in the fallback set,
-        # issue.set_labels 5xx, etc.) MUST still produce a JSONL row.
-        # Failed Worker runs are exactly the cost-telemetry data points
-        # operators need; silently dropping them — as pre-#238 did —
-        # made the audit log lie.
+    except Exception as exc:
+        # foreman#238 + foreman#229: any exception that escapes the
+        # body wrap (push auth failure, create_pull 422 not in the
+        # fallback set, issue.set_labels 5xx, etc.) MUST
+        # 1. Produce a JSONL row (cost telemetry — pre-#238 silently
+        #    dropped these).
+        # 2. Transition the issue to ``foreman:needs-help`` so the
+        #    dispatcher's poll loop stops re-dispatching the same
+        #    Worker on the same ticket. Pre-#229 the issue's entry
+        #    label was reverted via the ``finally:`` below to
+        #    ``foreman:plan-approved``, and the next poll re-fired
+        #    the Worker — the runaway burn.
         #
         # Defaults below match the spec: zeroed counters / empty
         # histograms / ``did_check_pass=False`` / ``confidence="low"``.
@@ -1167,7 +1173,7 @@ async def run_worker(
                 issue_number=issue_number,
                 pr_number=None,
                 attempt=attempt,
-                outcome="worker_failed",
+                outcome="exception",
                 total_sub_requests=0,
                 implemented_count=0,
                 skipped_count=0,
@@ -1192,7 +1198,7 @@ async def run_worker(
             )
         except Exception:
             _log.exception(
-                "foreman#238 worker_failed stats write failed for issue=%d; "
+                "foreman#238 worker exception stats write failed for issue=%d; "
                 "original exception will still propagate to the dispatcher",
                 issue_number,
             )
@@ -1208,7 +1214,7 @@ async def run_worker(
             project=project_name,
             issue_number=issue_number,
             pr_number=None,
-            outcome="worker_failed",
+            outcome="exception",
             usage=usage if usage is not None else UsageInfo(),
             role_data={
                 "attempt": attempt,
@@ -1223,6 +1229,23 @@ async def run_worker(
             },
             duration_seconds=duration_seconds,
         )
+        # foreman#229: runaway-burn defense. Post the traceback as a
+        # comment on the originating issue and transition it to
+        # ``foreman:needs-help`` so the dispatcher's poll loop stops
+        # re-dispatching. The ``finally:`` below still runs and
+        # reverts the entry-label transition; the
+        # ``foreman:needs-help`` label survives that revert (it's
+        # outside ``added_foreman_pre`` / ``removed_foreman_pre``)
+        # and is read by the reconciler's safety-tier
+        # ``_needs_help_label`` rule, which blocks re-dispatch even
+        # though the entry label was restored.
+        handle_unhandled_role_exception(
+            role="worker",
+            issue_number=issue_number,
+            exc=exc,
+            post_comment=lambda body: issue.create_comment(body),
+            set_needs_help_label=lambda: issue.add_to_labels(TERMINAL_BLOCKING_LABEL),
+        )
         # Bare ``raise`` re-propagates the original exception unchanged
         # — the daemon dispatcher's error handling stays in charge, and
         # the ``finally`` block below still runs to revert the entry
@@ -1234,6 +1257,14 @@ async def run_worker(
             # remove the impl-attempt-N we just added, restore plan-approved.
             # A revert failure leaves the issue stuck in impl-attempt-N — log loudly
             # but do not mask the original exception.
+            #
+            # foreman#229: the ``except Exception:`` above also added
+            # ``foreman:needs-help`` which sits outside the
+            # ``added_foreman_pre`` / ``removed_foreman_pre`` namespace
+            # and survives this revert. The reconciler's
+            # ``_needs_help_label`` safety rule then blocks
+            # re-dispatch even though the entry label is back, which
+            # is the actual runaway-burn defense.
             try:
                 issue.update()
                 current_after_crash = {label.name for label in issue.labels}

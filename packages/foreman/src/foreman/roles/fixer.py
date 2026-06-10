@@ -62,6 +62,7 @@ from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
+from foreman.roles import TERMINAL_BLOCKING_LABEL, handle_unhandled_role_exception
 from foreman.roles.reviewer import FINDINGS_BEGIN_MARKER, FINDINGS_END_MARKER
 from foreman.schemas.fixer import FixerOutput, FixerRunResult
 from foreman.schemas.reviewer import Finding
@@ -734,14 +735,23 @@ async def run_fixer(
             attempt=attempt,
             final_labels=sorted(current_labels),
         )
-    except Exception:
-        # foreman#239: capture cost telemetry for failed Fixer runs.
+    except Exception as exc:
+        # foreman#239 + foreman#229: capture cost telemetry AND defend
+        # against the runaway-burn pattern.
+        #
         # Pre-#239 any exception from worktree.attach / _find_spec_pr /
         # _latest_reviewer_review_comment / provider.run_agent /
         # pr.create_issue_comment / issue.update / issue.set_labels
         # propagated straight up and the JSONL row was never written —
         # failed runs vanished from ``fixer.jsonl`` and cross-role
         # cost rollups under-counted by exactly the failure rate.
+        #
+        # Pre-#229 the issue's in-flight label (``foreman:spec-fix``
+        # or ``foreman:impl-fix``) was NOT transitioned on exception.
+        # The dispatcher's next poll then re-dispatched the SAME role
+        # on the SAME ticket — runaway burn. The defensive
+        # ``handle_unhandled_role_exception`` call below transitions
+        # the issue to ``foreman:needs-help``.
         #
         # Partial state captured so far:
         #   - ``usage`` is set iff ``provider.run_agent`` returned
@@ -766,7 +776,7 @@ async def run_fixer(
                 issue_number=issue_number,
                 pr_number=pr_number,
                 attempt=attempt,
-                outcome="fixer_failed",
+                outcome="exception",
                 total_findings=0,
                 addressed_count=0,
                 unaddressed_count=0,
@@ -804,7 +814,7 @@ async def run_fixer(
             project=project_name,
             issue_number=issue_number,
             pr_number=pr_number,
-            outcome="fixer_failed",
+            outcome="exception",
             usage=usage if usage is not None else UsageInfo(),
             role_data={
                 "attempt": attempt,
@@ -816,5 +826,17 @@ async def run_fixer(
                 "confidence": "low",
             },
             duration_seconds=duration_seconds,
+        )
+        # foreman#229: runaway-burn defense. Post the traceback as a
+        # comment on the originating issue (the ticket that's stuck
+        # in ``foreman:spec-fix`` / ``foreman:impl-fix``) and
+        # transition it to ``foreman:needs-help`` so the dispatcher's
+        # poll loop stops re-dispatching.
+        handle_unhandled_role_exception(
+            role="fixer",
+            issue_number=issue_number,
+            exc=exc,
+            post_comment=lambda body: issue.create_comment(body),
+            set_needs_help_label=lambda: issue.add_to_labels(TERMINAL_BLOCKING_LABEL),
         )
         raise

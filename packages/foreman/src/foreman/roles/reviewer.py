@@ -47,6 +47,7 @@ from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
+from foreman.roles import TERMINAL_BLOCKING_LABEL, handle_unhandled_role_exception
 from foreman.schemas.reviewer import Finding, ReviewerOutput, ReviewerRunResult
 from foreman.stats import log_reviewer_run
 from foreman.worktree import WorktreeManager
@@ -578,14 +579,24 @@ async def run_reviewer(
         # raced its own write and produced stale-snapshot dispatches at the
         # next worker iteration).
         return ReviewerRunResult(llm_output=llm_output, final_labels=final_labels)
-    except Exception:
-        # foreman#237: capture cost telemetry for failed Reviewer runs.
+    except Exception as exc:
+        # foreman#237 + foreman#229: capture cost telemetry AND defend
+        # against the runaway-burn pattern.
+        #
         # Pre-#237 any exception from worktree attach / _get_pr_diff /
         # provider.run_agent / pr.create_review / issue.set_labels
         # propagated straight up and the JSONL row was never written —
         # failed runs vanished from ``reviewer.jsonl`` and cross-role
         # cost rollups under-counted by exactly the failure rate (same
         # shape Planner had pre-#235 / PR #236).
+        #
+        # Pre-#229 the originating issue's in-flight label
+        # (``foreman:planning`` for spec_pr, ``foreman:impl-review``
+        # for impl_pr) was NOT transitioned on exception. The
+        # dispatcher's next poll then re-dispatched the SAME role on
+        # the SAME ticket — runaway burn. The defensive
+        # ``handle_unhandled_role_exception`` call below transitions
+        # the issue to ``foreman:needs-help``.
         #
         # Partial state captured so far:
         #   - ``usage`` is set iff ``provider.run_agent`` returned
@@ -607,7 +618,7 @@ async def run_reviewer(
                 issue_number=issue_number,
                 pr_number=pr_number,
                 target=target,
-                outcome="review_failed",
+                outcome="exception",
                 duration_seconds=duration_seconds,
                 input_tokens=usage.input_tokens if usage is not None else 0,
                 output_tokens=usage.output_tokens if usage is not None else 0,
@@ -639,9 +650,21 @@ async def run_reviewer(
             project=project_name,
             issue_number=issue_number,
             pr_number=pr_number,
-            outcome="review_failed",
+            outcome="exception",
             usage=usage if usage is not None else UsageInfo(),
             role_data={"target": target},
             duration_seconds=duration_seconds,
+        )
+        # foreman#229: runaway-burn defense. Post the traceback as a
+        # comment on the originating issue (the ticket that's stuck
+        # in the in-flight label) and transition it to
+        # ``foreman:needs-help`` so the dispatcher's poll loop stops
+        # re-dispatching.
+        handle_unhandled_role_exception(
+            role="reviewer",
+            issue_number=issue_number,
+            exc=exc,
+            post_comment=lambda body: issue.create_comment(body),
+            set_needs_help_label=lambda: issue.add_to_labels(TERMINAL_BLOCKING_LABEL),
         )
         raise

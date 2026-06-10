@@ -672,6 +672,14 @@ class _FakeIssue:
         if label not in self._remote_labels:
             self._remote_labels.append(label)
 
+    def create_comment(self, body: str) -> None:
+        # foreman#229: defensive exception-handler surface. PyGithub's
+        # ``Issue.create_comment`` posts a comment on the issue; tests
+        # that exercise the exception path read ``comments_posted``.
+        if not hasattr(self, "comments_posted"):
+            self.comments_posted = []  # type: ignore[attr-defined]
+        self.comments_posted.append(body)
+
     def set_labels(self, *labels: str) -> None:
         # Production code (adversarial review MEDIUM #12) uses
         # ``set_labels`` for atomic transitions. To keep the existing
@@ -2751,16 +2759,16 @@ async def test_run_worker_reverts_entry_labels_when_create_impl_crashes(
 
 
 @pytest.mark.asyncio
-async def test_run_worker_logs_worker_failed_with_partial_usage_when_push_branch_raises(
+async def test_run_worker_logs_exception_with_partial_usage_when_push_branch_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """foreman#238: when ``host.push_branch`` raises after
-    ``provider.run_agent`` has already returned a UsageInfo,
+    """foreman#238 + foreman#229: when ``host.push_branch`` raises
+    after ``provider.run_agent`` has already returned a UsageInfo,
     ``run_worker`` must:
 
     1. Re-raise the original exception unchanged so the daemon
        dispatcher's error handling stays in charge.
-    2. Append a ``worker.jsonl`` row with ``outcome="worker_failed"``,
+    2. Append a ``worker.jsonl`` row with ``outcome="exception"``,
        ``pr_number=None`` (the PR never opened), and the
        ``input_tokens`` / ``output_tokens`` that the successful prior
        ``provider.run_agent`` call reported. Cost telemetry for failed
@@ -2780,7 +2788,7 @@ async def test_run_worker_logs_worker_failed_with_partial_usage_when_push_branch
     # Make ``host.push_branch`` raise. Everything before it
     # (worktree.create_impl, provider.run_agent) succeeds, so ``usage``
     # from the LLM call should be captured and reach the
-    # ``worker_failed`` row.
+    # ``exception`` row.
     class _PushBoom(RuntimeError):
         pass
 
@@ -2817,7 +2825,7 @@ async def test_run_worker_logs_worker_failed_with_partial_usage_when_push_branch
     # JSONL row landed for the failed run.
     jsonl = stats_root / "jeffrichley__voice" / "worker.jsonl"
     assert jsonl.exists(), (
-        "worker_failed run must still append a row to worker.jsonl; #238 "
+        "exception run must still append a row to worker.jsonl; #238 "
         "fixes the silent-disappearance bug where exceptions before the "
         "success-path log call skipped the write entirely"
     )
@@ -2826,7 +2834,7 @@ async def test_run_worker_logs_worker_failed_with_partial_usage_when_push_branch
     row = rows[0]
 
     # Outcome + pr_number reflect the failed-mid-run state.
-    assert row["outcome"] == "worker_failed"
+    assert row["outcome"] == "exception"
     assert row["pr_number"] is None
     assert row["role"] == "worker"
     assert row["issue_number"] == 42
@@ -2855,14 +2863,15 @@ async def test_run_worker_logs_worker_failed_with_partial_usage_when_push_branch
 
 
 @pytest.mark.asyncio
-async def test_run_worker_logs_worker_failed_with_safe_defaults_when_create_impl_raises(
+async def test_run_worker_logs_exception_with_safe_defaults_when_create_impl_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """foreman#238: when ``WorktreeManager.create_impl`` raises before
-    ``provider.run_agent`` is ever called, the worker_failed row still
-    lands — with the safe-default zeros for token / cost / duration
-    fields (the spec's "fall back to safe defaults" branch). pr_number
-    is also ``None`` because the PR never opened.
+    """foreman#238 + foreman#229: when ``WorktreeManager.create_impl``
+    raises before ``provider.run_agent`` is ever called, the
+    ``outcome="exception"`` row still lands — with the safe-default
+    zeros for token / cost / duration fields (the spec's "fall back to
+    safe defaults" branch). pr_number is also ``None`` because the PR
+    never opened.
     """
     clone = tmp_path / "clone"
     head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
@@ -2910,7 +2919,7 @@ async def test_run_worker_logs_worker_failed_with_safe_defaults_when_create_impl
     rows = [json.loads(line) for line in jsonl.read_text().splitlines() if line.strip()]
     assert len(rows) == 1
     row = rows[0]
-    assert row["outcome"] == "worker_failed"
+    assert row["outcome"] == "exception"
     assert row["pr_number"] is None
     # Safe-default zeros (no UsageInfo captured because create_impl
     # raised before run_agent ever ran).

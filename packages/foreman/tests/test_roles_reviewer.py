@@ -188,6 +188,14 @@ class _FakeIssue:
         if label not in self._remote_labels:
             self._remote_labels.append(label)
 
+    def create_comment(self, body: str) -> None:
+        # foreman#229: defensive exception-handler surface. PyGithub's
+        # ``Issue.create_comment`` posts a comment on the issue; tests
+        # that exercise the exception path read ``comments_posted``.
+        if not hasattr(self, "comments_posted"):
+            self.comments_posted = []  # type: ignore[attr-defined]
+        self.comments_posted.append(body)
+
     def set_labels(self, *labels: str) -> None:
         # Production code (adversarial review MEDIUM #12) uses
         # ``set_labels`` for atomic transitions. To keep the existing
@@ -1450,15 +1458,15 @@ async def test_run_reviewer_calls_update_before_write_site_label_read(
 
 
 @pytest.mark.asyncio
-async def test_run_reviewer_logs_review_failed_with_partial_usage_when_create_review_raises(
+async def test_run_reviewer_logs_exception_with_partial_usage_when_create_review_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """foreman#237: when ``pr.create_review`` raises after the LLM call
-    has already returned, ``run_reviewer`` must:
+    """foreman#237 + foreman#229: when ``pr.create_review`` raises
+    after the LLM call has already returned, ``run_reviewer`` must:
 
     1. Re-raise the original exception unchanged so the daemon
        dispatcher's error handling stays in charge.
-    2. Append a ``reviewer.jsonl`` row with ``outcome="review_failed"``,
+    2. Append a ``reviewer.jsonl`` row with ``outcome="exception"``,
        ``target`` preserved from the resolved branch, and the
        ``input_tokens`` / ``output_tokens`` that the successful prior
        ``provider.run_agent`` call reported. Cost telemetry for failed
@@ -1479,7 +1487,7 @@ async def test_run_reviewer_logs_review_failed_with_partial_usage_when_create_re
     # Make ``pr.create_review`` fail. Everything before it
     # (worktree.attach, _get_pr_diff, provider.run_agent) succeeds —
     # so ``usage`` from the LLM call should be captured and reach the
-    # ``review_failed`` row.
+    # ``exception`` row.
     class _CreateReviewBoom(RuntimeError):
         pass
 
@@ -1517,7 +1525,7 @@ async def test_run_reviewer_logs_review_failed_with_partial_usage_when_create_re
     # JSONL row landed for the failed run.
     jsonl = stats_root / "jeffrichley__voice" / "reviewer.jsonl"
     assert jsonl.exists(), (
-        "review_failed run must still append a row to reviewer.jsonl; #237 "
+        "exception run must still append a row to reviewer.jsonl; #237 "
         "fixes the silent-disappearance bug where exceptions before the "
         "success-path log call skipped the write entirely"
     )
@@ -1527,7 +1535,7 @@ async def test_run_reviewer_logs_review_failed_with_partial_usage_when_create_re
 
     # Outcome reflects the failed-mid-run state. target / issue_number /
     # pr_number / role survive from the pre-failure resolution.
-    assert row["outcome"] == "review_failed"
+    assert row["outcome"] == "exception"
     assert row["role"] == "reviewer"
     assert row["issue_number"] == 42
     assert row["pr_number"] == 77
@@ -1546,13 +1554,13 @@ async def test_run_reviewer_logs_review_failed_with_partial_usage_when_create_re
 
 
 @pytest.mark.asyncio
-async def test_run_reviewer_logs_review_failed_with_safe_defaults_when_run_agent_raises(
+async def test_run_reviewer_logs_exception_with_safe_defaults_when_run_agent_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """foreman#237: when ``provider.run_agent`` raises before producing
-    a ``UsageInfo``, the review_failed row still lands — with the
-    safe-default zeros for token / cost / duration fields (the spec's
-    "fall back to safe defaults" branch).
+    """foreman#237 + foreman#229: when ``provider.run_agent`` raises
+    before producing a ``UsageInfo``, the ``outcome="exception"`` row
+    still lands — with the safe-default zeros for token / cost /
+    duration fields (the spec's "fall back to safe defaults" branch).
     """
     import json as _json
 
@@ -1589,7 +1597,7 @@ async def test_run_reviewer_logs_review_failed_with_safe_defaults_when_run_agent
     rows = [_json.loads(line) for line in jsonl.read_text().splitlines() if line.strip()]
     assert len(rows) == 1
     row = rows[0]
-    assert row["outcome"] == "review_failed"
+    assert row["outcome"] == "exception"
     assert row["role"] == "reviewer"
     assert row["issue_number"] == 42
     assert row["pr_number"] == 77
