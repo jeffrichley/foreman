@@ -47,10 +47,23 @@ class UsageInfo(BaseModel):
     truly degenerate transport failures), ``input_tokens`` /
     ``output_tokens`` default to 0 and ``total_cost_usd`` stays
     ``None``. We never crash on a missing-usage path.
+
+    foreman#244 added ``cache_creation_input_tokens`` /
+    ``cache_read_input_tokens``. The Anthropic API charges these at
+    25% / 10% of the regular input rate respectively; the SDK's
+    ``ResultMessage.usage`` carries them alongside ``input_tokens`` /
+    ``output_tokens``. Before #244 we silently dropped both, so any
+    multi-turn agent loop (Planner / Reviewer / Worker / Fixer all
+    spend most of their turns mid-loop where prompt caching is the
+    default) produced JSONL rows whose per-token columns drifted from
+    the SDK-computed cost. They default to 0 so callers / consumers
+    don't have to special-case the first-turn / no-cache path.
     """
 
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
     total_cost_usd: float | None = None
     model_usage: dict[str, Any] | None = None
     duration_ms: int = 0

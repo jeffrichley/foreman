@@ -90,6 +90,15 @@ class CommonEnvelope(BaseModel):
         Provider-reported per-call usage + SDK-computed cost. Defaults
         match what AnthropicSDKProvider emits when no ResultMessage
         arrived (zeros for ints, ``None`` for cost / model_usage).
+    cache_creation_input_tokens / cache_read_input_tokens:
+        Prompt-cache counters from ``ResultMessage.usage`` (foreman#244).
+        The Anthropic API bills these at 25% and 10% of the regular
+        input rate respectively. Sit between ``output_tokens`` and
+        ``total_cost_usd`` so the four token counters cluster together
+        in the on-disk JSONL row — operator ``jq`` selecting per-token
+        columns gets all four in one peek. Default ``0`` (first turn
+        of a fresh agent loop, or older SDK that didn't surface the
+        fields).
     """
 
     timestamp: str
@@ -100,6 +109,8 @@ class CommonEnvelope(BaseModel):
     duration_seconds: float
     input_tokens: int
     output_tokens: int
+    cache_creation_input_tokens: int
+    cache_read_input_tokens: int
     total_cost_usd: float | None
     model_usage: dict[str, Any] | None
     duration_ms: int
@@ -136,6 +147,8 @@ def _envelope_dict(
     duration_seconds: float,
     input_tokens: int,
     output_tokens: int,
+    cache_creation_input_tokens: int,
+    cache_read_input_tokens: int,
     total_cost_usd: float | None,
     model_usage: dict[str, Any] | None,
     duration_ms: int,
@@ -147,6 +160,11 @@ def _envelope_dict(
     can ``{**envelope, **role_specific}`` without going through
     ``model_dump`` on every write. Python 3.7+ dicts preserve insertion
     order, so the key sequence here is the on-disk JSONL key sequence.
+
+    foreman#244: ``cache_creation_input_tokens`` and
+    ``cache_read_input_tokens`` sit between ``output_tokens`` and
+    ``total_cost_usd`` so the four token counters cluster together on
+    disk.
     """
     return {
         "timestamp": datetime.now(UTC).isoformat(),
@@ -157,6 +175,8 @@ def _envelope_dict(
         "duration_seconds": round(duration_seconds, 3),
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
+        "cache_creation_input_tokens": cache_creation_input_tokens,
+        "cache_read_input_tokens": cache_read_input_tokens,
         "total_cost_usd": total_cost_usd,
         "model_usage": model_usage,
         "duration_ms": duration_ms,
@@ -180,6 +200,8 @@ def log_fixer_run(
     duration_seconds: float,
     input_tokens: int = 0,
     output_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+    cache_read_input_tokens: int = 0,
     total_cost_usd: float | None = None,
     model_usage: dict[str, Any] | None = None,
     duration_ms: int = 0,
@@ -241,6 +263,8 @@ def log_fixer_run(
         duration_seconds=duration_seconds,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        cache_creation_input_tokens=cache_creation_input_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
         total_cost_usd=total_cost_usd,
         model_usage=model_usage,
         duration_ms=duration_ms,
@@ -279,6 +303,8 @@ def log_worker_run(
     new_failures_count: int,
     input_tokens: int = 0,
     output_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+    cache_read_input_tokens: int = 0,
     total_cost_usd: float | None = None,
     model_usage: dict[str, Any] | None = None,
     duration_ms: int = 0,
@@ -353,6 +379,8 @@ def log_worker_run(
         duration_seconds=duration_seconds,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        cache_creation_input_tokens=cache_creation_input_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
         total_cost_usd=total_cost_usd,
         model_usage=model_usage,
         duration_ms=duration_ms,
@@ -384,6 +412,8 @@ def log_planner_run(
     duration_seconds: float,
     input_tokens: int = 0,
     output_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+    cache_read_input_tokens: int = 0,
     total_cost_usd: float | None = None,
     model_usage: dict[str, Any] | None = None,
     duration_ms: int = 0,
@@ -410,6 +440,10 @@ def log_planner_run(
         duration_seconds: Wall-clock time the Planner run took.
         input_tokens: Provider-reported input token count.
         output_tokens: Provider-reported output token count.
+        cache_creation_input_tokens: Provider-reported prompt-cache
+            creation tokens (foreman#244, billed at 25% of input rate).
+        cache_read_input_tokens: Provider-reported prompt-cache read
+            tokens (foreman#244, billed at 10% of input rate).
         total_cost_usd: Provider-computed cost for the call.
         model_usage: Per-model breakdown when the provider supplies one.
         duration_ms: Provider-reported wall-clock duration.
@@ -432,6 +466,8 @@ def log_planner_run(
         duration_seconds=duration_seconds,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        cache_creation_input_tokens=cache_creation_input_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
         total_cost_usd=total_cost_usd,
         model_usage=model_usage,
         duration_ms=duration_ms,
@@ -456,6 +492,8 @@ def log_reviewer_run(
     duration_seconds: float,
     input_tokens: int = 0,
     output_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+    cache_read_input_tokens: int = 0,
     total_cost_usd: float | None = None,
     model_usage: dict[str, Any] | None = None,
     duration_ms: int = 0,
@@ -490,6 +528,10 @@ def log_reviewer_run(
         duration_seconds: Wall-clock time the Reviewer run took.
         input_tokens: Provider-reported input token count.
         output_tokens: Provider-reported output token count.
+        cache_creation_input_tokens: Provider-reported prompt-cache
+            creation tokens (foreman#244, billed at 25% of input rate).
+        cache_read_input_tokens: Provider-reported prompt-cache read
+            tokens (foreman#244, billed at 10% of input rate).
         total_cost_usd: Provider-computed cost for the call.
         model_usage: Per-model breakdown when the provider supplies one.
         duration_ms: Provider-reported wall-clock duration.
@@ -512,6 +554,8 @@ def log_reviewer_run(
         duration_seconds=duration_seconds,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        cache_creation_input_tokens=cache_creation_input_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
         total_cost_usd=total_cost_usd,
         model_usage=model_usage,
         duration_ms=duration_ms,

@@ -58,6 +58,7 @@ from pydantic import ValidationError
 
 from foreman.branches import spec_branch
 from foreman.config import Config
+from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
@@ -397,6 +398,8 @@ async def run_fixer(
     provider: ProviderFacade,
     identity_registry: IdentityRegistry | None = None,
     target: str = "spec_pr",
+    dispatch_recorder: DispatchRecorder | None = None,
+    dispatch_trace_id: int | None = None,
 ) -> FixerRunResult:
     """Run the Fixer role end-to-end on one issue.
 
@@ -691,10 +694,39 @@ async def run_fixer(
             # foreman#227: provider-reported usage from the ResultMessage.
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
+            # foreman#244: prompt-cache token counters from the SDK
+            # (billed at 25% / 10% of regular input rate).
+            cache_creation_input_tokens=usage.cache_creation_input_tokens,
+            cache_read_input_tokens=usage.cache_read_input_tokens,
             total_cost_usd=usage.total_cost_usd,
             model_usage=usage.model_usage,
             duration_ms=usage.duration_ms,
             num_turns=usage.num_turns,
+        )
+        # foreman#251 (Phase 1): dual-write through the Recorder.
+        emit_recorder_complete(
+            dispatch_recorder=dispatch_recorder,
+            dispatch_trace_id=dispatch_trace_id,
+            role="fixer",
+            repo_slug=actual_repo_slug,
+            ticket_id=f"{actual_repo_slug}#{issue_number}",
+            project=project_name,
+            issue_number=issue_number,
+            pr_number=pr_number,
+            outcome=llm_output.outcome,
+            usage=usage,
+            role_data={
+                "attempt": attempt,
+                "total_findings": (
+                    len(llm_output.addressed_findings) + len(llm_output.unaddressed_findings)
+                ),
+                "addressed_count": len(llm_output.addressed_findings),
+                "unaddressed_count": len(llm_output.unaddressed_findings),
+                "unaddressed_by_reason": unaddressed_hist,
+                "disagreed_count": disagreed_count,
+                "confidence": llm_output.confidence,
+            },
+            duration_seconds=duration_seconds,
         )
 
         return FixerRunResult(
@@ -744,6 +776,12 @@ async def run_fixer(
                 duration_seconds=duration_seconds,
                 input_tokens=usage.input_tokens if usage is not None else 0,
                 output_tokens=usage.output_tokens if usage is not None else 0,
+                cache_creation_input_tokens=(
+                    usage.cache_creation_input_tokens if usage is not None else 0
+                ),
+                cache_read_input_tokens=(
+                    usage.cache_read_input_tokens if usage is not None else 0
+                ),
                 total_cost_usd=usage.total_cost_usd if usage is not None else None,
                 model_usage=usage.model_usage if usage is not None else None,
                 duration_ms=usage.duration_ms if usage is not None else 0,
@@ -756,4 +794,27 @@ async def run_fixer(
             # raised. Surfacing the stats failure here would mask
             # the actual Fixer failure that triggered this branch.
             pass
+        # foreman#251 (Phase 1): mirror the failure-path dual-write.
+        emit_recorder_complete(
+            dispatch_recorder=dispatch_recorder,
+            dispatch_trace_id=dispatch_trace_id,
+            role="fixer",
+            repo_slug=actual_repo_slug,
+            ticket_id=f"{actual_repo_slug}#{issue_number}",
+            project=project_name,
+            issue_number=issue_number,
+            pr_number=pr_number,
+            outcome="fixer_failed",
+            usage=usage if usage is not None else UsageInfo(),
+            role_data={
+                "attempt": attempt,
+                "total_findings": 0,
+                "addressed_count": 0,
+                "unaddressed_count": 0,
+                "unaddressed_by_reason": {},
+                "disagreed_count": 0,
+                "confidence": "low",
+            },
+            duration_seconds=duration_seconds,
+        )
         raise

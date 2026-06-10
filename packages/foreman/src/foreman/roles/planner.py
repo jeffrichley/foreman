@@ -39,6 +39,7 @@ from pathlib import Path
 
 from foreman.branches import spec_branch
 from foreman.config import Config
+from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
 from foreman.git_host import GitHostProvider, IssueRef
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
@@ -145,6 +146,8 @@ async def run_planner(
     worktrees_root: Path,
     provider: ProviderFacade,
     identity_registry: IdentityRegistry | None = None,
+    dispatch_recorder: DispatchRecorder | None = None,
+    dispatch_trace_id: int | None = None,
 ) -> PlannerRunResult:
     """Run the Planner role end-to-end on one issue.
 
@@ -296,10 +299,32 @@ async def run_planner(
             duration_seconds=duration_seconds,
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
+            cache_creation_input_tokens=usage.cache_creation_input_tokens,
+            cache_read_input_tokens=usage.cache_read_input_tokens,
             total_cost_usd=usage.total_cost_usd,
             model_usage=usage.model_usage,
             duration_ms=usage.duration_ms,
             num_turns=usage.num_turns,
+        )
+        # foreman#251 (Phase 1): dual-write via the DispatchRecorder.
+        # When the daemon dispatched this run it constructed a
+        # Recorder + propagated the trace_id via env; the CLI entry
+        # point unpacks both and forwards them here. The existing
+        # ``log_planner_run`` call above stays in place — Phase 2 will
+        # collapse it.
+        emit_recorder_complete(
+            dispatch_recorder=dispatch_recorder,
+            dispatch_trace_id=dispatch_trace_id,
+            role="planner",
+            repo_slug=actual_repo_slug,
+            ticket_id=f"{actual_repo_slug}#{issue_number}",
+            project=project_name,
+            issue_number=issue_number,
+            pr_number=pr_number,
+            outcome="spec_written",
+            usage=usage,
+            role_data={},
+            duration_seconds=duration_seconds,
         )
 
         return PlannerRunResult(llm_output=llm_output, pr=pr, final_labels=final_labels)
@@ -337,6 +362,12 @@ async def run_planner(
                 duration_seconds=duration_seconds,
                 input_tokens=usage.input_tokens if usage is not None else 0,
                 output_tokens=usage.output_tokens if usage is not None else 0,
+                cache_creation_input_tokens=(
+                    usage.cache_creation_input_tokens if usage is not None else 0
+                ),
+                cache_read_input_tokens=(
+                    usage.cache_read_input_tokens if usage is not None else 0
+                ),
                 total_cost_usd=usage.total_cost_usd if usage is not None else None,
                 model_usage=usage.model_usage if usage is not None else None,
                 duration_ms=usage.duration_ms if usage is not None else 0,
@@ -349,4 +380,23 @@ async def run_planner(
             # raised. Surfacing the stats failure here would mask
             # the actual Planner failure that triggered this branch.
             pass
+        # foreman#251 (Phase 1): mirror the dual-write on the failure
+        # path. ``usage`` may be None (if ``provider.run_agent`` never
+        # returned) — the helper fills zeros via a default UsageInfo
+        # so the Recorder's cost columns stay populated with explicit
+        # zeros rather than NULL, matching the existing JSONL shape.
+        emit_recorder_complete(
+            dispatch_recorder=dispatch_recorder,
+            dispatch_trace_id=dispatch_trace_id,
+            role="planner",
+            repo_slug=actual_repo_slug,
+            ticket_id=f"{actual_repo_slug}#{issue_number}",
+            project=project_name,
+            issue_number=issue_number,
+            pr_number=pr_number,
+            outcome="spec_failed",
+            usage=usage if usage is not None else UsageInfo(),
+            role_data={},
+            duration_seconds=duration_seconds,
+        )
         raise

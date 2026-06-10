@@ -1013,3 +1013,103 @@ async def test_run_planner_logs_spec_failed_with_safe_defaults_when_run_agent_ra
     assert row["model_usage"] is None
     assert row["duration_ms"] == 0
     assert row["num_turns"] == 0
+
+
+# ----------------------------------------------------------------------
+# foreman#251 (Phase 1) — Recorder integration via run_planner
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_planner_emits_recorder_dispatch_complete_on_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """foreman#251: success path emits ``record_dispatch_complete``
+    through the Recorder when a recorder + trace_id are supplied. The
+    cost row lands in ``execution_log`` (parent_log_id pointing at the
+    trace_id) and the existing log_planner_run JSONL row still lands —
+    dual-write per Phase 1."""
+    import json as _json
+    import sqlite3
+
+    from foreman.dispatch_recorder import DispatchRecorder
+    from foreman.reconciler.exec_log import ExecutionLog
+
+    clone = tmp_path / "clone"
+    _seed_clone(clone, origin_path=tmp_path / "origin.git")
+    monkeypatch.setenv("FOREMAN_PLANNER_APP_ID", "123456")
+
+    cfg = _make_config(clone)
+
+    fake_host = _FakeHostProvider()
+    fake_registry = MagicMock()
+    fake_registry.get_host_provider.return_value = fake_host
+    fake_registry.get_planner_token.return_value = "fake-planner-token"
+
+    populated_usage = UsageInfo(
+        input_tokens=4321,
+        output_tokens=765,
+        cache_creation_input_tokens=50,
+        cache_read_input_tokens=12,
+        total_cost_usd=0.31,
+        model_usage={"claude-sonnet": {"input_tokens": 4321}},
+        duration_ms=5555,
+        num_turns=7,
+    )
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=(_make_llm_output(), populated_usage))
+
+    stats_root = tmp_path / "stats"
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(stats_root))
+
+    log = ExecutionLog(tmp_path / "exec.sqlite")
+    log.init()
+    # Seed a dispatch-start row to imitate the daemon's start_log_id.
+    trace_id = log.write_action(
+        ticket_id="jeffrichley/voice#42",
+        project="voice",
+        rule_name="dispatch_planner",
+        action="dispatch_planner",
+        outcome="running",
+        details={},
+    )
+
+    recorder = DispatchRecorder(log=log, stats_root=stats_root)
+
+    await run_planner(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=fake_registry,
+        dispatch_recorder=recorder,
+        dispatch_trace_id=trace_id,
+    )
+
+    # Recorder wrote a cost row to execution_log tied to the trace_id.
+    with sqlite3.connect(log.db_path) as conn:
+        row = conn.execute(
+            "SELECT input_tokens, output_tokens, total_cost_usd, num_turns, outcome "
+            "FROM execution_log WHERE parent_log_id = ?",
+            (trace_id,),
+        ).fetchone()
+    assert row is not None
+    db_input, db_output, db_cost, db_turns, outcome = row
+    assert db_input == 4321
+    assert db_output == 765
+    assert db_cost == pytest.approx(0.31)
+    assert db_turns == 7
+    assert outcome == "spec_written"
+
+    # Phase 1 dual-write: JSONL still landed via the existing
+    # log_planner_run call. RoleStatsSubscriber's mirror lands on top —
+    # 2 rows total (the existing log_planner_run + the Recorder fan-out).
+    jsonl = stats_root / "jeffrichley__voice" / "planner.jsonl"
+    rows = [_json.loads(line) for line in jsonl.read_text().splitlines() if line.strip()]
+    assert len(rows) == 2
+    for r in rows:
+        assert r["outcome"] == "spec_written"
+        assert r["input_tokens"] == 4321
+        assert r["output_tokens"] == 765
+        assert r["total_cost_usd"] == pytest.approx(0.31)

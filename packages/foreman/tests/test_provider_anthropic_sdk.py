@@ -604,3 +604,112 @@ async def test_run_agent_defaults_usage_info_when_result_message_usage_is_none(
     assert usage.duration_ms == 0
     assert usage.duration_api_ms == 0
     assert usage.num_turns == 0
+
+
+# ----------------------------------------------------------------------
+# foreman#244: prompt-cache token fields extraction from ResultMessage
+# ----------------------------------------------------------------------
+#
+# The Anthropic Agent SDK's ``ResultMessage.usage`` also carries
+# ``cache_creation_input_tokens`` and ``cache_read_input_tokens`` —
+# prompt-cache counters billed at 25% and 10% of the regular input
+# rate. They're absent only on the first turn of a fresh agent loop;
+# every subsequent turn of a multi-turn agent run (Planner / Reviewer /
+# Worker / Fixer all spend most of their turns mid-loop) populates
+# them. Pre-#244 we silently dropped both, so per-token columns in
+# the JSONL undercounted whenever prompt caching kicked in. The SDK's
+# ``total_cost_usd`` was still correct (Anthropic computes it
+# server-side), but the per-token columns drifted from the cost.
+#
+# These tests pin two paths:
+#
+#   1. SDK reports both cache fields → UsageInfo forwards them verbatim.
+#   2. SDK omits both cache fields (older API version, first turn of a
+#      fresh loop, etc.) → UsageInfo defaults them to 0.
+
+
+@pytest.mark.asyncio
+async def test_run_agent_forwards_cache_tokens_from_populated_result_message(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Happy path: the SDK reports both cache_creation_input_tokens and
+    cache_read_input_tokens. The provider extracts both into UsageInfo
+    so the JSONL row carries the full prompt-cache breakdown."""
+    _patch_query(
+        monkeypatch,
+        [
+            _make_result(
+                subtype="success",
+                structured_output={"name": "ok", "count": 1},
+                duration_ms=1_000,
+                duration_api_ms=900,
+                num_turns=3,
+                total_cost_usd=0.012,
+                usage={
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_creation_input_tokens": 4_096,
+                    "cache_read_input_tokens": 2_048,
+                },
+            )
+        ],
+    )
+
+    provider = AnthropicSDKProvider()
+    _result, usage = await provider.run_agent(
+        system_prompt="sys",
+        user_prompt="usr",
+        allowed_tools=["Read"],
+        output_model=_DemoOutput,
+        cwd=tmp_path,
+    )
+
+    assert isinstance(usage, UsageInfo)
+    # Both regular fields still extracted.
+    assert usage.input_tokens == 100
+    assert usage.output_tokens == 50
+    # Prompt-cache fields populated from the SDK.
+    assert usage.cache_creation_input_tokens == 4_096
+    assert usage.cache_read_input_tokens == 2_048
+
+
+@pytest.mark.asyncio
+async def test_run_agent_defaults_cache_tokens_to_zero_when_sdk_omits_them(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Defensive path: the SDK's usage dict omits cache_creation_input_tokens
+    and cache_read_input_tokens entirely (older API version, first turn
+    of a fresh agent loop, partial transport failure). UsageInfo must
+    default both to 0 — no crash, no fabricated values, no swallowed
+    exception."""
+    _patch_query(
+        monkeypatch,
+        [
+            _make_result(
+                subtype="success",
+                structured_output={"name": "ok", "count": 1},
+                duration_ms=500,
+                duration_api_ms=400,
+                num_turns=1,
+                total_cost_usd=0.001,
+                usage={"input_tokens": 100, "output_tokens": 50},
+            )
+        ],
+    )
+
+    provider = AnthropicSDKProvider()
+    _result, usage = await provider.run_agent(
+        system_prompt="sys",
+        user_prompt="usr",
+        allowed_tools=["Read"],
+        output_model=_DemoOutput,
+        cwd=tmp_path,
+    )
+
+    assert isinstance(usage, UsageInfo)
+    # Regular fields unaffected.
+    assert usage.input_tokens == 100
+    assert usage.output_tokens == 50
+    # Cache fields default cleanly to 0.
+    assert usage.cache_creation_input_tokens == 0
+    assert usage.cache_read_input_tokens == 0

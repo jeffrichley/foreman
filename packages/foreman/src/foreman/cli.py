@@ -45,6 +45,42 @@ def _default_worktrees_root() -> Path:
     )
 
 
+def _build_dispatch_recorder(cfg: Any) -> tuple[Any, int | None]:
+    """Construct the role-side DispatchRecorder + read the trace_id env var.
+
+    foreman#251 (Phase 1): when the daemon dispatched this role
+    subprocess it set ``FOREMAN_DISPATCH_TRACE_ID``. The role builds an
+    in-process :class:`DispatchRecorder` pointed at the same
+    ``execution_log`` DB the daemon uses (so the cost row lands where
+    the parent's :class:`CostSubscriber` will look it up) and the
+    same stats root (so the JSONL dual-write lands next to the
+    existing ``log_<role>_run`` rows).
+
+    Returns ``(None, None)`` when the trace_id env var is missing —
+    manual ``foreman plan`` invocations skip Recorder dual-write and
+    rely on the existing ``log_<role>_run`` calls only.
+
+    Local imports keep the existing fast-path CLI commands (`foreman
+    init`, `foreman ps`, etc.) from paying a Recorder import on
+    startup.
+    """
+    from foreman.dispatch_recorder import DispatchRecorder, trace_id_from_env
+    from foreman.reconciler.exec_log import ExecutionLog
+    from foreman.stats import _default_stats_root
+
+    trace_id = trace_id_from_env()
+    if trace_id is None:
+        return None, None
+
+    db_path = Path(os.path.expanduser(cfg.reconciler.db_path))
+    log = ExecutionLog(db_path)
+    # Don't call ``log.init()`` here — the daemon already initialized
+    # the schema. Calling init() from a role subprocess would race the
+    # daemon's writes and could double-apply migrations.
+    recorder = DispatchRecorder(log=log, stats_root=_default_stats_root())
+    return recorder, trace_id
+
+
 @click.group()
 def cli() -> None:
     """foreman — multi-identity GitHub-issue-to-PR orchestrator."""
@@ -65,6 +101,15 @@ def plan(issue_url: str, project: str, config_path: Path | None) -> None:
     cfg_path = config_path or _default_config_path()
     cfg = load_config(cfg_path)
     provider = AnthropicSDKProvider()
+    # foreman#251 (Phase 1): when the daemon dispatched this run it
+    # set FOREMAN_DISPATCH_TRACE_ID in the subprocess env. The role
+    # builds an in-process DispatchRecorder and forwards both into
+    # ``run_planner`` so the success / failure paths can emit
+    # cost-tagged completion events. Manual ``foreman plan`` invocations
+    # don't have the env var — the helper returns ``(None, None)`` and
+    # ``run_planner`` falls back to the existing log_planner_run-only
+    # path. Back-compat without a new code path.
+    recorder, trace_id = _build_dispatch_recorder(cfg)
     result = asyncio.run(
         run_planner(
             issue_url=issue_url,
@@ -72,6 +117,8 @@ def plan(issue_url: str, project: str, config_path: Path | None) -> None:
             project_name=project,
             worktrees_root=_default_worktrees_root(),
             provider=provider,
+            dispatch_recorder=recorder,
+            dispatch_trace_id=trace_id,
         )
     )
     pr = result.pr
@@ -129,6 +176,7 @@ def review(
     # decide spec vs impl). Forwarding the flag would require a role-side
     # signature change — out of scope for the Stage-2 action split.
     _ = target
+    recorder, trace_id = _build_dispatch_recorder(cfg)
     result = asyncio.run(
         run_reviewer(
             pr_url=pr_url,
@@ -136,6 +184,8 @@ def review(
             project_name=project,
             worktrees_root=_default_worktrees_root(),
             provider=provider,
+            dispatch_recorder=recorder,
+            dispatch_trace_id=trace_id,
         )
     )
     llm = result.llm_output
@@ -210,6 +260,7 @@ def fix(
     # Stage-2 action split). Keep the read so linters don't flag it as
     # an unused arg.
     _ = pr_url
+    recorder, trace_id = _build_dispatch_recorder(cfg)
     result = asyncio.run(
         run_fixer(
             issue_url=issue_url,
@@ -218,6 +269,8 @@ def fix(
             worktrees_root=_default_worktrees_root(),
             provider=provider,
             target=target,
+            dispatch_recorder=recorder,
+            dispatch_trace_id=trace_id,
         )
     )
     llm = result.llm_output
@@ -252,6 +305,7 @@ def implement(issue_url: str, project: str, config_path: Path | None) -> None:
     cfg_path = config_path or _default_config_path()
     cfg = load_config(cfg_path)
     provider = AnthropicSDKProvider()
+    recorder, trace_id = _build_dispatch_recorder(cfg)
     result = asyncio.run(
         run_worker(
             issue_url=issue_url,
@@ -259,6 +313,8 @@ def implement(issue_url: str, project: str, config_path: Path | None) -> None:
             project_name=project,
             worktrees_root=_default_worktrees_root(),
             provider=provider,
+            dispatch_recorder=recorder,
+            dispatch_trace_id=trace_id,
         )
     )
     llm = result.llm_output
@@ -768,6 +824,22 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
         raise click.ClickException(str(exc)) from exc
 
 
+def _build_daemon_dispatch_recorder(log: Any) -> Any:
+    """Construct the daemon-side DispatchRecorder.
+
+    foreman#251 (Phase 1): the parent reconciler holds its own Recorder
+    instance distinct from the per-subprocess Recorders. Both write to
+    the same ``execution_log`` DB; the parent's CostSubscriber uses a
+    DB lookup to detect when a role subprocess already wrote its
+    completion row (cross-process dedup), and the in-process ``_seen``
+    set catches re-emits within the parent itself.
+    """
+    from foreman.dispatch_recorder import DispatchRecorder
+    from foreman.stats import _default_stats_root
+
+    return DispatchRecorder(log=log, stats_root=_default_stats_root())
+
+
 def _build_v3_gh_and_host(config: Config, log: Any) -> tuple[Any, Any]:
     """Construct the real GHGraphQLClient + ReconcilerHost for v3 runtime.
 
@@ -829,6 +901,12 @@ def _build_v3_gh_and_host(config: Config, log: Any) -> tuple[Any, Any]:
         # the container at /foreman/logs) with ~/.foreman/logs fallback.
         log_dir=resolve_log_dir(),
         gh_queue_client=gh_queue,
+        # foreman#251 (Phase 1): wire the daemon-side DispatchRecorder
+        # so ``_track_subprocess_completion`` can fire
+        # ``record_subprocess_terminated`` after each subprocess exit
+        # and write a ``subprocess_killed`` cost row when the role
+        # didn't get to emit its own ``dispatch_complete``.
+        dispatch_recorder=_build_daemon_dispatch_recorder(log),
     )
     return gh, host
 
