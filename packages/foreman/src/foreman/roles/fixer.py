@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Literal, cast
 
 from github import Github
+from github.Issue import Issue
 from github.PullRequest import PullRequest
 from github.Repository import Repository
 from pydantic import ValidationError
@@ -115,6 +116,21 @@ _FIXER_ENTRY_LABEL_BY_TARGET: dict[str, str] = {
     "spec_pr": _LABEL_SPEC_FIX,
     "impl_pr": _LABEL_IMPL_FIX,
 }
+
+
+class _FixerPreflightRefusal(RuntimeError):
+    """Fixer refused to proceed because either (a) the issue lacks the
+    expected entry label (``foreman:spec-fix`` or ``foreman:impl-fix``),
+    or (b) the fix-attempt counter has hit ``max_fix_attempts``.
+
+    Subclass of :class:`RuntimeError` so existing callers'
+    ``except RuntimeError`` clauses and ``pytest.raises`` patterns work
+    unchanged. The distinguishing purpose is to tell the runaway-burn
+    defense (#229 helper invocation) to SKIP firing: both refusals are
+    deliberate (operator removed the label, or the attempt budget IS
+    the human-intervention escalation surface) — not a runaway signal.
+    Firing the helper would override operator intent.
+    """
 
 _FIXER_SUPERPOWERS_BY_TARGET: dict[str, list[str]] = {
     # Spec-side: today's discipline — receiving review feedback.
@@ -432,28 +448,57 @@ async def run_fixer(
             attempts (``project.max_fix_attempts``) already reached, or
             no open spec PR / no Reviewer review found.
     """
-    owner, repo_name, issue_number = parse_issue_url(issue_url)
-    project = config.projects[project_name]
-    expected_repo_slug = project.repo
-    actual_repo_slug = f"{owner}/{repo_name}"
-    if expected_repo_slug != actual_repo_slug:
-        raise ValueError(
-            f"Issue URL repo {actual_repo_slug!r} does not match project "
-            f"{project_name!r} configured repo {expected_repo_slug!r}"
+    # Post-adversarial-review (#1): wrap the initial setup — URL parse,
+    # project lookup, identity setup, ``repo.get_issue`` — in a
+    # defensive try block so a transient failure fires the runaway-burn
+    # helper on the FIRST failure instead of letting #228's rate-limit
+    # catch it at N=3. Refusals raise the marker subclass and are
+    # raised AFTER this block, so they don't enter it.
+    _setup_issue_number: int | None = None
+    _setup_repo_slug: str | None = None
+    _setup_issue: Issue | None = None
+    try:
+        owner, repo_name, issue_number = parse_issue_url(issue_url)
+        _setup_issue_number = issue_number
+        project = config.projects[project_name]
+        expected_repo_slug = project.repo
+        actual_repo_slug = f"{owner}/{repo_name}"
+        _setup_repo_slug = actual_repo_slug
+        if expected_repo_slug != actual_repo_slug:
+            raise ValueError(
+                f"Issue URL repo {actual_repo_slug!r} does not match project "
+                f"{project_name!r} configured repo {expected_repo_slug!r}"
+            )
+
+        registry = (
+            identity_registry if identity_registry is not None else IdentityRegistry(project)
         )
+        fixer_client: Github = registry.get_fixer_client()
+        fixer_token: str = registry.get_fixer_token()
 
-    registry = identity_registry if identity_registry is not None else IdentityRegistry(project)
-    fixer_client: Github = registry.get_fixer_client()
-    fixer_token: str = registry.get_fixer_token()
-
-    repo: Repository = fixer_client.get_repo(actual_repo_slug)
-    issue = repo.get_issue(issue_number)
-    issue_labels = {label.name for label in issue.labels}
+        repo: Repository = fixer_client.get_repo(actual_repo_slug)
+        issue = repo.get_issue(issue_number)
+        _setup_issue = issue
+        issue_labels = {label.name for label in issue.labels}
+    except Exception as exc:
+        if _setup_issue is not None and _setup_issue_number is not None:
+            bound_issue = _setup_issue
+            handle_unhandled_role_exception(
+                role="fixer",
+                issue_number=_setup_issue_number,
+                exc=exc,
+                post_comment=lambda body: bound_issue.create_comment(body),
+                set_needs_help_label=lambda: bound_issue.add_to_labels(
+                    TERMINAL_BLOCKING_LABEL
+                ),
+            )
+        raise
 
     # Pre-flight: refuse to run without the entry-condition label.
     expected_label = _FIXER_ENTRY_LABEL_BY_TARGET[target]
     if expected_label not in issue_labels:
-        raise RuntimeError(
+        # Graceful refusal — see _FixerPreflightRefusal docstring.
+        raise _FixerPreflightRefusal(
             f"Issue #{issue_number} does not carry the {expected_label!r} "
             f"label (labels: "
             + ", ".join(sorted(issue_labels) or ["<none>"])
@@ -470,7 +515,9 @@ async def run_fixer(
     previous_attempts = _count_fix_attempts(issue_labels)
     attempt = previous_attempts + 1
     if attempt > max_fix_attempts:
-        raise RuntimeError(
+        # Graceful refusal — the max-attempts gate IS the escalation
+        # surface, not a runaway-burn signal.
+        raise _FixerPreflightRefusal(
             f"Issue #{issue_number} has hit the max {max_fix_attempts} "
             "fix-attempts; needs human intervention via foreman:failed. "
             f"Existing attempts: {previous_attempts}."

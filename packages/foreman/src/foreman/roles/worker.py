@@ -76,6 +76,7 @@ from pathlib import Path
 
 from github import Github
 from github.GithubException import GithubException
+from github.Issue import Issue
 from github.PullRequest import PullRequest
 from github.Repository import Repository
 
@@ -113,6 +114,22 @@ WORKER_ALLOWED_TOOLS = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]
 # in v3 — execution-log + impl-attempt-N labels carry that state.
 _LABEL_PLAN_APPROVED = "foreman:plan-approved"
 _WORKER_ENTRY_LABELS = frozenset({_LABEL_PLAN_APPROVED})
+
+
+class _WorkerPreflightRefusal(RuntimeError):
+    """Worker refused to proceed because either (a) the issue lacks the
+    expected entry label (``foreman:plan-approved``), or (b) the
+    impl-attempt counter has hit ``max_impl_attempts``.
+
+    Subclass of :class:`RuntimeError` so existing callers'
+    ``except RuntimeError`` clauses and ``pytest.raises(RuntimeError,
+    match=...)`` patterns work unchanged. The distinguishing purpose is
+    to tell the runaway-burn defense (#229 helper invocation) to SKIP
+    firing: both refusals are deliberate (operator removed the label,
+    or the attempt budget was the human-intervention escalation
+    surface) — NOT a runaway signal. Firing the helper would override
+    operator intent by re-adding ``foreman:needs-help``.
+    """
 _LABEL_IMPL_REVIEW = "foreman:impl-review"
 _LABEL_SPEC_FIX = "foreman:spec-fix"
 _LABEL_NEEDS_HELP = "foreman:needs-help"
@@ -619,35 +636,75 @@ async def run_worker(
         RuntimeError: Issue missing ``foreman:plan-approved``, or max
             attempts (3) already reached.
     """
-    owner, repo_name, issue_number = parse_issue_url(issue_url)
-    project = config.projects[project_name]
-    expected_repo_slug = project.repo
-    actual_repo_slug = f"{owner}/{repo_name}"
-    if expected_repo_slug != actual_repo_slug:
-        raise ValueError(
-            f"Issue URL repo {actual_repo_slug!r} does not match project "
-            f"{project_name!r} configured repo {expected_repo_slug!r}"
+    # Post-adversarial-review (#1): wrap the initial setup — URL parse,
+    # project lookup, identity registry, host acquisition, ``repo.get_issue``
+    # — in a defensive try block so a transient failure (auth-token
+    # rotation, GitHub 5xx, malformed URL via daemon misconfig) fires
+    # the runaway-burn helper on the FIRST failure instead of letting
+    # #228's rate-limit catch it at N=3. The body's own ``try:`` /
+    # ``except`` / ``finally`` further down covers the in-flight phase
+    # plus the label-revert invariant; this wrap covers everything
+    # before that. Refusals (missing entry label, max-attempts) raise
+    # ``_WorkerPreflightRefusal`` and are not caught here.
+    _setup_issue_number: int | None = None
+    _setup_repo_slug: str | None = None
+    _setup_issue: Issue | None = None
+    try:
+        owner, repo_name, issue_number = parse_issue_url(issue_url)
+        _setup_issue_number = issue_number
+        project = config.projects[project_name]
+        expected_repo_slug = project.repo
+        actual_repo_slug = f"{owner}/{repo_name}"
+        _setup_repo_slug = actual_repo_slug
+        if expected_repo_slug != actual_repo_slug:
+            raise ValueError(
+                f"Issue URL repo {actual_repo_slug!r} does not match project "
+                f"{project_name!r} configured repo {expected_repo_slug!r}"
+            )
+
+        registry = (
+            identity_registry if identity_registry is not None else IdentityRegistry(project)
         )
+        worker_client: Github = registry.get_worker_client()
+        worker_token: str = registry.get_worker_token()
+        # foreman#222: acquire the authenticated GitHostProvider so we can
+        # push from Python via the tokenized-URL path that Planner already
+        # uses. The container has no git credential helper, so shell-out
+        # ``git push`` + Claude's Bash both fail auth.
+        host: GitHostProvider = registry.get_host_provider("worker")
 
-    registry = identity_registry if identity_registry is not None else IdentityRegistry(project)
-    worker_client: Github = registry.get_worker_client()
-    worker_token: str = registry.get_worker_token()
-    # foreman#222: acquire the authenticated GitHostProvider so we can
-    # push from Python via the tokenized-URL path that Planner already
-    # uses. The container has no git credential helper, so shell-out
-    # ``git push`` + Claude's Bash both fail auth.
-    host: GitHostProvider = registry.get_host_provider("worker")
-
-    repo: Repository = worker_client.get_repo(actual_repo_slug)
-    issue = repo.get_issue(issue_number)
-    issue_labels = {label.name for label in issue.labels}
+        repo: Repository = worker_client.get_repo(actual_repo_slug)
+        issue = repo.get_issue(issue_number)
+        _setup_issue = issue
+        issue_labels = {label.name for label in issue.labels}
+    except Exception as exc:
+        # Skip the helper for known graceful refusals or scope errors
+        # caught in transit (none here today, but the guard keeps the
+        # contract stable if a refusal kind gets relocated above this
+        # block in the future).
+        if _setup_issue is not None and _setup_issue_number is not None:
+            bound_issue = _setup_issue
+            handle_unhandled_role_exception(
+                role="worker",
+                issue_number=_setup_issue_number,
+                exc=exc,
+                post_comment=lambda body: bound_issue.create_comment(body),
+                set_needs_help_label=lambda: bound_issue.add_to_labels(
+                    TERMINAL_BLOCKING_LABEL
+                ),
+            )
+        raise
 
     # Pre-flight: refuse to run without the v3 Worker entry label.
     # ``foreman:plan-approved`` is the post-Reviewer-signoff queue marker;
     # the v3 reconciler dispatches the Worker once this label is on the
     # issue and the spec PR is merged (or stacked).
     if not (issue_labels & _WORKER_ENTRY_LABELS):
-        raise RuntimeError(
+        # Graceful refusal — operator removed the entry label or it was
+        # never set. Use the marker subclass so the body's except branch
+        # (when wrapped via the helper-invocation guard) skips the
+        # runaway-burn helper and respects the operator's intent.
+        raise _WorkerPreflightRefusal(
             f"Issue #{issue_number} does not carry the Worker entry label "
             f"({_LABEL_PLAN_APPROVED!r}); "
             f"labels: "
@@ -665,7 +722,11 @@ async def run_worker(
     previous_attempts = _count_impl_attempts(issue_labels)
     attempt = previous_attempts + 1
     if attempt > max_impl_attempts:
-        raise RuntimeError(
+        # Graceful refusal — the max-attempts gate IS the escalation
+        # surface to human intervention. Don't fire the runaway-burn
+        # helper; the operator's audit trail (attempt-N labels) is
+        # already the diagnostic.
+        raise _WorkerPreflightRefusal(
             f"Issue #{issue_number} has hit the max {max_impl_attempts} "
             "impl-attempts; needs human intervention via foreman:failed. "
             f"Existing attempts: {previous_attempts}."
