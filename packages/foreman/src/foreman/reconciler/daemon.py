@@ -133,6 +133,8 @@ class Reconciler:
         shutdown_sentinel_path: Path | str | None = None,
         reload_callback: Callable[[], tuple[ReconcilerProject, ...]] | None = None,
         reload_sentinel_path: Path | str | None = None,
+        rate_limit_max_consecutive_failures: int = 3,
+        rate_limit_window_seconds: int = 1800,
     ) -> None:
         self.projects = projects
         self.log = log
@@ -141,6 +143,11 @@ class Reconciler:
         self.dry_run = dry_run
         self.alert_after_n_failures = alert_after_n_failures
         self.poll_interval_seconds = poll_interval_seconds
+        # foreman#228: rate-limit knobs threaded into every
+        # ActionContext built per-tick — the rules + executor read from
+        # the context (single source of truth at the per-tick boundary).
+        self.rate_limit_max_consecutive_failures = rate_limit_max_consecutive_failures
+        self.rate_limit_window_seconds = rate_limit_window_seconds
         self._stop_event = asyncio.Event()
         self._consecutive_failures: dict[str, int] = {p.name: 0 for p in projects}
         # Sentinel-file-based graceful-shutdown signal. ``foreman daemon stop``
@@ -395,6 +402,10 @@ class Reconciler:
                 auto_merge_spec=project.auto_merge_spec,
                 auto_merge_impl=project.auto_merge_impl,
                 merge_mechanism=project.merge_mechanism,
+                rate_limit_max_consecutive_failures=(
+                    self.rate_limit_max_consecutive_failures
+                ),
+                rate_limit_window_seconds=self.rate_limit_window_seconds,
             )
             action, rule_name = evaluate_with_rule(ctx)
             if action is Action.NOOP:

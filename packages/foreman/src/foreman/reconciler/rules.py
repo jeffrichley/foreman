@@ -14,7 +14,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from foreman.reconciler.actions import Action, ActionContext
+from foreman.reconciler.actions import _RATE_LIMIT_RULE_PREFIX, Action, ActionContext
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +132,61 @@ def _reviewer_impl_attempts_exhausted(ctx: ActionContext) -> bool:
     )
 
 
+# foreman#228: per-ticket-per-role consecutive-failure rate-limit.
+#
+# Each entry: (dispatch_action_key, in_flight_label). The rate-limit
+# safety rule fires when count_recent_failures(dispatch_action_key,
+# ticket_id, within_seconds=W) >= N AND the ticket carries the
+# in_flight_label AND the ticket does NOT already carry
+# ``foreman:needs-help`` (which would be preempted by the higher-
+# precedence ``needs_help_label`` rule anyway, but the explicit gate
+# keeps the predicate self-contained).
+#
+# Order matches the spec's transition flow for readability; precedence
+# values in :data:`_RATE_LIMIT_RULES` are assigned in this order. The
+# rule name is the ``_RATE_LIMIT_RULE_PREFIX``-prefixed key from
+# :mod:`foreman.reconciler.actions` so the executor can recover the
+# dispatch_action from rule_name (single source of truth).
+_RATE_LIMIT_TARGETS: tuple[tuple[str, str], ...] = (
+    ("dispatch_planner", "foreman:planning"),
+    ("dispatch_worker", "foreman:plan-approved"),
+    ("dispatch_reviewer_spec", "foreman:planning"),
+    ("dispatch_reviewer_impl", "foreman:impl-review"),
+    ("dispatch_fixer_spec", "foreman:spec-fix"),
+    ("dispatch_fixer_impl", "foreman:impl-fix"),
+)
+
+
+def _make_rate_limit_predicate(
+    *, dispatch_action: str, in_flight_label: str
+) -> Callable[[ActionContext], bool]:
+    """Build the predicate for one role's rate-limit rule.
+
+    Closures over ``dispatch_action`` + ``in_flight_label`` so the six
+    rate-limit rules share one implementation. Each predicate consults
+    ``ctx.log.count_recent_failures`` against the role-specific
+    dispatch_action key, so per-role isolation falls out structurally
+    (Planner failures don't count against Worker and vice-versa).
+    """
+    def _pred(ctx: ActionContext) -> bool:
+        # needs-help preempt — let the existing higher-precedence
+        # ``needs_help_label`` rule handle it. The rate-limit's own
+        # transition adds needs-help; on the very next tick the issue
+        # carries needs-help and this rule must not re-fire.
+        if "foreman:needs-help" in ctx.issue.labels:
+            return False
+        if in_flight_label not in ctx.issue.labels:
+            return False
+        count = ctx.log.count_recent_failures(
+            action=dispatch_action,
+            ticket_id=ctx.ticket_id,
+            within_seconds=ctx.rate_limit_window_seconds,
+        )
+        return count >= ctx.rate_limit_max_consecutive_failures
+
+    return _pred
+
+
 def _safety_with_rate_limit(predicate):
     """Wrap a safety predicate so it stops re-firing if surface_help has been
     emitted for this ticket in the last hour.
@@ -217,6 +272,40 @@ _SAFETY_RULES: tuple[Rule, ...] = (
         then=Action.SURFACE_HELP,
     ),
 )
+
+
+# foreman#228: rate-limit rules — one per dispatch-action key. Each rule
+# fires RATE_LIMIT_TRIP when N same-role failures land on the same
+# ticket within W seconds. The executor decodes the dispatch action
+# from the rule_name (using ``_RATE_LIMIT_RULE_PREFIX``) and writes
+# the correct reset sentinel + removes the correct in-flight label.
+#
+# Precedence note: the rate-limit rules sit BEFORE the
+# attempts-exhausted block (50-70) so a 3-failure-in-window trip
+# preempts the simpler total-attempts SURFACE_HELP — RATE_LIMIT_TRIP's
+# comment is more informative (lists the recent failure outcomes) and
+# the reset-sentinel side effect is load-bearing. Precedences 42-47
+# (six rules) sit safely between ``spec_pr_ci_failure`` (40) and
+# ``fix_attempts_exhausted`` (50).
+def _build_rate_limit_rules() -> tuple[Rule, ...]:
+    rules: list[Rule] = []
+    for offset, (dispatch_action, in_flight_label) in enumerate(_RATE_LIMIT_TARGETS):
+        rules.append(
+            Rule(
+                name=f"{_RATE_LIMIT_RULE_PREFIX}{dispatch_action}",
+                tier=PrecedenceTier.SAFETY,
+                precedence=42 + offset,
+                when=_make_rate_limit_predicate(
+                    dispatch_action=dispatch_action,
+                    in_flight_label=in_flight_label,
+                ),
+                then=Action.RATE_LIMIT_TRIP,
+            )
+        )
+    return tuple(rules)
+
+
+_RATE_LIMIT_RULES: tuple[Rule, ...] = _build_rate_limit_rules()
 
 
 def _planning_no_pr(ctx: ActionContext) -> bool:
@@ -607,7 +696,16 @@ _PROGRESS_RULES: tuple[Rule, ...] = (
 )
 
 
-RULES = _SAFETY_RULES + _PROGRESS_RULES
+# foreman#228: concatenate then sort so the rate-limit rules
+# (precedences 42-47) slot between ``spec_pr_ci_failure`` (40) and
+# ``fix_attempts_exhausted`` (50) and the existing
+# ``test_rules_are_sorted_by_precedence`` invariant stays satisfied.
+RULES = tuple(
+    sorted(
+        _SAFETY_RULES + _RATE_LIMIT_RULES + _PROGRESS_RULES,
+        key=lambda r: r.precedence,
+    )
+)
 
 
 def evaluate_with_rule(

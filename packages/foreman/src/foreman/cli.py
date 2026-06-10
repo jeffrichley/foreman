@@ -759,6 +759,15 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
                 shutdown_sentinel_path=config.reconciler.shutdown_sentinel_path,
                 reload_callback=_reload_callback,
                 reload_sentinel_path=config.reconciler.reload_sentinel_path,
+                # foreman#228: per-ticket-per-role consecutive-failure
+                # rate-limit knobs. Defaults N=3, W=30min per Pepper's
+                # criterion-check.
+                rate_limit_max_consecutive_failures=(
+                    config.reconciler.rate_limit_max_consecutive_failures
+                ),
+                rate_limit_window_seconds=(
+                    config.reconciler.rate_limit_window_seconds
+                ),
             )
 
             async def _shutdown_watcher(

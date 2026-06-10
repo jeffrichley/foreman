@@ -21,6 +21,27 @@ from typing import Any
 _OUTCOME_RUNNING = "running"
 _OUTCOME_ERRORED_RECOVERY = "errored:recovery"
 
+# foreman#228: outcomes that do NOT count as same-role failures for the
+# consecutive-failure rate-limit predicate. ``success`` clears the counter
+# (the contract says "Same-role success only resets the counter"). The
+# administrative outcomes — ``dry_run``, ``skipped_capacity`` —
+# represent no real dispatch attempt and never burn budget. ``running``
+# is the start-row marker, not a termination; it is filtered out by the
+# ``parent_log_id IS NOT NULL`` clause in the counter query.
+_NON_FAILURE_OUTCOMES: tuple[str, ...] = (
+    "success",
+    "dry_run",
+    "skipped_capacity",
+)
+
+# foreman#228: the synthetic ``action`` value the rate-limit reset
+# sentinel uses. Stored as ``rate_limit_reset:<dispatch_action>`` so the
+# (action, ticket_id) shape mirrors every other query in this module and
+# the per-action scope falls out naturally. ``outcome='reset'`` keeps
+# the row out of every existing terminator-counting query.
+_RATE_LIMIT_RESET_ACTION_PREFIX = "rate_limit_reset:"
+_RATE_LIMIT_RESET_OUTCOME = "reset"
+
 # foreman#251 (Phase 1 of dispatch-recorder design): the execution_log
 # becomes the canonical cost ledger. ``CURRENT_SCHEMA_VERSION`` bumps
 # whenever the table layout changes; ``init()`` reads the live
@@ -371,6 +392,194 @@ class ExecutionLog:
                     (action, ticket_id, outcome),
                 ).fetchone()
             return int(row[0]) if row else 0
+
+    def count_recent_failures(
+        self,
+        *,
+        action: str,
+        ticket_id: str,
+        within_seconds: int,
+    ) -> int:
+        """Count consecutive failure terminations for the per-ticket-per-role
+        rate-limit (foreman#228).
+
+        A "failure" is a terminator row (``parent_log_id IS NOT NULL``)
+        for the named ``action``/``ticket_id`` whose ``outcome`` is NOT
+        in :data:`_NON_FAILURE_OUTCOMES` (success / dry_run /
+        skipped_capacity). The count is filtered to the last
+        ``within_seconds`` AND to rows whose ``ts`` is greater than the
+        most recent reset signal — where a "reset signal" is EITHER:
+
+        * a same-(action, ticket_id) ``outcome='success'`` termination
+          (per the contract: "Same-role success only resets the
+          counter"), OR
+        * a ``rate_limit_reset:<action>`` sentinel row written by
+          :meth:`write_rate_limit_reset` (per the contract's
+          reset-on-needs-help-removal path — the trip writes one to
+          ensure the human's re-queue gives a fresh window
+          deterministic regardless of timing).
+
+        The query uses string comparison against SQLite's
+        ``CURRENT_TIMESTAMP`` format (``YYYY-MM-DD HH:MM:SS``) so it
+        matches the existing ``has_recent`` convention.
+        """
+        cutoff = datetime.now(UTC) - timedelta(seconds=within_seconds)
+        cutoff_sql = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+        reset_action = f"{_RATE_LIMIT_RESET_ACTION_PREFIX}{action}"
+        with self._connect() as conn:
+            # Compute the reset fence: latest of {last same-role success
+            # termination, last rate_limit_reset sentinel}.
+            success_row = conn.execute(
+                """
+                SELECT MAX(ts) FROM execution_log
+                WHERE action = ?
+                  AND ticket_id = ?
+                  AND parent_log_id IS NOT NULL
+                  AND outcome = 'success'
+                """,
+                (action, ticket_id),
+            ).fetchone()
+            reset_row = conn.execute(
+                """
+                SELECT MAX(ts) FROM execution_log
+                WHERE action = ?
+                  AND ticket_id = ?
+                  AND outcome = ?
+                """,
+                (reset_action, ticket_id, _RATE_LIMIT_RESET_OUTCOME),
+            ).fetchone()
+            last_success_ts: str | None = success_row[0] if success_row else None
+            last_reset_ts: str | None = reset_row[0] if reset_row else None
+            # The fence is the later of the two timestamps (string
+            # comparison works on the ISO-shaped values SQLite stores).
+            fence_ts: str | None
+            if last_success_ts is None and last_reset_ts is None:
+                fence_ts = None
+            elif last_success_ts is None:
+                fence_ts = last_reset_ts
+            elif last_reset_ts is None:
+                fence_ts = last_success_ts
+            else:
+                fence_ts = max(last_success_ts, last_reset_ts)
+            placeholders = ",".join("?" for _ in _NON_FAILURE_OUTCOMES)
+            params: list[Any] = [action, ticket_id, *_NON_FAILURE_OUTCOMES, cutoff_sql]
+            sql = f"""
+                SELECT COUNT(*) FROM execution_log
+                WHERE action = ?
+                  AND ticket_id = ?
+                  AND parent_log_id IS NOT NULL
+                  AND outcome NOT IN ({placeholders})
+                  AND ts > ?
+            """
+            if fence_ts is not None:
+                sql += " AND ts > ?"
+                params.append(fence_ts)
+            row = conn.execute(sql, params).fetchone()
+            return int(row[0]) if row else 0
+
+    def write_rate_limit_reset(
+        self,
+        *,
+        action: str,
+        ticket_id: str,
+        details: dict[str, Any] | None = None,
+    ) -> int:
+        """Write a rate-limit reset sentinel for (``action``, ``ticket_id``).
+
+        Used by the foreman#228 rate-limit trip handler to clear the
+        counter so the human's subsequent re-queue (remove
+        ``foreman:needs-help`` + re-add the entry-point label) gives the
+        role a fresh window — even if the W window hasn't expired.
+
+        The row carries:
+
+        * ``action = "rate_limit_reset:<action>"`` so the synthetic
+          marker lives in its own action namespace (existing queries
+          that filter on ``action = "dispatch_*"`` are unaffected).
+        * ``outcome = "reset"`` so the row is never counted by
+          ``count_completed`` (which filters on terminations with
+          ``parent_log_id IS NOT NULL``).
+        * No ``parent_log_id`` (the reset is not a termination of any
+          prior row).
+        """
+        return self.write_action(
+            ticket_id=ticket_id,
+            project="foreman",
+            rule_name=None,
+            action=f"{_RATE_LIMIT_RESET_ACTION_PREFIX}{action}",
+            outcome=_RATE_LIMIT_RESET_OUTCOME,
+            details=details or {},
+        )
+
+    def recent_failure_details(
+        self,
+        *,
+        action: str,
+        ticket_id: str,
+        within_seconds: int,
+        limit: int = 3,
+    ) -> list[dict[str, Any]]:
+        """Return up to ``limit`` recent failure rows' ``details`` for the
+        rate-limit trip comment, newest first.
+
+        Same window + fence semantics as :meth:`count_recent_failures`
+        so the comment surfaces exactly the failures that caused the
+        trip.
+        """
+        cutoff = datetime.now(UTC) - timedelta(seconds=within_seconds)
+        cutoff_sql = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+        reset_action = f"{_RATE_LIMIT_RESET_ACTION_PREFIX}{action}"
+        with self._connect() as conn:
+            success_row = conn.execute(
+                """
+                SELECT MAX(ts) FROM execution_log
+                WHERE action = ? AND ticket_id = ?
+                  AND parent_log_id IS NOT NULL AND outcome = 'success'
+                """,
+                (action, ticket_id),
+            ).fetchone()
+            reset_row = conn.execute(
+                """
+                SELECT MAX(ts) FROM execution_log
+                WHERE action = ? AND ticket_id = ? AND outcome = ?
+                """,
+                (reset_action, ticket_id, _RATE_LIMIT_RESET_OUTCOME),
+            ).fetchone()
+            last_success_ts: str | None = success_row[0] if success_row else None
+            last_reset_ts: str | None = reset_row[0] if reset_row else None
+            fence_ts: str | None
+            if last_success_ts is None and last_reset_ts is None:
+                fence_ts = None
+            elif last_success_ts is None:
+                fence_ts = last_reset_ts
+            elif last_reset_ts is None:
+                fence_ts = last_success_ts
+            else:
+                fence_ts = max(last_success_ts, last_reset_ts)
+            placeholders = ",".join("?" for _ in _NON_FAILURE_OUTCOMES)
+            params: list[Any] = [action, ticket_id, *_NON_FAILURE_OUTCOMES, cutoff_sql]
+            sql = f"""
+                SELECT ts, outcome, details FROM execution_log
+                WHERE action = ?
+                  AND ticket_id = ?
+                  AND parent_log_id IS NOT NULL
+                  AND outcome NOT IN ({placeholders})
+                  AND ts > ?
+            """
+            if fence_ts is not None:
+                sql += " AND ts > ?"
+                params.append(fence_ts)
+            sql += " ORDER BY ts DESC LIMIT ?"
+            params.append(limit)
+            rows = conn.execute(sql, params).fetchall()
+        out: list[dict[str, Any]] = []
+        for ts, outcome, details_json in rows:
+            try:
+                parsed = json.loads(details_json) if details_json else {}
+            except json.JSONDecodeError:
+                parsed = {"raw_details": details_json}
+            out.append({"ts": ts, "outcome": outcome, "details": parsed})
+        return out
 
     def recover_orphaned(self) -> int:
         """On daemon restart: any outcome='running' row with no termination

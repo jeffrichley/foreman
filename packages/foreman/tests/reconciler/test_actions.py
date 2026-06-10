@@ -38,6 +38,11 @@ def test_action_enum_covers_spec_catalog() -> None:
     expected = {
         "NOOP",
         "SURFACE_HELP",
+        # foreman#228 (runaway-burn defense): per-ticket-per-role
+        # consecutive-failure rate-limit. Separate from SURFACE_HELP so
+        # the executor can render a role-specific comment + write the
+        # reset sentinel that lets human re-queue give a fresh window.
+        "RATE_LIMIT_TRIP",
         "DISPATCH_PLANNER",
         # foreman#165 replaces MERGE_SPEC_PR / MERGE_IMPL_PR with a pair
         # of label-advance actions plus a pair of state-machine-driven
