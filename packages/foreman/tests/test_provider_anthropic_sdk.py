@@ -21,6 +21,15 @@ from typing import Any
 
 import pytest
 from claude_agent_sdk import ResultMessage
+
+# foreman#230 contract test (xfail): import the internal Transport ABC at
+# module top per PEP 8 / ruff E402. Originally placed mid-file next to its
+# only consumer (the _SuccessAsErrorTransport fake near line 760) for
+# scope locality, but ruff + code-quality review both pushed for the
+# standard convention. The underscore-prefixed alias preserves the
+# "this is an internal-API touchpoint, not a stable surface" signal
+# the original mid-file placement was trying to convey.
+from claude_agent_sdk._internal.transport import Transport as _SDKTransport
 from pydantic import BaseModel
 
 from foreman.provider import (
@@ -751,9 +760,6 @@ async def test_run_agent_defaults_cache_tokens_to_zero_when_sdk_omits_them(
 # behaviour is upstream-controlled — we don't want a passing test here
 # to fail CI on the day the upstream fix arrives; we want a visible
 # XPASS that prompts a sweep.
-
-
-from claude_agent_sdk._internal.transport import Transport as _SDKTransport
 
 
 class _SuccessAsErrorTransport(_SDKTransport):
