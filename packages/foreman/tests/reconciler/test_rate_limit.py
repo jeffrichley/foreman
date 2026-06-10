@@ -677,3 +677,216 @@ def test_executor_rate_limit_trip_comment_names_role_and_count(
     assert "foreman:needs-help" in comment
     # foreman#228 attribution lives in the comment for audit trail.
     assert "228" in comment or "rate-limit" in comment.lower()
+
+
+# ---------------------------------------------------------------------------
+# System-level integration — three-layer runaway-burn defense
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _IntegrationFakeHost:
+    """Host fake that mirrors the production reconciler's label-edit + dispatch
+    surface enough to drive multi-tick simulation.
+
+    Unlike :class:`_FakeHost` (used by the executor unit tests above, which
+    asserts dispatch_role is *never* called), this fake actually records
+    dispatch_role calls — the integration test counts them as the
+    system-level invariant ("at most N dispatches before the loop is
+    killed"). Label mutations are tracked on a per-issue basis so the test
+    harness can rebuild the next tick's ``IssueState`` after a
+    ``RATE_LIMIT_TRIP`` transitions ``foreman:planning`` →
+    ``foreman:needs-help``.
+    """
+
+    dispatches: list[dict[str, Any]] = field(default_factory=list)
+    label_edits: list[tuple[str, str]] = field(default_factory=list)
+    comments: list[str] = field(default_factory=list)
+
+    def add_label(self, *, owner: str, repo: str, issue: int, label: str) -> None:
+        self.label_edits.append(("add", label))
+
+    def remove_label(self, *, owner: str, repo: str, issue: int, label: str) -> None:
+        self.label_edits.append(("remove", label))
+
+    def post_comment(self, *, owner: str, repo: str, issue: int, body: str) -> None:
+        self.comments.append(body)
+
+    def merge_pr(self, *, owner: str, repo: str, pr_number: int, mechanism: str) -> None:
+        raise AssertionError("merge_pr should not fire in the runaway scenario")
+
+    def get_pr_mergeability(self, *, owner: str, repo: str, pr_number: int) -> PRMergeability:
+        raise AssertionError(
+            "get_pr_mergeability should not fire in the runaway scenario"
+        )
+
+    def update_branch(self, *, owner: str, repo: str, pr_number: int) -> None:
+        raise AssertionError("update_branch should not fire in the runaway scenario")
+
+    def dispatch_role(
+        self,
+        *,
+        role: str,
+        target: str | None,
+        owner: str,
+        repo: str,
+        issue: int,
+        pr_number: int | None,
+        start_log_id: int,
+        project: str,
+    ) -> int:
+        self.dispatches.append({"role": role, "issue": issue, "start_log_id": start_log_id})
+        # Return a synthetic pid so execute_action's "skipped_capacity"
+        # branch is NOT taken — we want the start row to remain in
+        # ``running`` so the next tick's failure-simulation step can
+        # terminate it with ``outcome='error'`` (mirroring the
+        # foreman#229 defensive exception handler).
+        return 1000 + start_log_id
+
+
+def test_runaway_pattern_is_killed_by_rate_limit_within_n_plus_one_dispatches(
+    tmp_path: Path,
+) -> None:
+    """System-level prevention test for the three-layer runaway-burn defense.
+
+    Replays the scenario that produced foreman#227 yesterday: 171
+    consecutive failed Planner dispatches over 2h52m before a human
+    caught it. The three commits in this PR add the structural defense:
+
+    - #230 makes the upstream-SDK contract bug visible (xfail).
+    - #229 maps SDK-bug exceptions to ``outcome=error`` rows on the
+      execution log so the reconciler can count them.
+    - #228 (this commit's layer) caps consecutive same-role failures
+      at N=3 within W=30min and transitions the ticket to
+      ``foreman:needs-help`` instead of re-dispatching.
+
+    The integration property: a runaway role-failure scenario MUST die
+    within N+1 dispatch attempts, not N+many. This test simulates the
+    full reconciler tick loop (rule evaluation → action execution →
+    host side effects → label-state update for the next tick) and
+    asserts the cap holds end-to-end.
+    """
+    issue = _issue(labels=("foreman:planning",))
+    snap = ProjectSnapshot(
+        project="foreman",
+        owner="jeffrichley",
+        repo="foreman",
+        issues=(issue,),
+        prs=(),
+        fetched_at=datetime(2026, 6, 9, tzinfo=UTC),
+    )
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+    host = _IntegrationFakeHost()
+
+    # ``actions_per_tick`` and the live ``current_issue`` mutate as we
+    # walk through ticks; ``ctx`` is rebuilt each tick so predicates
+    # read the up-to-date label set.
+    actions_per_tick: list[Action] = []
+    current_issue = issue
+
+    for _tick in range(5):
+        ctx = ActionContext(snapshot=snap, issue=current_issue, pr=None, log=log)
+        from foreman.reconciler.rules import RULES, evaluate_with_rule
+
+        action, rule_name = evaluate_with_rule(ctx, rules=RULES)
+        actions_per_tick.append(action)
+
+        if action is Action.DISPATCH_PLANNER:
+            # Simulate the runaway: each dispatch fires + immediately
+            # fails via the foreman#229 exception path. ``execute_action``
+            # writes the ``running`` start row + calls
+            # ``host.dispatch_role`` (which our fake records); we then
+            # terminate the row with ``outcome='error'`` to mirror the
+            # role-runner's defensive exception handler from #229.
+            pre_dispatch_count = len(host.dispatches)
+            execute_action(
+                action,
+                ctx,
+                host=host,
+                rule_name=rule_name or "unknown",
+                dry_run=False,
+            )
+            # Recover the start_log_id the host saw and terminate it.
+            assert len(host.dispatches) == pre_dispatch_count + 1, (
+                "DISPATCH_PLANNER should have called host.dispatch_role exactly once"
+            )
+            start_log_id = host.dispatches[-1]["start_log_id"]
+            log.terminate_action(
+                parent_log_id=start_log_id,
+                outcome="error",
+                details={"error": "simulated foreman#227 SDK runaway"},
+            )
+        elif action is Action.RATE_LIMIT_TRIP:
+            # The rate-limit executor adds ``foreman:needs-help``,
+            # removes ``foreman:planning``, writes the reset sentinel.
+            execute_action(
+                action,
+                ctx,
+                host=host,
+                rule_name=rule_name or "unknown",
+                dry_run=False,
+            )
+            # Reflect the host's label edits into the next tick's
+            # IssueState. The production reconciler picks this up on
+            # the next observer fetch; in tests we apply it directly.
+            labels = set(current_issue.labels)
+            for op, lbl in host.label_edits:
+                if op == "add":
+                    labels.add(lbl)
+                elif op == "remove":
+                    labels.discard(lbl)
+            current_issue = _issue(labels=tuple(sorted(labels)))
+            snap = ProjectSnapshot(
+                project="foreman",
+                owner="jeffrichley",
+                repo="foreman",
+                issues=(current_issue,),
+                prs=(),
+                fetched_at=datetime(2026, 6, 9, tzinfo=UTC),
+            )
+        # NOOP / SURFACE_HELP / anything else: nothing to simulate.
+        # The next tick will re-evaluate against the updated label set.
+
+    # ---- Assertions: the three-layer defense killed the loop. ----
+
+    # By cycle N (=3) we got DISPATCH_PLANNER each time.
+    assert actions_per_tick[0] is Action.DISPATCH_PLANNER
+    assert actions_per_tick[1] is Action.DISPATCH_PLANNER
+    assert actions_per_tick[2] is Action.DISPATCH_PLANNER
+
+    # Cycle N+1 (=4): rate-limit rule pre-empts the dispatch.
+    assert actions_per_tick[3] is Action.RATE_LIMIT_TRIP, (
+        f"expected RATE_LIMIT_TRIP at cycle 4, got {actions_per_tick[3]!r}; "
+        f"full sequence: {[a.name for a in actions_per_tick]}"
+    )
+
+    # Cycle N+2 (=5): no further dispatch. Either rate-limit predicate
+    # short-circuits (needs-help label present) OR the higher-precedence
+    # ``needs_help_label`` safety rule fires SURFACE_HELP. The
+    # system-level invariant is "NOT a dispatch" — any non-dispatch
+    # action is acceptable.
+    _DISPATCH_ACTIONS = {
+        Action.DISPATCH_PLANNER,
+        Action.DISPATCH_WORKER,
+        Action.DISPATCH_REVIEWER_SPEC,
+        Action.DISPATCH_REVIEWER_IMPL,
+        Action.DISPATCH_FIXER_SPEC,
+        Action.DISPATCH_FIXER_IMPL,
+    }
+    assert actions_per_tick[4] not in _DISPATCH_ACTIONS, (
+        f"cycle 5 must NOT re-dispatch; got {actions_per_tick[4]!r}"
+    )
+
+    # System-level invariant: total dispatch attempts capped at N (=3),
+    # not the 171 that foreman#227 burned. This is the property the
+    # whole three-layer defense exists to enforce.
+    assert len(host.dispatches) == 3, (
+        f"runaway must be killed at N=3 dispatches; got {len(host.dispatches)}"
+    )
+
+    # The trip transitioned the ticket to foreman:needs-help so the
+    # next observer fetch will route it to the safety tier rather than
+    # forward-progress.
+    assert "foreman:needs-help" in current_issue.labels
+    assert "foreman:planning" not in current_issue.labels
