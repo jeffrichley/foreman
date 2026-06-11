@@ -1,0 +1,403 @@
+"""End-to-end integration tests for the refactored adapter (foreman#266
+sub-request 6).
+
+Drives a fake SDK message stream through ``AnthropicSDKProvider`` using
+the same ``_patch_query`` pattern as the existing
+``test_provider_anthropic_sdk.py``. Covers the three boundary contracts:
+
+* Normal ``subtype="success"`` path → validated tuple
+* ``Exception("success")`` after a valid result → recovered via chain
+* Unknown SDK exception → translated to ``ProviderUnknownError``
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Any
+
+import pytest
+from claude_agent_sdk import ResultMessage
+from pydantic import BaseModel
+
+from foreman.provider import ProviderAuthError, UsageInfo
+from foreman.providers import anthropic_sdk as anthropic_sdk_module
+from foreman.providers.anthropic_sdk import AnthropicSDKProvider
+from foreman.providers.exceptions import ProviderUnknownError
+from foreman.providers.recovery import (
+    PartialResult,
+    RecoveryChain,
+    RecoveryStrategy,
+)
+from foreman.providers.strategies.success_as_error import SuccessAsErrorRecovery
+
+
+class _AlwaysRecoverStrategy(RecoveryStrategy):
+    """Test-local strategy that recovers any ``Exception("success")``
+    by returning a hard-coded ``(_DemoOutput, UsageInfo)`` tuple.
+
+    Used to exercise the adapter's chain-consultation wiring
+    independent of any specific strategy's predicate. The deployed
+    :class:`SuccessAsErrorRecovery` is exercised end-to-end through
+    the production code path by
+    :func:`test_success_as_error_recovery_fires_via_production_path`
+    below.
+    """
+
+    def __init__(self, payload: tuple[Any, UsageInfo]) -> None:
+        self._payload = payload
+
+    def can_recover(self, exc: BaseException, partial: PartialResult[Any]) -> bool:
+        return isinstance(exc, Exception) and exc.args == ("success",)
+
+    def recover(self, exc: BaseException, partial: PartialResult[Any]) -> tuple[Any, UsageInfo]:
+        return self._payload
+
+
+class _DemoOutput(BaseModel):
+    name: str
+    count: int
+
+
+def _make_result(
+    *,
+    subtype: str,
+    structured_output: dict[str, Any] | None = None,
+    errors: list[str] | None = None,
+    duration_ms: int = 0,
+    duration_api_ms: int = 0,
+    num_turns: int = 0,
+    total_cost_usd: float | None = None,
+    usage: dict[str, Any] | None = None,
+    model_usage: dict[str, Any] | None = None,
+) -> ResultMessage:
+    return ResultMessage(
+        subtype=subtype,
+        duration_ms=duration_ms,
+        duration_api_ms=duration_api_ms,
+        is_error=subtype != "success",
+        num_turns=num_turns,
+        session_id="test-session",
+        structured_output=structured_output,
+        errors=errors,
+        total_cost_usd=total_cost_usd,
+        usage=usage,
+        model_usage=model_usage,
+    )
+
+
+def _patch_query_yielding_then_raising(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    messages: list[Any],
+    raise_after: BaseException | None = None,
+) -> None:
+    """Replace ``query`` with an async iterator that yields each message
+    then optionally raises ``raise_after`` (the foreman#230 shape).
+    """
+
+    def fake_query(*, prompt: str, options: Any) -> AsyncIterator[Any]:
+        async def gen() -> AsyncIterator[Any]:
+            for m in messages:
+                yield m
+            if raise_after is not None:
+                raise raise_after
+
+        return gen()
+
+    monkeypatch.setattr(anthropic_sdk_module, "query", fake_query)
+
+
+def _patch_query_raising_each_call(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    exc: BaseException,
+) -> None:
+    """Replace ``query`` with one that raises ``exc`` on each call."""
+
+    def fake_query(*, prompt: str, options: Any) -> AsyncIterator[Any]:
+        async def gen() -> AsyncIterator[Any]:
+            raise exc
+            yield  # pragma: no cover — keeps this an async generator
+
+        return gen()
+
+    monkeypatch.setattr(anthropic_sdk_module, "query", fake_query)
+
+
+@pytest.mark.asyncio
+async def test_normal_success_path_returns_validated_tuple(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Normal subtype=success result → validated ``(model, usage)``.
+
+    Chain includes ``SuccessAsErrorRecovery`` but it doesn't fire
+    because no exception is raised — the happy path is unchanged.
+    """
+    _patch_query_yielding_then_raising(
+        monkeypatch,
+        messages=[_make_result(subtype="success", structured_output={"name": "x", "count": 3})],
+    )
+
+    provider = AnthropicSDKProvider(recovery=RecoveryChain([SuccessAsErrorRecovery()]))
+    result, usage = await provider.run_agent(
+        system_prompt="sys",
+        user_prompt="usr",
+        allowed_tools=["Read"],
+        output_model=_DemoOutput,
+        cwd=tmp_path,
+    )
+
+    assert isinstance(result, _DemoOutput)
+    assert result.name == "x"
+    assert result.count == 3
+    assert isinstance(usage, UsageInfo)
+
+
+@pytest.mark.asyncio
+async def test_recovery_chain_handles_exception_when_iteration_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The adapter consults its recovery chain in the exception path
+    BEFORE the auth-retry guard fires. When a strategy claims the
+    exception, the adapter returns the strategy's payload instead of
+    propagating, and emits the structured recovery log line.
+
+    This test exercises chain-consultation wiring independent of any
+    specific strategy's predicate by using a test-local always-recover
+    strategy. The production
+    :class:`SuccessAsErrorRecovery` is exercised end-to-end through
+    the drain semantics by
+    :func:`test_success_as_error_recovery_fires_via_production_path`.
+    """
+    raise_exc = Exception("success")
+    _patch_query_raising_each_call(monkeypatch, exc=raise_exc)
+
+    payload_model = _DemoOutput(name="recovered", count=9)
+    payload_usage = UsageInfo(input_tokens=1, output_tokens=2)
+    provider = AnthropicSDKProvider(
+        recovery=RecoveryChain([_AlwaysRecoverStrategy(payload=(payload_model, payload_usage))])
+    )
+    caplog.set_level(logging.INFO, logger="foreman.providers.recovery")
+    result, usage = await provider.run_agent(
+        system_prompt="sys",
+        user_prompt="usr",
+        allowed_tools=["Read"],
+        output_model=_DemoOutput,
+        cwd=tmp_path,
+    )
+
+    assert result is payload_model
+    assert usage is payload_usage
+
+    recovery_log_lines = [
+        r.getMessage() for r in caplog.records if "provider recovery" in r.getMessage()
+    ]
+    assert any("_AlwaysRecoverStrategy" in line for line in recovery_log_lines), (
+        f"expected a recovery log line naming _AlwaysRecoverStrategy; got {recovery_log_lines!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_partial_result_carries_captured_result_message(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Sanity check: the adapter populates ``PartialResult.result_message``
+    as it iterates the SDK stream — observed by a strategy that records
+    what it sees on ``can_recover``.
+
+    Why this matters: the production
+    :class:`SuccessAsErrorRecovery` reads ``partial.result_message`` to
+    decide whether the exception is recoverable. If the adapter ever
+    stopped populating that field, the strategy would silently never
+    fire. This test pins the contract.
+    """
+    captured_messages: list[Any] = []
+
+    class _RecorderStrategy(RecoveryStrategy):
+        def can_recover(self, exc: BaseException, partial: PartialResult[Any]) -> bool:
+            captured_messages.append(partial.result_message)
+            return False
+
+        def recover(self, exc: BaseException, partial: PartialResult[Any]) -> tuple[Any, UsageInfo]:
+            raise AssertionError("should not be called — can_recover returned False")
+
+    # Yield a non-success ResultMessage so the adapter sets partial
+    # but does NOT short-circuit, then raise to drive the except path.
+    rm = _make_result(subtype="error_other", structured_output=None)
+
+    def fake_query(*, prompt: str, options: Any) -> AsyncIterator[Any]:
+        async def gen() -> AsyncIterator[Any]:
+            yield rm
+            raise Exception("unrecoverable")
+
+        return gen()
+
+    monkeypatch.setattr(anthropic_sdk_module, "query", fake_query)
+
+    provider = AnthropicSDKProvider(recovery=RecoveryChain([_RecorderStrategy()]))
+    with pytest.raises(ProviderUnknownError):
+        await provider.run_agent(
+            system_prompt="sys",
+            user_prompt="usr",
+            allowed_tools=["Read"],
+            output_model=_DemoOutput,
+            cwd=tmp_path,
+        )
+
+    assert captured_messages, "strategy never saw a partial — recovery wiring is broken"
+    assert captured_messages[0] is rm, (
+        f"expected partial.result_message to be the yielded ResultMessage; got {captured_messages[0]!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_success_as_error_recovery_fires_via_production_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The production :class:`SuccessAsErrorRecovery` strategy fires
+    end-to-end via the foreman#266 drain semantics.
+
+    Reproduces the foreman#230 sequence: SDK yields a satisfying
+    ResultMessage then raises ``Exception("success")``. With the
+    drain change, the adapter captures the satisfying ResultMessage
+    in ``partial.result_message`` and continues iterating — so when
+    the SDK then raises, the strategy's predicate (which requires
+    the satisfying ResultMessage to be in the partial state) is
+    actually reachable. The strategy re-validates from the captured
+    ResultMessage and returns the same payload the happy-path branch
+    would have returned.
+
+    Without drain semantics this test would either (a) early-return
+    before the SDK can raise or (b) capture a non-satisfying
+    ResultMessage that the strategy's strict predicate would reject.
+    """
+    success_msg = _make_result(
+        subtype="success",
+        structured_output={"name": "drained", "count": 7},
+    )
+    _patch_query_yielding_then_raising(
+        monkeypatch,
+        messages=[success_msg],
+        raise_after=Exception("success"),
+    )
+
+    provider = AnthropicSDKProvider(recovery=RecoveryChain([SuccessAsErrorRecovery()]))
+    result, usage = await provider.run_agent(
+        system_prompt="sys",
+        user_prompt="usr",
+        allowed_tools=["Read"],
+        output_model=_DemoOutput,
+        cwd=tmp_path,
+    )
+
+    assert isinstance(result, _DemoOutput)
+    assert result.name == "drained"
+    assert result.count == 7
+    assert isinstance(usage, UsageInfo)
+
+
+@pytest.mark.asyncio
+async def test_drain_returns_captured_success_when_loop_exits_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Drain semantics: when the SDK yields a satisfying ResultMessage
+    then a non-ResultMessage envelope then exhausts cleanly, the
+    adapter still returns the captured success rather than raising
+    StructuredOutputMissingError.
+
+    Pins two contracts:
+
+    1. Draining past the satisfying ResultMessage does not silently
+       lose the result on a clean stream end.
+    2. The foreman#266 instrumentation emits one INFO log line
+       describing the post-success envelopes when there were any —
+       that's the data point we need to learn what the CLI sends
+       between a success ResultMessage and stream end in production.
+    """
+
+    class _FakeOtherMessage:
+        """Stand-in for any non-ResultMessage envelope shape."""
+
+    success_msg = _make_result(
+        subtype="success",
+        structured_output={"name": "captured", "count": 3},
+    )
+    _patch_query_yielding_then_raising(
+        monkeypatch,
+        messages=[success_msg, _FakeOtherMessage()],
+    )
+
+    provider = AnthropicSDKProvider(recovery=RecoveryChain([SuccessAsErrorRecovery()]))
+    caplog.set_level(logging.INFO, logger="foreman.providers.anthropic_sdk")
+    result, usage = await provider.run_agent(
+        system_prompt="sys",
+        user_prompt="usr",
+        allowed_tools=["Read"],
+        output_model=_DemoOutput,
+        cwd=tmp_path,
+    )
+
+    assert isinstance(result, _DemoOutput)
+    assert result.name == "captured"
+    assert result.count == 3
+    assert isinstance(usage, UsageInfo)
+
+    drain_lines = [
+        r.getMessage() for r in caplog.records if "provider drain:" in r.getMessage()
+    ]
+    assert any("_FakeOtherMessage" in line for line in drain_lines), (
+        f"expected an instrumentation log line naming _FakeOtherMessage; got {drain_lines!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_unknown_sdk_exception_translates_to_provider_unknown_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unrecognized exception (no recovery match, no auth-prefix)
+    translates to ``ProviderUnknownError`` with ``__cause__`` preserved.
+    """
+    original = Exception("totally weird")
+    _patch_query_raising_each_call(monkeypatch, exc=original)
+
+    provider = AnthropicSDKProvider(recovery=RecoveryChain([]))
+    with pytest.raises(ProviderUnknownError) as exc_info:
+        await provider.run_agent(
+            system_prompt="sys",
+            user_prompt="usr",
+            allowed_tools=["Read"],
+            output_model=_DemoOutput,
+            cwd=tmp_path,
+        )
+
+    assert exc_info.value.__cause__ is original
+    assert "totally weird" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_auth_prefix_path_still_translates_to_provider_auth_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The existing foreman#227 auth-retry guard still fires for the
+    auth-prefix shape. After the second failed attempt the adapter
+    raises ``ProviderAuthError``.
+    """
+    auth_exc = Exception("Claude Code returned an error result: 401 unauth")
+    _patch_query_raising_each_call(monkeypatch, exc=auth_exc)
+
+    provider = AnthropicSDKProvider(recovery=RecoveryChain([]))
+    with pytest.raises(ProviderAuthError):
+        await provider.run_agent(
+            system_prompt="sys",
+            user_prompt="usr",
+            allowed_tools=["Read"],
+            output_model=_DemoOutput,
+            cwd=tmp_path,
+        )
