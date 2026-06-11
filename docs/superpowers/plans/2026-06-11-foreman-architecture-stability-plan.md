@@ -757,3 +757,21 @@ Plus operational follow-ups Phase 0 surfaced:
 - daemon_host.py preamble refactor (small, do it)
 
 **Phase 0 is complete.** Ready for Phase 1.
+
+---
+
+## Phase 1 — Decisions log
+
+Each finding gets one decision row. Format: finding summary, decision, rationale, next-step ticket placeholder.
+
+### Decision 1 — Restore PR #197 Labels as a `Labels` StrEnum following the `Outcome` pattern
+
+- **Finding:** PR #197's centralized `Labels` catalog was silently reverted by subsequent refactors. Today the 16+ `_LABEL_*` constants are duplicated across role modules.
+- **Decision:** Resurrect as a **`Labels` StrEnum** (NOT the original class-attribute pattern). Follow the foreman#258 `Outcome` enum design: StrEnum members with classification metadata via custom `__new__`. One source of truth, type-system enforced.
+- **Rationale:** consistency with the canonical pattern we landed today. The Outcome enum from #258 is now THE shape for "centralized vocabulary with metadata" in foreman. Doing labels the same way means we have one shape, not two.
+- **Cost:** ~half-day implementation vs ~half-hour for verbatim resurrection.
+- **Benefit:** consistent pattern with #258; if anyone tries to add a label without classification, Python's enum machinery raises `TypeError` at module load (same structural guarantee).
+- **Open question deferred:** the durability mechanism (how to prevent THIS from being silently reverted next time) — that is its own architectural topic for a later decision round.
+- **Next-step ticket:** TBD after Phase 1 closes; will reference this decision.
+
+
