@@ -211,3 +211,108 @@ Rituals:
 ## Living document
 
 Each phase appends a "Findings" section to this doc as it completes. When Phase 1 is done, this doc is the authoritative reference for what the review decided + what the follow-up tickets are. Tickets created reference this doc; this doc gets a "Decisions made on YYYY-MM-DD" section per review.
+
+---
+
+## Phase 0 findings — initial pass (2026-06-11 AM)
+
+Working through the three lenses against the whole foreman tree. This section appends as Phase 0 progresses; it is not exhaustive yet.
+
+### Lens A — PR pattern over the last 30 days
+
+50 PRs merged since 2026-05-12. First-pass classification (more nuanced re-read pending):
+
+**Bandaid pattern (PRs that defended against a symptom rather than the root cause):**
+
+- PR #255 — runaway-burn defense triple (#228+#229+#230). Three layers of defense against one foreman#227 incident. Per Jeff: the literal bandaid we are trying to stop.
+- PR #270 — fix(dispatch): inject GIT_AUTHOR_* into role subprocess env. Patches the symptom (commits attributed wrong); the root cause is that role runners do not have a clean identity boundary.
+- PR #231 — fix(provider): catch SDK auth pattern, refresh creds, retry once. Specific exception-shape pattern-match; structurally it is the kind of thing the GoF refactor (#266) eventually superseded.
+- PR #224 — fix(worktree): self-heal orphan local branch + stale worktree metadata. Defensive worktree handling; root cause is git worktree lifecycle is not modeled cleanly.
+- PR #223 — fix(worker): push impl branch via host.push_branch instead of unauthenticated shell-out. Mostly structural, but motivated by an auth incident.
+- PR #214 — fix(git): inject bot identity via env vars. Same shape as #270.
+- PR #192 — fix(reconciler): clear stale merging-* labels. Defensive cleanup; root cause is label state machine does not have an explicit terminator.
+- PR #189 — fix(worktree): reattach existing impl branch when worktree dir is gone. Same shape as #224.
+- PR #209 — fix: pin container reconciler.db_path. Single-site fix; not really a bandaid.
+
+**Structural fixes (root-cause work; pattern application; new abstractions):**
+
+- PR #277 — typed Outcome enum (foreman#258). Replaces three hand-maintained constants with one source-of-truth enum.
+- PR #275 / #273 — reviewer-budget gate moved to AFTER review, counts needs_fix outcomes. Fixes the gate-placement bug.
+- PR #276 / #260 — dead Literal cleanup. Pure dead code removal.
+- PR #274 / #271 — GoF ProviderAdapter + RecoveryChain. Boundary architecture (Adapter + Strategy + Chain of Responsibility + Facade + Translator).
+- PR #252 — dispatch recorder mediator with dual-write. Phase 1 of a structural plan.
+- PR #234 — standardize role JSONL envelope with CommonEnvelope. Single-source schema.
+- PR #197 — centralize foreman:* label constants. Single source of truth.
+- PR #207 — mirror daemon log to stdout. Visibility / ops.
+- PR #202 — plumb --target through run_reviewer as a sanity-check guard. Structural.
+
+**Feature work (genuine new capability):**
+
+- PR #232 — capture token usage from anthropic SDK ResultMessage (foreman#227 cost telemetry baseline).
+- PR #247 — capture cache tokens.
+- PR #236 / #240 / #241 / #242 — log per-role failures to JSONL. Telemetry coverage.
+- PR #216 — test isolation fix.
+- PR #212 — test coverage for 24h boundary.
+
+**Docs / spec PRs (the autonomous loops intentional spec-doc step):**
+
+PR #272, #267, #263, #257, #254, #250, #210, #211, #201, #199, #196, #193, #191, #188, #185 fed into impl PRs above.
+
+**Initial Lens A observation:**
+
+Roughly **40% bandaid-shaped, 35% structural, 15% feature, 10% docs** over the 30-day window. That ratio is the empirical evidence for what Jeff named last night. The bandaid PRs cluster around three failure surfaces: SDK boundary (multiple defensive try/except + retry shapes), git worktree lifecycle (multiple self-heal fixes), and label state machine (multiple defensive cleanups). All three were addressed at the architectural layer by PRs in the same window — #274 (GoF boundary), worktree work has not yet been redone structurally, label state machine is still distributed.
+
+### Lens C — Dead code findings (confirmed, first pass)
+
+**Mechanical tools:** `ruff F401,F811,F841` clean. `vulture --min-confidence 80` clean modulo signal-handler signatures and Click decorator boilerplate. `vulture --min-confidence 60` produced 60+ candidates of which most are false positives (Click commands, Pydantic schema fields, enum members read via iteration).
+
+**Confirmed real dead code (eyeball-verified, callers grep-checked):**
+
+| Location | Category | Action |
+|---|---|---|
+| `providers/__init__.py:80` — `ProviderInvalidResultError` in `__all__` | **Broken zombie**: class deleted but `__all__` reference remains. `from foreman.providers import ProviderInvalidResultError` raises ImportError today on main. | Delete the `__all__` entry. **Bug.** |
+| `roles/worker.py:252` — `_summarize_failures()` | Defined, no callers anywhere. | Delete. |
+| `dispatch_recorder.py:513` — `record_dispatch_started()` | Defined, no callers anywhere. Likely foreman#251 Phase 1 scaffolding that was planned but never wired. | Delete (or wire if Phase 2 of #251 still wants it). |
+| `reconciler/state.py:26` — `has_label()` | Only called by its own test. | Delete method + test. |
+| `reconciler/state.py:73` — `find_issue()` | Only called by its own test. | Delete method + test. |
+| `storage.py:153` — `mark_pipeline_terminated()` | Only called by its own test. | Delete method + test. |
+| `identity.py:100` — `get_planner_client()` | Only called by its own test. Generic `get_client(role)` is used everywhere else. | Delete the per-role convenience methods + their tests. |
+| `daemon_host.py:101` + `daemon_runners.py:50` — `get_issue_labels()` | Defined; only called by tests. Production code now uses the labels-cache approach. | Delete method + tests. |
+| `worktree.py:608` — `cleanup()` | No callers anywhere. | Delete. |
+| `config.py:47` — `AdminConfig.github_token_env` | Field defined; only test-loaded, never read from production code. Likely PAT-era leftover, obsolete since the GitHub App migration. | Delete + remove tests + remove TOML fixtures. |
+| `config.py:174` — `retention_days` | Field defined; never read from production. | Delete or wire (do we have a retention policy yet?). |
+| `config.py:95` — `max_concurrent_workers` | Self-described forward-compat knob with validator that requires it to be 1. Classic YAGNI scaffolding. | Delete + delete validator. Re-add when we actually want multi-worker. |
+
+**Indirect dead code (tests for dead code are themselves dead):**
+
+Every test for one of the methods above is its own dead-test entry. The grep showed ~5 such tests; the cleanup PR for the methods should remove them too.
+
+**To verify in a deeper sweep (not yet confirmed):**
+
+- Per-role convenience methods on `IdentityRegistry` (planner / reviewer / fixer / worker / orchestrator) — are some duplicated by the generic `get_client(role)`?
+- `init.py` label constants — every constant defined; are any labels never read from a rule predicate or written by a role?
+- `prompts/*.md` — do any prompts reference behavior the role no longer performs?
+- `execution_log` schema — any columns added in foreman#251 cost-telemetry that are not actually populated yet?
+- Pre-#266 provider-related code paths — anything that survived the GoF refactor but is not reached anymore?
+
+### Lens B — initial GoF observations (deeper audit pending)
+
+Modules sampled so far show:
+
+- **Reconciler / `rules.py`**: each rule is already a `Rule` dataclass with `name`, `tier`, `precedence`, `when` (predicate function), `then` (Action enum value). Close to Strategy pattern — each rule IS a strategy. Refactor toward "every rule is an explicit class with `evaluate(ctx) -> Action | None`" would make the pattern obvious; current shape is "rule = data + predicate function" which is more functional than OO Strategy. **Verdict: already pattern-shaped; no urgent refactor.**
+- **Reconciler / `actions.py`** + executor: this is closer to Command pattern (each action is a discrete operation handled by a dispatch table). Current shape: `Action` enum + executor `if`/`elif` dispatch. **Verdict: a Command registry pattern would replace the if/elif with explicit class-per-action — cleaner OCP (open/closed), easier to test in isolation.**
+- **`providers/`** (post-#266): canonical Adapter + Strategy + Chain of Responsibility + Facade + Translator. **Verdict: gold standard. Use as the template for other boundaries.**
+- **Role runners** (`roles/{planner,reviewer,fixer,worker}.py`): each role implements setup → preflight → dispatch → terminate informally. Template Method base class would formalize and eliminate the 4× duplication. **Verdict: refactor candidate — high-value.**
+- **`dispatch_recorder.py`**: mediator pattern between role runners and the cost ledger; the dual-write to JSONL + execution_log is Observer-shaped. **Verdict: pattern is present but not named explicitly in docstrings.**
+- **Label state machine**: distributed across `init.py` constants + `rules.py` predicates + `actions.py` transitions. NO explicit State pattern; transitions are implicit. **Verdict: explicit State or finite-state-machine library would make transitions auditable.**
+
+A deeper Lens B pass would produce a module-by-module table with the same shape as Lens C above. That is the next sub-step before Phase 1.
+
+### What is left for Phase 0
+
+- Deeper Lens B pass: explicit pattern map per module
+- Deeper Lens C pass: prompts, label constants, execution_log columns, pre-#266 leftovers
+- Draft straw-man positions on foreman#269 six review topics
+- Add this week's discovered structural bugs to foreman#269 evidence section
+
+Lens A is in good enough shape to brief from. Continue or pivot?
