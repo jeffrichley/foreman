@@ -488,3 +488,76 @@ On a second look at PR #197 ("centralize foreman:* label constants"): this PR is
 - Draft straw-man positions on foreman#269 six review topics
 
 Continuing.
+
+---
+
+## Phase 0 — third pass: the regression that nobody noticed (2026-06-11 noon)
+
+### THE STRUCTURAL FIX THAT WAS LOST
+
+This is the single biggest finding of Phase 0 so far. Documenting in full because it changes Phase 1's §2 (layered defenses audit) — there is a fourth dimension that audit needs to cover.
+
+**Discovery sequence:**
+
+1. Phase 0 found role modules with duplicated `_LABEL_*` constants (16+ entries across 3 files with aliases like `_LABEL_PLANNING` vs `_LABEL_SPEC_REVIEW` for the same `foreman:planning` string).
+2. Looking at git history, PR #197 (commit `186964c`, Jun 7, "refactor(labels): centralize foreman:* label constants into one source of truth") DID create the centralization:
+   - It created `packages/foreman/src/foreman/labels.py` with a `Labels` class catalog
+   - It refactored rules.py, actions.py, observer.py, all three role modules, AND init.py to use it
+   - It created `tests/test_labels_keystone.py` with three drift guards (foreman literal -> Labels value; Labels.all -> at least one v3 catalog; init metadata aligned)
+   - Per the commit body: "927 tests pass"
+3. Today, on main: `labels.py` DOES NOT EXIST. `test_labels_keystone.py` DOES NOT EXIST. The role modules have local `_LABEL_*` constants again. Every drift guard #197 added is gone.
+
+**This means: a confirmed structural fix landed, ran in production, and was reverted in a later commit WITHOUT anyone noticing.** The reversal was almost certainly an unintentional side effect of the v3 rescue / Plan B work (PRs in the #335-#342 range, "v3 rescue Stages") which restructured large parts of the reconciler. The label module fell out during that restructuring; nobody re-added it.
+
+**Why this matters:**
+
+- Lens A: the bandaid stack we see today over the label state machine is partially a consequence of #197 being silently un-done. The "label duplicated in 3 places" failure mode that #197 fixed is back in production.
+- Lens C: an entire module worth of structural-fix code disappeared without leaving a deletion trace anyone could grep for. This is the dead-code zombie problem at the largest scale.
+- **New Phase 1 topic**: § "regression detection for structural fixes." Today there is no mechanism that says "this structural fix was supposed to make this property true; here is the property; here is the test that guards it." The closest we have is the keystone-test pattern #197 itself used (which got deleted along with everything else).
+
+### Why this is THE bandaid pattern made visible
+
+Jeff's exact phrasing yesterday was: "we've been layering bandaid on top of bandaid." The labels-regression case is the bandaid pattern with a twist: **#197 was a structural fix that worked, was tested, was operationally correct — and then a later refactor removed it because the new refactor did not know it was load-bearing.** The role modules then accumulated the per-file constants again (#197's deletions undone), and we are now bandaiding around the lack of a single source of truth that we used to have.
+
+The taxonomy this exposes:
+
+- Bandaid layered on top of bandaid: what we already named.
+- **Structural fix layered on top of structural fix, where the second one buries the first**: this case. PR #335-#342's v3 rescue obsoleted (intentionally or not) the work in #197 because it touched the same modules. PR #197's tests and module went away with the v2 surface. The "keystone test" that was supposed to alarm if anyone deleted Labels was itself deleted.
+
+This pattern is invisible without git-archaeology and is exactly the kind of thing the architecture review should formalize a defense against. **Concrete Phase 1 §2 deliverable: a "load-bearing" tag for structural fixes** (a docstring marker, a designated test file pattern, a CI check that asserts "this property is still true") so that future refactors that touch the same module can SEE the property they would break.
+
+### Lens C deep — verified findings (revised after the regression discovery)
+
+The original Lens C inventory still stands, plus these additions:
+
+| Location | Category | Action |
+|---|---|---|
+| `packages/foreman/src/foreman/` (missing `labels.py`) | **Lost structural fix**: PR #197's centralized `Labels` catalog was deleted by a subsequent refactor; role-module constants reappeared as duplicates. | Re-create the centralization. The previous shape is recoverable via `git show 186964c`. Add the keystone test as a regression guard. |
+| `packages/foreman/src/foreman/__init__.py` | The `_LABEL_METADATA` map mentioned in #197 — is it still here or also deleted? Worth checking. | Verify state. |
+| `daemon_host.py` | 11+ methods each begin with `gh = self._registry.get_orchestrator_client(); repo_obj = gh.get_repo(repo)`. ~3-4 line preamble repeated. | Lens B finding: introduce a context-manager `with self._repo(repo) as repo_obj:` OR a `_get_repo(repo)` helper. Pure DRY play. |
+
+### Updated Lens A — PR #197 reclassified again
+
+Phase 0 has now reclassified PR #197 twice:
+
+1. **Initial pass:** "structural fix"
+2. **After finding role modules still have duplicates:** "partial structural fix — bandaid in disguise"
+3. **After finding labels.py existed and was deleted:** **"reverted structural fix"** — the work was real and complete; subsequent refactors silently undid it.
+
+The 30-day Lens A re-classification needs one more pass through this lens: which other PRs landed structural fixes that may have been undone by subsequent refactors? PRs that touched the same modules as later v3-rescue work are high-risk:
+- PR #202 (plumb --target through run_reviewer) — modified `roles/reviewer.py`, which was heavily reworked in the v3 rescue.
+- PR #197 (labels) — already confirmed reverted.
+- PR #214 (git bot identity injection) — similar shape to #270 today; was the work in #214 superseded by #270, or did #270 re-implement work that already existed?
+
+These would need git-archaeology to verify. Worth scoping a follow-up: **"PR resurrection audit"** — for every claimed structural fix in the last 90 days, verify the property it asserted is still true on main.
+
+### Still left for Phase 0 (post regression-discovery)
+
+- Run the property-still-true check against the top 5 structural PRs in the 90-day window (Lens A regression audit, manually for now)
+- Lens B deeper for actions.py / executor pattern
+- `__init__.py` label state vocabulary audit (now critical because we cannot trust the "centralized" claim)
+- Provider boundary "gold standard" sanity-check
+- Pre-#266 leftover audit
+- Draft straw-man positions on foreman#269 six review topics
+
+The regression-detection topic alone might want to be its own foreman#269 topic. Adding it to the review agenda.
