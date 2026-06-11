@@ -774,4 +774,20 @@ Each finding gets one decision row. Format: finding summary, decision, rationale
 - **Open question deferred:** the durability mechanism (how to prevent THIS from being silently reverted next time) — that is its own architectural topic for a later decision round.
 - **Next-step ticket:** TBD after Phase 1 closes; will reference this decision.
 
+### Decision 2 — Role-runner `RoleRunner` ABC via strangler-fig migration, executed back-to-back
+
+- **Finding:** four role runners (`planner.py`, `reviewer.py`, `fixer.py`, `worker.py`) share 80%+ of their shape (setup → preflight → dispatch → terminate) but have no shared abstraction. Every defensive change (#255 marker exceptions, #270 git identity injection, future #266 boundary integration) is applied 4× with drift risk. Lens B finding flagged Template Method as highest-ROI structural refactor.
+- **Decision:** **Option B (strangler-fig)** — introduce `RoleRunner` ABC + `run()` template, then migrate one role at a time. **Sequencing constraint: back-to-back as a single work sprint, not spread over days/weeks.** Order: Planner first (simplest, no PreflightRefusal yet) → Reviewer → Fixer → Worker. Each migration is its own PR for review granularity; all four land sequentially without long gaps.
+- **Rationale (against the alternatives):**
+  - Option A (big bang) felt too risky given recent stability work — single PR with 2000 LOC delta and 4× module touch is the kind of change that masks regressions.
+  - Option C (skeleton-first) too cautious — without actual migrations we cannot catch cases the template does not handle. The Planner migration is also the validation of the ABC design.
+- **Rationale (back-to-back sequencing):** spreading the migrations over multiple weeks means the codebase lives in a partial-migration state (some roles using the ABC, others not) for an extended window. That partial state is itself a Lens C/B finding (`dispatcher.py` is exactly this — the v2 module that was supposed to be migrated to v3 but the work stalled half-done). Back-to-back avoids becoming the next `dispatcher.py`.
+- **Sequencing dependency:** Decision 1 (Labels StrEnum) lands first; role migrations consume it from the start so the migrated roles use `Labels.SPEC_FIX` instead of importing per-module `_LABEL_*`.
+- **Integration opportunities** that land alongside the migration:
+  - Marker exceptions consolidate to a single `RolePreflightRefusal` base class
+  - Per-role identity-resolution boilerplate consolidates via the `setup()` template slot
+  - foreman#266 provider boundary consumed by `run()` template's dispatch step
+  - foreman#258 typed `Outcome` enum consumed by `terminate_*` template slots
+- **Next-step ticket:** TBD after Phase 1 closes. Should reference both Decision 1 (Labels first) and the back-to-back sequencing constraint so a future operator does not partially-migrate and walk away.
+
 
