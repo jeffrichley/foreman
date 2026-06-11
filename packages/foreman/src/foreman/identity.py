@@ -246,3 +246,25 @@ class IdentityRegistry:
             f"Unknown role: {role!r}. Walking skeleton supports "
             "'planner', 'reviewer', 'fixer', 'worker', and 'orchestrator'."
         )
+
+    def get_role_identity_env(self, role: str) -> dict[str, str]:
+        """Return GIT_AUTHOR_*/GIT_COMMITTER_* env vars for a role's bot identity.
+
+        Used by the v3 role dispatcher (V3GitHubHost.dispatch_role) so the
+        LLM-driven git commit calls inside the role subprocess attribute to
+        the correct bot (e.g. foreman-worker[bot]) regardless of what
+        .git/config says in the worktree.
+
+        Constructed from the role's App metadata (slug + numeric id) without
+        minting a fresh installation token --- the metadata is cached in the
+        registry for its lifetime.
+        """
+        meta = self._get_app_metadata(role)
+        bot_name = f"{meta.slug}[bot]"
+        bot_email = f"{meta.app_id}+{meta.slug}[bot]@users.noreply.github.com"
+        return {
+            "GIT_AUTHOR_NAME": bot_name,
+            "GIT_AUTHOR_EMAIL": bot_email,
+            "GIT_COMMITTER_NAME": bot_name,
+            "GIT_COMMITTER_EMAIL": bot_email,
+        }
