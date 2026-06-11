@@ -48,6 +48,7 @@ from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
+from foreman.providers import ProviderError
 from foreman.roles import TERMINAL_BLOCKING_LABEL, handle_unhandled_role_exception
 from foreman.schemas.reviewer import Finding, ReviewerOutput, ReviewerRunResult
 from foreman.stats import log_reviewer_run
@@ -74,6 +75,7 @@ class _ReviewerPreflightRefusal(RuntimeError):
     signal. Firing the helper would override the operator's removal by
     re-adding ``foreman:needs-help``.
     """
+
 
 # Tool capabilities matrix for the Reviewer. Read-only on the filesystem;
 # Bash is allowed for read-only recon (e.g., ``gh pr view``, ``git log``).
@@ -270,9 +272,7 @@ def _build_user_prompt(
     )
 
 
-def _get_pr_diff(
-    worktree_path: Path, base_branch: str, head_sha: str, *, role_token: str
-) -> str:
+def _get_pr_diff(worktree_path: Path, base_branch: str, head_sha: str, *, role_token: str) -> str:
     """Return the unified diff for the PR's head against its base branch.
 
     Uses ``git diff`` in the worktree rather than the GitHub Files API so
@@ -399,6 +399,78 @@ async def run_reviewer(
     issue_number: int | None = None
     target: Literal["spec_pr", "impl_pr"] = "spec_pr"  # Default until _parse_review_branch resolves
     issue: Issue | None = None
+
+    def _on_failure(exc: BaseException) -> None:
+        """Shared cleanup body for the ``ProviderError`` + ``Exception``
+        catch arms (foreman#266 — type-narrowing split). Closes over
+        ``start_time`` / ``usage`` / ``pr_number`` /
+        ``actual_repo_slug`` / ``issue_number`` / ``target`` /
+        ``issue`` / ``project_name`` / ``dispatch_recorder`` /
+        ``dispatch_trace_id``. The bare ``raise`` that re-propagates
+        the original exception lives in each ``except`` arm after
+        calling this helper.
+        """
+        # foreman#237 + foreman#229: capture cost telemetry AND defend
+        # against the runaway-burn pattern.
+        duration_seconds = time.monotonic() - start_time
+        if actual_repo_slug is not None and issue_number is not None:
+            try:
+                log_reviewer_run(
+                    repo_slug=actual_repo_slug,
+                    issue_number=issue_number,
+                    pr_number=pr_number,
+                    target=target,
+                    outcome="exception",
+                    duration_seconds=duration_seconds,
+                    input_tokens=usage.input_tokens if usage is not None else 0,
+                    output_tokens=usage.output_tokens if usage is not None else 0,
+                    cache_creation_input_tokens=(
+                        usage.cache_creation_input_tokens if usage is not None else 0
+                    ),
+                    cache_read_input_tokens=(
+                        usage.cache_read_input_tokens if usage is not None else 0
+                    ),
+                    total_cost_usd=usage.total_cost_usd if usage is not None else None,
+                    model_usage=usage.model_usage if usage is not None else None,
+                    duration_ms=usage.duration_ms if usage is not None else 0,
+                    num_turns=usage.num_turns if usage is not None else 0,
+                )
+            except Exception:
+                # Best-effort telemetry — swallow so the daemon
+                # dispatcher sees the ORIGINAL exception, not whatever
+                # the stats writer raised.
+                pass
+            # foreman#251 (Phase 1): mirror the failure-path dual-write.
+            emit_recorder_complete(
+                dispatch_recorder=dispatch_recorder,
+                dispatch_trace_id=dispatch_trace_id,
+                role="reviewer",
+                repo_slug=actual_repo_slug,
+                ticket_id=f"{actual_repo_slug}#{issue_number}",
+                project=project_name,
+                issue_number=issue_number,
+                pr_number=pr_number,
+                outcome="exception",
+                usage=usage if usage is not None else UsageInfo(),
+                role_data={"target": target},
+                duration_seconds=duration_seconds,
+            )
+        # foreman#229: runaway-burn defense. Skip for
+        # ``_ReviewerPreflightRefusal`` — that's intentional.
+        if (
+            not isinstance(exc, _ReviewerPreflightRefusal)
+            and issue is not None
+            and issue_number is not None
+        ):
+            bound_issue = issue
+            handle_unhandled_role_exception(
+                role="reviewer",
+                issue_number=issue_number,
+                exc=exc,
+                post_comment=lambda body: bound_issue.create_comment(body),
+                set_needs_help_label=lambda: bound_issue.add_to_labels(TERMINAL_BLOCKING_LABEL),
+            )
+
     try:
         owner, repo_name, pr_number = parse_pr_url(pr_url)
         project = config.projects[project_name]
@@ -410,9 +482,7 @@ async def run_reviewer(
                 f"{project_name!r} configured repo {expected_repo_slug!r}"
             )
 
-        registry = (
-            identity_registry if identity_registry is not None else IdentityRegistry(project)
-        )
+        registry = identity_registry if identity_registry is not None else IdentityRegistry(project)
         reviewer_client: Github = registry.get_reviewer_client()
         reviewer_token: str = registry.get_reviewer_token()
 
@@ -617,111 +687,15 @@ async def run_reviewer(
         # raced its own write and produced stale-snapshot dispatches at the
         # next worker iteration).
         return ReviewerRunResult(llm_output=llm_output, final_labels=final_labels)
+    except ProviderError as exc:
+        # foreman#266: typed catch for the documented provider-boundary
+        # failure mode. Same body as the ``except Exception`` arm
+        # below — the change is structural (type narrowing + boundary
+        # documentation), not semantic.
+        _on_failure(exc)
+        raise
     except Exception as exc:
-        # foreman#237 + foreman#229: capture cost telemetry AND defend
-        # against the runaway-burn pattern.
-        #
-        # Pre-#237 any exception from worktree attach / _get_pr_diff /
-        # provider.run_agent / pr.create_review / issue.set_labels
-        # propagated straight up and the JSONL row was never written —
-        # failed runs vanished from ``reviewer.jsonl`` and cross-role
-        # cost rollups under-counted by exactly the failure rate (same
-        # shape Planner had pre-#235 / PR #236).
-        #
-        # Pre-#229 the originating issue's in-flight label
-        # (``foreman:planning`` for spec_pr, ``foreman:impl-review``
-        # for impl_pr) was NOT transitioned on exception. The
-        # dispatcher's next poll then re-dispatched the SAME role on
-        # the SAME ticket — runaway burn. The defensive
-        # ``handle_unhandled_role_exception`` call below transitions
-        # the issue to ``foreman:needs-help``.
-        #
-        # Partial state captured so far:
-        #   - ``usage`` is set iff ``provider.run_agent`` returned
-        #     successfully (input/output tokens, cost, model usage).
-        #     A failure mid-review-post or mid-label-transition still
-        #     gets the LLM's per-call cost recorded.
-        # ``raise`` (bare) re-propagates the original exception
-        # unchanged: the daemon dispatcher's error handling must NOT
-        # be altered. The stats write is fire-and-forget telemetry,
-        # not a control-flow gate — wrapped in its own try/except so a
-        # disk-full or permissions failure during the log write cannot
-        # mask the original Reviewer exception. A stats-write failure
-        # here is strictly less bad than the original failure being
-        # silently replaced.
-        duration_seconds = time.monotonic() - start_time
-        if actual_repo_slug is not None and issue_number is not None:
-            try:
-                log_reviewer_run(
-                    repo_slug=actual_repo_slug,
-                    issue_number=issue_number,
-                    pr_number=pr_number,
-                    target=target,
-                    outcome="exception",
-                    duration_seconds=duration_seconds,
-                    input_tokens=usage.input_tokens if usage is not None else 0,
-                    output_tokens=usage.output_tokens if usage is not None else 0,
-                    cache_creation_input_tokens=(
-                        usage.cache_creation_input_tokens if usage is not None else 0
-                    ),
-                    cache_read_input_tokens=(
-                        usage.cache_read_input_tokens if usage is not None else 0
-                    ),
-                    total_cost_usd=usage.total_cost_usd if usage is not None else None,
-                    model_usage=usage.model_usage if usage is not None else None,
-                    duration_ms=usage.duration_ms if usage is not None else 0,
-                    num_turns=usage.num_turns if usage is not None else 0,
-                )
-            except Exception:
-                # Best-effort telemetry — swallow and continue to the
-                # bare ``raise`` so the daemon dispatcher sees the
-                # ORIGINAL exception, not whatever the stats writer
-                # raised. Surfacing the stats failure here would mask
-                # the actual Reviewer failure that triggered this branch.
-                pass
-            # foreman#251 (Phase 1): mirror the failure-path dual-write.
-            emit_recorder_complete(
-                dispatch_recorder=dispatch_recorder,
-                dispatch_trace_id=dispatch_trace_id,
-                role="reviewer",
-                repo_slug=actual_repo_slug,
-                ticket_id=f"{actual_repo_slug}#{issue_number}",
-                project=project_name,
-                issue_number=issue_number,
-                pr_number=pr_number,
-                outcome="exception",
-                usage=usage if usage is not None else UsageInfo(),
-                role_data={"target": target},
-                duration_seconds=duration_seconds,
-            )
-        # foreman#229: runaway-burn defense. Post the traceback as a
-        # comment on the originating issue (the ticket that's stuck
-        # in the in-flight label) and transition it to
-        # ``foreman:needs-help`` so the dispatcher's poll loop stops
-        # re-dispatching. If ``issue`` isn't yet bound (URL parse,
-        # PR fetch, or branch parse failed before ``repo.get_issue``
-        # ran) we let the bare ``raise`` propagate alone — #228's
-        # rate-limit still bounds the loop at N=3 in that path
-        # because v3_host's subprocess-exit handler writes an
-        # ``outcome="error"`` row that counts toward the failure
-        # budget regardless.
-        #
-        # Skip the helper entirely for ``_ReviewerPreflightRefusal``:
-        # that's an INTENTIONAL refusal (the operator removed the
-        # entry label or the ticket was retargeted), not a runaway-
-        # burn signal. Firing the helper would override the
-        # operator's intent by re-adding ``foreman:needs-help``.
-        if (
-            not isinstance(exc, _ReviewerPreflightRefusal)
-            and issue is not None
-            and issue_number is not None
-        ):
-            bound_issue = issue
-            handle_unhandled_role_exception(
-                role="reviewer",
-                issue_number=issue_number,
-                exc=exc,
-                post_comment=lambda body: bound_issue.create_comment(body),
-                set_needs_help_label=lambda: bound_issue.add_to_labels(TERMINAL_BLOCKING_LABEL),
-            )
+        # PR #255 commit 2 defensive handler — belt-and-suspenders for
+        # non-provider failures (worktree ops, host I/O, GitHub 5xx).
+        _on_failure(exc)
         raise
