@@ -343,9 +343,12 @@ def test_failure_path_writes_both_ledgers_once_each(
     recorder: DispatchRecorder, log: ExecutionLog, tmp_path: Path
 ) -> None:
     trace_id = _seed_start_row(log, ticket_id="jeffrichley/voice#42", action="dispatch_planner")
+    # foreman#256: legacy "spec_failed" replaced by uniform "exception"
+    # (PR #255 / commit b18a683); production code no longer emits
+    # the legacy value.
     recorder.record_dispatch_complete(
         **_dispatch_complete_kwargs(  # type: ignore[arg-type]
-            trace_id=trace_id, outcome="spec_failed", pr_number=None
+            trace_id=trace_id, outcome="exception", pr_number=None
         )
     )
     recorder.record_subprocess_terminated(
@@ -366,7 +369,7 @@ def test_failure_path_writes_both_ledgers_once_each(
     lines = jsonl_path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
     payload = json.loads(lines[0])
-    assert payload["outcome"] == "spec_failed"
+    assert payload["outcome"] == "exception"
 
 
 # ---------------------------------------------------------------------------
