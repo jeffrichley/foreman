@@ -501,3 +501,72 @@ def test_orchestrator_mint_called_again_when_token_near_expiry() -> None:
     assert first == "ghs_orch_old"
     assert second == "ghs_orch_new"
     assert mock_mint.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# foreman#215 — get_role_identity_env: GIT_AUTHOR_* / GIT_COMMITTER_* env vars
+# for LLM-driven git commits in role subprocesses. Format must match GitHub's
+# standard bot email convention so PRs/commits attribute to the right bot.
+# ---------------------------------------------------------------------------
+
+
+def test_get_role_identity_env_returns_four_git_env_vars() -> None:
+    """Happy path: returns a dict with exactly the four GIT_* env vars
+    git uses to attribute author + committer."""
+    with patch(
+        "foreman.identity.fetch_app_metadata",
+        return_value=_fake_app_metadata(app_id=444444, slug="foreman-worker"),
+    ):
+        reg = IdentityRegistry(_make_project())
+        env = reg.get_role_identity_env("worker")
+    assert set(env.keys()) == {
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+    }
+
+
+def test_get_role_identity_env_uses_standard_github_bot_email_format() -> None:
+    """Email must match GitHub's standard bot format
+    ``<app_id>+<slug>[bot]@users.noreply.github.com`` so commits attribute
+    correctly on github.com. A bad format would silently produce
+    "unverified" or unattributed commits in the UI even though git would
+    accept the address. Pins the format byte-for-byte."""
+    with patch(
+        "foreman.identity.fetch_app_metadata",
+        return_value=_fake_app_metadata(app_id=444444, slug="foreman-worker"),
+    ):
+        reg = IdentityRegistry(_make_project())
+        env = reg.get_role_identity_env("worker")
+    assert env["GIT_AUTHOR_NAME"] == "foreman-worker[bot]"
+    assert env["GIT_COMMITTER_NAME"] == "foreman-worker[bot]"
+    assert env["GIT_AUTHOR_EMAIL"] == "444444+foreman-worker[bot]@users.noreply.github.com"
+    assert env["GIT_COMMITTER_EMAIL"] == "444444+foreman-worker[bot]@users.noreply.github.com"
+
+
+def test_get_role_identity_env_author_and_committer_match() -> None:
+    """AUTHOR_* and COMMITTER_* identities must match. Foreman commits are
+    LLM-driven; a future refactor that returned distinct identities here
+    would break GitHub's bot-attribution UI (it shows "author committed
+    via committer" if they differ, which would look weird for a single-bot
+    flow)."""
+    with patch(
+        "foreman.identity.fetch_app_metadata",
+        return_value=_fake_app_metadata(app_id=777777, slug="foreman-fixer"),
+    ):
+        reg = IdentityRegistry(_make_project())
+        env = reg.get_role_identity_env("fixer")
+    assert env["GIT_AUTHOR_NAME"] == env["GIT_COMMITTER_NAME"]
+    assert env["GIT_AUTHOR_EMAIL"] == env["GIT_COMMITTER_EMAIL"]
+
+
+def test_get_role_identity_env_raises_on_unknown_role() -> None:
+    """Unknown role must surface the same ValueError that all other
+    role-dispatch methods raise — pins that the new method participates
+    in the existing role-validation contract."""
+    # No patches needed: ValueError fires inside _resolve_role_credentials
+    # before fetch_app_metadata gets called.
+    reg = IdentityRegistry(_make_project())
+    with pytest.raises(ValueError, match=r"Unknown role"):
+        reg.get_role_identity_env("not_a_real_role")
