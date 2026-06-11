@@ -13,9 +13,30 @@ This plan lives in the repo (not in an issue body) so we can iterate on it as th
 
 ---
 
-## The two cross-cutting lenses
+## Scope
 
-The phases below are organized chronologically, but every phase MUST be evaluated through these two lenses. If a phase's deliverable doesn't materially improve at least one, it's the wrong deliverable.
+**Whole-foreman.** The review and the lenses below apply to every module under `packages/foreman/src/foreman/`, not just the reconciler/rules engine that's been getting the most recent attention. Explicit scope:
+
+- `reconciler/` — rules, actions, exec_log, outcomes, dispatcher, observer, host wrappers
+- `roles/` — planner, reviewer, fixer, worker, and the shared role-runner helper
+- `providers/` — adapter, recovery chain, strategies, exceptions, the boundary contract
+- `provider.py` — facade ABC + legacy exception family
+- `daemon_runners.py` + `daemon.py` — process lifecycle, queue, locks, recovery
+- `cli.py` — entrypoints, the `_build_v3_gh_and_host` wiring site
+- `dispatch_recorder.py` — Phase 1 mediator, the dual-write path
+- `stats.py` — JSONL row shapes, per-role outcome Literals
+- `schemas/` — Pydantic models per role
+- `identity.py` + `auth.py` — App metadata, token minting, per-role clients
+- `git_hosts/` — GitHub provider, observer integrations
+- `worktree.py` — git-worktree lifecycle (the source of this morning's clone-staleness crash)
+- `config.py` + `init.py` — TOML loading, label constants, project config
+- `prompts/` — role prompt templates (Lens C cares here too — dead/stale prompt sections accumulate)
+
+Tests are in scope as well: dead test scaffolding, fixture drift, assertion mismatches with current production behavior all count.
+
+## The three cross-cutting lenses
+
+The phases below are organized chronologically, but every phase MUST be evaluated through these three lenses. If a phase's deliverable doesn't materially improve at least one, it's the wrong deliverable.
 
 ### Lens A — Operational stability
 *Will the autonomous loop survive the next class of failure we don't know about yet?*
@@ -49,20 +70,50 @@ Concrete checks per deliverable:
 
 A finding through Lens B doesn't automatically mean we MUST refactor — sometimes the bespoke shape is fine and adding a pattern just adds ceremony. But every deliverable that goes through this lens produces an explicit answer.
 
+### Lens C — Dead code + unused surface
+
+*Is every line earning its keep right now, or is it surviving because nobody noticed?*
+
+Dead code is its own failure mode: it lies to the reader, it hides bugs (the foreman#266 unreachable `SuccessAsErrorRecovery` shipped because the implementer KNEW it was unreachable and worked around it in tests — a textbook example), and it accumulates because removing things feels riskier than leaving them.
+
+Concrete categories to audit (the whole foreman tree, not just reconciler):
+
+- **Unused functions / classes / methods**: nothing imports them, nothing calls them. Use `vulture` or `ruff`'s unused-import + dead-code rules as a first pass; eyeball-confirm because dynamic imports + getattr can fool the tools.
+- **Unreachable code paths**: the foreman#266 `SuccessAsErrorRecovery` predicate-vs-early-return case is the canonical example. Look for branches whose preconditions contradict callers' invariants, defensive checks for conditions that can't occur, `except` arms catching exceptions never raised.
+- **YAGNI scaffolding**: classes/methods/parameters defined "for future use" with no current caller. `ProviderInvalidResultError` was a fresh example removed today. Re-add when the use case actually appears.
+- **Stale defensive code**: try/except arms catching errors that no longer happen because the bug was fixed elsewhere. Backwards-compat shims for migrations that completed months ago.
+- **Stale docstrings + comments**: references to closed issues, deleted modules, renamed functions. Comments describing behavior that's no longer true.
+- **Dead test fixtures / helpers**: setup code for tests that were deleted; mocks for classes that no longer exist; fixture parameters never consumed.
+- **Dead Literal/enum members**: foreman#256's `*_failed` outcomes were the canonical example. After foreman#258's typed enum lands, the equivalent check is "does every `Outcome` member appear in `outcomes_written_to_log` collected from the source tree?"
+- **Dead config knobs**: `ProjectConfig` / `OrchestratorConfig` fields never read; environment variables defined but never checked; CLI flags that route nowhere.
+- **Dead prompt sections**: `prompts/*.md` content that references behavior the role no longer performs. The role runners have evolved; the prompts may not have.
+- **Dead label states**: labels defined in `init.py` that no rule fires on and no role applies.
+- **Dead SQL columns**: migrations that added columns later abandoned but never dropped. `execution_log` has accumulated columns over multiple foreman# issues; some may be unused.
+- **Dead imports**: `ruff` catches the obvious ones; eyeball-confirm modules imported only for a side effect (`# noqa`) that no longer triggers.
+- **Commented-out code**: zero tolerance. Either it's live or it's deleted; "we'll come back to it" never happens.
+
+Lens C produces a separate deliverable per phase: a "dead surface inventory" with line numbers + provenance + suggested action (delete vs un-comment vs re-test the contract). Reviewer-on-impl prompt should grow a Lens C section: *"Look for branches the author claims handle a case the surrounding code can't reach. Look for defensive code for failure modes named in a closed ticket. If you find dead code, flag it; don't ignore it because 'it could be useful later'."*
+
 ---
 
 ## Phase 0 — Pre-review prep (this morning, before the session)
 
 **Goal:** show up with concrete evidence + straw-man positions, not blank-page.
 
-Deliverables:
-- [ ] Re-read `rules.py` / `actions.py` / `init.py` with both lenses
-- [ ] Audit last 30 days of merged PRs: tag each `feature` / `bandaid` / `structural fix` → quantify the pattern
-- [ ] **Lens B audit pass**: for each major module (`rules.py`, `actions.py`, role runners, exec_log.py), identify which GoF patterns ARE present, which would fit but aren't used, and which are missing entirely
-- [ ] Draft straw-man positions on each of foreman#269's six "Decision the review must produce" lines
-- [ ] Add this week's newly-discovered bugs to foreman#269's evidence section
+Deliverables (all three lenses, whole foreman tree):
 
-Output: this plan doc gets a "Phase 0 findings" section appended.
+- [ ] **Lens A — operational stability**: audit last 30 days of merged PRs, tag each `feature` / `bandaid` / `structural fix` → quantify the pattern. Catalog the failure modes each bandaid was added to defend against.
+- [ ] **Lens B — design quality**: whole-tree pattern audit. For each module under `packages/foreman/src/foreman/`, identify:
+  - Which GoF patterns ARE present (so we know the baseline vocabulary)
+  - Which would fit cleanly but aren't used (refactor candidates)
+  - Where code rolls its own version of something with a canonical pattern (Strategy / Adapter / Chain of Responsibility / Template Method / Observer / State / Command / Facade)
+  - Where Google principles are violated (multi-responsibility classes, wide interfaces, easy-thing-isn't-the-right-thing call sites, concrete dependencies that should be abstract)
+- [ ] **Lens C — dead code**: whole-tree dead-surface inventory. First pass `ruff check --select F401,F841` + `vulture packages/foreman` for the mechanical wins; eyeball-confirm pass for unreachable branches, YAGNI scaffolding, stale defensive code, dead Literal/enum members, dead config knobs, dead prompt sections, dead label states, dead SQL columns, dead test fixtures. Produce a CSV: `path:line | category | suggested action | provenance ticket`.
+- [ ] Re-read `rules.py` / `actions.py` / `init.py` / role runners / providers / daemon-runners with all three lenses simultaneously
+- [ ] Draft straw-man positions on each of foreman#269's six "Decision the review must produce" lines
+- [ ] Add this week's newly-discovered bugs to foreman#269's evidence section (already done for some — finish the rest)
+
+Output: this plan doc gets a "Phase 0 findings" section appended with summary tables per lens.
 
 ## Phase 1 — Architecture review session (today)
 
@@ -138,6 +189,8 @@ Rituals:
 - **Recurring architecture review** on a cadence (monthly? quarterly?) — driven by THIS doc updated with running findings
 - "Bandaid-pattern alarm" — a check that surfaces when N defenses stack against the same failure shape
 - **Lens B as a continuous discipline**: every PR description includes one line — "GoF/principles considered: ___ — no pattern applies because ___" OR "applies X pattern; here's why"
+- **Lens C as a continuous discipline**: every PR description includes one line — "Dead code added or removed: ___". Net-positive dead code is a code smell. Net-negative dead code is a feature.
+- **Quarterly dead-code sweep**: rerun `ruff` + `vulture` + the eyeball-confirm pass on the whole tree. The deltas tell us whether the per-PR discipline is holding or whether we're accumulating again.
 
 ## Gates between phases
 
