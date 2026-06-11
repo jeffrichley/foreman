@@ -963,9 +963,22 @@ def test_dispatch_reviewer_spec_blocked_after_3_completed_attempts(tmp_path: Pat
     assert evaluate(ctx, rules=RULES) is Action.RATE_LIMIT_TRIP
 
 
-def test_dispatch_reviewer_spec_still_fires_under_budget(tmp_path: Path) -> None:
-    """2 completed Reviewer-spec attempts is under the cap of 3 — the rule
-    must still fire on a tick with no in-flight dispatch."""
+def test_dispatch_reviewer_spec_fires_when_some_completed_attempts_have_errored(
+    tmp_path: Path,
+) -> None:
+    """2 completed Reviewer-spec error attempts (none in-flight) → the
+    forward-progress rule still fires DISPATCH_REVIEWER_SPEC.
+
+    Renamed from ``..._still_fires_under_budget`` for issue #268: after
+    the dispatch-side count gate at the old line 365 was removed, there
+    is no per-ticket dispatch-side budget cap to be "under" — dispatch
+    is gated solely on label state + PR shape + no-in-flight Reviewer.
+    The property still asserted: a tick with no in-flight dispatch and
+    a small number of completed errors continues to drive Reviewer
+    dispatch (the rate-limit at precedence 44 stays silent at 2 < N=3
+    consecutive failures, the new outcome-aware exhaustion at 65 stays
+    silent at 0 < N=3 needs_fix verdicts).
+    """
     from foreman.reconciler.rules import RULES
 
     ctx = _ctx_with(
@@ -1008,6 +1021,247 @@ def test_dispatch_reviewer_impl_blocked_after_3_completed_attempts(tmp_path: Pat
         )
         ctx.log.terminate_action(parent_log_id=start_id, outcome="error", details={})
     assert evaluate(ctx, rules=RULES) is Action.RATE_LIMIT_TRIP
+
+
+# ---------------------------------------------------------------------------
+# foreman#268 — Reviewer budget cap moved AFTER the review, counts
+# needs_fix verdicts only. The dispatch-side count gate is removed; the
+# attempts-exhausted safety rule filters terminations by
+# ``outcome="needs_fix"``. Tests below cover both the predicate change
+# (direct calls) and the dispatch-gate decoupling (via ``evaluate``).
+# ---------------------------------------------------------------------------
+
+
+def _write_reviewer_termination(
+    ctx: ActionContext, *, action: str, outcome: str
+) -> None:
+    """Test helper: write one start row + terminate it with the given outcome.
+
+    Matches the dispatch-recorder shape that ``_reviewer_*_attempts_exhausted``
+    reads via ``count_completed(action, ticket_id, outcome=…)``.
+    """
+    start_id = ctx.log.write_action(
+        ticket_id=ctx.ticket_id,
+        project="foreman",
+        rule_name=action,
+        action=action,
+        outcome="running",
+        details={},
+    )
+    ctx.log.terminate_action(parent_log_id=start_id, outcome=outcome, details={})
+
+
+# --- Spec-side ---
+
+
+def test_reviewer_spec_attempts_exhausted_fires_only_on_three_needs_fix_verdicts(
+    tmp_path: Path,
+) -> None:
+    """Three completed ``dispatch_reviewer_spec`` rows with
+    ``outcome="needs_fix"`` → ``_reviewer_spec_attempts_exhausted`` is
+    True. Behavior-locking test for the AC-named property: the cap
+    fires AFTER the Reviewer has said "try again" 3 times, not on raw
+    dispatch count. Direct predicate call (not ``evaluate``) because
+    going through evaluate on a bare 3-needs_fix fixture would trip the
+    rate-limit at precedence 44 first (``needs_fix`` is not in
+    ``_NON_FAILURE_OUTCOMES``).
+    """
+    from foreman.reconciler.rules import _reviewer_spec_attempts_exhausted
+
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:planning",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
+    )
+    for _ in range(3):
+        _write_reviewer_termination(
+            ctx, action="dispatch_reviewer_spec", outcome="needs_fix"
+        )
+    assert _reviewer_spec_attempts_exhausted(ctx) is True
+
+
+def test_reviewer_spec_attempts_exhausted_does_not_fire_on_3_error_terminations(
+    tmp_path: Path,
+) -> None:
+    """Genuine RED test for the new outcome filter: three completed
+    ``dispatch_reviewer_spec`` rows with ``outcome="error"`` (no
+    needs_fix verdicts at all) → predicate is False.
+
+    Pre-fix: predicate uses unfiltered ``count_completed`` → 3 >= 3 →
+    True (the test goes red). Post-fix: predicate uses
+    ``count_completed(outcome="needs_fix") == 0 < 3 → False`` (green).
+    Errors are handled by the rate-limit (precedence 44), not by the
+    exhaustion rule (precedence 65). Direct predicate call because
+    ``evaluate`` on this fixture returns ``RATE_LIMIT_TRIP`` first
+    (already locked by the test at
+    ``test_dispatch_reviewer_spec_blocked_after_3_completed_attempts``).
+    """
+    from foreman.reconciler.rules import _reviewer_spec_attempts_exhausted
+
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:planning",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
+    )
+    for _ in range(3):
+        _write_reviewer_termination(
+            ctx, action="dispatch_reviewer_spec", outcome="error"
+        )
+    assert _reviewer_spec_attempts_exhausted(ctx) is False
+
+
+def test_reviewer_spec_attempts_exhausted_does_not_fire_when_one_clean_verdict_present(
+    tmp_path: Path,
+) -> None:
+    """Mixed outcome sequence ``[needs_fix, needs_fix, clean]`` —
+    only 2 needs_fix verdicts → predicate is False.
+
+    Pre-fix: ``count_completed == 3 >= 3`` → True (the test goes red).
+    Post-fix: ``count_completed(outcome="needs_fix") == 2 < 3`` →
+    False (green). Direct predicate call avoids tangling the assertion
+    with the rate-limit on this shape (no success row → no fence
+    advance, and "clean" is not in ``_NON_FAILURE_OUTCOMES``, so all 3
+    rows would read as failures for the rate-limit's purpose).
+    """
+    from foreman.reconciler.rules import _reviewer_spec_attempts_exhausted
+
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:planning",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
+    )
+    for outcome in ("needs_fix", "needs_fix", "clean"):
+        _write_reviewer_termination(
+            ctx, action="dispatch_reviewer_spec", outcome=outcome
+        )
+    assert _reviewer_spec_attempts_exhausted(ctx) is False
+
+
+def test_dispatch_reviewer_spec_fires_after_many_completed_dispatches_with_no_needs_fix_streak(
+    tmp_path: Path,
+) -> None:
+    """Dispatch gate is no longer gated on total completion count.
+    Five completed dispatches with outcomes
+    ``[needs_fix, success, needs_fix, success, success]`` — 2
+    needs_fix, 3 success → exhaustion (needs_fix-aware) silent, rate-
+    limit silent (latest success advances ``fence_ts`` past every
+    failure), no in-flight dispatch → the forward-progress rule
+    ``_planning_pr_needs_review`` fires DISPATCH_REVIEWER_SPEC.
+
+    Pre-fix: the line-365 count gate sees ``count_completed == 5 >= 3``
+    → predicate False → ``_reviewer_spec_attempts_exhausted`` (also
+    unfiltered: ``5 >= 3``) fires SURFACE_HELP instead (red — the
+    asserted action is DISPATCH_REVIEWER_SPEC, not SURFACE_HELP).
+    Post-fix: count gate removed; exhaustion needs_fix-aware so it
+    sees ``2 < 3`` and stays silent → forward-progress rule wins.
+    """
+    from foreman.reconciler.rules import RULES
+
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:planning",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS"),
+    )
+    for outcome in ("needs_fix", "success", "needs_fix", "success", "success"):
+        _write_reviewer_termination(
+            ctx, action="dispatch_reviewer_spec", outcome=outcome
+        )
+    assert evaluate(ctx, rules=RULES) is Action.DISPATCH_REVIEWER_SPEC
+
+
+# --- Impl-side (symmetric to the four spec-side tests above) ---
+
+
+def test_reviewer_impl_attempts_exhausted_fires_only_on_three_needs_fix_verdicts(
+    tmp_path: Path,
+) -> None:
+    """Symmetric to the spec-side AC-named test: three completed
+    ``dispatch_reviewer_impl`` rows with ``outcome="needs_fix"`` →
+    ``_reviewer_impl_attempts_exhausted`` is True. Direct predicate
+    call (the rate-limit at precedence 45 would otherwise preempt
+    a bare 3-needs_fix fixture put through ``evaluate``).
+    """
+    from foreman.reconciler.rules import _reviewer_impl_attempts_exhausted
+
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-review",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143"),
+    )
+    for _ in range(3):
+        _write_reviewer_termination(
+            ctx, action="dispatch_reviewer_impl", outcome="needs_fix"
+        )
+    assert _reviewer_impl_attempts_exhausted(ctx) is True
+
+
+def test_reviewer_impl_attempts_exhausted_does_not_fire_on_3_error_terminations(
+    tmp_path: Path,
+) -> None:
+    """Symmetric genuine RED for the impl-side outcome filter: three
+    completed ``dispatch_reviewer_impl`` rows with ``outcome="error"``
+    → predicate is False after the fix (was True pre-fix). Errors are
+    rate-limit's concern (precedence 45), not exhaustion's (70).
+    """
+    from foreman.reconciler.rules import _reviewer_impl_attempts_exhausted
+
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-review",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143"),
+    )
+    for _ in range(3):
+        _write_reviewer_termination(
+            ctx, action="dispatch_reviewer_impl", outcome="error"
+        )
+    assert _reviewer_impl_attempts_exhausted(ctx) is False
+
+
+def test_reviewer_impl_attempts_exhausted_does_not_fire_when_one_clean_verdict_present(
+    tmp_path: Path,
+) -> None:
+    """Mixed ``[needs_fix, needs_fix, clean]`` — only 2 needs_fix verdicts
+    → predicate is False post-fix. Symmetric to the spec-side test.
+    """
+    from foreman.reconciler.rules import _reviewer_impl_attempts_exhausted
+
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-review",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143"),
+    )
+    for outcome in ("needs_fix", "needs_fix", "clean"):
+        _write_reviewer_termination(
+            ctx, action="dispatch_reviewer_impl", outcome=outcome
+        )
+    assert _reviewer_impl_attempts_exhausted(ctx) is False
+
+
+def test_dispatch_reviewer_impl_fires_after_many_completed_dispatches_with_no_needs_fix_streak(
+    tmp_path: Path,
+) -> None:
+    """Symmetric impl-side dispatch-gate decoupling test: five completed
+    ``dispatch_reviewer_impl`` rows with outcomes
+    ``[needs_fix, success, needs_fix, success, success]`` → exhaustion
+    silent, rate-limit silent, no in-flight dispatch → forward-progress
+    rule ``_impl_review_green`` fires DISPATCH_REVIEWER_IMPL.
+
+    Pre-fix: line-453 count gate (``5 >= 3``) blocks dispatch and
+    exhaustion fires SURFACE_HELP. Post-fix: count gate gone,
+    needs_fix-aware exhaustion silent (``2 < 3``) → DISPATCH_REVIEWER_IMPL.
+    """
+    from foreman.reconciler.rules import RULES
+
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-review",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143"),
+    )
+    for outcome in ("needs_fix", "success", "needs_fix", "success", "success"):
+        _write_reviewer_termination(
+            ctx, action="dispatch_reviewer_impl", outcome=outcome
+        )
+    assert evaluate(ctx, rules=RULES) is Action.DISPATCH_REVIEWER_IMPL
 
 
 # ---------------------------------------------------------------------------
