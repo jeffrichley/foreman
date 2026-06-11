@@ -63,6 +63,7 @@ from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
+from foreman.providers import ProviderError
 from foreman.roles import TERMINAL_BLOCKING_LABEL, handle_unhandled_role_exception
 from foreman.roles.reviewer import FINDINGS_BEGIN_MARKER, FINDINGS_END_MARKER
 from foreman.schemas.fixer import FixerOutput, FixerRunResult
@@ -132,6 +133,7 @@ class _FixerPreflightRefusal(RuntimeError):
     Firing the helper would override operator intent.
     """
 
+
 _FIXER_SUPERPOWERS_BY_TARGET: dict[str, list[str]] = {
     # Spec-side: today's discipline — receiving review feedback.
     "spec_pr": ["receiving-code-review"],
@@ -189,9 +191,7 @@ def _load_fixer_prompt(target: Literal["spec_pr", "impl_pr"] = "spec_pr") -> str
     """
     from foreman.prompts import compose_role_prompt
 
-    superpowers = _FIXER_SUPERPOWERS_BY_TARGET.get(
-        target, _FIXER_SUPERPOWERS_BY_TARGET["spec_pr"]
-    )
+    superpowers = _FIXER_SUPERPOWERS_BY_TARGET.get(target, _FIXER_SUPERPOWERS_BY_TARGET["spec_pr"])
     safe_target = target if target in _FIXER_SUPERPOWERS_BY_TARGET else "spec_pr"
     return compose_role_prompt(
         role="fixer",
@@ -470,9 +470,7 @@ async def run_fixer(
                 f"{project_name!r} configured repo {expected_repo_slug!r}"
             )
 
-        registry = (
-            identity_registry if identity_registry is not None else IdentityRegistry(project)
-        )
+        registry = identity_registry if identity_registry is not None else IdentityRegistry(project)
         fixer_client: Github = registry.get_fixer_client()
         fixer_token: str = registry.get_fixer_token()
 
@@ -488,9 +486,7 @@ async def run_fixer(
                 issue_number=_setup_issue_number,
                 exc=exc,
                 post_comment=lambda body: bound_issue.create_comment(body),
-                set_needs_help_label=lambda: bound_issue.add_to_labels(
-                    TERMINAL_BLOCKING_LABEL
-                ),
+                set_needs_help_label=lambda: bound_issue.add_to_labels(TERMINAL_BLOCKING_LABEL),
             )
         raise
 
@@ -549,6 +545,84 @@ async def run_fixer(
     start_time = time.monotonic()
     usage: UsageInfo | None = None
     pr_number: int | None = None
+
+    def _on_failure(exc: BaseException) -> None:
+        """Shared cleanup body for ``ProviderError`` + ``Exception``
+        arms (foreman#266 — type-narrowing split). Closes over
+        ``start_time`` / ``usage`` / ``pr_number`` /
+        ``actual_repo_slug`` / ``issue_number`` / ``attempt`` /
+        ``project_name`` / ``dispatch_recorder`` /
+        ``dispatch_trace_id`` / ``issue``. The bare ``raise`` that
+        re-propagates the original exception lives in each ``except``
+        arm after calling this helper.
+        """
+        # foreman#239 + foreman#229: capture cost telemetry AND defend
+        # against the runaway-burn pattern.
+        duration_seconds = time.monotonic() - start_time
+        try:
+            log_fixer_run(
+                repo_slug=actual_repo_slug,
+                issue_number=issue_number,
+                pr_number=pr_number,
+                attempt=attempt,
+                outcome="exception",
+                total_findings=0,
+                addressed_count=0,
+                unaddressed_count=0,
+                unaddressed_by_reason={},
+                disagreed_count=0,
+                confidence="low",
+                duration_seconds=duration_seconds,
+                input_tokens=usage.input_tokens if usage is not None else 0,
+                output_tokens=usage.output_tokens if usage is not None else 0,
+                cache_creation_input_tokens=(
+                    usage.cache_creation_input_tokens if usage is not None else 0
+                ),
+                cache_read_input_tokens=(usage.cache_read_input_tokens if usage is not None else 0),
+                total_cost_usd=usage.total_cost_usd if usage is not None else None,
+                model_usage=usage.model_usage if usage is not None else None,
+                duration_ms=usage.duration_ms if usage is not None else 0,
+                num_turns=usage.num_turns if usage is not None else 0,
+            )
+        except Exception:
+            # Best-effort telemetry — swallow so the daemon dispatcher
+            # sees the ORIGINAL exception, not the stats writer's.
+            pass
+        # foreman#251 (Phase 1): mirror the failure-path dual-write.
+        emit_recorder_complete(
+            dispatch_recorder=dispatch_recorder,
+            dispatch_trace_id=dispatch_trace_id,
+            role="fixer",
+            repo_slug=actual_repo_slug,
+            ticket_id=f"{actual_repo_slug}#{issue_number}",
+            project=project_name,
+            issue_number=issue_number,
+            pr_number=pr_number,
+            outcome="exception",
+            usage=usage if usage is not None else UsageInfo(),
+            role_data={
+                "attempt": attempt,
+                "total_findings": 0,
+                "addressed_count": 0,
+                "unaddressed_count": 0,
+                "unaddressed_by_reason": {},
+                "disagreed_count": 0,
+                "confidence": "low",
+            },
+            duration_seconds=duration_seconds,
+        )
+        # foreman#229: runaway-burn defense. Post the traceback as a
+        # comment on the originating issue and transition it to
+        # ``foreman:needs-help`` so the dispatcher's poll loop stops
+        # re-dispatching.
+        handle_unhandled_role_exception(
+            role="fixer",
+            issue_number=issue_number,
+            exc=exc,
+            post_comment=lambda body: issue.create_comment(body),
+            set_needs_help_label=lambda: issue.add_to_labels(TERMINAL_BLOCKING_LABEL),
+        )
+
     try:
         # Resolve the spec PR from the issue's branch convention.
         branch = spec_branch(issue_number)
@@ -672,10 +746,7 @@ async def run_fixer(
                 added_foreman.add(_LABEL_PLANNING)
             all_known_labels = issue_labels | {attempt_label}
             for label_name in all_known_labels:
-                if (
-                    label_name.startswith("foreman:fix-attempt-")
-                    or label_name == _LABEL_NEEDS_HELP
-                ):
+                if label_name.startswith("foreman:fix-attempt-") or label_name == _LABEL_NEEDS_HELP:
                     current_labels.discard(label_name)
         else:
             # incomplete: keep spec-fix so the human (or a later daemon
@@ -782,108 +853,15 @@ async def run_fixer(
             attempt=attempt,
             final_labels=sorted(current_labels),
         )
+    except ProviderError as exc:
+        # foreman#266: typed catch for the documented provider-boundary
+        # failure mode. Same body as the ``except Exception`` arm
+        # below — structural (type narrowing + boundary documentation),
+        # not semantic.
+        _on_failure(exc)
+        raise
     except Exception as exc:
-        # foreman#239 + foreman#229: capture cost telemetry AND defend
-        # against the runaway-burn pattern.
-        #
-        # Pre-#239 any exception from worktree.attach / _find_spec_pr /
-        # _latest_reviewer_review_comment / provider.run_agent /
-        # pr.create_issue_comment / issue.update / issue.set_labels
-        # propagated straight up and the JSONL row was never written —
-        # failed runs vanished from ``fixer.jsonl`` and cross-role
-        # cost rollups under-counted by exactly the failure rate.
-        #
-        # Pre-#229 the issue's in-flight label (``foreman:spec-fix``
-        # or ``foreman:impl-fix``) was NOT transitioned on exception.
-        # The dispatcher's next poll then re-dispatched the SAME role
-        # on the SAME ticket — runaway burn. The defensive
-        # ``handle_unhandled_role_exception`` call below transitions
-        # the issue to ``foreman:needs-help``.
-        #
-        # Partial state captured so far:
-        #   - ``usage`` is set iff ``provider.run_agent`` returned
-        #     successfully (input/output tokens, cost, model usage).
-        #   - ``pr_number`` is set iff ``_find_spec_pr`` returned
-        #     (the PR was resolved before the failure).
-        # Role-specific fields use safe defaults (per the spec): no
-        # FixerOutput was consumed so finding counts are ``0``,
-        # histograms empty, confidence ``"low"``.
-        # ``raise`` (bare) re-propagates the original exception
-        # unchanged: the daemon dispatcher's error handling must NOT
-        # be altered. The stats write is fire-and-forget telemetry,
-        # not a control-flow gate — wrapped in its own try/except so a
-        # disk-full or permissions failure during the log write cannot
-        # mask the original Fixer exception. A stats-write failure
-        # here is strictly less bad than the original failure being
-        # silently replaced. Mirrors foreman#235 / PR #236.
-        duration_seconds = time.monotonic() - start_time
-        try:
-            log_fixer_run(
-                repo_slug=actual_repo_slug,
-                issue_number=issue_number,
-                pr_number=pr_number,
-                attempt=attempt,
-                outcome="exception",
-                total_findings=0,
-                addressed_count=0,
-                unaddressed_count=0,
-                unaddressed_by_reason={},
-                disagreed_count=0,
-                confidence="low",
-                duration_seconds=duration_seconds,
-                input_tokens=usage.input_tokens if usage is not None else 0,
-                output_tokens=usage.output_tokens if usage is not None else 0,
-                cache_creation_input_tokens=(
-                    usage.cache_creation_input_tokens if usage is not None else 0
-                ),
-                cache_read_input_tokens=(
-                    usage.cache_read_input_tokens if usage is not None else 0
-                ),
-                total_cost_usd=usage.total_cost_usd if usage is not None else None,
-                model_usage=usage.model_usage if usage is not None else None,
-                duration_ms=usage.duration_ms if usage is not None else 0,
-                num_turns=usage.num_turns if usage is not None else 0,
-            )
-        except Exception:
-            # Best-effort telemetry — swallow and continue to the
-            # bare ``raise`` so the daemon dispatcher sees the
-            # ORIGINAL exception, not whatever the stats writer
-            # raised. Surfacing the stats failure here would mask
-            # the actual Fixer failure that triggered this branch.
-            pass
-        # foreman#251 (Phase 1): mirror the failure-path dual-write.
-        emit_recorder_complete(
-            dispatch_recorder=dispatch_recorder,
-            dispatch_trace_id=dispatch_trace_id,
-            role="fixer",
-            repo_slug=actual_repo_slug,
-            ticket_id=f"{actual_repo_slug}#{issue_number}",
-            project=project_name,
-            issue_number=issue_number,
-            pr_number=pr_number,
-            outcome="exception",
-            usage=usage if usage is not None else UsageInfo(),
-            role_data={
-                "attempt": attempt,
-                "total_findings": 0,
-                "addressed_count": 0,
-                "unaddressed_count": 0,
-                "unaddressed_by_reason": {},
-                "disagreed_count": 0,
-                "confidence": "low",
-            },
-            duration_seconds=duration_seconds,
-        )
-        # foreman#229: runaway-burn defense. Post the traceback as a
-        # comment on the originating issue (the ticket that's stuck
-        # in ``foreman:spec-fix`` / ``foreman:impl-fix``) and
-        # transition it to ``foreman:needs-help`` so the dispatcher's
-        # poll loop stops re-dispatching.
-        handle_unhandled_role_exception(
-            role="fixer",
-            issue_number=issue_number,
-            exc=exc,
-            post_comment=lambda body: issue.create_comment(body),
-            set_needs_help_label=lambda: issue.add_to_labels(TERMINAL_BLOCKING_LABEL),
-        )
+        # PR #255 commit 2 defensive handler — belt-and-suspenders for
+        # non-provider failures (worktree ops, host I/O, GitHub 5xx).
+        _on_failure(exc)
         raise
