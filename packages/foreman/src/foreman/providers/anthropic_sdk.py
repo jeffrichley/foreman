@@ -19,6 +19,7 @@ that. See foreman#50 + claude-agent-sdk #501.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 import uuid
@@ -37,6 +38,13 @@ from foreman.provider import (
     StructuredOutputRetryError,
     UsageInfo,
 )
+from foreman.providers._usage import build_usage_info as _build_usage_info
+from foreman.providers.exceptions import (
+    ProviderError,
+    ProviderTimeoutError,
+    ProviderUnknownError,
+)
+from foreman.providers.recovery import PartialResult, RecoveryChain
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -82,6 +90,7 @@ def _maybe_refresh_container_creds() -> bool:
     _CLAUDE_CREDS_LOCAL_DST.chmod(0o600)
     return True
 
+
 # Foreman-owned cache of role system prompts. Lives next to the other
 # foreman runtime dirs (``worktrees/``, ``keys/``, ``stats/``) so a
 # leaked file (daemon crash mid-query) is discoverable in a predictable
@@ -113,8 +122,52 @@ def _system_prompt_file(prompt: str, *, hint: str) -> Iterator[Path]:
             pass
 
 
+def _translate_sdk_exception(exc: BaseException) -> ProviderError:
+    """Translate an SDK-level exception into the corresponding domain
+    :class:`ProviderError` subclass.
+
+    foreman#266: the boundary between the SDK and the rest of foreman
+    lives here. Role runners catch the ``ProviderError`` family; SDK
+    types do not leak past this function.
+
+    Mapping:
+
+    * Message starts with :data:`_SDK_AUTH_ERROR_PREFIX` →
+      :class:`ProviderAuthError` (the foreman#227 auth-failure shape).
+    * :class:`asyncio.TimeoutError` (or any subclass) →
+      :class:`ProviderTimeoutError`.
+    * Anything else → :class:`ProviderUnknownError(str(exc))`.
+
+    The caller re-raises the returned exception via
+    ``raise translated from exc`` so the original SDK exception is
+    preserved as ``__cause__``.
+    """
+    if isinstance(exc, asyncio.TimeoutError):
+        return ProviderTimeoutError(str(exc) or "provider transport timed out")
+    if isinstance(exc, Exception) and str(exc).startswith(_SDK_AUTH_ERROR_PREFIX):
+        return ProviderAuthError(str(exc))
+    return ProviderUnknownError(str(exc))
+
+
 class AnthropicSDKProvider(ProviderFacade):
-    """ProviderFacade implementation backed by the Anthropic Agent SDK."""
+    """ProviderFacade implementation backed by the Anthropic Agent SDK.
+
+    foreman#266: accepts a :class:`RecoveryChain` of strategies that
+    inspect SDK-level exceptions before the auth-retry guard fires. A
+    strategy that ``can_recover`` short-circuits the exception path
+    with a normal ``(validated_output, usage)`` return; unrecovered
+    exceptions fall through to the existing auth-retry branch and
+    then the translator.
+
+    The constructor's ``recovery`` argument defaults to an empty chain
+    so existing test fixtures that instantiate ``AnthropicSDKProvider()``
+    directly continue to work. The production factory
+    :func:`foreman.providers.make_provider` constructs the deployed
+    chain with the registered strategies.
+    """
+
+    def __init__(self, recovery: RecoveryChain | None = None) -> None:
+        self._recovery = recovery if recovery is not None else RecoveryChain([])
 
     async def run_agent(
         self,
@@ -142,6 +195,19 @@ class AnthropicSDKProvider(ProviderFacade):
                 options_kwargs["env"] = env
             options = ClaudeAgentOptions(**options_kwargs)
 
+            # foreman#266: the per-call ``PartialResult`` accumulates
+            # mid-iteration state (most recent ResultMessage observed)
+            # so the recovery chain has something to inspect when the
+            # SDK raises a known bug shape after yielding a logically
+            # successful result. The same object flows through both
+            # ``_iterate_query`` invocations; the second iteration is
+            # not expected to fire recovery (the first one consumed
+            # the stream), but it's wired uniformly so the boundary
+            # discipline is the same on both paths.
+            partial: PartialResult[T] = PartialResult(
+                result_message=None, output_model=output_model
+            )
+
             # foreman#227 (2026-06-08): wrap the SDK iteration in a
             # one-shot retry guarded on auth failure. When the
             # container's local credentials file goes stale (the
@@ -152,26 +218,64 @@ class AnthropicSDKProvider(ProviderFacade):
             # the live Compose secret + one retry before surfacing as
             # ``ProviderAuthError``. Non-auth exceptions propagate
             # unchanged.
+            #
+            # foreman#266: the recovery chain runs FIRST so the
+            # foreman#230 ``Exception("success")`` shape gets a proper
+            # recovery before the auth-retry branch even considers
+            # re-running the query. The two defenses target different
+            # bug shapes (foreman#230 is bare ``Exception("success")``
+            # with a valid ResultMessage already captured; foreman#227
+            # is ``Exception("Claude Code returned an error result:
+            # ...")`` with no recoverable payload) — they do not
+            # overlap in practice. Translation runs LAST so any
+            # surviving SDK exception surfaces as a typed ProviderError
+            # at the boundary.
             try:
                 return await self._iterate_query(
-                    user_prompt=user_prompt, options=options, output_model=output_model
+                    user_prompt=user_prompt,
+                    options=options,
+                    output_model=output_model,
+                    partial=partial,
                 )
+            except ProviderError:
+                # Already a typed domain error (raised by
+                # ``_iterate_query`` itself — e.g.
+                # :class:`StructuredOutputRetryError`). Propagate
+                # unchanged; do NOT re-translate, do NOT attempt
+                # recovery (recovery is for SDK bug shapes, not for
+                # explicit foreman-raised typed errors).
+                raise
             except Exception as e:
+                recovered = self._recovery.try_recover(e, partial)
+                if recovered is not None:
+                    return recovered
                 if not str(e).startswith(_SDK_AUTH_ERROR_PREFIX):
-                    raise
+                    raise _translate_sdk_exception(e) from e
                 refreshed = _maybe_refresh_container_creds()
                 log.warning(
                     "Caught SDK auth-error pattern (%r); refreshed=%s; retrying once",
                     str(e),
                     refreshed,
                 )
+                # Reset the partial so the second iteration's recovery
+                # check sees fresh mid-stream state.
+                partial = PartialResult(result_message=None, output_model=output_model)
                 try:
                     return await self._iterate_query(
                         user_prompt=user_prompt,
                         options=options,
                         output_model=output_model,
+                        partial=partial,
                     )
+                except ProviderError:
+                    # Same rationale as the outer ``except ProviderError``
+                    # — a typed foreman error coming out of the second
+                    # iteration is already classified; don't re-wrap.
+                    raise
                 except Exception as retry_exc:
+                    recovered = self._recovery.try_recover(retry_exc, partial)
+                    if recovered is not None:
+                        return recovered
                     if str(retry_exc).startswith(_SDK_AUTH_ERROR_PREFIX):
                         raise ProviderAuthError(
                             "Anthropic Agent SDK failed authentication twice "
@@ -180,7 +284,7 @@ class AnthropicSDKProvider(ProviderFacade):
                             "also stale on the host side. Original error: "
                             f"{retry_exc!r}"
                         ) from retry_exc
-                    raise
+                    raise _translate_sdk_exception(retry_exc) from retry_exc
 
     async def _iterate_query(
         self,
@@ -188,12 +292,18 @@ class AnthropicSDKProvider(ProviderFacade):
         user_prompt: str,
         options: ClaudeAgentOptions,
         output_model: type[T],
+        partial: PartialResult[T],
     ) -> tuple[T, UsageInfo]:
         """Iterate the SDK query stream and validate the structured output.
 
         Split out from ``run_agent`` so the auth-retry wrapper can call it
         twice. Caller is responsible for the ``ClaudeAgentOptions``
         construction + the system-prompt-file lifecycle.
+
+        foreman#266: the caller-owned ``partial`` accumulator is
+        updated as ``ResultMessage`` envelopes are seen — the recovery
+        chain reads it from ``run_agent``'s exception handler when the
+        SDK raises a known bug shape mid-stream.
 
         Returns ``(validated_output, usage_info)`` where ``usage_info``
         is reconstructed from the same ``ResultMessage`` that carried
@@ -202,6 +312,10 @@ class AnthropicSDKProvider(ProviderFacade):
         async for message in query(prompt=user_prompt, options=options):
             if not isinstance(message, ResultMessage):
                 continue
+            # foreman#266: capture the most recent ResultMessage so
+            # the recovery chain has something to inspect if the SDK
+            # later raises ``Exception("success")``.
+            partial.result_message = message
             # SDK subtype taxonomy (verified against
             # claude_agent_sdk types.ResultMessage — `subtype: str`):
             #   "success" + structured_output → validated instance
@@ -222,40 +336,3 @@ class AnthropicSDKProvider(ProviderFacade):
             "Anthropic Agent SDK did not return a successful ResultMessage "
             f"carrying structured_output for {output_model.__name__}"
         )
-
-
-def _build_usage_info(message: ResultMessage) -> UsageInfo:
-    """Construct a :class:`UsageInfo` from a successful ``ResultMessage``.
-
-    foreman#227: the SDK's ``ResultMessage.usage`` is a free-form
-    ``dict[str, Any] | None`` carrying the Anthropic API's usage shape
-    (``input_tokens`` / ``output_tokens`` / cache-related counters).
-    We read the fields we care about with ``.get(..., 0)`` defaults
-    so a partial / unexpected SDK shape doesn't crash the role runner —
-    losing one stats field is strictly better than losing the whole
-    run. Same defensiveness for the wall-clock counters at the
-    envelope level: they're typed ``int`` on the dataclass but absent
-    in some degenerate ``is_error=True`` paths.
-
-    foreman#244: also extract ``cache_creation_input_tokens`` and
-    ``cache_read_input_tokens`` — the Anthropic API charges these at
-    25% and 10% of the regular input rate respectively. They're
-    absent on the first turn of a fresh agent loop and on older API
-    versions; the ``.get(..., 0)`` default keeps the no-cache path
-    clean. Without these, JSONL per-token columns drift from the
-    SDK-computed cost (cost stays right; tokens undercounted).
-    """
-    usage_dict = message.usage or {}
-    return UsageInfo(
-        input_tokens=int(usage_dict.get("input_tokens", 0) or 0),
-        output_tokens=int(usage_dict.get("output_tokens", 0) or 0),
-        cache_creation_input_tokens=int(
-            usage_dict.get("cache_creation_input_tokens", 0) or 0
-        ),
-        cache_read_input_tokens=int(usage_dict.get("cache_read_input_tokens", 0) or 0),
-        total_cost_usd=message.total_cost_usd,
-        model_usage=message.model_usage,
-        duration_ms=int(message.duration_ms or 0),
-        duration_api_ms=int(message.duration_api_ms or 0),
-        num_turns=int(message.num_turns or 0),
-    )

@@ -87,6 +87,7 @@ from foreman.git_host import GitHostProvider
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
+from foreman.providers import ProviderError
 from foreman.roles import TERMINAL_BLOCKING_LABEL, handle_unhandled_role_exception
 from foreman.schemas.worker import WorkerOutput, WorkerRunResult
 from foreman.stats import log_worker_run
@@ -130,6 +131,8 @@ class _WorkerPreflightRefusal(RuntimeError):
     surface) — NOT a runaway signal. Firing the helper would override
     operator intent by re-adding ``foreman:needs-help``.
     """
+
+
 _LABEL_IMPL_REVIEW = "foreman:impl-review"
 _LABEL_SPEC_FIX = "foreman:spec-fix"
 _LABEL_NEEDS_HELP = "foreman:needs-help"
@@ -340,11 +343,7 @@ def _is_invalid_base_422(exc: GithubException) -> bool:
     data = exc.data if isinstance(exc.data, dict) else {}
     errors = data.get("errors") or []
     for err in errors:
-        if (
-            isinstance(err, dict)
-            and err.get("field") == "base"
-            and err.get("code") == "invalid"
-        ):
+        if isinstance(err, dict) and err.get("field") == "base" and err.get("code") == "invalid":
             return True
     return False
 
@@ -662,9 +661,7 @@ async def run_worker(
                 f"{project_name!r} configured repo {expected_repo_slug!r}"
             )
 
-        registry = (
-            identity_registry if identity_registry is not None else IdentityRegistry(project)
-        )
+        registry = identity_registry if identity_registry is not None else IdentityRegistry(project)
         worker_client: Github = registry.get_worker_client()
         worker_token: str = registry.get_worker_token()
         # foreman#222: acquire the authenticated GitHostProvider so we can
@@ -689,9 +686,7 @@ async def run_worker(
                 issue_number=_setup_issue_number,
                 exc=exc,
                 post_comment=lambda body: bound_issue.create_comment(body),
-                set_needs_help_label=lambda: bound_issue.add_to_labels(
-                    TERMINAL_BLOCKING_LABEL
-                ),
+                set_needs_help_label=lambda: bound_issue.add_to_labels(TERMINAL_BLOCKING_LABEL),
             )
         raise
 
@@ -800,8 +795,89 @@ async def run_worker(
     # ``outcome=incomplete`` — and is NOT a #238 case.)
     start_time = time.monotonic()
     usage: UsageInfo | None = None
-    try:
 
+    def _on_failure(exc: BaseException) -> None:
+        """Shared cleanup body for the outer ``ProviderError`` +
+        ``Exception`` catch arms (foreman#266 — type-narrowing split).
+
+        Closes over ``start_time`` / ``usage`` / ``actual_repo_slug``
+        / ``issue_number`` / ``attempt`` / ``project_name`` /
+        ``dispatch_recorder`` / ``dispatch_trace_id`` / ``issue``.
+        The bare ``raise`` that re-propagates the original exception
+        lives in each ``except`` arm after calling this helper.
+        """
+        # foreman#238 + foreman#229: any exception that escapes the
+        # body wrap MUST produce a JSONL row + transition the issue
+        # to ``foreman:needs-help``.
+        duration_seconds = time.monotonic() - start_time
+        try:
+            log_worker_run(
+                repo_slug=actual_repo_slug,
+                issue_number=issue_number,
+                pr_number=None,
+                attempt=attempt,
+                outcome="exception",
+                total_sub_requests=0,
+                implemented_count=0,
+                skipped_count=0,
+                skipped_by_reason={},
+                did_check_pass=False,
+                confidence="low",
+                duration_seconds=duration_seconds,
+                baseline_failures_count=0,
+                new_failures_count=0,
+                input_tokens=usage.input_tokens if usage is not None else 0,
+                output_tokens=usage.output_tokens if usage is not None else 0,
+                cache_creation_input_tokens=(
+                    usage.cache_creation_input_tokens if usage is not None else 0
+                ),
+                cache_read_input_tokens=(usage.cache_read_input_tokens if usage is not None else 0),
+                total_cost_usd=usage.total_cost_usd if usage is not None else None,
+                model_usage=usage.model_usage if usage is not None else None,
+                duration_ms=usage.duration_ms if usage is not None else 0,
+                num_turns=usage.num_turns if usage is not None else 0,
+            )
+        except Exception:
+            _log.exception(
+                "foreman#238 worker exception stats write failed for issue=%d; "
+                "original exception will still propagate to the dispatcher",
+                issue_number,
+            )
+        # foreman#251 (Phase 1): mirror the failure-path dual-write.
+        emit_recorder_complete(
+            dispatch_recorder=dispatch_recorder,
+            dispatch_trace_id=dispatch_trace_id,
+            role="worker",
+            repo_slug=actual_repo_slug,
+            ticket_id=f"{actual_repo_slug}#{issue_number}",
+            project=project_name,
+            issue_number=issue_number,
+            pr_number=None,
+            outcome="exception",
+            usage=usage if usage is not None else UsageInfo(),
+            role_data={
+                "attempt": attempt,
+                "total_sub_requests": 0,
+                "implemented_count": 0,
+                "skipped_count": 0,
+                "skipped_by_reason": {},
+                "did_check_pass": False,
+                "confidence": "low",
+                "baseline_failures_count": 0,
+                "new_failures_count": 0,
+            },
+            duration_seconds=duration_seconds,
+        )
+        # foreman#229: runaway-burn defense.
+        handle_unhandled_role_exception(
+            role="worker",
+            issue_number=issue_number,
+            exc=exc,
+            post_comment=lambda body: issue.create_comment(body),
+            set_needs_help_label=lambda: issue.add_to_labels(TERMINAL_BLOCKING_LABEL),
+        )
+
+    try:
         # Resolve the spec branch + spec PR (PR may be None — implementation
         # proceeds either way; the impl PR body's spec-PR reference adapts).
         spec_branch_name = spec_branch(issue_number)
@@ -883,6 +959,31 @@ async def run_worker(
                 env={**os.environ, "GH_TOKEN": worker_token},
             )
             usage = run_usage
+        except ProviderError as exc:
+            # foreman#266: typed catch for the documented provider
+            # boundary failure mode. Synthesizes the same incomplete
+            # WorkerOutput shape as the broader ``except Exception``
+            # arm below. Both arms exist so a reviewer can see at the
+            # call site which failure shape the orchestrator expects.
+            duration_seconds = time.monotonic() - start_time
+            _log.exception(
+                "Worker provider.run_agent raised typed ProviderError; "
+                "surfacing as outcome=incomplete"
+            )
+            llm_output = WorkerOutput(
+                outcome="incomplete",
+                work_comment=(
+                    "incomplete — Worker provider error before structured output "
+                    f"was produced: {type(exc).__name__}: {exc}"
+                ),
+                commits_made=[],
+                implemented_sub_requests=[],
+                skipped_sub_requests=[],
+                did_check_pass=False,
+                check_output_summary=(f"provider.run_agent raised {type(exc).__name__}: {exc}"),
+                confidence="low",
+            )
+            usage = UsageInfo()
         except Exception as exc:
             # D5: SDK errors (timeout, network, validation, anything) MUST NOT
             # crash the orchestrator silently. Synthesize an incomplete-shaped
@@ -1178,8 +1279,7 @@ async def run_worker(
             role_data={
                 "attempt": attempt,
                 "total_sub_requests": (
-                    len(llm_output.implemented_sub_requests)
-                    + len(llm_output.skipped_sub_requests)
+                    len(llm_output.implemented_sub_requests) + len(llm_output.skipped_sub_requests)
                 ),
                 "implemented_count": len(llm_output.implemented_sub_requests),
                 "skipped_count": len(llm_output.skipped_sub_requests),
@@ -1203,114 +1303,17 @@ async def run_worker(
             final_did_check_pass=final_did_check_pass,
             final_labels=sorted(current_labels),
         )
+    except ProviderError as exc:
+        # foreman#266: typed catch for the documented provider-boundary
+        # failure mode. Same body as the ``except Exception`` arm
+        # below — structural (type narrowing + boundary documentation),
+        # not semantic.
+        _on_failure(exc)
+        raise
     except Exception as exc:
-        # foreman#238 + foreman#229: any exception that escapes the
-        # body wrap (push auth failure, create_pull 422 not in the
-        # fallback set, issue.set_labels 5xx, etc.) MUST
-        # 1. Produce a JSONL row (cost telemetry — pre-#238 silently
-        #    dropped these).
-        # 2. Transition the issue to ``foreman:needs-help`` so the
-        #    dispatcher's poll loop stops re-dispatching the same
-        #    Worker on the same ticket. Pre-#229 the issue's entry
-        #    label was reverted via the ``finally:`` below to
-        #    ``foreman:plan-approved``, and the next poll re-fired
-        #    the Worker — the runaway burn.
-        #
-        # Defaults below match the spec: zeroed counters / empty
-        # histograms / ``did_check_pass=False`` / ``confidence="low"``.
-        # Partial ``usage`` from a successful prior ``provider.run_agent``
-        # call (if any) flows through; otherwise the spec-mandated
-        # ``UsageInfo()`` zeros land. ``pr_number`` is always ``None`` on
-        # this path — by definition the PR did not open or we wouldn't
-        # be here.
-        duration_seconds = time.monotonic() - start_time
-        # Inner try/except (pattern from foreman#235 / PR #236): a
-        # disk-full / permission error on the JSONL write itself MUST
-        # NOT mask the original Worker exception the dispatcher needs
-        # to see.
-        try:
-            log_worker_run(
-                repo_slug=actual_repo_slug,
-                issue_number=issue_number,
-                pr_number=None,
-                attempt=attempt,
-                outcome="exception",
-                total_sub_requests=0,
-                implemented_count=0,
-                skipped_count=0,
-                skipped_by_reason={},
-                did_check_pass=False,
-                confidence="low",
-                duration_seconds=duration_seconds,
-                baseline_failures_count=0,
-                new_failures_count=0,
-                input_tokens=usage.input_tokens if usage is not None else 0,
-                output_tokens=usage.output_tokens if usage is not None else 0,
-                cache_creation_input_tokens=(
-                    usage.cache_creation_input_tokens if usage is not None else 0
-                ),
-                cache_read_input_tokens=(
-                    usage.cache_read_input_tokens if usage is not None else 0
-                ),
-                total_cost_usd=usage.total_cost_usd if usage is not None else None,
-                model_usage=usage.model_usage if usage is not None else None,
-                duration_ms=usage.duration_ms if usage is not None else 0,
-                num_turns=usage.num_turns if usage is not None else 0,
-            )
-        except Exception:
-            _log.exception(
-                "foreman#238 worker exception stats write failed for issue=%d; "
-                "original exception will still propagate to the dispatcher",
-                issue_number,
-            )
-        # foreman#251 (Phase 1): mirror the failure-path dual-write.
-        # Safe defaults match the existing log_worker_run failure-path
-        # call above so the two ledgers agree on shape.
-        emit_recorder_complete(
-            dispatch_recorder=dispatch_recorder,
-            dispatch_trace_id=dispatch_trace_id,
-            role="worker",
-            repo_slug=actual_repo_slug,
-            ticket_id=f"{actual_repo_slug}#{issue_number}",
-            project=project_name,
-            issue_number=issue_number,
-            pr_number=None,
-            outcome="exception",
-            usage=usage if usage is not None else UsageInfo(),
-            role_data={
-                "attempt": attempt,
-                "total_sub_requests": 0,
-                "implemented_count": 0,
-                "skipped_count": 0,
-                "skipped_by_reason": {},
-                "did_check_pass": False,
-                "confidence": "low",
-                "baseline_failures_count": 0,
-                "new_failures_count": 0,
-            },
-            duration_seconds=duration_seconds,
-        )
-        # foreman#229: runaway-burn defense. Post the traceback as a
-        # comment on the originating issue and transition it to
-        # ``foreman:needs-help`` so the dispatcher's poll loop stops
-        # re-dispatching. The ``finally:`` below still runs and
-        # reverts the entry-label transition; the
-        # ``foreman:needs-help`` label survives that revert (it's
-        # outside ``added_foreman_pre`` / ``removed_foreman_pre``)
-        # and is read by the reconciler's safety-tier
-        # ``_needs_help_label`` rule, which blocks re-dispatch even
-        # though the entry label was restored.
-        handle_unhandled_role_exception(
-            role="worker",
-            issue_number=issue_number,
-            exc=exc,
-            post_comment=lambda body: issue.create_comment(body),
-            set_needs_help_label=lambda: issue.add_to_labels(TERMINAL_BLOCKING_LABEL),
-        )
-        # Bare ``raise`` re-propagates the original exception unchanged
-        # — the daemon dispatcher's error handling stays in charge, and
-        # the ``finally`` block below still runs to revert the entry
-        # labels.
+        # PR #255 commit 2 defensive handler — belt-and-suspenders for
+        # non-provider failures (worktree ops, host I/O, GitHub 5xx).
+        _on_failure(exc)
         raise
     finally:
         if not outcome_labels_committed:

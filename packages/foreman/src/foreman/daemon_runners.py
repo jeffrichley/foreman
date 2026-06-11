@@ -31,7 +31,7 @@ from foreman.branches import impl_branch, spec_branch
 from foreman.config import Config, ProjectConfig
 from foreman.dispatcher import Ticket
 from foreman.provider import ProviderFacade
-from foreman.providers.anthropic_sdk import AnthropicSDKProvider
+from foreman.providers import make_provider
 from foreman.roles import fixer as _fixer_module
 from foreman.roles import planner as _planner_module
 from foreman.roles import reviewer as _reviewer_module
@@ -51,15 +51,11 @@ class _HostLike(Protocol):
     def find_pr_for_branch(self, repo: str, branch: str) -> int | None: ...
     def merge_pull_request(self, repo: str, pr_number: int) -> None: ...
     def add_issue_label(self, repo: str, issue_number: int, label: str) -> None: ...
-    def remove_issue_label(
-        self, repo: str, issue_number: int, label: str
-    ) -> None: ...
+    def remove_issue_label(self, repo: str, issue_number: int, label: str) -> None: ...
     def close_issue(self, repo: str, issue_number: int) -> None: ...
     def get_pr_base_ref(self, repo: str, pr_number: int) -> str: ...
     def is_pr_merged_for_branch(self, repo: str, branch: str) -> bool: ...
-    def retarget_pr_base(
-        self, repo: str, pr_number: int, new_base: str
-    ) -> None: ...
+    def retarget_pr_base(self, repo: str, pr_number: int, new_base: str) -> None: ...
     def get_default_branch(self, repo: str) -> str: ...
 
 
@@ -94,8 +90,9 @@ class DaemonRunners:
         live (typically ``~/.foreman/worktrees``).
 
         ``provider`` is the LLM provider facade passed to each role
-        function. Defaults to a fresh ``AnthropicSDKProvider`` when
-        unset — matches the CLI's default wiring.
+        function. Defaults to ``make_provider()`` when unset — the
+        production factory that wires the deployed recovery chain
+        (foreman#266) — matches the CLI's default wiring.
 
         The leading-underscore ``_planner``/``_reviewer``/``_fixer``/
         ``_worker`` kwargs are test seams — production code passes
@@ -103,7 +100,7 @@ class DaemonRunners:
         """
         self._host = host
         self._worktrees_root = worktrees_root
-        self._provider: ProviderFacade = provider or AnthropicSDKProvider()
+        self._provider: ProviderFacade = provider or make_provider()
         self._planner_fn = _planner or _planner_module.run_planner
         self._reviewer_fn = _reviewer or _reviewer_module.run_reviewer
         self._fixer_fn = _fixer or _fixer_module.run_fixer
@@ -134,9 +131,7 @@ class DaemonRunners:
             structured_output=_safe_dump(result.llm_output),
         )
 
-    async def run_reviewer(
-        self, *, ticket: Ticket, config: Config, target: str
-    ) -> RoleRunResult:
+    async def run_reviewer(self, *, ticket: Ticket, config: Config, target: str) -> RoleRunResult:
         project = self._project(ticket, config)
         branch = (
             spec_branch(ticket.issue_number)
@@ -145,9 +140,7 @@ class DaemonRunners:
         )
         pr_number = self._host.find_pr_for_branch(project.repo, branch)
         if pr_number is None:
-            raise RuntimeError(
-                f"No open PR found for branch {branch} on {project.repo}"
-            )
+            raise RuntimeError(f"No open PR found for branch {branch} on {project.repo}")
         result = await self._reviewer_fn(
             pr_url=_pr_url(project.repo, pr_number),
             config=config,
@@ -160,9 +153,7 @@ class DaemonRunners:
             structured_output=_safe_dump(result.llm_output),
         )
 
-    async def run_fixer(
-        self, *, ticket: Ticket, config: Config, target: str
-    ) -> RoleRunResult:
+    async def run_fixer(self, *, ticket: Ticket, config: Config, target: str) -> RoleRunResult:
         project = self._project(ticket, config)
         result = await self._fixer_fn(
             issue_url=_issue_url(project.repo, ticket.issue_number),
@@ -196,17 +187,11 @@ class DaemonRunners:
         branch = spec_branch(ticket.issue_number)
         pr_number = self._host.find_pr_for_branch(project.repo, branch)
         if pr_number is None:
-            raise RuntimeError(
-                f"No open spec PR found for branch {branch} on {project.repo}"
-            )
+            raise RuntimeError(f"No open spec PR found for branch {branch} on {project.repo}")
         self._host.merge_pull_request(project.repo, pr_number)
         # Advance label: remove spec-ready, add implementing-ready sentinel.
-        self._host.remove_issue_label(
-            project.repo, ticket.issue_number, "foreman:spec-ready"
-        )
-        self._host.add_issue_label(
-            project.repo, ticket.issue_number, "foreman:implementing-ready"
-        )
+        self._host.remove_issue_label(project.repo, ticket.issue_number, "foreman:spec-ready")
+        self._host.add_issue_label(project.repo, ticket.issue_number, "foreman:implementing-ready")
         # foreman#91: compute the post-merge label set deterministically
         # from the pre-merge snapshot in ``ticket.labels`` + the merge
         # transitions above. Avoids the eventual-consistency hazard of a
@@ -214,8 +199,7 @@ class DaemonRunners:
         # for the merge writes vs. the read in v1 — see
         # ``DaemonRunners._read_labels``'s now-removed implementation).
         final_labels = frozenset(
-            (set(ticket.labels) - {"foreman:spec-ready"})
-            | {"foreman:implementing-ready"}
+            (set(ticket.labels) - {"foreman:spec-ready"}) | {"foreman:implementing-ready"}
         )
         return RoleRunResult(
             new_labels=final_labels,
@@ -246,9 +230,7 @@ class DaemonRunners:
         branch = impl_branch(ticket.issue_number)
         pr_number = self._host.find_pr_for_branch(project.repo, branch)
         if pr_number is None:
-            raise RuntimeError(
-                f"No open impl PR found for branch {branch} on {project.repo}"
-            )
+            raise RuntimeError(f"No open impl PR found for branch {branch} on {project.repo}")
         # Retarget impl PR to default branch before merge if it still
         # points at the spec branch AND the spec PR has merged. See
         # issue #62 for the ghost-merge failure mode this guards against.
@@ -258,9 +240,7 @@ class DaemonRunners:
             project.repo, spec_branch_name
         ):
             default_branch = self._host.get_default_branch(project.repo)
-            self._host.retarget_pr_base(
-                project.repo, pr_number, default_branch
-            )
+            self._host.retarget_pr_base(project.repo, pr_number, default_branch)
         self._host.merge_pull_request(project.repo, pr_number)
         self._host.close_issue(project.repo, ticket.issue_number)
         # foreman#91: compute the post-merge label set deterministically.
