@@ -561,3 +561,199 @@ These would need git-archaeology to verify. Worth scoping a follow-up: **"PR res
 - Draft straw-man positions on foreman#269 six review topics
 
 The regression-detection topic alone might want to be its own foreman#269 topic. Adding it to the review agenda.
+
+---
+
+## Phase 0 — fourth pass: regression audit + dual implementations + provider split (2026-06-11 late noon)
+
+### Lens A — Regression audit (property-still-true on top 5 structural PRs)
+
+Pulled the 5 highest-impact structural PRs from the 30-day window and verified the property each claimed to deliver is still in effect on main:
+
+| PR | Claimed property | Status on main |
+|---|---|---|
+| #234 (CommonEnvelope) | `class CommonEnvelope` is the single JSONL envelope schema | ✅ HELD — `stats.py:54` |
+| #214 (bot identity env) | `IdentityRegistry` exposes role-bot GIT_AUTHOR_* env vars | ✅ HELD — `identity.py:264` (now wrapped by #270's dispatch-side injection) |
+| #202 (`--target` plumbing) | `_load_reviewer_prompt(target: Literal[...])` + `--target` CLI flag | ✅ HELD — `roles/reviewer.py:195, 400` |
+| #209 (db_path pin to /foreman/state) | Container's reconciler.db lives under `/foreman/state` | ✅ HELD — via `FOREMAN_STATE_DIR` env var override route (`v3_host.py:75`) |
+| **#207 (mirror daemon log to stdout as JSON for docker logs)** | `docker logs` shows the JSON-lines daemon log | ❌ **REGRESSED** — `logging_setup.py:113-133` writes JSON to a FileHandler, RichHandler goes to stderr. `docker logs` shows pretty Rich output, not JSON-lines. |
+| **#197 (centralize foreman:* labels into `Labels` catalog)** | `foreman.labels.Labels` is the single source of truth | ❌ **REGRESSED** (already documented above) |
+
+**Two confirmed regressions out of five sampled.** A 90-day audit would likely surface more. **Phase 1 §2 (layered defenses) and the new "regression detection" topic both need this finding.**
+
+The Lens A re-classification stands: **#197 and #207 are reclassified to "reverted structural fix"**, joining the broader pattern that "shipped structural work eventually drifts back to the bandaid baseline if there is no guard against it."
+
+### Lens B — `dispatcher.py` is a v2 module still actively imported by v3 code
+
+The codebase has **two Action-type universes**:
+
+- **v3 reconciler:** `reconciler/actions.py` defines `class Action(Enum)` with the rule-engine actions (ADVANCE_LABEL_*, RATE_LIMIT_TRIP, etc.)
+- **v2 dispatcher (in src root):** `dispatcher.py` defines `ActionKind`, `Action`, `Ticket`, `is_blocked`, `next_action`, `stage_index`, `_LABEL_TO_ACTION` map
+
+The v2 dispatcher is **NOT dead code** — it is imported live by:
+
+- `daemon_runners.py:32` — `Ticket`
+- `poller.py:19` — `Ticket`
+- `queue.py:14` — `Ticket, next_action, stage_index`
+- `role_dispatch.py:19` — `Action, ActionKind, Ticket`
+- `worker.py:18` — `Action, ActionKind, Ticket, next_action`
+
+Two parallel `Action` types coexist. Two parallel label-to-action maps coexist (`dispatcher._LABEL_TO_ACTION` is v2; `reconciler/rules.RULES` is v3). **The dispatcher.py `_LABEL_TO_ACTION` references labels that are NOT in `init.py:_FOREMAN_LABELS`** (e.g., `"foreman:plan"`, `"foreman:spec-review"`, `"foreman:implementing"`) — i.e., the v2 dispatcher routes to labels the v3 init flow does not even create on a fresh repo.
+
+**Lens B verdict:** classic incomplete-migration debt. The v3 reconciler is the live path; the v2 dispatcher's types still leak through the import graph because various daemon-side modules (worker.py, poller.py, queue.py at the src-root level) were not migrated to v3 idioms. Either (a) finish the v2 → v3 migration and delete `dispatcher.py`, or (b) recognize the v2 surface as load-bearing infrastructure and rename the types to remove the v2/v3 confusion.
+
+**Lens C verdict on the same finding:** `dispatcher._LABEL_TO_ACTION` references 5 labels that are nowhere in the v3 init flow and nowhere in v3 rule predicates. Those map entries are dead. But the rest of `dispatcher.py` is alive. This is "module half-dead" — different from the binary live/dead model.
+
+### Lens B — Provider boundary split across `foreman.provider` (singular) and `foreman.providers` (plural)
+
+The #266 GoF refactor was praised as the gold standard. Looking at imports on main, the boundary actually lives in **TWO modules with confusingly similar names:**
+
+- `foreman.provider` (singular) — `ProviderFacade` ABC, `UsageInfo`, legacy exceptions `StructuredOutputRetryError` / `StructuredOutputMissingError` / `ProviderAuthError`
+- `foreman.providers` (plural) — `ProviderError`, `ProviderTimeoutError`, `ProviderUnknownError`, `RecoveryChain`, `RecoveryStrategy`, strategies, `make_provider`
+
+The split is **intentional per the #266 design** (avoids a circular import — the providers package imports `UsageInfo` from `foreman.provider`, so the recovery types had to live on the providers side). But the result is that every role-runner imports from BOTH:
+
+```python
+# In every role module:
+from foreman.provider import ProviderFacade, UsageInfo
+from foreman.providers import ProviderError  # if it catches the error family
+```
+
+**Lens B verdict:** the gold-standard claim still holds for the internal structure of `foreman.providers` (Adapter + Strategy + Chain + Facade + Translator). But the **external surface** that role-runner callers see is a two-module boundary where the naming similarity invites confusion. A reader unfamiliar with the #266 history would not understand why `ProviderFacade` lives in `provider` and `ProviderError` lives in `providers`. The fix is documentation (a module-level docstring on `provider.py` that explicitly redirects readers to `providers.__init__` for the recovery types) OR a structural collapse (move `provider.py` into `providers/_facade.py` and re-export from `providers/__init__.py`, breaking the circular by reorganizing). Phase 3 candidate, not Phase 2.
+
+### Lens B — `daemon_host.py` boilerplate (the 33-line preamble tax)
+
+`packages/foreman/src/foreman/daemon_host.py`: 213 lines, 12 methods. Eleven of the twelve open with:
+
+```python
+gh = self._registry.get_orchestrator_client()
+repo_obj = gh.get_repo(repo)
+issue = repo_obj.get_issue(issue_number)  # or .get_pull(pr_number)
+```
+
+**~33 lines of pure boilerplate in a 213-line file (15%).** Classic Lens B Template Method / context-manager candidate:
+
+```python
+@contextmanager
+def _repo(self, repo: str) -> Iterator[Repository]:
+    gh = self._registry.get_orchestrator_client()
+    yield gh.get_repo(repo)
+```
+
+Every `def add_issue_label(...)` body would shrink by 2 lines; the abstraction would have one place to add (e.g.) timeout handling, retry policy, or rate-limit accommodation. Phase 2 candidate — low blast radius, high readability win.
+
+### Lens A + Lens B — `init.py:_FOREMAN_LABELS` is the operator catalog but is NOT the code's source of truth
+
+`init.py:_FOREMAN_LABELS` is an 18-entry tuple list with `(name, color, description)` per label. It is the master list **the operator sees** at `foreman init` setup time.
+
+Comparing this list to the 20 label strings actually referenced in foreman code (collected earlier), six strings are **used in code but NOT in `_FOREMAN_LABELS`**:
+
+- `foreman:plan` — used by v2 dispatcher's `_LABEL_TO_ACTION`
+- `foreman:spec-review` — same
+- `foreman:implementing` — same
+- `foreman:implementing-ready` — same
+- `foreman:ready-for-merge` — same
+- `foreman:spec-ready` — same
+
+All six are from the v2 dispatcher's `_LABEL_TO_ACTION` map (dead per the previous finding). If a fresh operator runs `foreman init`, none of these get created on their repo. The v2 dispatcher code that references them would silently no-op because the labels never appear on tickets.
+
+**Verdict:** `_FOREMAN_LABELS` is correct relative to v3, but the v2 dispatcher's label vocabulary is divergent. Cleaning up `dispatcher.py` (per the previous finding) would also collapse these dead label references. Lens C indirect dead code: 5 `_LABEL_TO_ACTION` entries that nothing will ever match.
+
+---
+
+## Phase 0 — fifth pass: foreman#269 straw-man positions
+
+For each of the six review topics, here is the position I would defend at today's session. The point is not "Wren has decided" but "Jeff has something concrete to react to rather than starting from blank."
+
+### §1 — Snapshot-eval vs lifecycle events
+
+**Straw-man:** **small version now, big version only if Phase 1 §2 reveals 3+ more bugs of this shape**. Adding `count_completed_with_outcome` (already in tree as of #258's enum + #268's gate) gets us 80% of the value at 5% of the cost. The big version (event-sourced reactor with explicit `on_outcome` handlers per transition) trades the "GitHub is source of truth, db is cache" simplicity for cleaner reactivity. We do not yet have evidence that the simplicity trade is worth it.
+
+**Why I'd defend this:** the #268 bug we just fixed is the only confirmed instance of "gate fires in the wrong place." Until 2-3 more land, the small version is paying for itself.
+
+**Where the lens-B audit pushes back:** the v2 dispatcher / v3 reconciler split (above) is structurally the same kind of "two competing dispatch models" mess we'd get from event-sourcing being added on top of snapshot-eval. Maybe a clearer separation IS necessary.
+
+### §2 — Layered defenses audit (failure-mode taxonomy)
+
+**Straw-man:** the taxonomy needs **four orthogonal dimensions, not the three Jeff outlined yesterday**:
+
+- (A) Failure source: SDK / git subprocess / GitHub API / role-runner logic / role-runner prompt
+- (B) Recovery shape: retry / fallback / surface-help / abort
+- (C) Trigger layer: pre-dispatch gate / mid-dispatch try-except / post-dispatch outcome check / rate-limit window
+- (D) **NEW: durability — "is this defense self-asserting" or "does it depend on operator memory"?**
+
+Dimension (D) is the new one from this morning's regression discovery. PR #197's centralized `Labels` had a keystone test that asserted "every label literal matches a `Labels` value" — that is self-asserting durability. When PR #197 was unintentionally reverted, the keystone test went away too; if it had lived elsewhere (e.g., `tests/architecture/`), the regression would have alarmed.
+
+**Concrete §2 deliverable:** an inventory of every defense the foreman code currently runs, classified along (A)-(D). Then we KNOW which defenses are self-asserting and which depend on discipline. Add the "load-bearing tag" mechanism for new structural fixes.
+
+### §3 — Role-runner contract formalization
+
+**Straw-man:** **Template Method base class.** The four role runners share 80%+ of their shape (setup, preflight, dispatch, terminate). Today the shape is replicated 4×; every defensive change (#255 marker exceptions, #270 git identity injection, future #266 boundary integration) has to be applied 4×. A `RoleRunner` ABC with `setup` / `preflight` / `dispatch` / `terminate` as abstract/protected methods plus a `run` driver that orchestrates them is the highest-ROI refactor in the tree.
+
+**This also subsumes:** the 3 `_<Role>PreflightRefusal` classes (consolidate to a single `RolePreflightRefusal`), the per-role `_LABEL_*` constants (consolidate via the resurrected `Labels` catalog), the worker-only `combined_output` dead variable and `_summarize_failures` dead function (eliminate the asymmetry).
+
+### §4 — Provider boundary generalization
+
+**Straw-man:** **defer generalization for one cycle.** The #266 boundary is genuinely good for the SDK case but lives in a confusingly-split two-module shape (`foreman.provider` vs `foreman.providers`). Before applying the same pattern to PyGithub / git subprocess / GraphQL boundaries, document the SPLIT — write a module-level docstring on `provider.py` that names the circular-import constraint and points at `providers.__init__`. Wait one cycle to see if the documentation alone is enough, OR refactor to collapse the split (rename `provider.py` → `providers/_facade.py` + re-exports).
+
+Once the provider boundary is genuinely consolidated and documented, generalizing to other third-party boundaries becomes safe.
+
+### §5 — Outcome vocabulary
+
+**Straw-man:** **already done as of foreman#258 (typed `Outcome` enum).** Residual question: does the role-level outcome vocabulary (`spec_written`, `clean`, `needs_fix`, `fixed`, `incomplete`, `implemented`, `spec_invalid`, `exception`) — flowing through `emit_recorder_complete → terminate_action(outcome=variable)` — deserve the same treatment? That's the "dual-write path" the foreman#258 reviewer flagged. The Outcome enum today only covers inline-literal write sites; the role-level outcomes are an `stats.py` `Literal` union, narrower scope.
+
+If the architecture review says yes, file a follow-up: extend `Outcome` enum to cover role-level outcomes too (probably an `Outcome.ROLE_SPEC_WRITTEN` family or a separate `RoleOutcome` enum). If no, the spec PR #259 was already correct in scoping narrowly.
+
+### §6 — State-machine visibility
+
+**Straw-man:** **build the visualizer — but do it as a `foreman doctor` subcommand, not a web dashboard.** Render the rule predicates + action transitions as a Mermaid diagram emitted on demand. Operators get a CLI command that prints "here is the live state machine"; CI gets the same command to produce a diagram that's checked into docs.
+
+This is cheaper than the dashboard (foreman#218) and addresses 80% of the "I cannot read the state machine in my head" pain. The dashboard adds operational live-status visibility; the visualizer adds structural-state-shape visibility. Different needs.
+
+**Lens B view:** the state machine itself is the candidate refactor (explicit State pattern). The visualizer is a corollary that comes for free if the State pattern lands.
+
+### NEW §7 — Regression detection for structural fixes (proposed addition to foreman#269)
+
+**Straw-man:** introduce a `load_bearing` decorator or designated `tests/architecture/` directory pattern. Every structural fix that asserts a property the code MUST keep gets a regression-guard test. PR template gets a checkbox: "Did this PR introduce a load-bearing property? If yes, name the guard." Optionally, CI fails if a load-bearing test gets deleted without an accompanying ADR justifying it.
+
+The PR #197 lost-fix case is the canonical motivator. Today there is zero mechanism to alarm when a deliberate structural fix gets buried by a subsequent refactor.
+
+---
+
+## Phase 0 — synthesis (ready for Phase 1)
+
+### What we learned
+
+**Three lenses applied to the whole foreman tree produced 9 categories of finding:**
+
+1. **30-day PR pattern (Lens A):** ~40% bandaid / 35% structural / 15% feature / 10% docs. Bandaid clusters around SDK boundary (now addressed by #266/#274), worktree lifecycle (still bandaiding), label state machine (still bandaiding).
+2. **Reverted structural fixes (Lens A regression audit):** **2 of 5** sampled top-impact PRs have regressed silently on main (#197 labels, #207 stdout-mirror). Suggests a broader 90-day sweep would find more.
+3. **Dead code (Lens C mechanical + eyeball):** 12 confirmed entries. 1 active import bug (`ProviderInvalidResultError` in `__all__`). 11 unused methods/fields.
+4. **Duplication / DRY violations:** 10 per-role IdentityRegistry methods over a generic. 16+ per-role `_LABEL_*` constants (re-introducing the failure mode #197 fixed). 3 per-role `_<Role>PreflightRefusal` classes for the same shape.
+5. **Half-dead modules:** v2 `dispatcher.py` still actively imported by 5 v3-era modules. 5 of its `_LABEL_TO_ACTION` map entries reference labels nothing creates.
+6. **Boilerplate tax:** ~33 lines / 15% of `daemon_host.py` is repeated 3-line preamble.
+7. **Module-split confusion:** `foreman.provider` (singular) vs `foreman.providers` (plural) — intentional but undocumented.
+8. **Prompt drift risk:** all 6 role prompts last touched 5+ days ago; code has evolved.
+9. **Refactor candidates (Lens B):** Template Method for role runners (highest ROI), Command registry for actions, explicit State for label state machine, context-manager for daemon_host repo access.
+
+### Phase 1 agenda (refined)
+
+The original foreman#269 six topics + the new §7 are:
+
+1. Snapshot-eval vs lifecycle events
+2. Layered defenses audit (with new dimension D — durability)
+3. Role-runner contract formalization (Template Method)
+4. Provider boundary generalization (or "document the split first")
+5. Outcome vocabulary (already done; residual decision on role-level outcomes)
+6. State-machine visibility (build visualizer as `foreman doctor` subcommand)
+7. **NEW: Regression detection for structural fixes**
+
+Plus operational follow-ups Phase 0 surfaced:
+
+- 2 confirmed regressions to resurrect (#197 labels, #207 stdout-mirror)
+- 12 dead-code entries to delete
+- 1 active import bug to fix (`ProviderInvalidResultError` in `__all__`)
+- v2 `dispatcher.py` migration (finish or rename)
+- daemon_host.py preamble refactor (small, do it)
+
+**Phase 0 is complete.** Ready for Phase 1.
