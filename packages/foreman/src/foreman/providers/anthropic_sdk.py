@@ -305,10 +305,25 @@ class AnthropicSDKProvider(ProviderFacade):
         chain reads it from ``run_agent``'s exception handler when the
         SDK raises a known bug shape mid-stream.
 
+        **Drain semantics (foreman#266 follow-up):** on observing a
+        satisfying ``ResultMessage`` (``subtype="success"`` +
+        ``structured_output``), the validated payload + usage are
+        captured in local state but the loop continues iterating. This
+        gives the SDK a chance to emit (and potentially raise on) the
+        post-result envelopes that carry the foreman#230 bug — without
+        draining, the consumer's early-return would throw
+        ``GeneratorExit`` into the SDK at its yield point and the
+        terminal raise would never fire. If the loop exits cleanly
+        the captured success is returned; if the SDK raises, the
+        exception propagates to the caller's recovery chain which
+        re-validates from ``partial.result_message``.
+
         Returns ``(validated_output, usage_info)`` where ``usage_info``
         is reconstructed from the same ``ResultMessage`` that carried
         the structured output (foreman#227).
         """
+        captured_success: tuple[T, UsageInfo] | None = None
+
         async for message in query(prompt=user_prompt, options=options):
             if not isinstance(message, ResultMessage):
                 continue
@@ -318,19 +333,35 @@ class AnthropicSDKProvider(ProviderFacade):
             partial.result_message = message
             # SDK subtype taxonomy (verified against
             # claude_agent_sdk types.ResultMessage — `subtype: str`):
-            #   "success" + structured_output → validated instance
-            #   "error_max_structured_output_retries" → SDK gave up
+            #   "success" + structured_output → captured, keep iterating
+            #   "error_max_structured_output_retries" → SDK gave up (raise)
             #   anything else → keep looping; the SDK may emit more results
             if message.subtype == "success" and message.structured_output is not None:
+                # foreman#266 drain semantics: validate + capture, but
+                # do NOT return yet. Continue iterating so the SDK's
+                # post-result envelopes (which may include the
+                # foreman#230 bug shape) get a chance to surface.
                 validated = output_model.model_validate(message.structured_output)
                 usage = _build_usage_info(message)
-                return validated, usage
+                captured_success = (validated, usage)
+                continue
             if message.subtype == "error_max_structured_output_retries":
+                # An explicit retry-exhausted signal after a success is
+                # an SDK inconsistency we should respect rather than
+                # paper over: the captured success is discarded and
+                # the error surfaces. If this ever fires in production
+                # with a real captured success, file a ticket so we
+                # understand the SDK's intent before changing policy.
                 raise StructuredOutputRetryError(
                     "Anthropic Agent SDK exhausted its retry budget trying to "
                     f"satisfy the schema for {output_model.__name__}. "
                     f"Errors reported: {message.errors!r}"
                 )
+
+        # Loop exited cleanly. If we captured a success along the way,
+        # return it; otherwise the SDK produced no successful result.
+        if captured_success is not None:
+            return captured_success
 
         raise StructuredOutputMissingError(
             "Anthropic Agent SDK did not return a successful ResultMessage "

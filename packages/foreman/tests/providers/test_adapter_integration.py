@@ -37,13 +37,12 @@ class _AlwaysRecoverStrategy(RecoveryStrategy):
     """Test-local strategy that recovers any ``Exception("success")``
     by returning a hard-coded ``(_DemoOutput, UsageInfo)`` tuple.
 
-    Used to exercise the adapter's wiring (chain consultation in the
-    exception path) without depending on the production strategy's
-    strict predicate, which is unit-tested separately. The deployed
-    :class:`SuccessAsErrorRecovery` requires a captured ResultMessage
-    in the partial state — a precondition the success-shortcut path in
-    ``_iterate_query`` would already have returned for, so it cannot
-    be exercised end-to-end with the natural fake-query shape.
+    Used to exercise the adapter's chain-consultation wiring
+    independent of any specific strategy's predicate. The deployed
+    :class:`SuccessAsErrorRecovery` is exercised end-to-end through
+    the production code path by
+    :func:`test_success_as_error_recovery_fires_via_production_path`
+    below.
     """
 
     def __init__(self, payload: tuple[Any, UsageInfo]) -> None:
@@ -167,15 +166,12 @@ async def test_recovery_chain_handles_exception_when_iteration_raises(
     exception, the adapter returns the strategy's payload instead of
     propagating, and emits the structured recovery log line.
 
-    Implementation note: the production
-    :class:`SuccessAsErrorRecovery` predicate requires a captured
-    ``ResultMessage`` with ``subtype="success"`` + ``structured_output``
-    — but those same conditions cause ``_iterate_query`` to return
-    BEFORE the SDK can raise. To exercise the wiring without depending
-    on a contradiction in the production strategy, we use a
-    test-local strategy that recovers any
-    ``Exception("success")``. The production strategy's strict
-    predicate is unit-tested separately.
+    This test exercises chain-consultation wiring independent of any
+    specific strategy's predicate by using a test-local always-recover
+    strategy. The production
+    :class:`SuccessAsErrorRecovery` is exercised end-to-end through
+    the drain semantics by
+    :func:`test_success_as_error_recovery_fires_via_production_path`.
     """
     raise_exc = Exception("success")
     _patch_query_raising_each_call(monkeypatch, exc=raise_exc)
@@ -257,6 +253,92 @@ async def test_partial_result_carries_captured_result_message(
     assert captured_messages[0] is rm, (
         f"expected partial.result_message to be the yielded ResultMessage; got {captured_messages[0]!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_success_as_error_recovery_fires_via_production_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The production :class:`SuccessAsErrorRecovery` strategy fires
+    end-to-end via the foreman#266 drain semantics.
+
+    Reproduces the foreman#230 sequence: SDK yields a satisfying
+    ResultMessage then raises ``Exception("success")``. With the
+    drain change, the adapter captures the satisfying ResultMessage
+    in ``partial.result_message`` and continues iterating — so when
+    the SDK then raises, the strategy's predicate (which requires
+    the satisfying ResultMessage to be in the partial state) is
+    actually reachable. The strategy re-validates from the captured
+    ResultMessage and returns the same payload the happy-path branch
+    would have returned.
+
+    Without drain semantics this test would either (a) early-return
+    before the SDK can raise or (b) capture a non-satisfying
+    ResultMessage that the strategy's strict predicate would reject.
+    """
+    success_msg = _make_result(
+        subtype="success",
+        structured_output={"name": "drained", "count": 7},
+    )
+    _patch_query_yielding_then_raising(
+        monkeypatch,
+        messages=[success_msg],
+        raise_after=Exception("success"),
+    )
+
+    provider = AnthropicSDKProvider(recovery=RecoveryChain([SuccessAsErrorRecovery()]))
+    result, usage = await provider.run_agent(
+        system_prompt="sys",
+        user_prompt="usr",
+        allowed_tools=["Read"],
+        output_model=_DemoOutput,
+        cwd=tmp_path,
+    )
+
+    assert isinstance(result, _DemoOutput)
+    assert result.name == "drained"
+    assert result.count == 7
+    assert isinstance(usage, UsageInfo)
+
+
+@pytest.mark.asyncio
+async def test_drain_returns_captured_success_when_loop_exits_cleanly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Drain semantics: when the SDK yields a satisfying ResultMessage
+    then a non-ResultMessage envelope then exhausts cleanly, the
+    adapter still returns the captured success rather than raising
+    StructuredOutputMissingError.
+
+    Pins the contract that draining past the satisfying ResultMessage
+    does not silently lose the result on a clean stream end.
+    """
+
+    class _FakeOtherMessage:
+        """Stand-in for any non-ResultMessage envelope shape."""
+
+    success_msg = _make_result(
+        subtype="success",
+        structured_output={"name": "captured", "count": 3},
+    )
+    _patch_query_yielding_then_raising(
+        monkeypatch,
+        messages=[success_msg, _FakeOtherMessage()],
+    )
+
+    provider = AnthropicSDKProvider(recovery=RecoveryChain([SuccessAsErrorRecovery()]))
+    result, usage = await provider.run_agent(
+        system_prompt="sys",
+        user_prompt="usr",
+        allowed_tools=["Read"],
+        output_model=_DemoOutput,
+        cwd=tmp_path,
+    )
+
+    assert isinstance(result, _DemoOutput)
+    assert result.name == "captured"
+    assert result.count == 3
+    assert isinstance(usage, UsageInfo)
 
 
 @pytest.mark.asyncio
