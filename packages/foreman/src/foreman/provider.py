@@ -71,7 +71,15 @@ class UsageInfo(BaseModel):
     num_turns: int = 0
 
 
-class StructuredOutputRetryError(RuntimeError):
+# Import the new domain-exception base AFTER ``UsageInfo`` is defined so
+# the back-reference from ``foreman.providers.recovery`` (which imports
+# ``UsageInfo`` from this module) resolves during the cycle that loading
+# ``foreman.providers`` triggers — see the foreman#266 commit body for
+# the full circular-import discussion.
+from foreman.providers.exceptions import ProviderError  # noqa: E402
+
+
+class StructuredOutputRetryError(ProviderError, RuntimeError):
     """The SDK exhausted its retry budget trying to satisfy the schema.
 
     Surfaced when a ``ResultMessage`` arrives with subtype
@@ -79,25 +87,36 @@ class StructuredOutputRetryError(RuntimeError):
     SDK could not coerce into the supplied JSON schema after its internal
     retry budget; raising this instead of the generic "missing output"
     error gives callers a specific failure mode to handle.
+
+    foreman#266: re-rooted under :class:`ProviderError` so role runners
+    can catch the whole provider-boundary failure family with one arm.
+    Multiple inheritance preserves the pre-#266 ``RuntimeError`` lineage
+    so any existing ``isinstance(exc, RuntimeError)`` check still works.
     """
 
 
-class StructuredOutputMissingError(RuntimeError):
+class StructuredOutputMissingError(ProviderError, RuntimeError):
     """No ``ResultMessage`` carrying ``structured_output`` was ever produced.
 
     Indicates the agent loop terminated without a successful result — either
     the transport hung up, the agent exited early, or some path the SDK
     doesn't surface as a known error subtype.
+
+    foreman#266: re-rooted under :class:`ProviderError` — see
+    :class:`StructuredOutputRetryError` for the rationale.
     """
 
 
-class ProviderAuthError(RuntimeError):
+class ProviderAuthError(ProviderError, RuntimeError):
     """The underlying provider rejected authentication.
 
     Surfaced after a defensive credential refresh + single retry have
     failed. The role runner should map this to a terminal blocking label
     (``foreman:needs-help``) so the dispatcher doesn't retry-spiral.
     foreman#227 (2026-06-08).
+
+    foreman#266: re-rooted under :class:`ProviderError` — see
+    :class:`StructuredOutputRetryError` for the rationale.
     """
 
 

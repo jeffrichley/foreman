@@ -24,7 +24,7 @@ from github import Auth, Github
 
 from foreman.config import Config, load_config
 from foreman.init import InitConfig, detect_matching_clone, run_init
-from foreman.providers.anthropic_sdk import AnthropicSDKProvider
+from foreman.providers import make_provider
 from foreman.roles.fixer import run_fixer
 from foreman.roles.planner import run_planner
 from foreman.roles.reviewer import run_reviewer
@@ -36,6 +36,7 @@ def _default_config_path() -> Path:
     # Delegates to foreman.config.resolve_config_path which honors
     # FOREMAN_CONFIG_PATH (container compose) AND legacy FOREMAN_CONFIG.
     from foreman.config import resolve_config_path
+
     return resolve_config_path()
 
 
@@ -100,7 +101,7 @@ def plan(issue_url: str, project: str, config_path: Path | None) -> None:
     """Run the Planner on a GitHub issue and open a spec PR."""
     cfg_path = config_path or _default_config_path()
     cfg = load_config(cfg_path)
-    provider = AnthropicSDKProvider()
+    provider = make_provider()
     # foreman#251 (Phase 1): when the daemon dispatched this run it
     # set FOREMAN_DISPATCH_TRACE_ID in the subprocess env. The role
     # builds an in-process DispatchRecorder and forwards both into
@@ -169,7 +170,7 @@ def review(
     """
     cfg_path = config_path or _default_config_path()
     cfg = load_config(cfg_path)
-    provider = AnthropicSDKProvider()
+    provider = make_provider()
     # ``target`` is accepted for symmetry with ``foreman fix`` and to keep
     # the v3 dispatch argv shape uniform; ``run_reviewer`` itself does not
     # take a ``target`` kwarg today (the Reviewer parses the PR head to
@@ -253,7 +254,7 @@ def fix(
     """
     cfg_path = config_path or _default_config_path()
     cfg = load_config(cfg_path)
-    provider = AnthropicSDKProvider()
+    provider = make_provider()
     # ``pr_url`` not yet plumbed into ``run_fixer`` — accepting it on the
     # CLI keeps the v3 reconciler's argv shape uniform; threading it
     # through the role is a separate change (out of scope for the
@@ -304,7 +305,7 @@ def implement(issue_url: str, project: str, config_path: Path | None) -> None:
     """
     cfg_path = config_path or _default_config_path()
     cfg = load_config(cfg_path)
-    provider = AnthropicSDKProvider()
+    provider = make_provider()
     recorder, trace_id = _build_dispatch_recorder(cfg)
     result = asyncio.run(
         run_worker(
@@ -653,6 +654,7 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
     # the container at /foreman/state, mounted as a named volume so the
     # log survives `docker compose down`) with ~/.foreman fallback.
     from foreman.reconciler.v3_host import resolve_state_dir
+
     v3_log_path = resolve_state_dir() / "v3-daemon.log"
     configure_daemon_logging(
         log_path=v3_log_path,
@@ -713,9 +715,7 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
 
             recovered = log.recover_orphaned()
             if recovered > 0:
-                click.echo(
-                    f"recovered {recovered} orphaned running row(s) from prior daemon"
-                )
+                click.echo(f"recovered {recovered} orphaned running row(s) from prior daemon")
 
             # Project tuple is resolved by the module-level helper so the
             # reload-callback path (below) goes through the same code, and
@@ -726,8 +726,7 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
             if max_ticks == 0:
                 # Smoke-test wiring without spinning the loop.
                 click.echo(
-                    f"v3-start wired: {len(projects)} projects, "
-                    f"db={db_path}, dry_run={dry_run}"
+                    f"v3-start wired: {len(projects)} projects, db={db_path}, dry_run={dry_run}"
                 )
                 return
 
@@ -765,9 +764,7 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
                 rate_limit_max_consecutive_failures=(
                     config.reconciler.rate_limit_max_consecutive_failures
                 ),
-                rate_limit_window_seconds=(
-                    config.reconciler.rate_limit_window_seconds
-                ),
+                rate_limit_window_seconds=(config.reconciler.rate_limit_window_seconds),
             )
 
             async def _shutdown_watcher(
@@ -893,9 +890,7 @@ def _build_v3_gh_and_host(config: Config, log: Any) -> tuple[Any, Any]:
     # "Merge queues: write" permission on the target repo when an
     # operator enables MergeQueue. The observer's gh keeps using the
     # planner App because its workload is observation-only.
-    gh_queue = HttpxGHGraphQLClient(
-        token_supplier=lambda: registry.get_orchestrator_token()
-    )
+    gh_queue = HttpxGHGraphQLClient(token_supplier=lambda: registry.get_orchestrator_token())
     host = V3GitHubHost(
         v2_host=v2_host,
         log=log,
@@ -960,9 +955,7 @@ def daemon_stop() -> None:
     # when there's a live daemon to receive it.
     if not lock_path.exists():
         discover = (
-            "tasklist | findstr foreman"
-            if sys.platform == "win32"
-            else "ps aux | grep foreman"
+            "tasklist | findstr foreman" if sys.platform == "win32" else "ps aux | grep foreman"
         )
         click.echo(
             f"No daemon lock file at {lock_path}. Either the daemon "
@@ -1079,9 +1072,7 @@ def daemon_reload() -> None:
     # first tick and would log a config_reload row for a fresh config.
     if not lock_path.exists():
         discover = (
-            "tasklist | findstr foreman"
-            if sys.platform == "win32"
-            else "ps aux | grep foreman"
+            "tasklist | findstr foreman" if sys.platform == "win32" else "ps aux | grep foreman"
         )
         click.echo(
             f"No daemon lock file at {lock_path}. Either the daemon "
@@ -1144,6 +1135,7 @@ def _load_config_from_env() -> Config:
     """Load config from FOREMAN_CONFIG_PATH (container) / FOREMAN_CONFIG
     (host legacy) env var or default ~/.foreman/config.toml."""
     from foreman.config import resolve_config_path
+
     return load_config(resolve_config_path())
 
 
