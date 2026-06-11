@@ -808,6 +808,7 @@ Each finding gets one decision row. Format: finding summary, decision, rationale
   - Single PR vs staged-by-confidence-tier excise
   - Whether to delete the `daemon start` CLI subcommand at the same time as the modules it transitively uses, or in a follow-up
 - **Next-step ticket:** TBD after Phase 1 closes. Should reference both the tooling stack (vulture + reachability) and Decision 2's back-to-back constraint (the v2 island is itself a partial-migration carcass — exactly the failure mode Decision 2 is trying to prevent for the role-runner ABC).
+- **Cross-reference (Topic 7 — `ProviderInvalidResultError` zombie):** the active import bug in `foreman.providers.__all__` is the textbook case this tooling is designed to catch. Recording it here so the relevance is obvious: if a `__all__` export references a class that does not exist, the reachability sweep's symbol resolution step trips, and `vulture --confidence=100` flags the dangling string. Both signals would have surfaced it months ago.
 
 ### Decision 4 — Bandaid-ratio guardrail: artifact discipline (B) + prompt-level bias toward structural patterns
 
@@ -853,6 +854,7 @@ Each finding gets one decision row. Format: finding summary, decision, rationale
   - Pairs naturally with Decision 2's `RoleRunner` ABC migration — the role-runner template's dispatch step consumes the provider; cleaner provider package = cleaner dispatch slot
 - **Sequencing dependency:** none with Decisions 1-4. Independent of role-runner work, label work, dead-code excise, and the bandaid guardrail.
 - **Next-step ticket:** TBD after Phase 1 closes. Should reference the zombie symbol resolution as part of the merge so it doesn't slip into a separate cleanup ticket.
+- **Cross-reference (Topic 7 dissolution):** the active import bug `ProviderInvalidResultError` (the zombie symbol from Lens C) is absorbed into this decision's scope rather than being filed as a separate decision. It's exactly the shape Decision 3's vulture + reachability sweep is designed to catch, and exactly the shape Decision 7's import-boundary CI is designed to prevent reappearing.
 
 ### Decision 6 — `daemon_host.py` boilerplate: constructor injection (C) + verify-and-pin the dependency's lifecycle invariant
 
@@ -867,5 +869,31 @@ Each finding gets one decision row. Format: finding summary, decision, rationale
 - **Why pin-as-test, not pin-as-comment:** Decision 4 codified the principle that artifacts survive memory drift better than process. A docstring saying "this assumes auto-refresh" rots when the registry's refresh policy changes silently; a test fails loudly.
 - **Sequencing dependency:** no hard sequencing with Decisions 1, 3, 5 (independent surface areas). Decision 2 shares the generalizable sub-rule — when 2 lands, it inherits the verify-and-pin discipline.
 - **Next-step ticket:** TBD after Phase 1 closes. Should reference (a) Option C as the implementation shape, (b) the token-TTL refresh test as a precondition of the refactor merging, (c) the generalizable sub-rule so it propagates to future constructor-injection refactors (Decision 2 included).
+
+### Decision 7 — Adopt `import-linter` CI rules with the discipline "only when a decision creates the boundary"
+
+- **Finding:** Phase 0 surfaced multiple cases where soft architectural boundaries silently rotted. The v2 dispatcher module remained importable from anywhere in the tree for months after v3 was supposed to replace it; the `ProviderInvalidResultError` zombie sat in `__all__` undetected because nothing exercised the import; the singular-vs-plural provider package split misled even reviewers actively editing it (#266 comment thread). Jeff's question raised the canonical fix shape from another repo: CI-enforced import boundaries so that only specific packages may import from named other packages (or from external code).
+- **Decision:** **Yes — adopt `import-linter` as the boundary-enforcement layer**, with three rules tied directly to decisions already made in this Phase 1 round. Add new rules only as future decisions create the boundaries they enforce. Do NOT pre-populate the rule set with hypothetical layers.
+- **Three initial rules** (each tied to an in-flight decision):
+  - **R1 — Provider-adapter boundary (Decision 5).** Only modules under `foreman.provider.adapters.*` may import third-party provider SDKs (`anthropic`, future `openai`, etc.). All other consumers must talk to the `provider.api` ABC. Prevents the provider boundary from silently re-splitting.
+  - **R2 — Role-runner boundary (Decision 2).** `foreman.reconciler.*` may not import from `foreman.roles.*`. Only the role-dispatch seam (`reconciler/role_dispatch.py`) bridges the two; reconciler does not reach into role internals. Prevents the v3 reconciler from sneaking back into role-runner shape the way the v2 dispatcher did.
+  - **R3 — Dead-island prevention (Decision 3).** Modules on the reachability complement (unreachable from the live entry-point graph computed by Decision 3's tooling) fail CI. This is what permanently closes the v2 island once excised and catches the next dead-island shape *before* it accumulates. Implementation note: the import-linter contract type is `forbidden` against any module flagged by the reachability sweep.
+- **Tool: `import-linter`** — mature, declarative config (`importlinter.cfg`), integrates with pre-commit and the existing `just check` gate. The three rule shapes above are all standard contracts it supports (`forbidden`, `layered`, custom-with-helper-script).
+- **Rule-set discipline (the load-bearing piece):** add a rule **only when a decision creates the boundary it enforces.** No hypothetical-future layers; no "let's also enforce X just in case." Reason: the failure mode of boundary-rule CI is config drift — every new package needs a rule, every refactor needs the rule updated, and the moment the config falls behind the code the rules stop biting. Keeping the rule set small enough to inspect at a glance is the only sustainable defense against this drift.
+- **Layered defense framing** (why this composes with Decisions 3, 4, 6):
+  - Decision 4 = soft guardrail (prompt-level bias toward GoF + Google patterns during initial design)
+  - Decision 6 = test-as-truth (verify-and-pin invariants as tests, not comments)
+  - Decision 3 = sweep tooling (vulture + reachability find dead code AFTER it forms)
+  - Decision 7 = boundary CI (import-linter prevents specific boundary violations from forming AT ALL)
+  - The four together: bias the initial design toward good patterns → pin lifecycle assumptions as tests → catch dead code retrospectively → block boundary violations at CI. Defense in depth; each layer catches what the others miss.
+- **Why this is "worth it" for foreman specifically, not for every project:**
+  - ~30-module codebase is the threshold where humans CAN still hold all boundaries in their heads but won't reliably do so under deadline pressure
+  - We're explicitly hardening boundaries this sprint (Decisions 2, 3, 5) — adding the enforcement layer alongside is cheaper than adding it later
+  - A 5-module project would be pure overhead; a 100-module project would make this non-negotiable; we're in the band where the discipline of "only when a decision creates the boundary" keeps it from tipping into overhead
+- **Rationale (against the do-nothing alternative):**
+  - Without CI enforcement, every one of Decisions 2/3/5 relies on reviewer vigilance during PR review. Reviewer vigilance has already been demonstrated insufficient — see the v2 dispatcher dead island, the provider-package split confusion, the zombie `__all__` export.
+  - Soft conventions in CLAUDE.md / prompts (Decision 4) bias initial proposals but do not catch the case where someone explicitly chooses to violate the convention "just this once."
+- **Sequencing dependency:** R1, R2, R3 land *with* their respective parent decisions (5, 2, 3) — the import-linter rule and the boundary it enforces ship in the same PR so the rule is testing the new shape, not retrofitting the old. The `import-linter` framework itself can land independently first.
+- **Next-step ticket:** TBD after Phase 1 closes. Should reference (a) `import-linter` adoption as the framework PR (independent), (b) the rule-set discipline ("only when a decision creates the boundary"), and (c) the three initial rules with their parent-decision linkage so the rule provenance survives memory drift.
 
 
