@@ -316,19 +316,26 @@ def test_log_planner_run_emits_role_planner(tmp_path: Path) -> None:
     assert payload["outcome"] == "spec_written"
 
 
-def test_log_planner_run_accepts_spec_failed_outcome(tmp_path: Path) -> None:
-    """``spec_failed`` is the other allowed Planner outcome literal — pinned
-    here so the Literal can't be silently narrowed."""
-    log_planner_run(
-        stats_root=tmp_path,
-        repo_slug="acme/widgets",
-        issue_number=2,
-        pr_number=None,
-        outcome="spec_failed",
-        duration_seconds=0.5,
-    )
-    payload = json.loads(
-        (tmp_path / "acme__widgets" / "planner.jsonl").read_text(encoding="utf-8").strip()
-    )
-    assert payload["outcome"] == "spec_failed"
-    assert payload["pr_number"] is None
+def test_log_outcome_literals_exclude_dead_failure_values() -> None:
+    """foreman#256: PR #255 (commit b18a683) unified all four role
+    runners on ``outcome="exception"``. The legacy ``<role>_failed``
+    values are dead vocabulary — accepted by the type system but
+    never emitted. This test pins the cleanup so they can't be
+    silently re-added."""
+    from typing import get_args, get_type_hints
+
+    cases = [
+        (log_planner_run, "spec_failed"),
+        (log_reviewer_run, "review_failed"),
+        (log_worker_run, "worker_failed"),
+        (log_fixer_run, "fixer_failed"),
+    ]
+    for fn, dead_value in cases:
+        allowed = set(get_args(get_type_hints(fn)["outcome"]))
+        assert dead_value not in allowed, (
+            f"{fn.__name__}: dead Literal value {dead_value!r} re-introduced"
+        )
+        # And the replacement is still in the vocabulary.
+        assert "exception" in allowed, (
+            f"{fn.__name__}: 'exception' missing from outcome Literal"
+        )

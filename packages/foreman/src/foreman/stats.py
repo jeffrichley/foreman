@@ -78,7 +78,7 @@ class CommonEnvelope(BaseModel):
         Originating issue # the run was attached to.
     pr_number:
         The PR the run produced / reviewed / edited. ``None`` when the
-        run produced no PR (Planner spec_failed, Worker incomplete, etc.).
+        run produced no PR (Planner exception, Worker incomplete, etc.).
     outcome:
         Per-role enum value — see each ``log_*_run`` docstring for the
         allowed literals.
@@ -190,7 +190,7 @@ def log_fixer_run(
     issue_number: int,
     pr_number: int | None,
     attempt: int,
-    outcome: Literal["fixed", "incomplete", "fixer_failed", "exception"],
+    outcome: Literal["fixed", "incomplete", "exception"],
     total_findings: int,
     addressed_count: int,
     unaddressed_count: int,
@@ -215,19 +215,20 @@ def log_fixer_run(
             stats subdirectory.
         issue_number: Originating issue # (label-triggered the Fixer).
         pr_number: Spec PR # the Fixer edited. ``None`` on
-            ``"fixer_failed"`` runs that crashed before the spec PR
+            ``"exception"`` runs that crashed before the spec PR
             could be resolved.
         attempt: 1-based fix-attempt counter (matches the
             ``foreman:fix-attempt-N`` label set on entry).
         outcome: ``"fixed"`` or ``"incomplete"`` per
             :class:`~foreman.schemas.fixer.FixerOutput.outcome`, or
-            ``"fixer_failed"`` (foreman#239) when ``run_fixer`` itself
-            raised an exception before producing a FixerOutput.
-            ``"incomplete"`` is the Fixer's SELF-REPORTED outcome (LLM
-            said it didn't finish); ``"fixer_failed"`` is a different
-            shape — an uncaught exception in the role runner. Keeping
-            them distinct lets cost-rollup queries answer "how many
-            Fixer runs crashed vs how many the LLM gave up on?".
+            ``"exception"`` (foreman#239 / unified across all four roles
+            in PR #255) when ``run_fixer`` itself raised an exception
+            before producing a FixerOutput. ``"incomplete"`` is the
+            Fixer's SELF-REPORTED outcome (LLM said it didn't finish);
+            ``"exception"`` is a different shape — an uncaught
+            exception in the role runner. Keeping them distinct lets
+            cost-rollup queries answer "how many Fixer runs crashed vs
+            how many the LLM gave up on?".
         total_findings: Sum of addressed + unaddressed; matches the
             Reviewer's finding count.
         addressed_count: ``len(addressed_findings)``.
@@ -291,7 +292,7 @@ def log_worker_run(
     issue_number: int,
     pr_number: int | None,
     attempt: int,
-    outcome: Literal["implemented", "incomplete", "spec_invalid", "worker_failed", "exception"],
+    outcome: Literal["implemented", "incomplete", "spec_invalid", "exception"],
     total_sub_requests: int,
     implemented_count: int,
     skipped_count: int,
@@ -323,13 +324,14 @@ def log_worker_run(
             ``foreman:impl-attempt-N`` label set on entry).
         outcome: One of ``implemented`` / ``incomplete`` /
             ``spec_invalid`` per :class:`~foreman.schemas.worker.WorkerOutput.outcome`,
-            OR ``worker_failed`` (foreman#238) when an uncaught exception
-            escaped ``run_worker``'s body wrap. ``worker_failed`` is
-            distinct from ``incomplete`` (the Worker's self-reported
-            "I couldn't finish") and ``spec_invalid`` (the Worker's
-            self-reported "the spec is wrong") — both of those are LLM
-            outputs. ``worker_failed`` means the run never produced a
-            structured output at all.
+            OR ``exception`` (foreman#238 / unified across all four
+            roles in PR #255) when an uncaught exception escaped
+            ``run_worker``'s body wrap. ``exception`` is distinct from
+            ``incomplete`` (the Worker's self-reported "I couldn't
+            finish") and ``spec_invalid`` (the Worker's self-reported
+            "the spec is wrong") — both of those are LLM outputs.
+            ``exception`` means the run never produced a structured
+            output at all.
             The non-failed outcomes are the FINAL value after
             orchestrator-side override: if the Worker claimed
             ``implemented`` but the orchestrator's post-Worker
@@ -408,7 +410,7 @@ def log_planner_run(
     repo_slug: str,
     issue_number: int,
     pr_number: int | None,
-    outcome: Literal["spec_written", "spec_failed", "exception"],
+    outcome: Literal["spec_written", "exception"],
     duration_seconds: float,
     input_tokens: int = 0,
     output_tokens: int = 0,
@@ -434,7 +436,9 @@ def log_planner_run(
         pr_number: Spec PR # opened by the Planner (None on failed runs
             that returned before opening a PR).
         outcome: ``"spec_written"`` when the run produced a spec PR;
-            ``"spec_failed"`` when the run exited without one. Required
+            ``"exception"`` when the role runner caught an uncaught
+            exception before producing structured output (foreman#239
+            unified across all four roles in PR #255). Required
             kwarg — foreman#233 deliberately does NOT default this, so
             callers can't silently regress by omitting it.
         duration_seconds: Wall-clock time the Planner run took.
@@ -488,7 +492,7 @@ def log_reviewer_run(
     issue_number: int,
     pr_number: int | None,
     target: Literal["spec_pr", "impl_pr"],
-    outcome: Literal["clean", "needs_fix", "review_failed", "exception"],
+    outcome: Literal["clean", "needs_fix", "exception"],
     duration_seconds: float,
     input_tokens: int = 0,
     output_tokens: int = 0,
@@ -521,10 +525,11 @@ def log_reviewer_run(
             target-aware routing.
         outcome: ``"clean"`` / ``"needs_fix"`` per
             :class:`~foreman.schemas.reviewer.ReviewerOutput.outcome`
-            on success, or ``"review_failed"`` when ``run_reviewer``
-            caught an exception mid-run. foreman#237 extended the
-            Literal additively so failed Reviewer runs no longer
-            silently vanish from ``reviewer.jsonl``.
+            on success, or ``"exception"`` when ``run_reviewer``
+            caught an uncaught exception mid-run (foreman#237 / unified
+            across all four roles in PR #255). The exception path
+            ensures failed Reviewer runs no longer silently vanish
+            from ``reviewer.jsonl``.
         duration_seconds: Wall-clock time the Reviewer run took.
         input_tokens: Provider-reported input token count.
         output_tokens: Provider-reported output token count.
