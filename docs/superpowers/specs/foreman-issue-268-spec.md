@@ -4,7 +4,9 @@
 
 The spec-side and impl-side Reviewer budget caps fire BEFORE the next
 review runs (a count-based dispatch gate inside `_planning_pr_needs_review`
-and `_impl_pr_needs_review`), and the post-dispatch `attempts_exhausted`
+and `_impl_review_green` — note: the impl-side function in
+`rules.py:437` is named `_impl_review_green`, NOT `_impl_pr_needs_review`
+as the originating issue body uses), and the post-dispatch `attempts_exhausted`
 safety rules conflate "Reviewer ran N times" with "Reviewer said
 needs_fix N times". This spec moves the cap to AFTER each review's
 outcome is known and counts only `needs_fix` verdicts toward the budget.
@@ -25,7 +27,7 @@ See issue [#268](https://github.com/jeffrichley/foreman/issues/268).
   is updated to explain the new "cap fires AFTER, not BEFORE" semantics
   and links to issue #268.
 - `packages/foreman/src/foreman/reconciler/rules.py` line 453: the
-  symmetric clause in `_impl_pr_needs_review`
+  symmetric clause in `_impl_review_green`
   (`and ctx.log.count_completed("dispatch_reviewer_impl", ctx.ticket_id) < _MAX_REVIEWER_ATTEMPTS`)
   is REMOVED. Doc-comment updated symmetrically.
 - `packages/foreman/src/foreman/reconciler/rules.py` line 80: the
@@ -58,13 +60,28 @@ See issue [#268](https://github.com/jeffrichley/foreman/issues/268).
   `test_reviewer_spec_attempts_exhausted_fires_only_on_three_needs_fix_verdicts`
   added to `packages/foreman/tests/reconciler/test_rules.py`. Builds a
   context with 3 completed `dispatch_reviewer_spec` rows whose
-  termination outcomes are ALL `"needs_fix"`, asserts
-  `evaluate(ctx, rules=RULES) is Action.SURFACE_HELP` (the
-  `reviewer_spec_attempts_exhausted` rule at precedence 65 wins). The
-  context's PR is set up such that `_planning_pr_needs_review` would
-  otherwise have fired
-  (`labels=("foreman:planning",)`, `_pr(mergeable="MERGEABLE",
-  ci_status="SUCCESS")`).
+  termination outcomes are ALL `"needs_fix"`, then calls the predicate
+  directly:
+  `assert _reviewer_spec_attempts_exhausted(ctx) is True`. The test
+  MUST NOT go through `evaluate(ctx, rules=RULES)` here — the
+  `dispatch_reviewer_spec` rate-limit rule (precedence 44) runs BEFORE
+  `reviewer_spec_attempts_exhausted` (precedence 65), and
+  `_NON_FAILURE_OUTCOMES = ("success", "dry_run", "skipped_capacity")`
+  (`exec_log.py:31-35`) classifies `needs_fix` as a failure, so a bare
+  test fixture with 3 `needs_fix` rows would trip the rate-limit first
+  and return `Action.RATE_LIMIT_TRIP`, not `Action.SURFACE_HELP`. In
+  production the daemon's `success` termination row alongside each
+  Recorder `needs_fix` row advances `fence_ts` (`v3_host.py:1023-1029`
+  + `dispatch_recorder.py:181-200`), so the rate-limit stays silent
+  and the higher-precedence exhaustion rule fires correctly; the
+  direct-predicate-call pattern in the test isolates the property
+  under test (the outcome filter) from that dual-write fixture
+  scaffolding. Context labels: `labels=("foreman:planning",)`.
+  Acceptable alternative pattern (Worker's choice): construct the
+  fixture with BOTH the Recorder-shape `outcome="needs_fix"` row AND
+  a daemon-shape `outcome="success"` row per dispatch (matching
+  production), then assert
+  `evaluate(ctx, rules=RULES) is Action.SURFACE_HELP`.
 - Red test 2 (spec-side, clean verdicts don't burn budget):
   `test_reviewer_spec_attempts_exhausted_does_not_fire_when_one_clean_verdict_present`
   added to `packages/foreman/tests/reconciler/test_rules.py`. Builds
@@ -81,20 +98,38 @@ See issue [#268](https://github.com/jeffrichley/foreman/issues/268).
   `test_dispatch_reviewer_spec_fires_after_many_completed_dispatches_with_no_needs_fix_streak`
   added to `packages/foreman/tests/reconciler/test_rules.py`. Builds a
   context with 5 completed `dispatch_reviewer_spec` rows with mixed
-  outcomes (e.g.,
-  `["needs_fix", "needs_fix", "success", "needs_fix", "success"]`), no
-  unterminated dispatch, label state `foreman:planning`, PR is
-  spec-shaped + unmerged. Asserts
-  `evaluate(ctx, rules=RULES) is Action.DISPATCH_REVIEWER_SPEC`. This
-  fails today because the existing line-365 count gate blocks past 3
-  total dispatches; after the change it passes.
+  outcomes whose `needs_fix` count is STRICTLY LESS THAN 3 (e.g.,
+  `["needs_fix", "success", "needs_fix", "success", "success"]` — 2
+  needs_fix, 3 success), no unterminated dispatch, label state
+  `foreman:planning`, PR is spec-shaped + unmerged. Asserts
+  `evaluate(ctx, rules=RULES) is Action.DISPATCH_REVIEWER_SPEC`. The
+  needs_fix count must be < 3 so the post-fix exhaustion rule does
+  NOT fire (`count_completed(outcome="needs_fix") == 2 < 3`); the
+  trailing `success` rows advance the rate-limit `fence_ts` past any
+  needs_fix rows so the rate-limit stays silent. This fails today
+  because the existing line-365 count gate blocks past 3 total
+  dispatches; after the change it passes. Symmetric impl-side Test 6
+  uses the same shape with `dispatch_reviewer_impl` /
+  `foreman:impl-review` / `head_ref="foreman/impl-143"`.
 - Symmetric impl-side red tests:
   `test_reviewer_impl_attempts_exhausted_fires_only_on_three_needs_fix_verdicts`,
   `test_reviewer_impl_attempts_exhausted_does_not_fire_when_one_clean_verdict_present`,
   `test_dispatch_reviewer_impl_fires_after_many_completed_dispatches_with_no_needs_fix_streak`
   — each mirrors its spec-side counterpart but uses
   `foreman:impl-review` label, `dispatch_reviewer_impl` action, and
-  impl-shaped PR (`head_ref="foreman/impl-143"`).
+  impl-shaped PR (`head_ref="foreman/impl-143"`). Test 4
+  (`_fires_only_on_three_needs_fix_verdicts`) MUST follow the same
+  rate-limit-avoidance pattern as Red test 1: call the predicate
+  `_reviewer_impl_attempts_exhausted(ctx)` directly and assert `is
+  True`, OR write a daemon-shape `outcome="success"` row alongside
+  each Recorder-shape `outcome="needs_fix"` row to advance `fence_ts`
+  so `evaluate(ctx, rules=RULES)` can return `Action.SURFACE_HELP`
+  without `dispatch_reviewer_impl`'s precedence-45 rate-limit firing
+  first. A bare 3-`needs_fix`-row fixture put through `evaluate`
+  returns `Action.RATE_LIMIT_TRIP` (same reason as spec-side: the
+  rate-limit at precedence 42+3=45 sits below
+  `reviewer_impl_attempts_exhausted` at precedence 70, and `needs_fix`
+  is not in `_NON_FAILURE_OUTCOMES`).
 - Existing rate-limit test
   `test_dispatch_reviewer_spec_blocked_after_3_completed_attempts`
   (`packages/foreman/tests/reconciler/test_rules.py:933`) continues to
@@ -153,7 +188,7 @@ The fix has three localized edits in `rules.py`, all in a single
 module, with no schema change and no new helper functions.
 
 **Edit 1 — drop the dispatch-side count gate.** Lines 365 and 453.
-After this edit, `_planning_pr_needs_review` and `_impl_pr_needs_review`
+After this edit, `_planning_pr_needs_review` and `_impl_review_green`
 gate dispatch on label state + PR state + head-ref shape + no
 in-flight Reviewer dispatch. There is no upper bound on how many times
 Reviewer can dispatch against a single PR. The bound is the labeled-
@@ -205,10 +240,25 @@ crashing" vs "Reviewer keeps saying needs_fix" — get two different
 defenses, which is exactly the shape the issue argues for.
 
 **TDD discipline.** The new tests go red first against the current
-predicates (test 1 fails because today the rule fires on
-count_completed >= 3 regardless of outcome; test 3 fails because the
-dispatch gate blocks at 3 total). Then the predicate edits land and
-the new tests go green. The existing rate-limit + precedence
+predicates. Tests that exercise the outcome filter (Tests 1, 2, 4, 5)
+use direct predicate calls — `assert
+_reviewer_spec_attempts_exhausted(ctx) is …` / `_reviewer_impl_…` —
+to bypass `evaluate`'s precedence walk. Going through `evaluate` on
+needs_fix/error-only fixtures returns `Action.RATE_LIMIT_TRIP` first,
+because the `dispatch_reviewer_spec` rate-limit at precedence 44
+(impl at 45) sits below `reviewer_spec_attempts_exhausted` at 65
+(impl at 70), and `_NON_FAILURE_OUTCOMES` (`exec_log.py:31-35`)
+classifies any outcome other than `success` / `dry_run` /
+`skipped_capacity` as a failure for the rate-limit's
+`count_recent_failures`. The existing test at
+`test_rules.py:933` already locks `Action.RATE_LIMIT_TRIP` on 3
+error rows; tests that go through `evaluate` (Tests 3 and 6) use a
+success-trailing outcome sequence so the rate-limit `fence_ts`
+advances past any failure rows and rate-limit stays silent. Once the
+predicate edits land, direct-predicate tests flip to the post-fix
+assertion (`is True` / `is False` per the outcome filter), and the
+`evaluate`-path tests advance to `Action.DISPATCH_REVIEWER_SPEC` (no
+more line-365 count gate). The existing rate-limit + precedence
 invariant tests are run in the same suite to confirm no regression.
 
 **What this change does NOT do.** Out of scope per the issue body
@@ -232,41 +282,93 @@ and one existing test repurposed.
    existing reviewer attempt-budget tests (after line 989).
 
 2. **Run the new tests; confirm they fail against current code.**
-   Tests 1 and 4 (the spec-side and impl-side "fires on 3 needs_fix
-   verdicts") currently fail because today's predicate counts
-   ALL terminations, so 3 `needs_fix` rows DO fire SURFACE_HELP —
-   meaning these specific tests may PASS by accident on current code
-   (the predicate is `>= 3` regardless of outcome filter). To make
-   them genuine red tests, EACH must also write enough non-needs_fix
-   rows that today's predicate would over-count. Concretely: each
-   test writes 3 `needs_fix` rows + a 4th `outcome="success"` row,
-   so today's count_completed == 4 (still fires, passes), and the
-   asserted post-fix count_completed(outcome="needs_fix") == 3 (still
-   fires). To make THIS pair of tests genuine reds: after the fix,
-   ADD a 5th `outcome="error"` row — predicate still must fire (3
-   needs_fix). The pair "fires when exactly 3 needs_fix" is naturally
-   green both before and after; the property the test is locking is
-   that the SOURCE of the firing is the needs_fix count, not the
-   total. Cover this by ADDING a follow-up test
+   The reds split into two categories based on which assertion path
+   is exercised.
+
+   **Tests 1 and 4 (direct-predicate path)** — using the pattern
+   pinned in the Red test 1 acceptance criterion: `assert
+   _reviewer_spec_attempts_exhausted(ctx) is True` (or the impl
+   variant). Today's predicate is
+   `count_completed(action, ticket_id) >= 3` (no outcome filter), so
+   3 `needs_fix` rows + 0 other rows give `count_completed == 3` —
+   predicate returns True today AND after the fix. Naturally green
+   both ways. To make these GENUINE reds, the test fixture writes 3
+   `outcome="needs_fix"` rows AND 1 `outcome="error"` row (4
+   terminations total). Today: `count_completed == 4 >= 3` → True
+   (green). After the fix:
+   `count_completed(outcome="needs_fix") == 3 >= 3` → True (still
+   green). To get a genuine red on Tests 1/4 themselves, INVERT the
+   fixture and the assertion: write 3 `outcome="error"` rows + 0
+   `outcome="needs_fix"` rows and assert `is FALSE`. Today's
+   unfiltered predicate returns True (red); after fix's
+   needs_fix-filtered predicate returns False (green). Worker MUST
+   either (a) rename Tests 1 and 4 to
    `test_reviewer_spec_attempts_exhausted_does_not_fire_on_3_error_terminations`
-   that builds a context with 3 `outcome="error"` rows + 0
-   `needs_fix` rows and asserts the rule does NOT match
-   `Action.SURFACE_HELP` (today it does match, after fix it does
-   not).
-   Tests 2 and 5 ("3 dispatches but only 2 needs_fix → does not
-   exhaust") naturally fail today: today's predicate counts the 3
-   total terminations and fires SURFACE_HELP; after fix it counts 2
-   needs_fix and does not. These are genuine reds.
-   Tests 3 and 6 ("dispatch fires after 5 mixed-outcome
-   completions") naturally fail today: today's
-   `_planning_pr_needs_review` count gate blocks past 3 total
-   dispatches. After fix the gate is gone and the dispatch fires.
-   Genuine reds.
+   / `_impl_` counterpart with the inverted shape (3 error rows,
+   assert `is False`), or (b) keep Tests 1 and 4 named as in the AC
+   bullets (3 needs_fix rows, assert `is True`) AND add the inverted
+   tests as genuine reds. Either approach exercises the new outcome
+   filter directly. NOTE: Going through `evaluate(ctx, rules=RULES)`
+   with 3 error rows asserts a property the rate-limit already
+   enforces (at precedence 42-47, lower than exhaustion at 65-70) —
+   the existing test at `test_rules.py:933` already locks
+   `Action.RATE_LIMIT_TRIP` on 3 error rows. So the direct-predicate
+   form is the ONLY assertion path that genuinely exercises the new
+   outcome filter for the error-row case; do not duplicate the line
+   933 property through `evaluate`.
+
+   **Tests 2 and 5 (direct-predicate path).** Build a context with 3
+   completed dispatches whose outcomes are `["needs_fix",
+   "needs_fix", "clean"]` (mixed). Today's unfiltered predicate
+   returns True (3 total terminations); after fix's
+   needs_fix-filtered predicate returns False (only 2 `needs_fix`).
+   Genuine reds via direct call: `assert
+   _reviewer_spec_attempts_exhausted(ctx) is False` (and
+   `_reviewer_impl_attempts_exhausted` symmetric). Using `evaluate`
+   here would tangle the assertion with the rate-limit interaction
+   too (2 needs_fix + 1 clean over the window → rate-limit asks
+   "consecutive failures past the latest success fence" — `clean` is
+   not a success, so `fence_ts` stays None, and the 2 needs_fix
+   rows + the 1 clean row all read as failures; today
+   `count_recent_failures = 3` → rate-limit also fires). Direct
+   call avoids the entanglement.
+
+   **Tests 3 and 6 (`evaluate` path).** Build a context with 5
+   completed `dispatch_reviewer_spec` rows whose outcomes are
+   `["needs_fix", "needs_fix", "success", "needs_fix", "success"]`,
+   no unterminated dispatch, label state `foreman:planning`, PR is
+   spec-shaped + unmerged. Today: the line-365 count gate sees
+   `count_completed == 5 >= 3` → `_planning_pr_needs_review` returns
+   False → no dispatch fires (whatever else `evaluate` returns is
+   not `Action.DISPATCH_REVIEWER_SPEC`). After fix: the count gate
+   is gone; `_planning_pr_needs_review` returns True. Rate-limit on
+   `dispatch_reviewer_spec` reads: most recent success fence is the
+   5th termination (`outcome="success"`), so the consecutive-failure
+   window past the fence is empty → rate-limit silent. Exhaustion:
+   `count_completed(outcome="needs_fix") == 3 >= 3` → exhaustion
+   FIRES first (precedence 65 < dispatch tier). After fix's correct
+   behavior, exhaustion still wins over dispatch on this fixture
+   because the test is ALSO testing the new outcome-aware
+   exhaustion. To get Tests 3 and 6 to assert
+   `Action.DISPATCH_REVIEWER_SPEC` (not `SURFACE_HELP`) after the
+   fix, the fixture's `needs_fix` count must be `< 3`. Adjust the
+   outcome sequence to e.g.
+   `["needs_fix", "success", "needs_fix", "success", "success"]`
+   (2 needs_fix, 3 success — 5 total dispatches, none currently
+   in-flight; exhaustion does NOT fire because
+   `count_completed(outcome="needs_fix") == 2 < 3`; rate-limit
+   silent because the most recent success advances the fence past
+   any needs_fix); the only rule that matches at the FORWARD-PROGRESS
+   tier is `_planning_pr_needs_review` → dispatch fires.
+   Today's line-365 gate STILL blocks regardless of outcome mix
+   (`count_completed == 5 >= 3`); after fix the gate is gone and
+   dispatch fires. Genuine reds via `evaluate`.
+
    Confirm all genuine red tests fail on `just check`.
 
 3. **Apply Edit 3 (constant rename) first.** Replace line 80
    `_MAX_REVIEWER_ATTEMPTS = 3` with
-   `_MAX_REVIEWER_FIX_VERDICTS = 3`. Update the three usages at lines
+   `_MAX_REVIEWER_FIX_VERDICTS = 3`. Update the four usages at lines
    122, 131, 365, 453 to reference the new name. The rename is a pure
    `s/old/new/g` inside rules.py; no semantic change. Run tests after
    this edit to confirm green (no behavior change yet).
@@ -274,7 +376,7 @@ and one existing test repurposed.
 4. **Apply Edit 1 (drop dispatch-side gate).** Delete the
    `and ctx.log.count_completed(...) < _MAX_REVIEWER_FIX_VERDICTS`
    line from both `_planning_pr_needs_review` (formerly line 365)
-   and `_impl_pr_needs_review` (formerly line 453). Update the
+   and `_impl_review_green` (formerly line 453). Update the
    inline doc-comment blocks at lines 353-358 and 444-446 (the
    "Budget cap..." paragraph) to reflect the new "cap fires AFTER,
    not BEFORE" design and link issue #268. Run tests after this
@@ -288,10 +390,15 @@ and one existing test repurposed.
    `outcome="needs_fix"` into `count_completed`. Same for
    `_reviewer_impl_attempts_exhausted`. Update both doc-comments
    (lines 109-119 and 126-128) to explain the new semantics and link
-   issue #268. Run tests. The new genuine red tests (the
-   `does_not_fire_on_3_error_terminations` pair from sub-request 2)
-   should now go green. Tests 2 and 5 (mixed-outcome non-exhaustion)
-   should also go green.
+   issue #268. Run tests. The genuine reds from sub-request 2 that
+   target the new outcome filter should now go green:
+   - Tests 1 and 4 in whichever shape the Worker chose in sub-request 2
+     — either inverted (3 error rows, assert predicate is False) or
+     positive (3 needs_fix rows, direct-predicate call asserts True;
+     the predicate flips from True-by-coincidence to True-because-
+     filter-matches, which is the semantic change being locked in).
+   - Tests 2 and 5 (mixed-outcome `[needs_fix, needs_fix, clean]`,
+     direct-predicate call asserts False).
 
 6. **Update the legacy test
    `test_dispatch_reviewer_spec_still_fires_under_budget` at
@@ -331,8 +438,8 @@ and one existing test repurposed.
 
 | File | Change |
 | --- | --- |
-| `packages/foreman/src/foreman/reconciler/rules.py` | Rename `_MAX_REVIEWER_ATTEMPTS` → `_MAX_REVIEWER_FIX_VERDICTS` (line 80). Drop the `count_completed(...) < _MAX_REVIEWER_FIX_VERDICTS` clause from `_planning_pr_needs_review` (line 365) and `_impl_pr_needs_review` (line 453). Change `_reviewer_spec_attempts_exhausted` (lines 109-123) and `_reviewer_impl_attempts_exhausted` (lines 126-132) to call `count_completed(..., outcome="needs_fix")`. Update four doc-comment blocks to describe the new "cap fires AFTER, not BEFORE" design and link issue #268. No precedence values change; no rule additions or removals. |
-| `packages/foreman/tests/reconciler/test_rules.py` | Add six new red tests (three spec-side, three impl-side) in the existing "Pass 3 HIGH: Reviewer attempt budget (spec + impl)" section after line 1010. Add the two "3 error terminations does not fire attempts_exhausted" sibling tests (one spec-side, one impl-side) per sub-request 2. Resolve the legacy `test_dispatch_reviewer_spec_still_fires_under_budget` at line 966 per sub-request 6 (delete or rename + repurpose). No changes to the existing rate-limit tests at lines 933 + 989. |
+| `packages/foreman/src/foreman/reconciler/rules.py` | Rename `_MAX_REVIEWER_ATTEMPTS` → `_MAX_REVIEWER_FIX_VERDICTS` (line 80). Drop the `count_completed(...) < _MAX_REVIEWER_FIX_VERDICTS` clause from `_planning_pr_needs_review` (line 365) and `_impl_review_green` (line 453). Change `_reviewer_spec_attempts_exhausted` (lines 109-123) and `_reviewer_impl_attempts_exhausted` (lines 126-132) to call `count_completed(..., outcome="needs_fix")`. Update four doc-comment blocks to describe the new "cap fires AFTER, not BEFORE" design and link issue #268. No precedence values change; no rule additions or removals. |
+| `packages/foreman/tests/reconciler/test_rules.py` | Add six new red tests (three spec-side, three impl-side) in the existing "Pass 3 HIGH: Reviewer attempt budget (spec + impl)" section after line 1010. Tests 1, 2, 4, 5 use the direct-predicate-call pattern (`assert _reviewer_spec_attempts_exhausted(ctx) is …` / `_reviewer_impl_attempts_exhausted`) to bypass `evaluate`'s precedence walk so the rate-limit at precedences 44/45 (lower than exhaustion at 65/70) does not preempt the assertion under test — see sub-request 2 for the per-test fixture shapes and the rate-limit interaction rationale, and Red test 1's acceptance bullet for the alternative dual-write pattern that lets a Worker use `evaluate` instead. Tests 3 and 6 use `evaluate` with the success-trailing outcome sequence (`[needs_fix, success, needs_fix, success, success]` — needs_fix count strictly < 3 so exhaustion does not fire, trailing success advances `fence_ts` so rate-limit stays silent). Resolve the legacy `test_dispatch_reviewer_spec_still_fires_under_budget` at line 966 per sub-request 6 (delete or rename + repurpose). No changes to the existing rate-limit tests at lines 933 + 989. |
 | `packages/foreman/src/foreman/reconciler/exec_log.py` | NOT modified. `count_completed` already accepts `outcome: str \| None`. |
 | `packages/foreman/src/foreman/dispatch_recorder.py` | NOT modified. The Recorder already writes the Reviewer's `needs_fix` / `clean` verdict to the `outcome` column via `CostSubscriber.handle_dispatch_complete`. |
 | `packages/foreman/src/foreman/roles/reviewer.py` | NOT modified. `emit_recorder_complete` already propagates `llm_output.outcome` literally. |
