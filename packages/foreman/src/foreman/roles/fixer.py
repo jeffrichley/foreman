@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Literal, cast
 
 from github import Github
+from github.Issue import Issue
 from github.PullRequest import PullRequest
 from github.Repository import Repository
 from pydantic import ValidationError
@@ -62,6 +63,7 @@ from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
+from foreman.roles import TERMINAL_BLOCKING_LABEL, handle_unhandled_role_exception
 from foreman.roles.reviewer import FINDINGS_BEGIN_MARKER, FINDINGS_END_MARKER
 from foreman.schemas.fixer import FixerOutput, FixerRunResult
 from foreman.schemas.reviewer import Finding
@@ -114,6 +116,21 @@ _FIXER_ENTRY_LABEL_BY_TARGET: dict[str, str] = {
     "spec_pr": _LABEL_SPEC_FIX,
     "impl_pr": _LABEL_IMPL_FIX,
 }
+
+
+class _FixerPreflightRefusal(RuntimeError):
+    """Fixer refused to proceed because either (a) the issue lacks the
+    expected entry label (``foreman:spec-fix`` or ``foreman:impl-fix``),
+    or (b) the fix-attempt counter has hit ``max_fix_attempts``.
+
+    Subclass of :class:`RuntimeError` so existing callers'
+    ``except RuntimeError`` clauses and ``pytest.raises`` patterns work
+    unchanged. The distinguishing purpose is to tell the runaway-burn
+    defense (#229 helper invocation) to SKIP firing: both refusals are
+    deliberate (operator removed the label, or the attempt budget IS
+    the human-intervention escalation surface) — not a runaway signal.
+    Firing the helper would override operator intent.
+    """
 
 _FIXER_SUPERPOWERS_BY_TARGET: dict[str, list[str]] = {
     # Spec-side: today's discipline — receiving review feedback.
@@ -431,28 +448,57 @@ async def run_fixer(
             attempts (``project.max_fix_attempts``) already reached, or
             no open spec PR / no Reviewer review found.
     """
-    owner, repo_name, issue_number = parse_issue_url(issue_url)
-    project = config.projects[project_name]
-    expected_repo_slug = project.repo
-    actual_repo_slug = f"{owner}/{repo_name}"
-    if expected_repo_slug != actual_repo_slug:
-        raise ValueError(
-            f"Issue URL repo {actual_repo_slug!r} does not match project "
-            f"{project_name!r} configured repo {expected_repo_slug!r}"
+    # Post-adversarial-review (#1): wrap the initial setup — URL parse,
+    # project lookup, identity setup, ``repo.get_issue`` — in a
+    # defensive try block so a transient failure fires the runaway-burn
+    # helper on the FIRST failure instead of letting #228's rate-limit
+    # catch it at N=3. Refusals raise the marker subclass and are
+    # raised AFTER this block, so they don't enter it.
+    _setup_issue_number: int | None = None
+    _setup_repo_slug: str | None = None
+    _setup_issue: Issue | None = None
+    try:
+        owner, repo_name, issue_number = parse_issue_url(issue_url)
+        _setup_issue_number = issue_number
+        project = config.projects[project_name]
+        expected_repo_slug = project.repo
+        actual_repo_slug = f"{owner}/{repo_name}"
+        _setup_repo_slug = actual_repo_slug
+        if expected_repo_slug != actual_repo_slug:
+            raise ValueError(
+                f"Issue URL repo {actual_repo_slug!r} does not match project "
+                f"{project_name!r} configured repo {expected_repo_slug!r}"
+            )
+
+        registry = (
+            identity_registry if identity_registry is not None else IdentityRegistry(project)
         )
+        fixer_client: Github = registry.get_fixer_client()
+        fixer_token: str = registry.get_fixer_token()
 
-    registry = identity_registry if identity_registry is not None else IdentityRegistry(project)
-    fixer_client: Github = registry.get_fixer_client()
-    fixer_token: str = registry.get_fixer_token()
-
-    repo: Repository = fixer_client.get_repo(actual_repo_slug)
-    issue = repo.get_issue(issue_number)
-    issue_labels = {label.name for label in issue.labels}
+        repo: Repository = fixer_client.get_repo(actual_repo_slug)
+        issue = repo.get_issue(issue_number)
+        _setup_issue = issue
+        issue_labels = {label.name for label in issue.labels}
+    except Exception as exc:
+        if _setup_issue is not None and _setup_issue_number is not None:
+            bound_issue = _setup_issue
+            handle_unhandled_role_exception(
+                role="fixer",
+                issue_number=_setup_issue_number,
+                exc=exc,
+                post_comment=lambda body: bound_issue.create_comment(body),
+                set_needs_help_label=lambda: bound_issue.add_to_labels(
+                    TERMINAL_BLOCKING_LABEL
+                ),
+            )
+        raise
 
     # Pre-flight: refuse to run without the entry-condition label.
     expected_label = _FIXER_ENTRY_LABEL_BY_TARGET[target]
     if expected_label not in issue_labels:
-        raise RuntimeError(
+        # Graceful refusal — see _FixerPreflightRefusal docstring.
+        raise _FixerPreflightRefusal(
             f"Issue #{issue_number} does not carry the {expected_label!r} "
             f"label (labels: "
             + ", ".join(sorted(issue_labels) or ["<none>"])
@@ -469,7 +515,9 @@ async def run_fixer(
     previous_attempts = _count_fix_attempts(issue_labels)
     attempt = previous_attempts + 1
     if attempt > max_fix_attempts:
-        raise RuntimeError(
+        # Graceful refusal — the max-attempts gate IS the escalation
+        # surface, not a runaway-burn signal.
+        raise _FixerPreflightRefusal(
             f"Issue #{issue_number} has hit the max {max_fix_attempts} "
             "fix-attempts; needs human intervention via foreman:failed. "
             f"Existing attempts: {previous_attempts}."
@@ -734,14 +782,23 @@ async def run_fixer(
             attempt=attempt,
             final_labels=sorted(current_labels),
         )
-    except Exception:
-        # foreman#239: capture cost telemetry for failed Fixer runs.
+    except Exception as exc:
+        # foreman#239 + foreman#229: capture cost telemetry AND defend
+        # against the runaway-burn pattern.
+        #
         # Pre-#239 any exception from worktree.attach / _find_spec_pr /
         # _latest_reviewer_review_comment / provider.run_agent /
         # pr.create_issue_comment / issue.update / issue.set_labels
         # propagated straight up and the JSONL row was never written —
         # failed runs vanished from ``fixer.jsonl`` and cross-role
         # cost rollups under-counted by exactly the failure rate.
+        #
+        # Pre-#229 the issue's in-flight label (``foreman:spec-fix``
+        # or ``foreman:impl-fix``) was NOT transitioned on exception.
+        # The dispatcher's next poll then re-dispatched the SAME role
+        # on the SAME ticket — runaway burn. The defensive
+        # ``handle_unhandled_role_exception`` call below transitions
+        # the issue to ``foreman:needs-help``.
         #
         # Partial state captured so far:
         #   - ``usage`` is set iff ``provider.run_agent`` returned
@@ -766,7 +823,7 @@ async def run_fixer(
                 issue_number=issue_number,
                 pr_number=pr_number,
                 attempt=attempt,
-                outcome="fixer_failed",
+                outcome="exception",
                 total_findings=0,
                 addressed_count=0,
                 unaddressed_count=0,
@@ -804,7 +861,7 @@ async def run_fixer(
             project=project_name,
             issue_number=issue_number,
             pr_number=pr_number,
-            outcome="fixer_failed",
+            outcome="exception",
             usage=usage if usage is not None else UsageInfo(),
             role_data={
                 "attempt": attempt,
@@ -816,5 +873,17 @@ async def run_fixer(
                 "confidence": "low",
             },
             duration_seconds=duration_seconds,
+        )
+        # foreman#229: runaway-burn defense. Post the traceback as a
+        # comment on the originating issue (the ticket that's stuck
+        # in ``foreman:spec-fix`` / ``foreman:impl-fix``) and
+        # transition it to ``foreman:needs-help`` so the dispatcher's
+        # poll loop stops re-dispatching.
+        handle_unhandled_role_exception(
+            role="fixer",
+            issue_number=issue_number,
+            exc=exc,
+            post_comment=lambda body: issue.create_comment(body),
+            set_needs_help_label=lambda: issue.add_to_labels(TERMINAL_BLOCKING_LABEL),
         )
         raise

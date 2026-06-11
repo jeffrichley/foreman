@@ -98,6 +98,11 @@ class _FakeProvider(GitHostProvider):
     ) -> None:
         self.calls.append(("update_issue_labels", (repo_slug, issue_number, add, remove)))
 
+    def post_issue_comment(
+        self, repo_slug: str, issue_number: int, body: str
+    ) -> None:
+        self.calls.append(("post_issue_comment", (repo_slug, issue_number, body)))
+
 
 def test_fake_provider_is_instantiable_and_callable() -> None:
     fake = _FakeProvider()

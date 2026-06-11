@@ -132,3 +132,17 @@ class GitHostProvider(ABC):
         remove: list[str],
     ) -> None:
         """Add and/or remove labels on an issue."""
+
+    @abstractmethod
+    def post_issue_comment(
+        self,
+        repo_slug: str,
+        issue_number: int,
+        body: str,
+    ) -> None:
+        """Post a comment on an issue (foreman#229 — defensive exception
+        handler surface). Used by the Planner role runner when an
+        unhandled exception escapes the body wrap; the comment carries
+        the exception type + traceback so an operator can diagnose
+        without spelunking daemon logs.
+        """

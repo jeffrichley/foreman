@@ -21,6 +21,15 @@ from typing import Any
 
 import pytest
 from claude_agent_sdk import ResultMessage
+
+# foreman#230 contract test (xfail): import the internal Transport ABC at
+# module top per PEP 8 / ruff E402. Originally placed mid-file next to its
+# only consumer (the _SuccessAsErrorTransport fake near line 760) for
+# scope locality, but ruff + code-quality review both pushed for the
+# standard convention. The underscore-prefixed alias preserves the
+# "this is an internal-API touchpoint, not a stable surface" signal
+# the original mid-file placement was trying to convey.
+from claude_agent_sdk._internal.transport import Transport as _SDKTransport
 from pydantic import BaseModel
 
 from foreman.provider import (
@@ -713,3 +722,161 @@ async def test_run_agent_defaults_cache_tokens_to_zero_when_sdk_omits_them(
     # Cache fields default cleanly to 0.
     assert usage.cache_creation_input_tokens == 0
     assert usage.cache_read_input_tokens == 0
+
+
+# ----------------------------------------------------------------------
+# foreman#230: upstream claude_agent_sdk receive_messages success-raises
+# ----------------------------------------------------------------------
+#
+# The Anthropic Agent SDK's ``Query.receive_messages`` raises a generic
+# ``Exception`` whenever the raw transport message has ``type == "error"``,
+# substituting the ``error`` field for the exception text. On 2026-06-08
+# this produced 171 consecutive Planner failures on foreman#227 because
+# the SDK / CLI emitted what was logically a successful run as a raw
+# ``{"type": "error", "error": "success"}`` envelope — and the
+# ``receive_messages`` raise path didn't check the protocol-level subtype
+# before treating the message as a failure. See also the production-code
+# comment in ``anthropic_sdk.py`` lines 45-55, which already documents
+# the absurd "Claude Code returned an error result: success" string.
+#
+# Contract: a raw protocol message whose payload identifies a successful
+# completion (``error == "success"``, i.e. the protocol subtype "success"
+# leaked into the error field) MUST NOT cause ``receive_messages`` to
+# raise. The result should reach foreman's adapter as a normal message.
+#
+# This test reaches one level lower than the other tests in this file:
+# the other tests patch ``anthropic_sdk_module.query`` and drive
+# foreman's adapter against an in-process fake. THIS test invokes the
+# REAL ``claude_agent_sdk.query`` with a fake ``Transport`` so the real
+# ``receive_messages`` code path is exercised. That's the only way the
+# test can convert from XFAIL → XPASS automatically once the upstream
+# SDK ships a fix — a top-level mock would close the loop and never
+# observe an upstream change.
+#
+# Marked xfail so CI stays green today; once the SDK fix lands and
+# foreman picks it up, this test will go XPASS as a tripwire signaling
+# that the defensive auth-retry guard in ``run_agent`` (and ticket #229
+# follow-up work) can be re-evaluated. Strict=False because the
+# behaviour is upstream-controlled — we don't want a passing test here
+# to fail CI on the day the upstream fix arrives; we want a visible
+# XPASS that prompts a sweep.
+
+
+class _SuccessAsErrorTransport(_SDKTransport):
+    """Fake ``claude_agent_sdk.Transport`` that emits the foreman#230
+    bug-triggering raw protocol message.
+
+    The real ``Transport`` ABC requires connect / write / read_messages /
+    close / is_ready / end_input. This fake supplies the minimum needed
+    to drive ``Query.receive_messages`` once: it never expects a control
+    handshake (no ``initialize``) because we patch ``Query.initialize``
+    out in the test below. The single message yielded is the exact shape
+    that today triggers the upstream raise.
+
+    Per Wren's strict-fake rule: we mirror the real ``Transport``
+    abstract method signatures exactly — including subclassing the
+    Transport ABC so instantiation would fail loudly if any abstract
+    method is missing or has the wrong shape. ``read_messages`` is a
+    SYNC method returning an async iterator (matching
+    SubprocessCLITransport at
+    ``_internal/transport/subprocess_cli.py:539``), not an async
+    generator function — a duck-type async generator would pass
+    isinstance checks but discriminate under
+    ``inspect.iscoroutinefunction`` / ``inspect.isasyncgenfunction``.
+    """
+
+    def __init__(self) -> None:
+        self._connected = False
+
+    async def connect(self) -> None:
+        self._connected = True
+
+    async def write(self, data: str) -> None:
+        # The query() driver writes the user message + the initialize
+        # control request. We accept both silently — the test only cares
+        # about what comes back out of read_messages().
+        return None
+
+    def read_messages(self) -> AsyncIterator[dict[str, Any]]:
+        # Sync method returning an async iterator — matches the real
+        # SubprocessCLITransport shape exactly.
+        return self._iter_messages()
+
+    async def _iter_messages(self) -> AsyncIterator[dict[str, Any]]:
+        # Emit the offending shape: a raw "error"-type envelope whose
+        # payload is the protocol-level subtype string "success". This
+        # is the exact wire shape that produced the 2026-06-08 outage —
+        # confirmed by the production-code comment at
+        # ``anthropic_sdk.py`` lines 45-55. ``receive_messages`` is
+        # supposed to NOT raise for a logically-successful result, even
+        # when wrapped this way; today it does.
+        yield {"type": "error", "error": "success"}
+
+    async def close(self) -> None:
+        self._connected = False
+
+    def is_ready(self) -> bool:
+        return self._connected
+
+    async def end_input(self) -> None:
+        return None
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "upstream claude_agent_sdk bug — receive_messages raises "
+        "Exception('success') when a logically-successful result is "
+        "wrapped in a type='error' envelope; foreman#230. Converts to "
+        "XPASS automatically when the SDK ships a fix."
+    ),
+)
+@pytest.mark.asyncio
+async def test_sdk_receive_messages_does_not_raise_on_success_subtype(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Contract test for foreman#230: claude_agent_sdk.query() must NOT
+    raise ``Exception('success')`` when the underlying message stream
+    carries a result whose protocol subtype is "success".
+
+    Today this fails because the SDK's ``receive_messages`` treats every
+    ``type == "error"`` envelope as a failure without inspecting the
+    payload's subtype — so a result that's actually a successful
+    completion (subtype "success" leaked into the ``error`` field) is
+    surfaced as ``Exception('success')``. Once the SDK fixes the
+    classification, this test goes green naturally.
+    """
+    # Import lazily so a missing SDK in some future env doesn't break
+    # collection of the other tests in this file.
+    import claude_agent_sdk
+    from claude_agent_sdk import ClaudeAgentOptions
+
+    # Patch Query.initialize to skip the control-protocol handshake — the
+    # fake transport doesn't speak it, and the bug under test is in
+    # receive_messages, not initialization. We're isolating the
+    # contract-violating code path so the test fails for the RIGHT reason.
+    from claude_agent_sdk._internal.query import Query
+
+    async def _noop_initialize(self: Query) -> dict[str, Any] | None:
+        self._initialized = True  # type: ignore[attr-defined]
+        return None
+
+    monkeypatch.setattr(Query, "initialize", _noop_initialize)
+
+    transport = _SuccessAsErrorTransport()
+
+    # Drain the iterator. The contract: this completes without raising
+    # an Exception whose message is "success". Today, it raises.
+    collected: list[Any] = []
+    async for message in claude_agent_sdk.query(
+        prompt="ignored — the fake transport drives the response",
+        options=ClaudeAgentOptions(),
+        transport=transport,
+    ):
+        collected.append(message)
+
+    # If we got here, the SDK didn't raise on the success-shaped
+    # message — the bug is fixed upstream. The test goes XPASS.
+    # We don't assert on ``collected`` contents because the parser may
+    # legitimately discard an unparseable envelope; the contract this
+    # test pins is strictly "no spurious Exception('success') raise".

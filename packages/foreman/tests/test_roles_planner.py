@@ -201,6 +201,14 @@ class _FakeHostProvider(GitHostProvider):
     ) -> None:
         self.label_calls.append((repo_slug, issue_number, list(add), list(remove)))
 
+    def post_issue_comment(self, repo_slug: str, issue_number: int, body: str) -> None:
+        # foreman#229: defensive exception-handler surface. Tests that
+        # don't exercise the exception path don't read this; tests that
+        # do read ``posted_comments`` directly.
+        if not hasattr(self, "posted_comments"):
+            self.posted_comments = []  # type: ignore[attr-defined]
+        self.posted_comments.append((repo_slug, issue_number, body))
+
 
 def _seed_clone(clone: Path, *, origin_path: Path | None = None) -> None:
     """Init a minimal git repo at ``clone``.
@@ -866,15 +874,15 @@ async def test_run_planner_returns_authoritative_final_labels(
 
 
 @pytest.mark.asyncio
-async def test_run_planner_logs_spec_failed_with_partial_usage_when_open_pr_raises(
+async def test_run_planner_logs_exception_with_partial_usage_when_open_pr_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """foreman#235: when ``host.open_pull_request`` raises after the LLM
-    call has already returned, ``run_planner`` must:
+    """foreman#235 + foreman#229: when ``host.open_pull_request`` raises
+    after the LLM call has already returned, ``run_planner`` must:
 
     1. Re-raise the original exception unchanged so the daemon
        dispatcher's error handling stays in charge.
-    2. Append a ``planner.jsonl`` row with ``outcome="spec_failed"``,
+    2. Append a ``planner.jsonl`` row with ``outcome="exception"``,
        ``pr_number=None`` (the PR never opened), and the
        ``input_tokens`` / ``output_tokens`` that the successful prior
        ``provider.run_agent`` call reported. Cost telemetry for failed
@@ -894,7 +902,7 @@ async def test_run_planner_logs_spec_failed_with_partial_usage_when_open_pr_rais
     # Make ``open_pull_request`` fail. Everything before it
     # (worktree.create, provider.run_agent, commit, push) succeeds — so
     # ``usage`` from the LLM call should be captured and reach the
-    # ``spec_failed`` row.
+    # ``exception`` row.
     class _OpenPRBoom(RuntimeError):
         pass
 
@@ -933,7 +941,7 @@ async def test_run_planner_logs_spec_failed_with_partial_usage_when_open_pr_rais
     # JSONL row landed for the failed run.
     jsonl = stats_root / "jeffrichley__voice" / "planner.jsonl"
     assert jsonl.exists(), (
-        "spec_failed run must still append a row to planner.jsonl; #235 "
+        "exception run must still append a row to planner.jsonl; #235 "
         "fixes the silent-disappearance bug where exceptions before the "
         "success-path log call skipped the write entirely"
     )
@@ -942,7 +950,7 @@ async def test_run_planner_logs_spec_failed_with_partial_usage_when_open_pr_rais
     row = rows[0]
 
     # Outcome + pr_number reflect the failed-mid-run state.
-    assert row["outcome"] == "spec_failed"
+    assert row["outcome"] == "exception"
     assert row["pr_number"] is None
     assert row["role"] == "planner"
     assert row["issue_number"] == 42
@@ -960,14 +968,14 @@ async def test_run_planner_logs_spec_failed_with_partial_usage_when_open_pr_rais
 
 
 @pytest.mark.asyncio
-async def test_run_planner_logs_spec_failed_with_safe_defaults_when_run_agent_raises(
+async def test_run_planner_logs_exception_with_safe_defaults_when_run_agent_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """foreman#235: when ``provider.run_agent`` raises before producing
-    a ``UsageInfo``, the spec_failed row still lands — with the
-    safe-default zeros for token / cost / duration fields (the spec's
-    "fall back to safe defaults" branch). pr_number is also ``None``
-    because the PR never opened.
+    """foreman#235 + foreman#229: when ``provider.run_agent`` raises
+    before producing a ``UsageInfo``, the ``outcome="exception"`` row
+    still lands — with the safe-default zeros for token / cost /
+    duration fields (the spec's "fall back to safe defaults" branch).
+    pr_number is also ``None`` because the PR never opened.
     """
     import json as _json
 
@@ -1004,7 +1012,7 @@ async def test_run_planner_logs_spec_failed_with_safe_defaults_when_run_agent_ra
     rows = [_json.loads(line) for line in jsonl.read_text().splitlines() if line.strip()]
     assert len(rows) == 1
     row = rows[0]
-    assert row["outcome"] == "spec_failed"
+    assert row["outcome"] == "exception"
     assert row["pr_number"] is None
     # Safe-default zeros (no UsageInfo captured because run_agent raised).
     assert row["input_tokens"] == 0

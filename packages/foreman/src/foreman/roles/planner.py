@@ -44,6 +44,7 @@ from foreman.git_host import GitHostProvider, IssueRef
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
+from foreman.roles import TERMINAL_BLOCKING_LABEL, handle_unhandled_role_exception
 from foreman.schemas.planner import PlannerOutput, PlannerRunResult
 from foreman.stats import log_planner_run
 from foreman.worktree import WorktreeManager
@@ -165,23 +166,6 @@ async def run_planner(
         :class:`~foreman.schemas.planner.PlannerRunResult` carrying both the
         LLM output and the opened PR's metadata.
     """
-    owner, repo_name, issue_number = parse_issue_url(issue_url)
-    project = config.projects[project_name]
-    expected_repo_slug = project.repo  # e.g. "jeffrichley/voice"
-    actual_repo_slug = f"{owner}/{repo_name}"
-    if expected_repo_slug != actual_repo_slug:
-        raise ValueError(
-            f"Issue URL repo {actual_repo_slug!r} does not match project "
-            f"{project_name!r} configured repo {expected_repo_slug!r}"
-        )
-
-    registry = identity_registry if identity_registry is not None else IdentityRegistry(project)
-    host: GitHostProvider = registry.get_host_provider("planner")
-    planner_token: str = registry.get_planner_token()
-
-    issue = host.get_issue(actual_repo_slug, issue_number)
-    default_branch = host.get_default_branch(actual_repo_slug)
-
     # foreman#235: stamp ``start_time`` BEFORE the body wrap and
     # initialize ``usage`` / ``pr_number`` to ``None`` so the except
     # branch below can log partial state regardless of where in the
@@ -191,10 +175,43 @@ async def run_planner(
     # inside the wrap; pre-#235 any of those raising silently dropped
     # the run's cost telemetry because the success-path
     # ``log_planner_run`` call below never executed.
+    #
+    # Post-adversarial-review: extend the wrap to ALSO cover URL parse,
+    # project lookup, identity setup, and host.get_issue / .get_default_branch
+    # so a failure in any of those — a malformed URL, a wrong project
+    # name, a stale auth token, a network blip on the get_issue HTTP
+    # call — fires the runaway-burn defense helper too. Without the
+    # extension, those pre-body exceptions would crash the role
+    # subprocess without ever transitioning the in-flight label, and
+    # the dispatcher would re-fire on the next poll until #228's
+    # rate-limit caught the loop at N=3. Now the FIRST such failure
+    # transitions the ticket and posts a comment.
     start_time = time.monotonic()
     usage: UsageInfo | None = None
     pr_number: int | None = None
+    actual_repo_slug: str | None = None
+    issue_number: int | None = None
+    host: GitHostProvider | None = None
     try:
+        owner, repo_name, issue_number = parse_issue_url(issue_url)
+        project = config.projects[project_name]
+        expected_repo_slug = project.repo  # e.g. "jeffrichley/voice"
+        actual_repo_slug = f"{owner}/{repo_name}"
+        if expected_repo_slug != actual_repo_slug:
+            raise ValueError(
+                f"Issue URL repo {actual_repo_slug!r} does not match project "
+                f"{project_name!r} configured repo {expected_repo_slug!r}"
+            )
+
+        registry = (
+            identity_registry if identity_registry is not None else IdentityRegistry(project)
+        )
+        host = registry.get_host_provider("planner")
+        planner_token: str = registry.get_planner_token()
+
+        issue = host.get_issue(actual_repo_slug, issue_number)
+        default_branch = host.get_default_branch(actual_repo_slug)
+
         # WorktreeManager's git subprocesses (fetch / worktree add) must
         # authenticate as the planner bot — without the explicit token they
         # inherit the daemon's parent ``GH_TOKEN`` (CI runner, dev shell)
@@ -328,13 +345,23 @@ async def run_planner(
         )
 
         return PlannerRunResult(llm_output=llm_output, pr=pr, final_labels=final_labels)
-    except Exception:
-        # foreman#235: capture cost telemetry for failed Planner runs.
+    except Exception as exc:
+        # foreman#235 + foreman#229: capture cost telemetry AND defend
+        # against the runaway-burn pattern.
+        #
         # Pre-#235 any exception from worktree.create / provider.run_agent
         # / commit_files_to_worktree / push_branch / open_pull_request
         # propagated straight up and the JSONL row was never written —
         # failed runs vanished from ``planner.jsonl`` and cross-role
         # cost rollups under-counted by exactly the failure rate.
+        #
+        # Pre-#229 the issue's in-flight label (``foreman:planning``)
+        # was NOT transitioned. The dispatcher's next poll then
+        # re-dispatched the SAME role on the SAME ticket — the runaway
+        # (foreman#227 = 171 dispatches in 2h52m). The defensive
+        # ``handle_unhandled_role_exception`` call below transitions
+        # the issue to ``foreman:needs-help`` so the dispatcher stops
+        # re-dispatching until an operator removes the label.
         #
         # Partial state captured so far:
         #   - ``usage`` is set iff ``provider.run_agent`` returned
@@ -353,50 +380,85 @@ async def run_planner(
         # here is strictly less bad than the original failure being
         # silently replaced.
         duration_seconds = time.monotonic() - start_time
-        try:
-            log_planner_run(
+        # Stats writes need ``actual_repo_slug`` + ``issue_number``. If
+        # the exception happened during the URL parse itself those will
+        # be None; skip the stats write rather than synthesize fake
+        # values (under-counting is fixable; bogus rows mislead
+        # downstream cost rollups).
+        if actual_repo_slug is not None and issue_number is not None:
+            try:
+                log_planner_run(
+                    repo_slug=actual_repo_slug,
+                    issue_number=issue_number,
+                    pr_number=pr_number,
+                    outcome="exception",
+                    duration_seconds=duration_seconds,
+                    input_tokens=usage.input_tokens if usage is not None else 0,
+                    output_tokens=usage.output_tokens if usage is not None else 0,
+                    cache_creation_input_tokens=(
+                        usage.cache_creation_input_tokens if usage is not None else 0
+                    ),
+                    cache_read_input_tokens=(
+                        usage.cache_read_input_tokens if usage is not None else 0
+                    ),
+                    total_cost_usd=usage.total_cost_usd if usage is not None else None,
+                    model_usage=usage.model_usage if usage is not None else None,
+                    duration_ms=usage.duration_ms if usage is not None else 0,
+                    num_turns=usage.num_turns if usage is not None else 0,
+                )
+            except Exception:
+                # Best-effort telemetry — swallow and continue to the
+                # bare ``raise`` so the daemon dispatcher sees the
+                # ORIGINAL exception, not whatever the stats writer
+                # raised. Surfacing the stats failure here would mask
+                # the actual Planner failure that triggered this branch.
+                pass
+            # foreman#251 (Phase 1): mirror the dual-write on the failure
+            # path. ``usage`` may be None (if ``provider.run_agent`` never
+            # returned) — the helper fills zeros via a default UsageInfo
+            # so the Recorder's cost columns stay populated with explicit
+            # zeros rather than NULL, matching the existing JSONL shape.
+            emit_recorder_complete(
+                dispatch_recorder=dispatch_recorder,
+                dispatch_trace_id=dispatch_trace_id,
+                role="planner",
                 repo_slug=actual_repo_slug,
+                ticket_id=f"{actual_repo_slug}#{issue_number}",
+                project=project_name,
                 issue_number=issue_number,
                 pr_number=pr_number,
-                outcome="spec_failed",
+                outcome="exception",
+                usage=usage if usage is not None else UsageInfo(),
+                role_data={},
                 duration_seconds=duration_seconds,
-                input_tokens=usage.input_tokens if usage is not None else 0,
-                output_tokens=usage.output_tokens if usage is not None else 0,
-                cache_creation_input_tokens=(
-                    usage.cache_creation_input_tokens if usage is not None else 0
-                ),
-                cache_read_input_tokens=(
-                    usage.cache_read_input_tokens if usage is not None else 0
-                ),
-                total_cost_usd=usage.total_cost_usd if usage is not None else None,
-                model_usage=usage.model_usage if usage is not None else None,
-                duration_ms=usage.duration_ms if usage is not None else 0,
-                num_turns=usage.num_turns if usage is not None else 0,
             )
-        except Exception:
-            # Best-effort telemetry — swallow and continue to the
-            # bare ``raise`` so the daemon dispatcher sees the
-            # ORIGINAL exception, not whatever the stats writer
-            # raised. Surfacing the stats failure here would mask
-            # the actual Planner failure that triggered this branch.
-            pass
-        # foreman#251 (Phase 1): mirror the dual-write on the failure
-        # path. ``usage`` may be None (if ``provider.run_agent`` never
-        # returned) — the helper fills zeros via a default UsageInfo
-        # so the Recorder's cost columns stay populated with explicit
-        # zeros rather than NULL, matching the existing JSONL shape.
-        emit_recorder_complete(
-            dispatch_recorder=dispatch_recorder,
-            dispatch_trace_id=dispatch_trace_id,
-            role="planner",
-            repo_slug=actual_repo_slug,
-            ticket_id=f"{actual_repo_slug}#{issue_number}",
-            project=project_name,
-            issue_number=issue_number,
-            pr_number=pr_number,
-            outcome="spec_failed",
-            usage=usage if usage is not None else UsageInfo(),
-            role_data={},
-            duration_seconds=duration_seconds,
-        )
+        # foreman#229: runaway-burn defense. Post the traceback as a
+        # comment on the originating issue and transition it to
+        # ``foreman:needs-help`` so the dispatcher's poll loop stops
+        # re-dispatching the same role on the same ticket. The helper
+        # needs a host + identifiable repo+issue; if the exception
+        # fired before those were bound (URL parse, project lookup,
+        # identity-registry init), there is no ticket to post on and we
+        # let the bare ``raise`` propagate alone — #228's rate-limit
+        # still bounds the loop at N=3 in that path because v3_host's
+        # subprocess-exit handler writes an ``outcome="error"`` row
+        # that counts toward the failure budget regardless.
+        if host is not None and actual_repo_slug is not None and issue_number is not None:
+            bound_host = host
+            bound_repo_slug = actual_repo_slug
+            bound_issue_number = issue_number
+            handle_unhandled_role_exception(
+                role="planner",
+                issue_number=bound_issue_number,
+                exc=exc,
+                post_comment=lambda body: bound_host.post_issue_comment(
+                    bound_repo_slug, bound_issue_number, body
+                ),
+                set_needs_help_label=lambda: bound_host.update_issue_labels(
+                    bound_repo_slug,
+                    bound_issue_number,
+                    add=[TERMINAL_BLOCKING_LABEL],
+                    remove=[],
+                ),
+            )
         raise

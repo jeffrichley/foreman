@@ -184,6 +184,16 @@ class GitHubProvider(GitHostProvider):
         for label in add:
             issue.add_to_labels(label)
 
+    def post_issue_comment(
+        self,
+        repo_slug: str,
+        issue_number: int,
+        body: str,
+    ) -> None:
+        repo = self._client.get_repo(repo_slug)
+        issue = repo.get_issue(issue_number)
+        issue.create_comment(body)
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------

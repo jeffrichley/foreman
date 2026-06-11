@@ -617,9 +617,13 @@ def test_hold_label_blocks_all_actions(tmp_path: Path) -> None:
 
 
 def test_dispatch_fixer_blocked_after_3_completed_attempts(tmp_path: Path) -> None:
-    """Once 3 dispatch_fixer_impl attempts have completed, the budget is
-    exhausted and the budget-exhausted safety rule fires (SURFACE_HELP),
-    preempting any further dispatch_fixer_impl."""
+    """Once 3 dispatch_fixer_impl attempts have completed in a tight
+    window, the foreman#228 rate-limit fires RATE_LIMIT_TRIP — preempting
+    any further dispatch_fixer_impl. (Pre-foreman#228, this test asserted
+    SURFACE_HELP via the attempts-exhausted safety rule; the rate-limit
+    rule at lower precedence catches the same scenario first now, posting
+    a richer comment and writing a reset sentinel so the human's re-queue
+    gives a fresh window.)"""
     from foreman.reconciler.rules import RULES
 
     issue = _issue(labels=("foreman:impl-fix",))
@@ -632,7 +636,7 @@ def test_dispatch_fixer_blocked_after_3_completed_attempts(tmp_path: Path) -> No
         )
         ctx.log.terminate_action(parent_log_id=start_id, outcome="error", details={})
 
-    assert evaluate(ctx, rules=RULES) is Action.SURFACE_HELP
+    assert evaluate(ctx, rules=RULES) is Action.RATE_LIMIT_TRIP
 
 
 def test_dispatch_fixer_still_fires_under_budget(tmp_path: Path) -> None:
@@ -653,6 +657,9 @@ def test_dispatch_fixer_still_fires_under_budget(tmp_path: Path) -> None:
 
 
 def test_dispatch_worker_blocked_after_3_completed_attempts(tmp_path: Path) -> None:
+    """3 consecutive Worker error terminations in a tight window trips the
+    foreman#228 rate-limit. See ``test_dispatch_fixer_blocked_...`` for the
+    SURFACE_HELP → RATE_LIMIT_TRIP transition rationale."""
     from foreman.reconciler.rules import RULES
 
     issue = _issue(labels=("foreman:plan-approved",))
@@ -664,7 +671,7 @@ def test_dispatch_worker_blocked_after_3_completed_attempts(tmp_path: Path) -> N
         )
         ctx.log.terminate_action(parent_log_id=start_id, outcome="error", details={})
 
-    assert evaluate(ctx, rules=RULES) is Action.SURFACE_HELP
+    assert evaluate(ctx, rules=RULES) is Action.RATE_LIMIT_TRIP
 
 
 # --- HIGH #7 regression: spec-vs-impl Reviewer count_completed isolation ---
@@ -924,14 +931,17 @@ def test_advance_label_to_done_ignores_spec_shaped_pr(tmp_path: Path) -> None:
 
 
 def test_dispatch_reviewer_spec_blocked_after_3_completed_attempts(tmp_path: Path) -> None:
-    """After 3 completed Reviewer-spec runs (any outcome), the forward-progress
-    rule must not fire; the safety budget-exhausted rule fires SURFACE_HELP.
+    """After 3 completed Reviewer-spec errors within the foreman#228 window,
+    the rate-limit safety rule fires RATE_LIMIT_TRIP (lower precedence than
+    the original attempts-exhausted rule, which still exists for mixed
+    success+error scenarios outside the window).
 
-    Before this fix, Plan B Stage 1+2 closed the silent-stall gap by
-    terminating crashed Reviewer rows — but with no budget cap, a persistent
-    root cause (e.g., LLM provider down) creates an infinite hot-spawn loop:
-    crash → terminate → next tick re-fire → crash → ...
-    Every other dispatch role has an attempt budget; this closes that gap.
+    Before foreman#228, the assertion was SURFACE_HELP via the
+    attempts-exhausted rule at precedence 65. Plan B Stage 1+2 closed the
+    silent-stall gap by terminating crashed Reviewer rows; the rate-limit
+    closes the structural floor — every other dispatch role had an attempt
+    budget; Reviewer was the only gap. The 3-errors-fast case now triggers
+    the richer rate-limit comment + reset sentinel.
     """
     from foreman.reconciler.rules import RULES
 
@@ -950,7 +960,7 @@ def test_dispatch_reviewer_spec_blocked_after_3_completed_attempts(tmp_path: Pat
             details={},
         )
         ctx.log.terminate_action(parent_log_id=start_id, outcome="error", details={})
-    assert evaluate(ctx, rules=RULES) is Action.SURFACE_HELP
+    assert evaluate(ctx, rules=RULES) is Action.RATE_LIMIT_TRIP
 
 
 def test_dispatch_reviewer_spec_still_fires_under_budget(tmp_path: Path) -> None:
@@ -977,9 +987,9 @@ def test_dispatch_reviewer_spec_still_fires_under_budget(tmp_path: Path) -> None
 
 
 def test_dispatch_reviewer_impl_blocked_after_3_completed_attempts(tmp_path: Path) -> None:
-    """Symmetric to spec-side: after 3 completed Reviewer-impl runs, the
-    forward-progress rule must not fire; the safety budget-exhausted rule
-    fires SURFACE_HELP."""
+    """Symmetric to spec-side: 3 Reviewer-impl errors fast trips the
+    foreman#228 rate-limit (RATE_LIMIT_TRIP). The attempts-exhausted safety
+    rule still exists for mixed success+error scenarios."""
     from foreman.reconciler.rules import RULES
 
     ctx = _ctx_with(
@@ -997,7 +1007,7 @@ def test_dispatch_reviewer_impl_blocked_after_3_completed_attempts(tmp_path: Pat
             details={},
         )
         ctx.log.terminate_action(parent_log_id=start_id, outcome="error", details={})
-    assert evaluate(ctx, rules=RULES) is Action.SURFACE_HELP
+    assert evaluate(ctx, rules=RULES) is Action.RATE_LIMIT_TRIP
 
 
 # ---------------------------------------------------------------------------

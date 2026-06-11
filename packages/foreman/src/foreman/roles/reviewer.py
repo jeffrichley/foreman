@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Literal
 
 from github import Github
+from github.Issue import Issue
 from github.Repository import Repository
 
 from foreman.config import Config
@@ -47,6 +48,7 @@ from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
+from foreman.roles import TERMINAL_BLOCKING_LABEL, handle_unhandled_role_exception
 from foreman.schemas.reviewer import Finding, ReviewerOutput, ReviewerRunResult
 from foreman.stats import log_reviewer_run
 from foreman.worktree import WorktreeManager
@@ -56,6 +58,22 @@ _PR_URL_RE = re.compile(
 )
 _BRANCH_ISSUE_RE = re.compile(r"^foreman/issue-(?P<number>\d+)$")
 _BRANCH_IMPL_RE = re.compile(r"^foreman/impl-(?P<number>\d+)$")
+
+
+class _ReviewerPreflightRefusal(RuntimeError):
+    """Reviewer refused to proceed because the source issue lacks the
+    expected entry label (``foreman:planning`` for spec PRs,
+    ``foreman:impl-review`` for impl PRs).
+
+    Subclass of :class:`RuntimeError` so existing callers' ``except
+    RuntimeError`` clauses and ``pytest.raises(RuntimeError, match=...)``
+    test patterns continue to work unchanged. The distinguishing
+    purpose is to tell the runaway-burn defense (#229 helper invocation)
+    to SKIP firing: a label-mismatch is operator intent (the label was
+    removed deliberately or never set), not a "broken system" runaway
+    signal. Firing the helper would override the operator's removal by
+    re-adding ``foreman:needs-help``.
+    """
 
 # Tool capabilities matrix for the Reviewer. Read-only on the filesystem;
 # Bash is allowed for read-only recon (e.g., ``gh pr view``, ``git log``).
@@ -355,49 +373,6 @@ async def run_reviewer(
             ``foreman:impl-review`` for impl PRs) — we refuse to advance
             PRs whose source issue was not queued for review.
     """
-    owner, repo_name, pr_number = parse_pr_url(pr_url)
-    project = config.projects[project_name]
-    expected_repo_slug = project.repo
-    actual_repo_slug = f"{owner}/{repo_name}"
-    if expected_repo_slug != actual_repo_slug:
-        raise ValueError(
-            f"PR URL repo {actual_repo_slug!r} does not match project "
-            f"{project_name!r} configured repo {expected_repo_slug!r}"
-        )
-
-    registry = identity_registry if identity_registry is not None else IdentityRegistry(project)
-    reviewer_client: Github = registry.get_reviewer_client()
-    reviewer_token: str = registry.get_reviewer_token()
-
-    repo: Repository = reviewer_client.get_repo(actual_repo_slug)
-    pr = repo.get_pull(pr_number)
-
-    head_branch = pr.head.ref
-    head_sha = pr.head.sha
-    base_branch = pr.base.ref
-    issue_number, target = _parse_review_branch(head_branch)
-
-    in_review_label = _REVIEWER_ENTRY_LABEL_BY_TARGET[target]
-    if target == "impl_pr":
-        clean_label = _LABEL_READY_FOR_MERGE
-        fix_label = _LABEL_IMPL_FIX
-    else:
-        clean_label = _LABEL_SPEC_READY
-        fix_label = _LABEL_SPEC_FIX
-
-    issue = repo.get_issue(issue_number)
-    issue_labels = {label.name for label in issue.labels}
-    if in_review_label not in issue_labels:
-        raise RuntimeError(
-            f"Issue #{issue_number} (source of PR #{pr_number}) does not carry "
-            f"the {in_review_label!r} label (labels: "
-            + ", ".join(sorted(issue_labels) or ["<none>"])
-            + "). The Reviewer only acts on issues queued via the Planner."
-        )
-
-    issue_title = issue.title or ""
-    issue_body = issue.body or ""
-
     # foreman#237: stamp ``start_time`` BEFORE the body wrap and
     # initialize ``usage`` to ``None`` so the except branch below can
     # log partial state regardless of where in the pipeline a failure
@@ -408,9 +383,73 @@ async def run_reviewer(
     # because the success-path ``log_reviewer_run`` call below never
     # executed (same shape as the Planner bug fixed in foreman#235 /
     # PR #236).
+    #
+    # Post-adversarial-review: extend the wrap to ALSO cover URL parse,
+    # project lookup, identity setup, ``repo.get_pull`` /
+    # ``repo.get_issue``, and the in-review-label refusal check. Any of
+    # those raising used to crash the role subprocess WITHOUT
+    # transitioning the in-flight label; the dispatcher then
+    # re-dispatched until #228's rate-limit caught the loop at N=3.
+    # Now the FIRST such failure fires the helper (assuming the issue
+    # was resolvable — see the None guards in the except branch).
     start_time = time.monotonic()
     usage: UsageInfo | None = None
+    actual_repo_slug: str | None = None
+    pr_number: int | None = None
+    issue_number: int | None = None
+    target: Literal["spec_pr", "impl_pr"] = "spec_pr"  # Default until _parse_review_branch resolves
+    issue: Issue | None = None
     try:
+        owner, repo_name, pr_number = parse_pr_url(pr_url)
+        project = config.projects[project_name]
+        expected_repo_slug = project.repo
+        actual_repo_slug = f"{owner}/{repo_name}"
+        if expected_repo_slug != actual_repo_slug:
+            raise ValueError(
+                f"PR URL repo {actual_repo_slug!r} does not match project "
+                f"{project_name!r} configured repo {expected_repo_slug!r}"
+            )
+
+        registry = (
+            identity_registry if identity_registry is not None else IdentityRegistry(project)
+        )
+        reviewer_client: Github = registry.get_reviewer_client()
+        reviewer_token: str = registry.get_reviewer_token()
+
+        repo: Repository = reviewer_client.get_repo(actual_repo_slug)
+        pr = repo.get_pull(pr_number)
+
+        head_branch = pr.head.ref
+        head_sha = pr.head.sha
+        base_branch = pr.base.ref
+        issue_number, target = _parse_review_branch(head_branch)
+
+        in_review_label = _REVIEWER_ENTRY_LABEL_BY_TARGET[target]
+        if target == "impl_pr":
+            clean_label = _LABEL_READY_FOR_MERGE
+            fix_label = _LABEL_IMPL_FIX
+        else:
+            clean_label = _LABEL_SPEC_READY
+            fix_label = _LABEL_SPEC_FIX
+
+        issue = repo.get_issue(issue_number)
+        issue_labels = {label.name for label in issue.labels}
+        if in_review_label not in issue_labels:
+            # Graceful refusal, NOT a runaway-burn signal. The operator
+            # may have removed the label deliberately (to abort an
+            # in-flight review, or because the ticket was retargeted).
+            # Use the marker subclass so the except branch below skips
+            # the helper and lets the original intent survive.
+            raise _ReviewerPreflightRefusal(
+                f"Issue #{issue_number} (source of PR #{pr_number}) does not carry "
+                f"the {in_review_label!r} label (labels: "
+                + ", ".join(sorted(issue_labels) or ["<none>"])
+                + "). The Reviewer only acts on issues queued via the Planner."
+            )
+
+        issue_title = issue.title or ""
+        issue_body = issue.body or ""
+
         # WorktreeManager's git subprocesses (fetch / worktree add) must
         # authenticate as the reviewer bot — without the explicit token they
         # inherit the daemon's parent ``GH_TOKEN`` (CI runner, dev shell)
@@ -578,14 +617,24 @@ async def run_reviewer(
         # raced its own write and produced stale-snapshot dispatches at the
         # next worker iteration).
         return ReviewerRunResult(llm_output=llm_output, final_labels=final_labels)
-    except Exception:
-        # foreman#237: capture cost telemetry for failed Reviewer runs.
+    except Exception as exc:
+        # foreman#237 + foreman#229: capture cost telemetry AND defend
+        # against the runaway-burn pattern.
+        #
         # Pre-#237 any exception from worktree attach / _get_pr_diff /
         # provider.run_agent / pr.create_review / issue.set_labels
         # propagated straight up and the JSONL row was never written —
         # failed runs vanished from ``reviewer.jsonl`` and cross-role
         # cost rollups under-counted by exactly the failure rate (same
         # shape Planner had pre-#235 / PR #236).
+        #
+        # Pre-#229 the originating issue's in-flight label
+        # (``foreman:planning`` for spec_pr, ``foreman:impl-review``
+        # for impl_pr) was NOT transitioned on exception. The
+        # dispatcher's next poll then re-dispatched the SAME role on
+        # the SAME ticket — runaway burn. The defensive
+        # ``handle_unhandled_role_exception`` call below transitions
+        # the issue to ``foreman:needs-help``.
         #
         # Partial state captured so far:
         #   - ``usage`` is set iff ``provider.run_agent`` returned
@@ -601,47 +650,78 @@ async def run_reviewer(
         # here is strictly less bad than the original failure being
         # silently replaced.
         duration_seconds = time.monotonic() - start_time
-        try:
-            log_reviewer_run(
+        if actual_repo_slug is not None and issue_number is not None:
+            try:
+                log_reviewer_run(
+                    repo_slug=actual_repo_slug,
+                    issue_number=issue_number,
+                    pr_number=pr_number,
+                    target=target,
+                    outcome="exception",
+                    duration_seconds=duration_seconds,
+                    input_tokens=usage.input_tokens if usage is not None else 0,
+                    output_tokens=usage.output_tokens if usage is not None else 0,
+                    cache_creation_input_tokens=(
+                        usage.cache_creation_input_tokens if usage is not None else 0
+                    ),
+                    cache_read_input_tokens=(
+                        usage.cache_read_input_tokens if usage is not None else 0
+                    ),
+                    total_cost_usd=usage.total_cost_usd if usage is not None else None,
+                    model_usage=usage.model_usage if usage is not None else None,
+                    duration_ms=usage.duration_ms if usage is not None else 0,
+                    num_turns=usage.num_turns if usage is not None else 0,
+                )
+            except Exception:
+                # Best-effort telemetry — swallow and continue to the
+                # bare ``raise`` so the daemon dispatcher sees the
+                # ORIGINAL exception, not whatever the stats writer
+                # raised. Surfacing the stats failure here would mask
+                # the actual Reviewer failure that triggered this branch.
+                pass
+            # foreman#251 (Phase 1): mirror the failure-path dual-write.
+            emit_recorder_complete(
+                dispatch_recorder=dispatch_recorder,
+                dispatch_trace_id=dispatch_trace_id,
+                role="reviewer",
                 repo_slug=actual_repo_slug,
+                ticket_id=f"{actual_repo_slug}#{issue_number}",
+                project=project_name,
                 issue_number=issue_number,
                 pr_number=pr_number,
-                target=target,
-                outcome="review_failed",
+                outcome="exception",
+                usage=usage if usage is not None else UsageInfo(),
+                role_data={"target": target},
                 duration_seconds=duration_seconds,
-                input_tokens=usage.input_tokens if usage is not None else 0,
-                output_tokens=usage.output_tokens if usage is not None else 0,
-                cache_creation_input_tokens=(
-                    usage.cache_creation_input_tokens if usage is not None else 0
-                ),
-                cache_read_input_tokens=(
-                    usage.cache_read_input_tokens if usage is not None else 0
-                ),
-                total_cost_usd=usage.total_cost_usd if usage is not None else None,
-                model_usage=usage.model_usage if usage is not None else None,
-                duration_ms=usage.duration_ms if usage is not None else 0,
-                num_turns=usage.num_turns if usage is not None else 0,
             )
-        except Exception:
-            # Best-effort telemetry — swallow and continue to the
-            # bare ``raise`` so the daemon dispatcher sees the
-            # ORIGINAL exception, not whatever the stats writer
-            # raised. Surfacing the stats failure here would mask
-            # the actual Reviewer failure that triggered this branch.
-            pass
-        # foreman#251 (Phase 1): mirror the failure-path dual-write.
-        emit_recorder_complete(
-            dispatch_recorder=dispatch_recorder,
-            dispatch_trace_id=dispatch_trace_id,
-            role="reviewer",
-            repo_slug=actual_repo_slug,
-            ticket_id=f"{actual_repo_slug}#{issue_number}",
-            project=project_name,
-            issue_number=issue_number,
-            pr_number=pr_number,
-            outcome="review_failed",
-            usage=usage if usage is not None else UsageInfo(),
-            role_data={"target": target},
-            duration_seconds=duration_seconds,
-        )
+        # foreman#229: runaway-burn defense. Post the traceback as a
+        # comment on the originating issue (the ticket that's stuck
+        # in the in-flight label) and transition it to
+        # ``foreman:needs-help`` so the dispatcher's poll loop stops
+        # re-dispatching. If ``issue`` isn't yet bound (URL parse,
+        # PR fetch, or branch parse failed before ``repo.get_issue``
+        # ran) we let the bare ``raise`` propagate alone — #228's
+        # rate-limit still bounds the loop at N=3 in that path
+        # because v3_host's subprocess-exit handler writes an
+        # ``outcome="error"`` row that counts toward the failure
+        # budget regardless.
+        #
+        # Skip the helper entirely for ``_ReviewerPreflightRefusal``:
+        # that's an INTENTIONAL refusal (the operator removed the
+        # entry label or the ticket was retargeted), not a runaway-
+        # burn signal. Firing the helper would override the
+        # operator's intent by re-adding ``foreman:needs-help``.
+        if (
+            not isinstance(exc, _ReviewerPreflightRefusal)
+            and issue is not None
+            and issue_number is not None
+        ):
+            bound_issue = issue
+            handle_unhandled_role_exception(
+                role="reviewer",
+                issue_number=issue_number,
+                exc=exc,
+                post_comment=lambda body: bound_issue.create_comment(body),
+                set_needs_help_label=lambda: bound_issue.add_to_labels(TERMINAL_BLOCKING_LABEL),
+            )
         raise

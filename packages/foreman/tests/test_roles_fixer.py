@@ -215,6 +215,14 @@ class _FakeIssue:
         if label not in self._remote_labels:
             self._remote_labels.append(label)
 
+    def create_comment(self, body: str) -> None:
+        # foreman#229: defensive exception-handler surface. PyGithub's
+        # ``Issue.create_comment`` posts a comment on the issue; tests
+        # that exercise the exception path read ``comments_posted``.
+        if not hasattr(self, "comments_posted"):
+            self.comments_posted = []  # type: ignore[attr-defined]
+        self.comments_posted.append(body)
+
     def set_labels(self, *labels: str) -> None:
         # Production code (adversarial review MEDIUM #12) uses
         # ``set_labels`` for atomic transitions. To keep the existing
@@ -1702,27 +1710,28 @@ async def test_run_fixer_calls_update_before_write_site_label_read(
 # 5xx'd, ``issue.update`` raised), the exception propagated up to the
 # daemon and NO JSONL row was written for the failed Fixer run. Cost
 # telemetry for failures vanished. #239 wraps the body in try/except
-# so the failure path also writes a row tagged ``outcome="fixer_failed"``
+# so the failure path also writes a row tagged ``outcome="exception"``
 # with whatever partial ``usage`` was captured before the failure.
 #
 # Note: ``"incomplete"`` is the Fixer's SELF-REPORTED outcome (LLM said
 # it didn't finish) — a different shape from an uncaught exception in
-# the role runner. Keeping ``fixer_failed`` distinct lets cost-rollup
+# the role runner. Keeping ``exception`` distinct lets cost-rollup
 # queries answer "how many Fixer runs crashed vs how many the LLM
 # gave up on?".
 # ----------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_run_fixer_logs_fixer_failed_with_partial_usage_when_post_llm_step_raises(
+async def test_run_fixer_logs_exception_with_partial_usage_when_post_llm_step_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """foreman#239: when a step AFTER ``provider.run_agent`` succeeds
-    raises (here: ``pr.create_issue_comment``), ``run_fixer`` must:
+    """foreman#239 + foreman#229: when a step AFTER
+    ``provider.run_agent`` succeeds raises (here:
+    ``pr.create_issue_comment``), ``run_fixer`` must:
 
     1. Re-raise the original exception unchanged so the daemon
        dispatcher's error handling stays in charge.
-    2. Append a ``fixer.jsonl`` row with ``outcome="fixer_failed"`` and
+    2. Append a ``fixer.jsonl`` row with ``outcome="exception"`` and
        the ``input_tokens`` / ``output_tokens`` / ``total_cost_usd`` /
        ``duration_ms`` / ``num_turns`` from the successful prior
        ``provider.run_agent`` call. Cost telemetry for failed runs
@@ -1739,7 +1748,7 @@ async def test_run_fixer_logs_fixer_failed_with_partial_usage_when_post_llm_step
 
     # Make ``create_issue_comment`` fail. Everything before it
     # (worktree.attach, provider.run_agent) succeeds — so ``usage`` from
-    # the LLM call should be captured and reach the ``fixer_failed`` row.
+    # the LLM call should be captured and reach the ``exception`` row.
     class _CommentBoom(RuntimeError):
         pass
 
@@ -1777,7 +1786,7 @@ async def test_run_fixer_logs_fixer_failed_with_partial_usage_when_post_llm_step
     # JSONL row landed for the failed run.
     jsonl = stats_root / "jeffrichley__voice" / "fixer.jsonl"
     assert jsonl.exists(), (
-        "fixer_failed run must still append a row to fixer.jsonl; #239 "
+        "exception run must still append a row to fixer.jsonl; #239 "
         "fixes the silent-disappearance bug where exceptions before the "
         "success-path log call skipped the write entirely"
     )
@@ -1786,7 +1795,7 @@ async def test_run_fixer_logs_fixer_failed_with_partial_usage_when_post_llm_step
     row = rows[0]
 
     # Outcome reflects the failed-mid-run state.
-    assert row["outcome"] == "fixer_failed"
+    assert row["outcome"] == "exception"
     assert row["role"] == "fixer"
     assert row["issue_number"] == 42
     # PR was resolved before the failure, so pr_number is the real PR.
@@ -1817,13 +1826,13 @@ async def test_run_fixer_logs_fixer_failed_with_partial_usage_when_post_llm_step
 
 
 @pytest.mark.asyncio
-async def test_run_fixer_logs_fixer_failed_with_safe_defaults_when_run_agent_raises(
+async def test_run_fixer_logs_exception_with_safe_defaults_when_run_agent_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """foreman#239: when ``provider.run_agent`` raises before producing
-    a ``UsageInfo``, the fixer_failed row still lands — with the
-    safe-default zeros for token / cost / duration fields (the spec's
-    "fall back to safe defaults" branch).
+    """foreman#239 + foreman#229: when ``provider.run_agent`` raises
+    before producing a ``UsageInfo``, the ``outcome="exception"`` row
+    still lands — with the safe-default zeros for token / cost /
+    duration fields (the spec's "fall back to safe defaults" branch).
     """
     clone = tmp_path / "clone"
     head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
@@ -1857,7 +1866,7 @@ async def test_run_fixer_logs_fixer_failed_with_safe_defaults_when_run_agent_rai
     rows = [json.loads(line) for line in jsonl.read_text().splitlines() if line.strip()]
     assert len(rows) == 1
     row = rows[0]
-    assert row["outcome"] == "fixer_failed"
+    assert row["outcome"] == "exception"
     assert row["role"] == "fixer"
     # Safe-default zeros (no UsageInfo captured because run_agent raised).
     assert row["input_tokens"] == 0

@@ -105,6 +105,48 @@ class DaemonConfig(BaseModel):
     # helps. Surfaced 2026-06-01 when a 600s default cut a Worker mid-
     # impl on foreman#30.
     role_dispatch_timeout_seconds: int | None = Field(default=None, ge=30)
+    # foreman#228 (runaway-burn defense): per-ticket-per-role
+    # consecutive-failure rate-limit. After
+    # ``rate_limit_max_consecutive_failures`` failures of the SAME role
+    # on the SAME ticket within ``rate_limit_window_seconds``, the
+    # reconciler stops re-dispatching and transitions the ticket to
+    # ``foreman:needs-help`` (writing a reset sentinel so the human's
+    # subsequent re-queue gives a fresh window). Per-ticket + per-role
+    # isolation — failures on ticket A don't affect ticket B; Planner
+    # failures don't affect Worker dispatch.
+    #
+    # N=3 / W=30min were criterion-checked against yesterday's burn
+    # (foreman#227: ~1 dispatch/min for 2h52m = 171 total) — N=3 catches
+    # it fast, W=30min leaves headroom for legitimate long dispatches
+    # (Planner max_turns=1000 can run 10-20 minutes).
+    rate_limit_max_consecutive_failures: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "N for the per-ticket-per-role consecutive-failure rate-limit "
+            "(foreman#228). After N failures of the same role on the same "
+            "ticket within ``rate_limit_window_seconds``, the reconciler "
+            "transitions the ticket to ``foreman:needs-help`` and stops "
+            "re-dispatching."
+        ),
+    )
+    rate_limit_window_seconds: int = Field(
+        default=1800,  # 30 minutes
+        ge=60,
+        le=24 * 3600,  # 24 hours — defense against a config typo
+        # (e.g., rate_limit_window_seconds = 999999999) that would
+        # silently disable the rate-limit by making the window so
+        # large that count_recent_failures always reaches back to the
+        # dawn of time. 24h ceiling is comfortably larger than any
+        # legitimate window an operator would set while still being
+        # human-meaningful.
+        description=(
+            "W (seconds) for the per-ticket-per-role consecutive-failure "
+            "rate-limit (foreman#228). Failures older than W are ignored "
+            "by the trip predicate. Capped at 24h to defend against a "
+            "config typo silently disabling the rate-limit."
+        ),
+    )
 
     @field_validator("max_concurrent_workers")
     @classmethod
@@ -205,6 +247,43 @@ class ReconcilerConfig(BaseModel):
             "code, so the daemon parks at ``foreman:ready-for-merge`` for "
             "human review by default. A per-project ``auto_merge_impl`` "
             "overrides this."
+        ),
+    )
+    # foreman#228 (runaway-burn defense): mirror of the DaemonConfig
+    # knobs at the v3 reconciler layer. The reconciler reads these
+    # values per tick and threads them into every ``ActionContext``;
+    # the rate-limit rules + RATE_LIMIT_TRIP executor read from there.
+    #
+    # The duplicate definition (here AND on ``DaemonConfig``) is
+    # intentional: the ticket spec names ``DaemonConfig`` as the
+    # configuration surface (operator mental model), while the v3
+    # reconciler runs off ``ReconcilerConfig`` (architectural reality).
+    # Surfaces match.
+    rate_limit_max_consecutive_failures: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "N for the per-ticket-per-role consecutive-failure rate-limit "
+            "(foreman#228). After N failures of the same role on the same "
+            "ticket within ``rate_limit_window_seconds``, the reconciler "
+            "transitions the ticket to ``foreman:needs-help`` and stops "
+            "re-dispatching. Pepper criterion-checked N=3 as catching "
+            "yesterday's burn (foreman#227: 1 dispatch/min for 2h52m = "
+            "171 total) fast."
+        ),
+    )
+    rate_limit_window_seconds: int = Field(
+        default=1800,  # 30 minutes
+        ge=60,
+        le=24 * 3600,  # 24 hours — mirror of the DaemonConfig ceiling
+        # so a config typo cannot silently disable the rate-limit at
+        # the v3 daemon's reading surface either.
+        description=(
+            "W (seconds) for the per-ticket-per-role consecutive-failure "
+            "rate-limit (foreman#228). 30min headroom leaves room for "
+            "legitimate long dispatches (Planner max_turns=1000 ~ 10-20min). "
+            "Capped at 24h to defend against a config typo silently "
+            "disabling the rate-limit."
         ),
     )
     merge_mechanism: MergeMechanism = Field(

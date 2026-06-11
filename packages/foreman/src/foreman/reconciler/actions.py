@@ -8,7 +8,7 @@ from __future__ import annotations
 import enum
 import logging
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from foreman.config import MergeMechanism
 from foreman.reconciler.exec_log import ExecutionLog
@@ -27,6 +27,19 @@ class Action(enum.Enum):
 
     NOOP = "noop"
     SURFACE_HELP = "surface_help"
+    # foreman#228 (runaway-burn defense): per-ticket-per-role
+    # consecutive-failure rate-limit trip. The reconciler emits this
+    # when N same-role failures have landed on the same ticket within
+    # W seconds. The executor removes the role's in-flight label, adds
+    # ``foreman:needs-help``, posts a comment naming the role + last
+    # failures, and writes a ``rate_limit_reset:<dispatch_action>``
+    # sentinel so the human's subsequent re-queue starts a fresh
+    # window. Separate enum value (not reusing ``SURFACE_HELP``) so the
+    # comment copy + the reset-sentinel side effect are first-class in
+    # the executor and so the existing ``surface_help`` cooldown
+    # (``_safety_with_rate_limit`` 1h gate) doesn't suppress this trip
+    # — the rate-limit predicate is its own gate.
+    RATE_LIMIT_TRIP = "rate_limit_trip"
     # foreman#171: ``foreman:plan`` is the documented "queue for planning"
     # entry label, but no rule fires on it directly — ``dispatch_planner``
     # requires ``foreman:planning``. This action is the forward-progress
@@ -97,6 +110,13 @@ class ActionContext:
     auto_merge_spec: bool = True
     auto_merge_impl: bool = False
     merge_mechanism: MergeMechanism = "direct"
+    # foreman#228: per-ticket-per-role consecutive-failure rate-limit
+    # knobs. Defaults mirror ``DaemonConfig`` so tests + reconciler
+    # paths that omit them keep the same behavior. Production resolves
+    # the effective values via the per-tick context-build path in the
+    # reconciler daemon (which reads ``ReconcilerConfig``).
+    rate_limit_max_consecutive_failures: int = 3
+    rate_limit_window_seconds: int = 1800
 
     @property
     def ticket_id(self) -> str:
@@ -120,6 +140,269 @@ _MERGING_LABEL_FOR_TARGET: dict[str, str] = {
     "plan": "foreman:merging-plan",
     "impl": "foreman:merging-impl",
 }
+
+
+# foreman#228: terminal blocking label name. Matches the role-runner
+# helper from foreman#229 so the operator always sees the same name in
+# failure comments regardless of which path surfaced them.
+TERMINAL_NEEDS_HELP_LABEL = "foreman:needs-help"
+
+
+# foreman#228: the rate-limit rule name → (role, dispatch_action,
+# in_flight_label) mapping the RATE_LIMIT_TRIP executor uses to figure
+# out which label to remove and which dispatch-action key to write the
+# reset sentinel against. The rule layer creates one rate-limit rule
+# per dispatch-action key (planner / worker / reviewer-spec /
+# reviewer-impl / fixer-spec / fixer-impl), each named with the prefix
+# below. The executor parses the rule name to recover the per-action
+# context.
+_RATE_LIMIT_RULE_PREFIX = "rate_limit_consecutive_failures:"
+
+# (dispatch_action → (role_name, in_flight_label)). The role_name is
+# used only in the human-facing comment prose. The in_flight_label is
+# what the executor removes; the dispatch_action is what the reset
+# sentinel is keyed against AND what ``count_recent_failures`` /
+# ``recent_failure_details`` query for. Keeping the three together in
+# ONE structure means a future role addition touches one place.
+_RATE_LIMIT_TARGETS: dict[str, tuple[str, str]] = {
+    "dispatch_planner": ("planner", "foreman:planning"),
+    "dispatch_worker": ("worker", "foreman:plan-approved"),
+    "dispatch_reviewer_spec": ("reviewer", "foreman:planning"),
+    "dispatch_reviewer_impl": ("reviewer", "foreman:impl-review"),
+    "dispatch_fixer_spec": ("fixer", "foreman:spec-fix"),
+    "dispatch_fixer_impl": ("fixer", "foreman:impl-fix"),
+}
+
+
+def _parse_rate_limit_rule_name(rule_name: str) -> str | None:
+    """Extract the dispatch-action key from a rate-limit rule name.
+
+    Returns ``"dispatch_planner"`` (etc.) for
+    ``"rate_limit_consecutive_failures:dispatch_planner"``, or ``None``
+    when the rule_name doesn't match the rate-limit shape.
+    """
+    if not rule_name.startswith(_RATE_LIMIT_RULE_PREFIX):
+        return None
+    suffix = rule_name[len(_RATE_LIMIT_RULE_PREFIX):]
+    return suffix if suffix in _RATE_LIMIT_TARGETS else None
+
+
+def _format_rate_limit_comment(
+    *,
+    role: str,
+    dispatch_action: str,
+    failure_count: int,
+    window_seconds: int,
+    recent: list[dict[str, Any]],
+) -> str:
+    """Render the GitHub comment body posted on RATE_LIMIT_TRIP.
+
+    Names the role + dispatch action that tripped, the configured N/W
+    knobs, and a digest of the last failures (newest first). Each
+    failure line is one bullet capped at ~200 chars so a runaway
+    provider that filled details with megabytes doesn't post a multi-MB
+    comment. The full per-dispatch subprocess log naming convention
+    (foreman#119) is referenced so an operator can spelunk further;
+    pairs with the truncation-marker shape from foreman#229.
+    """
+    window_minutes = window_seconds // 60
+    lines = [
+        f"foreman {role} dispatch ({dispatch_action}) hit the per-ticket "
+        f"per-role consecutive-failure rate-limit "
+        f"(foreman#228): {failure_count} failures within the last "
+        f"{window_minutes} minutes.",
+        "",
+        f"The ticket has been transitioned to `{TERMINAL_NEEDS_HELP_LABEL}` "
+        "to stop the daemon from re-dispatching on every poll cycle "
+        "(yesterday's runaway: foreman#227 spun 171 consecutive "
+        "Planner dispatches in 2h52m before this defense existed). "
+        f"Remove `{TERMINAL_NEEDS_HELP_LABEL}` to resume the autonomous "
+        "flow once the underlying cause is addressed; the counter has "
+        "been reset so the next failure starts a fresh window.",
+    ]
+    if recent:
+        lines.append("")
+        lines.append("Recent failures (newest first):")
+        for entry in recent:
+            ts = entry.get("ts", "?")
+            outcome = entry.get("outcome", "?")
+            details = entry.get("details") or {}
+            err = str(details.get("error", "")).strip()
+            if len(err) > 200:
+                err = err[:200] + "... (truncated)"
+            issue_no = details.get("issue", "?")
+            head = f"- {ts} UTC · outcome=`{outcome}` · issue={issue_no}"
+            if err:
+                head += f" · `{err}`"
+            lines.append(head)
+        lines.append("")
+        lines.append(
+            "Full tracebacks live in the daemon's per-dispatch subprocess "
+            "log convention `<log_dir>/<role>/<issue>__<timestamp>.log` "
+            "(`<log_dir>` = `$FOREMAN_LOG_DIR` or `~/.foreman/logs`)."
+        )
+    return "\n".join(lines)
+
+
+def _handle_rate_limit_trip(
+    ctx: ActionContext,
+    host: ReconcilerHost,
+    *,
+    rule_name: str,
+) -> None:
+    """Side effects for ``Action.RATE_LIMIT_TRIP`` (foreman#228).
+
+    Per the locked contract from Pepper's criterion-check:
+
+    - Remove the role's in-flight label (e.g., ``foreman:planning`` for
+      Planner) so a stale label doesn't mis-route future polls.
+    - Add ``foreman:needs-help`` so safety-tier rules at higher
+      precedence keep firing NOOP / SURFACE_HELP rather than re-routing
+      forward-progress dispatch.
+    - Post a comment naming the role, the trip count + window, and the
+      last few failures so the operator has actionable context without
+      having to spelunk the daemon logs.
+    - Write a ``rate_limit_reset:<dispatch_action>`` sentinel so the
+      counter clears for the (action, ticket_id) — when the human then
+      removes ``foreman:needs-help`` and re-adds the entry-point label,
+      the next failure starts a fresh window deterministic regardless
+      of how much of W has elapsed.
+
+    The dispatch-action key the trip relates to is encoded in
+    ``rule_name`` via the :data:`_RATE_LIMIT_RULE_PREFIX` convention
+    (e.g., ``rate_limit_consecutive_failures:dispatch_planner``).
+
+    All four side effects are independently try-wrapped (mirroring
+    ``foreman.roles.handle_unhandled_role_exception``): a transient
+    failure of any one (GitHub 5xx, race-window 404, sentinel-write
+    hiccup) is logged and the remaining steps still run. The order is
+    chosen so the most-load-bearing step (``needs-help`` label add)
+    runs first.
+    """
+    dispatch_action = _parse_rate_limit_rule_name(rule_name)
+    if dispatch_action is None:
+        # Defensive: a future caller that fires RATE_LIMIT_TRIP under
+        # an unknown rule_name shape — log loudly + skip the structured
+        # side effects rather than papering over with an arbitrary
+        # default that could clear the wrong counter or remove the
+        # wrong label.
+        logger.error(
+            "RATE_LIMIT_TRIP fired under unrecognized rule_name=%r; "
+            "skipping side effects for ticket %s",
+            rule_name,
+            ctx.ticket_id,
+        )
+        return
+    role, in_flight_label = _RATE_LIMIT_TARGETS[dispatch_action]
+    recent = ctx.log.recent_failure_details(
+        action=dispatch_action,
+        ticket_id=ctx.ticket_id,
+        within_seconds=ctx.rate_limit_window_seconds,
+        limit=ctx.rate_limit_max_consecutive_failures,
+    )
+    failure_count = ctx.log.count_recent_failures(
+        action=dispatch_action,
+        ticket_id=ctx.ticket_id,
+        within_seconds=ctx.rate_limit_window_seconds,
+    )
+    body = _format_rate_limit_comment(
+        role=role,
+        dispatch_action=dispatch_action,
+        failure_count=failure_count,
+        window_seconds=ctx.rate_limit_window_seconds,
+        recent=recent,
+    )
+    # Each side effect is wrapped INDEPENDENTLY so a single host hiccup
+    # (GitHub 5xx on the comment, race-window 404 on remove_label, disk
+    # write hiccup on the sentinel) cannot leave the others undone. This
+    # mirrors the pattern from ``handle_unhandled_role_exception`` in
+    # ``foreman.roles`` (#229) — Pepper called the independent wrapping
+    # load-bearing because the rate-limit's contract depends on each
+    # of these landing.
+    #
+    # The semantic priorities, in order:
+    #   1. ``add_label(needs-help)`` — the load-bearing safety move.
+    #      Without it the rate-limit rule predicate's `needs-help in
+    #      labels: return False` short-circuit cannot fire and the
+    #      trip's protection is broken. Wrap and log loudly, but do
+    #      NOT abort the remaining steps — a label-add failure today
+    #      is far more recoverable than a permanently-stuck loop.
+    #   2. ``remove_label(in_flight)`` — hygiene. A failed remove
+    #      leaves the ticket double-labeled (in-flight + needs-help);
+    #      the higher-precedence ``needs_help_label`` rule wins, so
+    #      forward-progress dispatch stays gated.
+    #   3. ``post_comment`` — diagnostic. Operator loses the last-N
+    #      failure summary if this fails; the label transition (and
+    #      the structural protection) still holds.
+    #   4. ``write_rate_limit_reset`` — load-bearing for the contract.
+    #      Without the sentinel, a same-window human re-queue trips
+    #      immediately at N=1 (the re-trip whiplash Pepper warned
+    #      about). Log loudly on failure: this is the one to wake
+    #      somebody for.
+    try:
+        host.add_label(
+            owner=ctx.snapshot.owner,
+            repo=ctx.snapshot.repo,
+            issue=ctx.issue.number,
+            label=TERMINAL_NEEDS_HELP_LABEL,
+        )
+    except Exception:
+        logger.exception(
+            "RATE_LIMIT_TRIP: failed to add %s on issue %d (rule=%s); "
+            "continuing with remaining trip side effects but the rate-limit "
+            "predicate's short-circuit may not fire on the next poll",
+            TERMINAL_NEEDS_HELP_LABEL,
+            ctx.issue.number,
+            rule_name,
+        )
+    if in_flight_label in ctx.issue.labels:
+        try:
+            host.remove_label(
+                owner=ctx.snapshot.owner,
+                repo=ctx.snapshot.repo,
+                issue=ctx.issue.number,
+                label=in_flight_label,
+            )
+        except Exception:
+            logger.exception(
+                "RATE_LIMIT_TRIP: failed to remove %s on issue %d; ticket "
+                "will carry both labels until the next reconcile cycle",
+                in_flight_label,
+                ctx.issue.number,
+            )
+    try:
+        host.post_comment(
+            owner=ctx.snapshot.owner,
+            repo=ctx.snapshot.repo,
+            issue=ctx.issue.number,
+            body=body,
+        )
+    except Exception:
+        logger.exception(
+            "RATE_LIMIT_TRIP: failed to post diagnostic comment on issue %d "
+            "(rule=%s); operator will see needs-help label but no comment",
+            ctx.issue.number,
+            rule_name,
+        )
+    try:
+        ctx.log.write_rate_limit_reset(
+            action=dispatch_action,
+            ticket_id=ctx.ticket_id,
+            details={
+                "tripped_by_rule": rule_name,
+                "failure_count_at_trip": failure_count,
+                "window_seconds": ctx.rate_limit_window_seconds,
+                "issue": ctx.issue.number,
+            },
+        )
+    except Exception:
+        logger.exception(
+            "RATE_LIMIT_TRIP: failed to write reset sentinel for "
+            "(action=%s, ticket=%s) — human re-queue may re-trip "
+            "immediately at N=1 within W. Investigate the execution log.",
+            dispatch_action,
+            ctx.ticket_id,
+        )
 
 
 def _handle_attempt_merge(
@@ -325,7 +608,9 @@ def execute_action(
     )
 
     try:
-        if action is Action.SURFACE_HELP:
+        if action is Action.RATE_LIMIT_TRIP:
+            _handle_rate_limit_trip(ctx, host, rule_name=rule_name)
+        elif action is Action.SURFACE_HELP:
             host.add_label(
                 owner=ctx.snapshot.owner,
                 repo=ctx.snapshot.repo,
