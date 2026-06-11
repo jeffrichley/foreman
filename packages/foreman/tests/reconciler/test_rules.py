@@ -1064,7 +1064,7 @@ def test_reviewer_spec_attempts_exhausted_fires_only_on_three_needs_fix_verdicts
     dispatch count. Direct predicate call (not ``evaluate``) because
     going through evaluate on a bare 3-needs_fix fixture would trip the
     rate-limit at precedence 44 first (``needs_fix`` is not in
-    ``_NON_FAILURE_OUTCOMES``).
+    ``NON_FAILURE_OUTCOMES``).
     """
     from foreman.reconciler.rules import _reviewer_spec_attempts_exhausted
 
@@ -1120,7 +1120,7 @@ def test_reviewer_spec_attempts_exhausted_does_not_fire_when_one_clean_verdict_p
     Post-fix: ``count_completed(outcome="needs_fix") == 2 < 3`` →
     False (green). Direct predicate call avoids tangling the assertion
     with the rate-limit on this shape (no success row → no fence
-    advance, and "clean" is not in ``_NON_FAILURE_OUTCOMES``, so all 3
+    advance, and "clean" is not in ``NON_FAILURE_OUTCOMES``, so all 3
     rows would read as failures for the rate-limit's purpose).
     """
     from foreman.reconciler.rules import _reviewer_spec_attempts_exhausted

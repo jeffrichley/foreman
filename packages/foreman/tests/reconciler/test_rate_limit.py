@@ -220,7 +220,8 @@ def test_count_recent_failures_counts_errored_recovery_outcomes(tmp_path: Path) 
     therefore pre-load the failure counter and cause an early trip on the
     first poll after restart. Pins the over-count-is-safer-than-under-count
     contract so a future tuple-tidying refactor doesn't accidentally add
-    `errored:recovery` to `_NON_FAILURE_OUTCOMES`.
+    `errored:recovery` to `NON_FAILURE_OUTCOMES` (foreman#258: the
+    typed `Outcome` enum classifies `ERRORED_RECOVERY` as `FAILURE`).
     """
     log = ExecutionLog(tmp_path / "log.sqlite")
     log.init()
