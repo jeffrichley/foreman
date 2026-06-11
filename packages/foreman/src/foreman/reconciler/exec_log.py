@@ -15,24 +15,15 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-# Outcome sentinels hoisted so the partial index DDL, query predicates, and
-# recovery writer share one source of truth. A typo or rename at one site
-# would silently degrade the index without breaking tests.
-_OUTCOME_RUNNING = "running"
-_OUTCOME_ERRORED_RECOVERY = "errored:recovery"
-
-# foreman#228: outcomes that do NOT count as same-role failures for the
-# consecutive-failure rate-limit predicate. ``success`` clears the counter
-# (the contract says "Same-role success only resets the counter"). The
-# administrative outcomes — ``dry_run``, ``skipped_capacity`` —
-# represent no real dispatch attempt and never burn budget. ``running``
-# is the start-row marker, not a termination; it is filtered out by the
-# ``parent_log_id IS NOT NULL`` clause in the counter query.
-_NON_FAILURE_OUTCOMES: tuple[str, ...] = (
-    "success",
-    "dry_run",
-    "skipped_capacity",
-)
+# foreman#258: the typed :class:`Outcome` enum is the single source of
+# truth for every outcome string written to ``execution_log``. The
+# derived :data:`NON_FAILURE_OUTCOMES` frozenset replaces the
+# hand-maintained ``_NON_FAILURE_OUTCOMES`` tuple; the two sentinel
+# constants (``_OUTCOME_RUNNING`` and ``_OUTCOME_ERRORED_RECOVERY``)
+# now route through ``Outcome.RUNNING`` / ``Outcome.ERRORED_RECOVERY``.
+# Adding a new outcome is a single-line edit to ``reconciler/outcomes.py``;
+# forgetting its classification raises ``TypeError`` at module load.
+from foreman.reconciler.outcomes import NON_FAILURE_OUTCOMES, Outcome
 
 # foreman#228: the synthetic ``action`` value the rate-limit reset
 # sentinel uses. Stored as ``rate_limit_reset:<dispatch_action>`` so the
@@ -81,9 +72,13 @@ _SCHEMA = [
     "CREATE INDEX IF NOT EXISTS idx_ticket_ts ON execution_log(ticket_id, ts DESC)",
     # F-string substitution into static DDL is safe — no user input touches
     # it. SQLite partial-index predicates cannot be parameterized.
+    # ``.value`` is required here: f-string interpolation of the
+    # ``StrEnum`` member would still produce the bare string in 3.12,
+    # but ``.value`` is the explicit, documented spelling and makes the
+    # DDL impervious to subtle changes in ``StrEnum.__format__``.
     f"""
     CREATE INDEX IF NOT EXISTS idx_running ON execution_log(outcome)
-    WHERE outcome = '{_OUTCOME_RUNNING}'
+    WHERE outcome = '{Outcome.RUNNING.value}'
     """,
 ]
 
@@ -315,7 +310,7 @@ class ExecutionLog:
                   )
                 LIMIT 1
                 """,
-                (ticket_id, action, _OUTCOME_RUNNING),
+                (ticket_id, action, Outcome.RUNNING),
             ).fetchone()
             return row is not None
 
@@ -405,7 +400,8 @@ class ExecutionLog:
 
         A "failure" is a terminator row (``parent_log_id IS NOT NULL``)
         for the named ``action``/``ticket_id`` whose ``outcome`` is NOT
-        in :data:`_NON_FAILURE_OUTCOMES` (success / dry_run /
+        in :data:`foreman.reconciler.outcomes.NON_FAILURE_OUTCOMES`
+        (success / dry_run /
         skipped_capacity). The count is filtered to the last
         ``within_seconds`` AND to rows whose ``ts`` is greater than the
         most recent reset signal — where a "reset signal" is EITHER:
@@ -426,7 +422,8 @@ class ExecutionLog:
         **Post-daemon-restart semantics.** ``recover_orphaned`` writes
         ``outcome='errored:recovery'`` rows for any ``running`` start
         rows orphaned by a daemon crash. Those rows ARE terminator rows
-        and ``errored:recovery`` is NOT in :data:`_NON_FAILURE_OUTCOMES`,
+        and ``errored:recovery`` is NOT in
+        :data:`foreman.reconciler.outcomes.NON_FAILURE_OUTCOMES`,
         so they count as failures here. Intentional: a crashed daemon
         that was mid-dispatch represents a real (incomplete) attempt,
         and over-counting is safer than under-counting for runaway
@@ -474,8 +471,8 @@ class ExecutionLog:
                 fence_ts = last_success_ts
             else:
                 fence_ts = max(last_success_ts, last_reset_ts)
-            placeholders = ",".join("?" for _ in _NON_FAILURE_OUTCOMES)
-            params: list[Any] = [action, ticket_id, *_NON_FAILURE_OUTCOMES, cutoff_sql]
+            placeholders = ",".join("?" for _ in NON_FAILURE_OUTCOMES)
+            params: list[Any] = [action, ticket_id, *NON_FAILURE_OUTCOMES, cutoff_sql]
             sql = f"""
                 SELECT COUNT(*) FROM execution_log
                 WHERE action = ?
@@ -569,8 +566,8 @@ class ExecutionLog:
                 fence_ts = last_success_ts
             else:
                 fence_ts = max(last_success_ts, last_reset_ts)
-            placeholders = ",".join("?" for _ in _NON_FAILURE_OUTCOMES)
-            params: list[Any] = [action, ticket_id, *_NON_FAILURE_OUTCOMES, cutoff_sql]
+            placeholders = ",".join("?" for _ in NON_FAILURE_OUTCOMES)
+            params: list[Any] = [action, ticket_id, *NON_FAILURE_OUTCOMES, cutoff_sql]
             sql = f"""
                 SELECT ts, outcome, details FROM execution_log
                 WHERE action = ?
@@ -609,13 +606,13 @@ class ExecutionLog:
                       WHERE term.parent_log_id = start.id
                   )
                 """,
-                (_OUTCOME_RUNNING,),
+                (Outcome.RUNNING,),
             ).fetchall()
         count = 0
         for (parent_id,) in orphans:
             self.terminate_action(
                 parent_log_id=parent_id,
-                outcome=_OUTCOME_ERRORED_RECOVERY,
+                outcome=Outcome.ERRORED_RECOVERY.value,
                 details={"reason": "daemon restart found orphaned running row"},
             )
             count += 1
