@@ -316,3 +316,175 @@ A deeper Lens B pass would produce a module-by-module table with the same shape 
 - Add this week's discovered structural bugs to foreman#269 evidence section
 
 Lens A is in good enough shape to brief from. Continue or pivot?
+
+---
+
+## Phase 0 deeper pass (2026-06-11 late morning)
+
+Jeff's direction: pure analysis, no fixing, no filing. Document everything.
+
+### Lens C deeper — IdentityRegistry per-role surface
+
+**10 per-role methods** on `IdentityRegistry`:
+
+| Method | Line | Production callers |
+|---|---|---|
+| `get_planner_client()` | identity.py:100 | **ZERO** in src; only test_identity.py:55 |
+| `get_planner_token()` | identity.py:104 | roles/planner.py:315 |
+| `get_reviewer_client()` | identity.py:108 | roles/reviewer.py:486 |
+| `get_reviewer_token()` | identity.py:118 | roles/reviewer.py:487 |
+| `get_fixer_client()` | identity.py:122 | roles/fixer.py:474 |
+| `get_fixer_token()` | identity.py:133 | roles/fixer.py:475 |
+| `get_worker_client()` | identity.py:137 | roles/worker.py:665 |
+| `get_worker_token()` | identity.py:148 | roles/worker.py:666 |
+| `get_orchestrator_client()` | identity.py:152 | daemon_host.py × 11 |
+| `get_orchestrator_token()` | identity.py:163 | cli.py:893 |
+
+**Plus a generic `get_client(role)` / `get_token(role)`** — only one caller of the generic in cli.py:886 (`registry.get_token("planner")`).
+
+**Findings:**
+- `get_planner_client()` is **dead** (only test-called) — confirmed from initial pass.
+- The per-role methods are thin wrappers around `get_client(role)` / `get_token(role)`. Pure DRY violation; per-role wrappers exist for typing convenience but add 10 method definitions for zero behavior. **Lens B verdict:** the generic IS the cleaner interface; the per-role variants are syntactic sugar that costs maintenance.
+- Asymmetry: planner uses only `_token`, reviewer/fixer/worker use both `_client` and `_token`. Suggests the planner is genuinely simpler than the others (no PyGithub client work) — could be intentional.
+
+### Lens C deeper — Label constant duplication (the big one)
+
+Label string constants ARE NOT centralized — they are **re-declared in every role module that touches them**:
+
+| Constant | fixer.py | reviewer.py | worker.py |
+|---|---|---|---|
+| `_LABEL_SPEC_FIX = "foreman:spec-fix"` | line 101 | line 90 | — |
+| `_LABEL_PLANNING = "foreman:planning"` | line 105 | — | — |
+| `_LABEL_NEEDS_HELP = "foreman:needs-help"` | line 106 | — | line 138 |
+| `_LABEL_FAILED = "foreman:failed"` | line 107 | — | line 139 |
+| `_LABEL_IMPL_FIX = "foreman:impl-fix"` | line 113 | line 93 | line 137 |
+| `_LABEL_IMPL_REVIEW = "foreman:impl-review"` | line 114 | line 91 | line 136 |
+| `_LABEL_SPEC_REVIEW = "foreman:planning"` | — | line 88 | — |
+| `_LABEL_SPEC_READY = "foreman:plan-approved"` | — | line 89 | — |
+| `_LABEL_READY_FOR_MERGE = "foreman:impl-approved"` | — | line 92 | — |
+| `_LABEL_PLAN_APPROVED = "foreman:plan-approved"` | — | — | line 116 |
+
+20 distinct `foreman:*` label strings appear across the source tree. The role modules each re-declare a subset. Of particular note:
+
+- **Aliasing confusion**: `_LABEL_SPEC_REVIEW = "foreman:planning"` (reviewer.py:88) and `_LABEL_PLANNING = "foreman:planning"` (fixer.py:105) name the same string differently. A reader has to know that "planning" and "spec_review" refer to the same conceptual state.
+- **Overlap rate**: `_LABEL_IMPL_REVIEW` appears 3× across role modules. `_LABEL_IMPL_FIX` appears 3×. `_LABEL_SPEC_FIX` appears 2×. Same string, three (or two) source-of-truth definitions.
+- **PR #197 ("centralize foreman:* label constants into one source of truth") claimed to fix this.** It did NOT update the role modules — the per-module declarations survived. The "centralization" presumably happened elsewhere (init.py? reconciler/labels?). This is a Lens A finding too: a structural PR that did not finish the job.
+
+**The exact failure mode Jeff named** ("if you can forget it in two places, it is an issue") is alive and well here. Renaming `foreman:needs-help` to anything else means editing 3+ files; missing one is a silent bug.
+
+**Where the "centralized" constants live (if they exist):** TBD — need to find them. The fact that `grep -nE '^_LABEL_|^LABEL_' __init__.py` returned nothing means they are not in `foreman.__init__` like PR #197 suggested. Worth chasing.
+
+### Lens C deeper — Prompt inventory
+
+6 main role prompts under `prompts/`:
+
+| File | Size | Last touched |
+|---|---|---|
+| `fixer.md` | 12,623 B | June 5 |
+| `fixer_impl.md` | 7,804 B | June 5 |
+| `planner.md` | 10,578 B | June 5 |
+| `reviewer.md` | 12,445 B | June 5 |
+| `reviewer_impl.md` | 8,303 B | June 5 |
+| `worker.md` | 18,092 B | June 7 |
+
+5 of 6 last-touched June 5 (today is June 11). Worker prompt last touched June 7. **Drift risk:** the role runners have evolved (PR #255 added defensive exception handling, PR #266 introduced provider boundary, PR #277 introduced typed Outcome, etc.) but the prompts have been static for ~5 days. Prompt sections referring to specific behavior may now be stale.
+
+**8 vendored superpowers files under `prompts/superpowers/`:**
+`_VERSION.md`, `executing-plans.md`, `finishing-a-development-branch.md`, `receiving-code-review.md`, `requesting-code-review.md`, `test-driven-development.md`, `verification-before-completion.md`, `writing-plans.md`
+
+These are copies of source-of-truth skills that live in the `superpowers` plugin. **Drift risk:** if the source skills get iterated on (and they have, per the substrate's history) and we never re-vendor, our copies are stale. `_VERSION.md` exists, which suggests a versioning convention — worth checking whether the versioning is being honored.
+
+### Lens C deeper — Marker exception duplication
+
+PR #255 added marker exception subclasses for graceful preflight refusals:
+
+- `_ReviewerPreflightRefusal(RuntimeError)` in roles/reviewer.py
+- `_WorkerPreflightRefusal(RuntimeError)` in roles/worker.py
+- `_FixerPreflightRefusal(RuntimeError)` in roles/fixer.py
+
+(Planner does not have one — yet?)
+
+**3 distinct classes for the same conceptual shape.** Each role re-implements identical boilerplate. The role-runner helper from PR #255 catches them generically. This is a Lens B finding: the marker-exception pattern is a candidate for a single `RolePreflightRefusal` base class with optional role tag, OR — better — formalization into the eventual Template Method base class.
+
+### Lens B deeper — Role runner shape (Template Method opportunity)
+
+The four `run_<role>` functions:
+
+- `run_planner(...)` — roles/planner.py:143
+- `run_reviewer(...)` — roles/reviewer.py:335
+- `run_fixer(...)` — roles/fixer.py:409
+- `run_worker(...)` — roles/worker.py:597
+
+Each one informally implements:
+
+1. Setup (worktree attach, label snapshot, App identity resolve)
+2. Preflight (refuse fast if labels/state are wrong; raises `_<Role>PreflightRefusal` if so)
+3. Dispatch (provider.run_agent with role-specific prompt + schema)
+4. Post-dispatch (commit, push, label transition, comment, terminate the dispatch row)
+
+**Template Method opportunity** is concrete: a `RoleRunner` ABC with `setup`, `preflight`, `dispatch`, `terminate` as abstract/protected methods plus a `run` driver that orchestrates them. Each role would implement only what differs. The shared shape (try/except for preflight refusal, label snapshot for post-state, terminate-on-finally) would live once.
+
+**Cost of NOT doing this:** every defensive change (the marker-exception pattern, the env-injection #270, the foreman#266 GoF boundary integration) has to be applied 4×. The "we keep bandaiding" pattern is structurally caused by 4× role runners that share 80%+ of their shape with no shared abstraction.
+
+### execution_log schema columns
+
+| Column | Type | Source | Populated? |
+|---|---|---|---|
+| `id` | INTEGER PRIMARY KEY | original | yes |
+| `ts` | TIMESTAMP | original | yes |
+| `ticket_id` | TEXT | original | yes |
+| `project` | TEXT | original | yes |
+| `rule_name` | TEXT | original | yes |
+| `action` | TEXT | original | yes |
+| `outcome` | TEXT | original | yes (now via typed `Outcome` enum) |
+| `details` | TEXT (JSON) | original | yes |
+| `parent_log_id` | INTEGER | original | yes (for terminations) |
+| `input_tokens` | INTEGER | foreman#251 (_COST_COLUMNS) | only on dispatch_complete rows |
+| `output_tokens` | INTEGER | foreman#251 | only on dispatch_complete rows |
+| `cache_creation_input_tokens` | INTEGER | foreman#251 + #244 | only on dispatch_complete rows |
+| `cache_read_input_tokens` | INTEGER | foreman#251 + #244 | only on dispatch_complete rows |
+| `total_cost_usd` | REAL | foreman#251 | only on dispatch_complete rows |
+| `model_usage_json` | TEXT | foreman#251 | only on dispatch_complete rows |
+| `duration_ms` | INTEGER | foreman#251 | only on dispatch_complete rows |
+| `num_turns` | INTEGER | foreman#251 | only on dispatch_complete rows |
+
+**Observation:** 8 cost columns added in foreman#251 are populated only when `CostSubscriber.handle_dispatch_complete` fires. For every other row (rate-limit trips, label advances, terminations from `recover_orphaned`, etc.), those columns are NULL. That is not dead code — it is correctly sparse — but it does mean most rows in `execution_log` have NULL across 8 columns. A schema audit later might ask whether the cost data should live in a separate sibling table rather than padding the main log; for now, noting.
+
+### Initial Lens A re-classification (correction)
+
+On a second look at PR #197 ("centralize foreman:* label constants"): this PR is now reclassified from "structural fix" to **"partial structural fix — bandaid in disguise"**. It did centralize some constants but left the role modules with their own duplicated declarations. The centralization is half-done. This pattern — incomplete structural fixes that still get tagged as "done" because the spec was narrowly scoped — is itself worth surfacing in Phase 1 §2 (layered defenses audit).
+
+### Findings summary at this point
+
+**Confirmed dead code (12 items, listed above):** 1 active bug (`ProviderInvalidResultError` zombie in `__all__`), 11 unused methods/fields.
+
+**Duplication / single-source-of-truth violations:**
+
+- 10 per-role IdentityRegistry methods (`get_<role>_client`/`_token` × 5) wrapping a generic `get_client(role)`/`get_token(role)`. 1 of 10 (`get_planner_client`) is dead.
+- 20 `foreman:*` label strings, with at least 6 re-declared across 3 role modules with overlapping names AND aliases. Centralization PR #197 did not finish the job.
+- 3 `_<Role>PreflightRefusal` classes for the same conceptual marker.
+
+**Refactor candidates (Lens B):**
+
+- Role runners → Template Method base class (eliminates ~80% of the 4× duplication; folds marker exceptions, env injection, label management, etc. into one shape).
+- Actions executor → Command registry (replaces if/elif dispatch with explicit class-per-action).
+- Label state machine → explicit State pattern (today distributed across 3 layers).
+
+**Prompts:**
+
+- 6 main role prompts last touched 5+ days ago; drift risk.
+- 8 vendored superpowers files; vendor-sync discipline unclear.
+
+**Schema:**
+
+- `execution_log` is wide (17 columns). 8 of those are cost columns populated only on `dispatch_complete` rows. Not dead, but sparsely populated. Possible sibling-table candidate.
+
+### Still left for Phase 0
+
+- Find where labels are "centralized" per PR #197 (or confirm they're NOT, which makes #197's claim retroactively wrong)
+- Audit `init.py` label state vocabulary specifically
+- Lens B deeper for: provider boundary's adapter wiring (sanity-check the gold standard claim), daemon_host.py (very tall — 11 calls to `get_orchestrator_client` — possibly should accept a host wrapper instead)
+- Pre-#266 leftover audit (anything that the GoF refactor obsoleted but did not delete)
+- Draft straw-man positions on foreman#269 six review topics
+
+Continuing.
