@@ -809,6 +809,7 @@ Each finding gets one decision row. Format: finding summary, decision, rationale
   - Whether to delete the `daemon start` CLI subcommand at the same time as the modules it transitively uses, or in a follow-up
 - **Next-step ticket:** TBD after Phase 1 closes. Should reference both the tooling stack (vulture + reachability) and Decision 2's back-to-back constraint (the v2 island is itself a partial-migration carcass — exactly the failure mode Decision 2 is trying to prevent for the role-runner ABC).
 - **Cross-reference (Topic 7 — `ProviderInvalidResultError` zombie):** the active import bug in `foreman.providers.__all__` is the textbook case this tooling is designed to catch. Recording it here so the relevance is obvious: if a `__all__` export references a class that does not exist, the reachability sweep's symbol resolution step trips, and `vulture --confidence=100` flags the dangling string. Both signals would have surfaced it months ago.
+- **Cross-reference (Topic 8 dissolution — Phase 0's 12-item dead-code catalogue):** Phase 0 manually catalogued ~12 specific dead-code items (the v2 island, `ProviderInvalidResultError`, ~10 smaller orphans — unused helpers, dead test fixtures, prompt-template fragments referenced nowhere). Rather than file Topic 8 as a separate decision, the catalogue is absorbed into Decision 3 as the **calibration baseline for the first tooling run**: when vulture + reachability execute, the result is compared against this 12-item list. If the tool misses items from the catalogue, the vulture whitelist / reachability entry-points need tuning. If the tool finds more, that's signal that the manual sweep undercounted. The catalogue becomes the calibration set; it does not itself need a decision entry.
 
 ### Decision 4 — Bandaid-ratio guardrail: artifact discipline (B) + prompt-level bias toward structural patterns
 
@@ -895,5 +896,34 @@ Each finding gets one decision row. Format: finding summary, decision, rationale
   - Soft conventions in CLAUDE.md / prompts (Decision 4) bias initial proposals but do not catch the case where someone explicitly chooses to violate the convention "just this once."
 - **Sequencing dependency:** R1, R2, R3 land *with* their respective parent decisions (5, 2, 3) — the import-linter rule and the boundary it enforces ship in the same PR so the rule is testing the new shape, not retrofitting the old. The `import-linter` framework itself can land independently first.
 - **Next-step ticket:** TBD after Phase 1 closes. Should reference (a) `import-linter` adoption as the framework PR (independent), (b) the rule-set discipline ("only when a decision creates the boundary"), and (c) the three initial rules with their parent-decision linkage so the rule provenance survives memory drift.
+
+### Decision 8 — Library-boundary audit with tier table (extends Decision 7's rule-source discipline)
+
+- **Finding:** Decision 7 specified three import-boundary rules (R1 provider-adapter, R2 role-runner, R3 dead-island) tied to specific decisions in this Phase 1 round. But several third-party libraries currently imported across `foreman.*` are high blast-radius if misplaced (network surface, process spawn, DB layer, crypto) and don't yet have boundaries enforced. The "only when a decision creates the boundary" discipline was protecting against pre-building rules for hypothetical layers, not against discovering boundaries that already exist implicitly. An audit IS a decision-making activity — done in batch instead of piecewise — and each resulting rule still traces back to a documented justification.
+- **Decision:** **Run a library-boundary audit** as part of Phase 1's execution work. The audit produces a tier table of every third-party library imported in `foreman.*`, ranked by *blast-radius if imported from the wrong place*. Tier 1 libraries get import-linter rules immediately; Tiers 2 and 3 stay documented but unbound. Decision 8 amends Decision 7's rule-source discipline from "only when an in-flight decision creates the boundary" to "rules come from documented decisions, **including** the explicit library-boundary audit." Same load-bearing principle (each rule has documented justification), broader sourcing.
+- **Straw-man tier table** (subject to verification when the audit actually runs against the current tree):
+  - **Tier 1 — bind now (high blast-radius if misplaced):**
+    - `anthropic` — LLM SDK; only `provider.adapters.*` (this is Decision 7's R1 absorbed)
+    - `github` (PyGithub) — GitHub REST; only `identity.*`, `auth.*`, `git_hosts.*`, `daemon_host.*`
+    - `httpx` — HTTP client; only `git_hosts.*`, `reconciler.gh_graphql`, future provider adapters
+    - `subprocess` / `asyncio.create_subprocess_*` — process spawn surface; only `worktree.*`, `reconciler.v3_host` (for role-dispatch subprocess)
+    - `sqlite3` / `aiosqlite` — DB surface; only `reconciler.exec_log`, `storage.*`
+    - `pyjwt`, `cryptography` — JWT minting; only `auth.*`, `identity.*`
+  - **Tier 2 — bind when a second-consumer threatens (don't pre-build the rule):**
+    - `click` — CLI framework; only matters if non-CLI code starts importing it
+    - `rich` — pretty-print; only matters if business logic starts touching terminal output
+  - **Tier 3 — explicitly NOT bound, with reason:**
+    - `pydantic` — intentionally used everywhere; binding would create overhead with no payoff
+    - `pathlib`, `os`, `sys`, stdlib basics — universally needed
+    - `tomllib` / `tomli` — used wherever config loads; no leakage concern
+- **The Tier 3 column is load-bearing** (anti-pattern defense): the audit's failure mode is bind-everything. By explicitly naming the libraries we are *not* binding *and why*, we prevent a future operator from reflexively adding boundaries to libraries that should stay unconstrained. The phrase "intentionally everywhere" must appear in the doc for `pydantic` (and any future library that crosses module boundaries by design).
+- **Rationale (against do-nothing):** without the audit, the rule set is whatever R1/R2/R3 from Decision 7 happened to surface — `anthropic` covered, but `httpx`/`subprocess`/`sqlite3`/`pyjwt` left ungoverned. Those are higher blast-radius than the v2 dispatcher import we just spent a decision on. The audit is the cheapest way to know whether other dispatcher-shaped problems are hiding.
+- **Rationale (against expanding without audit):** "add 6 more rules" without naming why each one is bound (versus Tier 2/3) is exactly the bind-everything failure mode. The tier table forces the justification onto the record so future operators can re-tier as the codebase evolves.
+- **Composes with prior decisions:**
+  - Absorbs Decision 7's R1 (anthropic) into the Tier 1 set
+  - R2 (role-runner) and R3 (dead-island) remain as documented in Decision 7 — they are intra-codebase boundaries, not library boundaries; they are orthogonal to the tier table
+  - Decision 4's prompt-bias toward GoF/Google patterns naturally drives Tier-1-shaped thinking ("which libraries are at boundaries Google would harden?")
+- **Sequencing dependency:** Decision 7 framework lands first (need `import-linter` configured before rules can land); audit runs as a Phase 2 task; Tier 1 rules ship in the framework PR or a fast-follow PR.
+- **Next-step ticket:** TBD after Phase 1 closes. Should reference (a) the audit as a Phase 2 task that produces the tier table as an artifact in the repo (e.g. `docs/architecture/library-boundaries.md`), (b) Tier 1 rules ship at audit-completion time, (c) the Tier 3 explicit-non-bind discipline so future operators don't reflexively add rules.
 
 
