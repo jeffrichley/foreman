@@ -26,17 +26,6 @@ class ProviderError(Exception):
     """
 
 
-class ProviderInvalidResultError(ProviderError):
-    """The provider returned a structured result the adapter could not
-    validate against the supplied output-model schema.
-
-    Reserved for a future need where the SDK delivers a payload that
-    parses as JSON but fails Pydantic validation. Today no production
-    code path raises this; it exists so the family is complete and a
-    future strategy can map to it without inventing a new type.
-    """
-
-
 class ProviderTimeoutError(ProviderError):
     """The provider's underlying transport timed out.
 

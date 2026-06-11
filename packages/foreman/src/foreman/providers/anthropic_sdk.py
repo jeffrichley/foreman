@@ -122,6 +122,26 @@ def _system_prompt_file(prompt: str, *, hint: str) -> Iterator[Path]:
             pass
 
 
+def _describe_envelope(message: Any) -> str:
+    """Short, log-safe description of one SDK message envelope.
+
+    foreman#266 instrumentation: used to summarize envelopes that arrive
+    AFTER the adapter has captured a satisfying ResultMessage, so we can
+    learn empirically what the CLI sends between the success
+    ResultMessage and either the SDK's terminal raise or a clean
+    exhaust. For ``ResultMessage`` we include ``subtype`` and whether
+    ``structured_output`` is present; for anything else we just include
+    the class name. The result must remain short — it's emitted as part
+    of a single INFO log line per call when post-success envelopes
+    appear.
+    """
+    if isinstance(message, ResultMessage):
+        subtype = getattr(message, "subtype", "?")
+        has_output = getattr(message, "structured_output", None) is not None
+        return f"ResultMessage(subtype={subtype}, has_output={has_output})"
+    return type(message).__name__
+
+
 def _translate_sdk_exception(exc: BaseException) -> ProviderError:
     """Translate an SDK-level exception into the corresponding domain
     :class:`ProviderError` subclass.
@@ -323,8 +343,20 @@ class AnthropicSDKProvider(ProviderFacade):
         the structured output (foreman#227).
         """
         captured_success: tuple[T, UsageInfo] | None = None
+        # foreman#266 instrumentation: accumulate short descriptions of
+        # every envelope the SDK emits AFTER a satisfying ResultMessage
+        # was captured. We have no production trace yet for what the
+        # CLI sends between the success ResultMessage and either the
+        # SDK's terminal raise (foreman#230 bug shape) or a clean
+        # exhaust. This list feeds one log line per call that lets us
+        # build an empirical model of the post-success protocol.
+        # Downgrade to DEBUG (or remove) once we have a stable picture.
+        post_success_envelopes: list[str] = []
 
         async for message in query(prompt=user_prompt, options=options):
+            if captured_success is not None:
+                post_success_envelopes.append(_describe_envelope(message))
+
             if not isinstance(message, ResultMessage):
                 continue
             # foreman#266: capture the most recent ResultMessage so
@@ -361,6 +393,19 @@ class AnthropicSDKProvider(ProviderFacade):
         # Loop exited cleanly. If we captured a success along the way,
         # return it; otherwise the SDK produced no successful result.
         if captured_success is not None:
+            if post_success_envelopes:
+                # The interesting data point: the SDK kept emitting
+                # envelopes after our satisfying ResultMessage and then
+                # exhausted cleanly (no raise). Log so we can build an
+                # empirical model of post-success protocol shape — most
+                # role runs won't hit this, so the line is rare-enough
+                # to be informational rather than noisy.
+                log.info(
+                    "provider drain: stream exhausted after captured success "
+                    "with %d post-success envelope(s): %s",
+                    len(post_success_envelopes),
+                    post_success_envelopes,
+                )
             return captured_success
 
         raise StructuredOutputMissingError(

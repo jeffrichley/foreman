@@ -303,15 +303,23 @@ async def test_success_as_error_recovery_fires_via_production_path(
 
 @pytest.mark.asyncio
 async def test_drain_returns_captured_success_when_loop_exits_cleanly(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Drain semantics: when the SDK yields a satisfying ResultMessage
     then a non-ResultMessage envelope then exhausts cleanly, the
     adapter still returns the captured success rather than raising
     StructuredOutputMissingError.
 
-    Pins the contract that draining past the satisfying ResultMessage
-    does not silently lose the result on a clean stream end.
+    Pins two contracts:
+
+    1. Draining past the satisfying ResultMessage does not silently
+       lose the result on a clean stream end.
+    2. The foreman#266 instrumentation emits one INFO log line
+       describing the post-success envelopes when there were any —
+       that's the data point we need to learn what the CLI sends
+       between a success ResultMessage and stream end in production.
     """
 
     class _FakeOtherMessage:
@@ -327,6 +335,7 @@ async def test_drain_returns_captured_success_when_loop_exits_cleanly(
     )
 
     provider = AnthropicSDKProvider(recovery=RecoveryChain([SuccessAsErrorRecovery()]))
+    caplog.set_level(logging.INFO, logger="foreman.providers.anthropic_sdk")
     result, usage = await provider.run_agent(
         system_prompt="sys",
         user_prompt="usr",
@@ -339,6 +348,13 @@ async def test_drain_returns_captured_success_when_loop_exits_cleanly(
     assert result.name == "captured"
     assert result.count == 3
     assert isinstance(usage, UsageInfo)
+
+    drain_lines = [
+        r.getMessage() for r in caplog.records if "provider drain:" in r.getMessage()
+    ]
+    assert any("_FakeOtherMessage" in line for line in drain_lines), (
+        f"expected an instrumentation log line naming _FakeOtherMessage; got {drain_lines!r}"
+    )
 
 
 @pytest.mark.asyncio

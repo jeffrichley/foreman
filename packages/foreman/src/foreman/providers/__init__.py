@@ -25,7 +25,6 @@ from typing import TYPE_CHECKING
 
 from foreman.providers.exceptions import (
     ProviderError,
-    ProviderInvalidResultError,
     ProviderTimeoutError,
     ProviderUnknownError,
 )
