@@ -809,4 +809,29 @@ Each finding gets one decision row. Format: finding summary, decision, rationale
   - Whether to delete the `daemon start` CLI subcommand at the same time as the modules it transitively uses, or in a follow-up
 - **Next-step ticket:** TBD after Phase 1 closes. Should reference both the tooling stack (vulture + reachability) and Decision 2's back-to-back constraint (the v2 island is itself a partial-migration carcass — exactly the failure mode Decision 2 is trying to prevent for the role-runner ABC).
 
+### Decision 4 — Bandaid-ratio guardrail: artifact discipline (B) + prompt-level bias toward structural patterns
+
+- **Finding:** Phase 0 Lens A tallied ~40% of post-Docker-cutover merges as defensive patches against symptoms rather than structural fixes. Without a guardrail, the ratio drifts back up after every stability sprint.
+- **Decision:** **Combined intervention — artifact discipline AND prompt-level bias.** Two complementary layers:
+  - **Layer 1 (Option B from the three-option set) — artifact discipline.** When a defensive patch is the right call (hot fire, structural fix too expensive right now), the patch ships with (a) a regression test that pins the bandaid in place and (b) a tracking ticket for the eventual structural fix. The test + ticket are the durable signal that survives memory drift, where social process (Option A) and calendar-driven sweeps (Option C) do not.
+  - **Layer 2 (Jeff's twist) — prompt-level bias toward GoF + Google principles.** Encode a calibrated lens into both `foreman/CLAUDE.md` (for human/Wren-driven work in the tree) and `prompts/planner.md` + `prompts/reviewer.md` (for autonomous-loop output, where most bandaid-ratio risk actually lives). Empirical observation: "what would Google do + which GoF pattern applies" pulls LLM output into a higher-quality sample neighborhood than "what is the best way." Calibration matters — see wording below.
+- **Calibrated wording** (load-bearing — "or say it doesn't fit" prevents pattern-fishing):
+  > Before proposing a non-trivial design, name the GoF pattern and/or the Google engineering principle (SRP / OCP / DIP / "make the right thing easy") the design embodies. If neither applies cleanly, say so explicitly — "no pattern fits, this is straightforward X" is a legitimate output. Pattern-fishing produces worse code than no pattern at all.
+- **Why the two layers compose** (rather than one replacing the other):
+  - Layer 2 biases the *initial* Planner output away from bandaids → fewer bandaid PRs even filed
+  - Layer 1 catches the bandaids that still ship under fire → no untracked bandaid survives
+  - Two-stage filter: lower bandaid input rate; bandaids that ship are tracked + tested
+- **Rationale (against alternatives):**
+  - Option A (PR-template process gate) alone: social, easy to drift, no artifact
+  - Option C (quarterly de-bandaid sweep) alone: calendar-dependent, retrospective only
+  - B alone: catches bandaids after the fact but doesn't reduce the input rate
+  - Twist alone: improves initial proposals but provides no audit trail for bandaids that do ship
+- **Risks named:**
+  - Pattern-fishing (Adapters everywhere) if the lens is uncalibrated — the "or say it doesn't fit" clause is the defense
+  - Subagent-prompt bloat slowing simple work — kept to 3-4 lines
+  - Layer 1 producing test-as-bandaid-monument (the regression test memorializes the bug shape instead of fixing it) — addressed by the tracking ticket linkage
+- **Tracking metric:** subsequent architecture audits compute bandaid-ratio; if not lower after both layers are in place, the lens didn't bite.
+- **Sequencing dependency:** none with Decisions 1-3 — Decision 4 is process/prompt-level, not code-level. Can land any time.
+- **Next-step ticket:** TBD after Phase 1 closes. Should reference both layers (artifact discipline + prompt bias) and the calibration wording above so a future operator does not strip the "or say it doesn't fit" clause as redundant.
+
 
