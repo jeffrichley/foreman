@@ -790,4 +790,23 @@ Each finding gets one decision row. Format: finding summary, decision, rationale
   - foreman#258 typed `Outcome` enum consumed by `terminate_*` template slots
 - **Next-step ticket:** TBD after Phase 1 closes. Should reference both Decision 1 (Labels first) and the back-to-back sequencing constraint so a future operator does not partially-migrate and walk away.
 
+### Decision 3 — v2 layer is dead code; excise via `vulture` + reachability cross-check
+
+- **Finding correction:** I initially framed this as Lens B "dual Action universes in active use" based on `dispatcher.py` still being importable by 5 modules. Jeff pushed back ("I thought we were completely off of v2 at this point and that old code was dead code"); verification confirmed his read. Production runtime entrypoint is `foreman daemon v3-start` (per `docker/entrypoint.sh:75`), which routes entirely through `foreman.reconciler.*` — no imports of `dispatcher`, `daemon`, `worker`, `poller`, `queue`, `daemon_runners`, or `role_dispatch`. The v2 surface is a **closed dead island** of 7 modules + the `daemon start` CLI subcommand + 3 helper functions in `cli.py`, reached from no live path. The reason I misread it was that the modules still pass static `import` resolution, which is itself evidence of the cognitive cost of leaving dead code on disk — it actively fooled the analysis two minutes ago.
+- **Reclassification:** Lens C (dead code), not Lens B (dual universes in active use).
+- **Decision:** **Smart Option A — excise the dead set via tooling**, not by manual grep. Two-tool stack:
+  - **`vulture`** at `--min-confidence 80` against `packages/foreman/src/foreman/`, with a committed `vulture_whitelist.py` for the predictable Python false-positives in this codebase (Click commands, Pydantic validators, pytest fixtures, hookspec callbacks, `__all__` exports, `__new__` metadata enums).
+  - **Reachability AST-walk script** starting from the live CLI entry points (`daemon v3-start`, `init run`, `ps`, `pipeline-detail`) plus the test-suite entry points, marking every transitively-imported module. Complement = unreachable modules. The v2 island shows up as a closed component automatically; anything else dead in the tree (e.g. `ProviderInvalidResultError` in `providers/__init__.__all__` — already flagged by Lens C) surfaces too.
+  - High-confidence dead = (vulture-flagged at ≥80) ∪ (modules not reachable from entry points).
+- **Rationale (against the alternatives):**
+  - Manual-grep A (the version I originally proposed): brittle. I just misidentified the v2 surface as live by eyeballing imports; I could miss other dead code I'm not specifically looking for.
+  - Option B (quarantine + telemetry): "harmless if nobody runs it" is exactly what enabled the v2 island to live since the Docker cutover; leaving it longer prolongs the cognitive-cost finding.
+  - Option C (keep): no operational justification — v2 has been off the production path since the Docker cutover (#343).
+- **Why tooling-driven is "smart":** outputs an auditable list, catches dead code in corners I have not looked at, and the whitelist is the artifact that prevents the dead set from growing back. The same `vulture` invocation can later become a CI gate — but the gate decision belongs to execution planning, not analysis.
+- **Execution-phase questions deferred** (to the implementation plan, not here):
+  - One-shot audit vs CI-regression-gate
+  - Single PR vs staged-by-confidence-tier excise
+  - Whether to delete the `daemon start` CLI subcommand at the same time as the modules it transitively uses, or in a follow-up
+- **Next-step ticket:** TBD after Phase 1 closes. Should reference both the tooling stack (vulture + reachability) and Decision 2's back-to-back constraint (the v2 island is itself a partial-migration carcass — exactly the failure mode Decision 2 is trying to prevent for the role-runner ABC).
+
 
