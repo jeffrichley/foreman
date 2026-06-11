@@ -834,4 +834,24 @@ Each finding gets one decision row. Format: finding summary, decision, rationale
 - **Sequencing dependency:** none with Decisions 1-3 — Decision 4 is process/prompt-level, not code-level. Can land any time.
 - **Next-step ticket:** TBD after Phase 1 closes. Should reference both layers (artifact discipline + prompt bias) and the calibration wording above so a future operator does not strip the "or say it doesn't fit" clause as redundant.
 
+### Decision 5 — Merge `foreman.provider` (singular) + `foreman.providers` (plural) into one `foreman.provider` package
+
+- **Finding:** Two sibling packages with confusingly similar names doing different things — `foreman.provider` (singular) holds the ABC + `UsageInfo` + legacy exception family; `foreman.providers` (plural) holds concrete adapters + the recovery chain + Strategy implementations and additionally exports `ProviderInvalidResultError` in `__all__` (the zombie symbol from Lens C — class doesn't exist, would crash on import-by-name). The split is a Java/C# "interface package vs implementation package" convention that does not translate to Python idiom; it has already misled reviewers (see the #266 GoF refactor PR comment thread).
+- **Decision:** **Option B — merge into one package, `foreman.provider`, with internal sub-modules:**
+  - `provider/__init__.py` — public surface
+  - `provider/api.py` — ABC + `UsageInfo` + protocol types
+  - `provider/adapters/` — concrete adapters (Anthropic SDK, future others)
+  - `provider/recovery.py` — recovery chain + Strategy implementations
+  - `provider/exceptions.py` — single source of truth for the exception family (the zombie `ProviderInvalidResultError` either gets defined here or removed from `__all__`)
+- **Rationale (against the alternatives):**
+  - Option A (rename + keep split, e.g. `provider` → `provider_api`): cheapest but preserves the underlying confusion. The Java convention is wrong for Python; renaming hides the smell rather than removing it.
+  - Option C (three-way split — `provider` for ABC, `provider_recovery` for chain, `adapters` for impls): same number of confusing boundaries as the current bad split, just rearranged. Three packages each with "one SRP-clean responsibility" produces three cross-cutting import chains where one would do.
+- **Rationale (for B):** Python idiom is "one package per coherent concept, internal sub-modules for separation." The provider concept is coherent — ABC, adapters, recovery, exceptions all belong to the same domain. Single package + sub-modules is the boring-correct answer that nobody is confused by six months from now. Also surfaces the zombie `ProviderInvalidResultError` for resolution (either define it or remove it) as part of the merge.
+- **Integration opportunities:**
+  - Resolves Lens C zombie `ProviderInvalidResultError`
+  - Eliminates one of the cross-module-import knot that the recent #266 refactor partly addressed but left half-resolved
+  - Pairs naturally with Decision 2's `RoleRunner` ABC migration — the role-runner template's dispatch step consumes the provider; cleaner provider package = cleaner dispatch slot
+- **Sequencing dependency:** none with Decisions 1-4. Independent of role-runner work, label work, dead-code excise, and the bandaid guardrail.
+- **Next-step ticket:** TBD after Phase 1 closes. Should reference the zombie symbol resolution as part of the merge so it doesn't slip into a separate cleanup ticket.
+
 
