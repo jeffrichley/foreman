@@ -911,6 +911,11 @@ def _build_v3_gh_and_host(config: Config, log: Any) -> tuple[Any, Any]:
         # and write a ``subprocess_killed`` cost row when the role
         # didn't get to emit its own ``dispatch_complete``.
         dispatch_recorder=_build_daemon_dispatch_recorder(log),
+        # foreman#215: inject GIT_AUTHOR_* / GIT_COMMITTER_* into role
+        # subprocess env so LLM-driven git commit calls attribute to
+        # the correct bot (worker/fixer/planner/reviewer) regardless
+        # of .git/config in the worktree.
+        identity_registry=registry,
     )
     return gh, host
 

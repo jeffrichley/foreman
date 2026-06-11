@@ -1399,3 +1399,174 @@ def test_build_role_subprocess_env_does_not_mutate_base_env() -> None:
         "Helper mutated its base_env argument — the daemon's own env "
         "would be corrupted if base_env is os.environ."
     )
+
+
+# ---------------------------------------------------------------------------
+# foreman#215 — V3GitHubHost injects GIT_AUTHOR_* / GIT_COMMITTER_* env vars
+# into role subprocesses when wired with an IdentityRegistry. Pins both
+# (a) presence + value when registry is wired, and (b) absence when registry
+# is None (the existing test default).
+# ---------------------------------------------------------------------------
+
+
+class _FakeIdentityRegistry:
+    """Minimal stand-in for IdentityRegistry — returns canned env vars per role
+    so dispatch_role can verify the env-injection branch without minting tokens
+    or fetching App metadata. Records which role(s) were requested."""
+
+    def __init__(self) -> None:
+        self.requested_roles: list[str] = []
+
+    def get_role_identity_env(self, role: str) -> dict[str, str]:
+        self.requested_roles.append(role)
+        return {
+            "GIT_AUTHOR_NAME": f"foreman-{role}[bot]",
+            "GIT_AUTHOR_EMAIL": f"99+foreman-{role}[bot]@users.noreply.github.com",
+            "GIT_COMMITTER_NAME": f"foreman-{role}[bot]",
+            "GIT_COMMITTER_EMAIL": f"99+foreman-{role}[bot]@users.noreply.github.com",
+        }
+
+
+def test_dispatch_role_injects_git_identity_env_when_registry_wired(
+    tmp_path: Path,
+) -> None:
+    """foreman#215: when V3GitHubHost is constructed with an
+    ``identity_registry``, dispatch_role merges the role's
+    GIT_AUTHOR_* / GIT_COMMITTER_* env vars into the subprocess
+    environment so LLM-driven ``git commit`` calls attribute to the
+    correct bot rather than leaking the human identity from
+    ``.git/config`` in the worktree.
+
+    Production failure mode: PR #214 fixed the
+    ``commit_files_to_worktree`` path but missed the role-subprocess
+    path. Without this injection, Worker/Fixer LLM commits silently
+    show the wrong author in the GitHub UI even though the PR is
+    opened under the correct bot identity.
+    """
+    v2 = _FakeV2Host()
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+
+    captured_extra_env: list[dict[str, str] | None] = []
+
+    class _FakeProcess:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+            self.returncode: int | None = None
+
+        async def wait(self) -> int:
+            self.returncode = 0
+            return 0
+
+    def _runner(
+        argv: list[str],
+        *,
+        log_path: Any = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> _FakeProcess:
+        # Copy so a subsequent ``.update`` from a future caller can't
+        # mutate the recorded snapshot.
+        captured_extra_env.append(dict(extra_env) if extra_env else None)
+        return _FakeProcess(pid=11111)
+
+    registry = _FakeIdentityRegistry()
+    host = V3GitHubHost(
+        v2_host=v2,
+        log=log,
+        subprocess_runner=_runner,
+        identity_registry=registry,
+    )
+    start_id = log.write_action(
+        ticket_id="jeffrichley/foreman#143",
+        project="foreman",
+        rule_name="dispatch_worker",
+        action="dispatch_worker",
+        outcome="running",
+        details={},
+    )
+
+    host.dispatch_role(
+        role="worker",
+        target=None,
+        owner="jeffrichley",
+        repo="foreman",
+        issue=143,
+        pr_number=None,
+        start_log_id=start_id,
+        project="foreman",
+    )
+
+    assert registry.requested_roles == ["worker"]
+    assert len(captured_extra_env) == 1
+    env = captured_extra_env[0]
+    assert env is not None, "extra_env should not be None when identity_registry is wired"
+    assert env["GIT_AUTHOR_NAME"] == "foreman-worker[bot]"
+    assert env["GIT_COMMITTER_NAME"] == "foreman-worker[bot]"
+    assert "GIT_AUTHOR_EMAIL" in env and "[bot]@users.noreply.github.com" in env["GIT_AUTHOR_EMAIL"]
+
+
+def test_dispatch_role_omits_git_identity_env_when_registry_is_none(
+    tmp_path: Path,
+) -> None:
+    """Existing default behavior — when V3GitHubHost is constructed
+    without an ``identity_registry`` (the test default), no GIT_*
+    identity env vars are injected. The subprocess inherits whatever
+    identity ``.git/config`` in the worktree provides. Pins backwards
+    compatibility so test fixtures that don't wire a registry still
+    work, and confirms the env injection is strictly opt-in."""
+    v2 = _FakeV2Host()
+    log = ExecutionLog(tmp_path / "log.sqlite")
+    log.init()
+
+    captured_extra_env: list[dict[str, str] | None] = []
+
+    class _FakeProcess:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+            self.returncode: int | None = None
+
+        async def wait(self) -> int:
+            self.returncode = 0
+            return 0
+
+    def _runner(
+        argv: list[str],
+        *,
+        log_path: Any = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> _FakeProcess:
+        captured_extra_env.append(dict(extra_env) if extra_env else None)
+        return _FakeProcess(pid=22222)
+
+    # No identity_registry kwarg.
+    host = V3GitHubHost(v2_host=v2, log=log, subprocess_runner=_runner)
+    start_id = log.write_action(
+        ticket_id="jeffrichley/foreman#143",
+        project="foreman",
+        rule_name="dispatch_worker",
+        action="dispatch_worker",
+        outcome="running",
+        details={},
+    )
+
+    host.dispatch_role(
+        role="worker",
+        target=None,
+        owner="jeffrichley",
+        repo="foreman",
+        issue=143,
+        pr_number=None,
+        start_log_id=start_id,
+        project="foreman",
+    )
+
+    assert len(captured_extra_env) == 1
+    env = captured_extra_env[0]
+    # With no identity_registry AND no dispatch_recorder, extra_env is
+    # None — the runner inherits the parent's full environment unmodified.
+    # The trace_id env var (foreman#251) would be present here only when
+    # a dispatch_recorder is wired, which this fixture deliberately
+    # omits to isolate the identity-registry branch.
+    assert env is None or (
+        "GIT_AUTHOR_NAME" not in env and "GIT_COMMITTER_NAME" not in env
+    )

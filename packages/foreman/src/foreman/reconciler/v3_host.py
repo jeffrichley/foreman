@@ -44,6 +44,7 @@ from foreman.reconciler.host import PRMergeability
 # constant inside ``dispatch_role`` to break the cycle.
 if TYPE_CHECKING:
     from foreman.dispatch_recorder import DispatchRecorder
+    from foreman.identity import IdentityRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -410,6 +411,7 @@ class V3GitHubHost:
         log_dir: Path | None = None,
         gh_queue_client: _GraphQLClientLike | None = None,
         dispatch_recorder: DispatchRecorder | None = None,
+        identity_registry: IdentityRegistry | None = None,
     ) -> None:
         self._v2 = v2_host
         self._log = log
@@ -452,6 +454,13 @@ class V3GitHubHost:
         # invocations working without forcing a queue client through
         # every test fixture.
         self._gh_queue_client = gh_queue_client
+        # foreman#215: optional IdentityRegistry for injecting GIT_AUTHOR_* /
+        # GIT_COMMITTER_* env vars into role subprocesses so LLM-driven
+        # git commit calls attribute to the correct bot regardless of
+        # .git/config state in the worktree. When None (test default),
+        # identity env vars are omitted --- the subprocess inherits whatever
+        # identity the worktree's .git/config already has.
+        self._identity_registry = identity_registry
 
     def add_label(self, *, owner: str, repo: str, issue: int, label: str) -> None:
         self._v2.add_issue_label(f"{owner}/{repo}", issue, label)
@@ -872,6 +881,18 @@ class V3GitHubHost:
         # this, repeated spawn failures would permanently consume slots until
         # the daemon restart triggers recover_orphaned + slot reset.
         try:
+            # foreman#215: inject GIT_AUTHOR_* / GIT_COMMITTER_* env vars so the
+            # LLM-driven git commit calls inside the role subprocess attribute
+            # to the correct bot rather than leaking the human identity from
+            # .git/config in the worktree. Done inside the try/except so that
+            # a metadata-fetch error (first-time App metadata call) still
+            # releases the capacity slot instead of leaking it.
+            if self._identity_registry is not None:
+                git_identity_env = self._identity_registry.get_role_identity_env(role)
+                if extra_env is None:
+                    extra_env = git_identity_env
+                else:
+                    extra_env.update(git_identity_env)
             runner_kwargs: dict[str, Any] = {}
             if log_path is not None:
                 runner_kwargs["log_path"] = log_path
