@@ -977,6 +977,81 @@ Each finding gets one decision row. Format: finding summary, decision, rationale
 - **Next-step ticket:** **HIGH-PRIORITY** foreman issue with the three investigation questions, the empirical evidence above, the audit results, and a fix-the-loop scope. Title: `bug: autonomous loop merges impl PR into orphan spec branch; content never reaches main; daemon labels done anyway`. Must be addressed before any further autonomous-loop tickets run (otherwise the orphan list keeps growing). Pair with: a rescue sprint that audits the remaining ~10 orphans and either re-promotes their content or filed-as-known-dropped tickets.
 - **Operational action taken 2026-06-11 20:54 PM:** foreman daemon container stopped (`docker compose stop daemon`). The autonomous loop is paused on all three registered projects (foreman, voice, agent_core) until Decision 9's fix lands. Per Jeff's decision: "First stop foreman. Second document that we need to do this but don't do it yet. Finish the analysis and get all documented."
 
+#### D9 Phase 2 analysis findings (2026-06-11 21:00–21:15 PM, read-only)
+
+##### Q1 TAIL — Per-PR triage of the 10 untriaged orphans (DEFINITIVE):
+
+- **3 still ORPHAN (code content):**
+  - **#197** Labels keystone — `packages/foreman/src/foreman/labels.py` (+169) + `tests/test_labels_keystone.py` (+285). Original Decision 1 motivating case.
+  - **#207** stdout JSON logging — `feat(logging): mirror daemon log to stdout as JSON for docker logs`. **This is the Phase 0 Lens A logging regression** — it's not a regression, the fix never landed.
+  - **#159** `--pr-url` in fixer — verified 0 matches on main for `pr_url` symbol in `roles/fixer.py`.
+- **2 still ORPHAN (non-code content):**
+  - **#212** 24h `has_recent` boundary test for lagging label rules.
+  - **#186** role-runtime speedup investigation doc.
+- **7 RESCUED implicitly** by later code paths re-implementing the same content (verified by symbol presence on main): #58 (branches module), #168 (attempt_merge action), #189 (worktree reattach), #192 (clear stale merging-* labels), #202 (reviewer target plumbing), #206 (fixer docs), #225 (init.py merging docstring).
+- **3 RESCUED explicitly** by today's promote PRs (#274, #275, #276 covering #266, #268, #256).
+
+**Total rescue scope for Phase 2: 5 PRs** (#197, #207, #159, #212, #186). Each is recoverable from its orphan branch via a "promote ... to main" PR.
+
+##### Q2 — Code-path investigation (the retarget step exists but in the wrong place):
+
+**Critical discovery: the retarget logic IS in the repo — and lives on the v2 dead-code island Decision 3 wants to excise.**
+
+- **`packages/foreman/src/foreman/daemon_runners.py:209-255`** — v1/v2 `merge_impl_pr()` has a working retarget conditional at lines 234-243: reads current base via `get_pr_base_ref()`, checks if base == spec_branch AND spec PR merged, calls `retarget_pr_base(pr_number, default_branch)` before merging. The docstring at lines 210-227 explicitly explains the orphan-commit failure mode this guards against (foreman#49 + recovery PR #61 from 2026-06-02 — this exact bug has been "fixed" once before).
+- **`packages/foreman/src/foreman/daemon_host.py:195-207`** — `retarget_pr_base()` method exists and works. Calls `pr.edit(base=new_base)` via PyGithub. Production-ready.
+- **`packages/foreman/src/foreman/reconciler/actions.py:408-530`** — v3 `_handle_attempt_merge()` reads PR mergeability and calls `host.merge_pr()` directly. **No retarget step.** No predicate check on current base before merge.
+- **`packages/foreman/src/foreman/reconciler/rules.py:557-570`** — `_impl_pr_merged_label_lagging` checks `ctx.pr.is_merged` to fire ADVANCE_LABEL_TO_DONE. **`is_merged` is True regardless of merge target.** No verification that the merge landed on main.
+
+**Root cause:** the v3 reconciler migration replaced `daemon_runners.merge_impl_pr()` (which had the retarget) with `ATTEMPT_MERGE_IMPL` action (which doesn't). The retarget logic was simply never ported. The host-layer method (`retarget_pr_base`) was preserved; the call site disappeared.
+
+**This is the same shape as the v2-dispatcher-dead-island finding** from Decision 3, but with sharper teeth: it's not just that v2 code is dead — it's that v2 code contains the ONLY working implementation of a critical correctness invariant the v3 path lacks. The v2 island is load-bearing in a way our pre-D9 analysis didn't appreciate.
+
+##### CRITICAL CROSS-DECISION SEQUENCING (amends D3):
+
+**Port retarget v2→v3 BEFORE excising v2 (Decision 3).** Otherwise we delete the only working implementation of the very logic D9 needs to land. Updated Phase 2 ordering: D9 retarget port → D9 regression test → D9 rescue sprint → D3 dead-code excise. D3's pre-flight check now reads "no v2 module contains code that is uniquely correct vs the v3 equivalent" — the retarget logic must be lifted first.
+
+##### Q3 — Regression test sketch (for after the port lands):
+
+Two assertions, written as one integration test against the autonomous-loop simulator:
+
+```python
+def test_impl_pr_base_is_retargeted_to_main_after_spec_merge():
+    # Setup: simulate spec PR merged
+    spec_pr = make_spec_pr(issue_n=999, base="main", head="foreman/issue-999")
+    impl_pr = make_impl_pr(issue_n=999, base="foreman/issue-999", head="foreman/impl-999")
+    fake_host.merge_pr(spec_pr.number)  # spec lands on main
+
+    # Action: drive the reconciler one tick with impl-approved label
+    fake_host.add_label(issue=999, label="foreman:impl-approved")
+    reconciler.tick()
+
+    # Assertion 1 (the retarget check itself)
+    impl_pr_now = fake_host.get_pr(impl_pr.number)
+    assert impl_pr_now.base_ref == "main", \
+        f"Impl PR base should be retargeted to main after spec merge, was {impl_pr_now.base_ref}"
+
+def test_impl_pr_merge_target_is_main_not_orphan_branch():
+    # Drive through full spec→impl autonomous-loop cycle
+    drive_full_cycle(issue_n=999)
+
+    # Assertion 2 (the merge-target check — would have caught #197 directly)
+    impl_pr_now = fake_host.get_pr(impl_pr.number)
+    assert impl_pr_now.merged
+    assert fake_host.is_commit_in_main(impl_pr_now.merge_commit_oid), \
+        "Impl PR merge commit must be reachable from main; otherwise content is orphaned"
+```
+
+The second assertion is the one that would have flagged #197 specifically the moment it ran. It belongs in the reconciler e2e test suite, not as a unit test — it specifically checks the integration of merge + label-transition + main-reachability.
+
+##### Phase 2 D9 execution sequence (when work resumes):
+
+1. **Port retarget into v3** — add retarget-conditional inside `_handle_attempt_merge()` at `actions.py` before the existing merge call. Mirror the daemon_runners.py:234-243 logic. Reuse `host.retarget_pr_base()` unchanged.
+2. **Add regression test** (the Q3 sketch above) — guard the new path.
+3. **Update `_impl_pr_merged_label_lagging`** to also verify merge target is main before firing ADVANCE_LABEL_TO_DONE. Belt-and-suspenders defense.
+4. **Rescue sprint** — 5 "promote ... to main" PRs for #197, #207, #159, #212, #186.
+5. **Verify on dogfood** — file a test ticket, run it through the loop, confirm impl PR base is retargeted and merge commit lands on main.
+6. **THEN** D3 dead-code excise can proceed — at this point `daemon_runners.merge_impl_pr` has no unique correctness over the v3 path.
+
 ---
 
 ## Phase 1 closure (2026-06-11 evening)
