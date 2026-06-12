@@ -4,12 +4,14 @@
 
 This plan lives in the repo (not in an issue body) so we can iterate on it as the review produces decisions. Tracking ticket: foreman#269.
 
-## Status note (2026-06-11 morning)
+## Status note (2026-06-11 morning — CORRECTED EVENING)
 
-- All five overnight PRs landed on main: #266 (GoF provider boundary), #268 (reviewer-budget gate), #256 (dead Literals), #215 (git identity), #258 (typed Outcome enum)
-- Container rebuilt on `a6c6956` and running healthy
-- Architecture review session is **today** (Jeff corrected the timing — I had been calling it "tomorrow")
-- Two structural bugs surfaced during deployment: container clone staleness, crash-cascade leaves ticket label-less
+- Morning state (as I believed it at the time): "All five overnight PRs landed on main: #266 (GoF provider boundary), #268 (reviewer-budget gate), #256 (dead Literals), #215 (git identity), #258 (typed Outcome enum)."
+- **Evening correction (see Decision 9):** that statement was only true via three *manual rescue PRs* (#274, #275, #276 — "promote ... to main") that re-landed the orphaned impl content. The original impl PRs (#271, #273, #260) all merged into orphan spec branches, not main. We did NOT realize at the time that the rescue work was rescue work; we believed it was normal stability sprint merging. This is the same impl-PR-base-retarget bug Decision 9 names.
+- Container rebuilt on `a6c6956` and ran healthy through the day.
+- **Container STOPPED 2026-06-11 20:54 PM** per Jeff's decision after Decision 9's audit findings. The autonomous loop is paused on all three registered projects (foreman, voice, agent_core) pending the fix.
+- Architecture review session was **today** (Jeff corrected the timing — I had been calling it "tomorrow").
+- Two structural bugs surfaced during deployment: container clone staleness, crash-cascade leaves ticket label-less.
 
 ---
 
@@ -973,5 +975,57 @@ Each finding gets one decision row. Format: finding summary, decision, rationale
 - **Updated diagnosis** (in light of audit results): the bug is NOT "newly discovered today." It has been silently failing the autonomous loop for at least 9 days (since 2026-06-02 #58). The team has been working around it manually via "promote ... to main" rescue PRs — but the workaround is incomplete. The team also has not realized this is a single systemic bug; each rescue has been treated as a one-off "weird, the merge went sideways" fix.
 - **Updated severity:** **CRITICAL.** The autonomous loop has been reporting `foreman:done` on content that never reached main for over a week. Every "completed" ticket needs verification. The container that's been running in production is built off a main that's missing ~12 of the last month's structural fixes. We've been building today's architecture review on the implicit assumption that those fixes are in place; the assumption is FALSE.
 - **Next-step ticket:** **HIGH-PRIORITY** foreman issue with the three investigation questions, the empirical evidence above, the audit results, and a fix-the-loop scope. Title: `bug: autonomous loop merges impl PR into orphan spec branch; content never reaches main; daemon labels done anyway`. Must be addressed before any further autonomous-loop tickets run (otherwise the orphan list keeps growing). Pair with: a rescue sprint that audits the remaining ~10 orphans and either re-promotes their content or filed-as-known-dropped tickets.
+- **Operational action taken 2026-06-11 20:54 PM:** foreman daemon container stopped (`docker compose stop daemon`). The autonomous loop is paused on all three registered projects (foreman, voice, agent_core) until Decision 9's fix lands. Per Jeff's decision: "First stop foreman. Second document that we need to do this but don't do it yet. Finish the analysis and get all documented."
+
+---
+
+## Phase 1 closure (2026-06-11 evening)
+
+**Status: CLOSED.** Nine decisions recorded covering the original 8-topic finding list from Phase 0 plus three emergent decisions (D7 import-linter, D8 library-boundary audit, D9 autonomous-loop bug — the largest finding of the day).
+
+### Decision summary
+
+| # | Topic | Verdict | Layer |
+|---|---|---|---|
+| 1 | Labels regression resurrection | Restore as `StrEnum` following `Outcome` pattern from foreman#258 | Code structure |
+| 2 | Role-runner duplication | `RoleRunner` ABC via strangler-fig, executed back-to-back | Code structure |
+| 3 | Dead-code surface | `vulture` + reachability AST-walk tooling (smart Option A) | Tooling |
+| 4 | Bandaid-ratio guardrail | Artifact discipline (test + ticket) + prompt-level GoF/Google lens with "or say it doesn't fit" calibration | Process + prompt |
+| 5 | Provider package split (`provider` vs `providers`) | Merge into one `foreman.provider` package with sub-modules | Code structure |
+| 6 | `daemon_host.py` boilerplate | Constructor injection + verify-and-pin token-TTL invariant as a test (generalizable sub-rule for all constructor-injection refactors) | Code structure + discipline |
+| 7 | Import-boundary CI (emergent topic) | `import-linter` with R1/R2/R3 rules tied to D5/D2/D3; rule-set discipline "only when a decision creates the boundary" | Tooling |
+| 8 | Library-boundary audit (emergent topic) | Tier-table audit of third-party imports; Tier 1 binds now, Tier 2 binds on second-consumer, Tier 3 explicitly NOT bound with reason | Tooling + amendment to D7 |
+| 9 | Impl-PR-base-retarget bug (emergent — the critical finding) | Investigate + fix; orphan-content audit identifies scope; the actual durability mechanism Decision 1 §7 was reaching for | Code (daemon) + audit |
+
+### The four-layer defense framing (D3 + D4 + D6 + D7)
+
+D9 is its own layer because it addresses autonomous-loop machinery failure, not human/Wren judgment failure. The original four-layer defense (bias → pin → sweep → CI) protects against drift in human work; D9 protects against the loop itself silently failing to ship work.
+
+### Topics that dissolved without standalone decisions
+
+- **Topic 7** (`ProviderInvalidResultError` zombie symbol): absorbed into D5 (resolved by the package merge) and cross-referenced from D3 (exemplar of what reachability tooling catches) and D7 (exemplar of what dead-island CI prevents).
+- **Topic 8** (Phase 0's 12-item manual dead-code catalogue): absorbed into D3 as the calibration baseline for the first tooling run.
+
+### Phase 2 priority order (recommended)
+
+1. **D9 fix first** — without it, the autonomous loop continues orphaning work. Everything downstream is wasted if D9 isn't first. Includes: investigate the retarget code path (Q2), write the post-merge-target assertion test (Q3), audit + rescue the remaining ~10 orphan PRs (Q1 tail).
+2. **D1 + D5** — Labels resurrection and provider package merge land alongside the D9 rescue work; both are referenced by other decisions and unblock them.
+3. **D7 framework (import-linter scaffolding)** — independent infrastructure; cheap to land; enables D2/D3/D8 rule-checking.
+4. **D3 tooling** — runs the dead-code sweep; produces input for D7 R3 (dead-island rule).
+5. **D8 library-boundary audit** — produces Tier 1 rules; these ship as additions to D7.
+6. **D2 RoleRunner ABC** — back-to-back strangler-fig across all four roles. Depends on D1 (labels), D6 sub-rule (verify-pin lifecycle invariants), and consumes D5 (provider boundary).
+7. **D6 daemon_host constructor injection** — independent of the loop work; can land any time after D6's verify-pin test for token-TTL invariant is written.
+8. **D4 process/prompt guardrail** — process layer; lowest urgency; updates `CLAUDE.md` + `prompts/{planner,reviewer}.md` at end of Phase 2.
+
+### Explicit non-decisions (recorded for traceability)
+
+- **Decision NOT taken:** "structural-fix-regression-detection annotation" (the original §7 of D1 as I'd framed it — a comment marker / registry file marking load-bearing fixes). Reason: D9 superseded the framing entirely. The annotation would have been paperwork solving a problem that didn't exist; the real problem was the loop lying about completion.
+- **Decision NOT taken:** binding `pydantic`, `pathlib`, `tomllib`, stdlib basics under D7/D8. Recorded in D8's Tier 3 with the phrase "intentionally everywhere" to prevent a future operator from reflexively binding them.
+
+### Open follow-ups not requiring Phase 1 decisions
+
+- The remaining ~10 orphan PRs from D9's audit (#58, #159, #168, #186, #189, #192, #202, #206, #212, #225) need per-PR triage during Phase 2's rescue sprint. Each needs the same check: is the content on main (rescued by later commit) or genuinely still missing?
+- The "BEHIND merges + parallel-rebase cycle" smell Jeff named as Hypothesis 2 is real but separate from D9. It is exacerbated by strict-up-to-date branch protection. Worth filing as a Phase 2 followup once D9's fix is in: does the autonomous loop's PR-base-retarget step also handle the stale-rebase-loop cleanly?
+
 
 
