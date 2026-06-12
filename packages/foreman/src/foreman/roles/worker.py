@@ -249,21 +249,6 @@ def _run_check_command(
     return result.returncode, failing, combined
 
 
-def _summarize_failures(failures: set[str], combined_output: str) -> str:
-    """Compose a one-paragraph human summary for stats / logs.
-
-    Caps at 8 listed failures to keep the JSONL row + stderr trace
-    readable. The full output stays in ``combined_output`` for the
-    caller to log separately if needed.
-    """
-    if not failures:
-        return "no new failures"
-    listed = sorted(failures)
-    head = listed[:8]
-    tail_note = f" (+{len(listed) - 8} more)" if len(listed) > 8 else ""
-    return f"{len(listed)} new failures: " + ", ".join(head) + tail_note
-
-
 def _read_spec_doc_from_branch(
     *, worktree_path: Path, spec_branch: str, issue_number: int, role_token: str
 ) -> str | None:
