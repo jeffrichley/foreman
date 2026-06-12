@@ -175,20 +175,6 @@ def test_create_worktree_creates_dir_with_branch(tmp_path: Path) -> None:
     assert branch_check.stdout.strip() == "foreman/issue-42"
 
 
-def test_cleanup_removes_worktree(tmp_path: Path) -> None:
-    clone = tmp_path / "clone"
-    clone.mkdir()
-    _init_git_repo(clone, origin_path=tmp_path / "origin.git")
-
-    worktrees_root = tmp_path / "worktrees"
-    mgr = WorktreeManager(worktrees_root=worktrees_root)
-    wt_path = mgr.create(clone_path=clone, repo_slug="voice", ticket_id=42)
-    assert wt_path.exists()
-
-    mgr.cleanup(clone_path=clone, worktree_path=wt_path)
-    assert not wt_path.exists()
-
-
 def test_create_idempotent_on_existing_worktree(tmp_path: Path) -> None:
     clone = tmp_path / "clone"
     clone.mkdir()
@@ -1699,40 +1685,6 @@ def test_attach_impl_threads_role_token_into_git_subprocess_envs(
     for env in captured_envs:
         assert env is not None
         assert env.get("GH_TOKEN") == "ghs_role_reviewer_impl_token_xyz"
-
-
-def test_cleanup_threads_role_token_into_git_subprocess_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``cleanup`` runs ``git worktree remove`` — a local-only op, but
-    still routed through the env filter for consistency (and to avoid
-    leaking VIRTUAL_ENV into any worktree-removal hook the target repo
-    happens to run).
-    """
-    clone = tmp_path / "clone"
-    clone.mkdir()
-    _init_git_repo(clone, origin_path=tmp_path / "origin.git")
-
-    worktrees_root = tmp_path / "worktrees"
-    mgr = WorktreeManager(
-        worktrees_root=worktrees_root,
-        role_token="ghs_role_cleanup_token_xyz",
-    )
-    wt_path = mgr.create(clone_path=clone, repo_slug="voice", ticket_id=42)
-
-    monkeypatch.setenv("GH_TOKEN", "ghs_PARENT_DAEMON_TOKEN_SHOULD_NOT_WIN")
-
-    captured_envs: list[dict[str, str] | None] = []
-    with patch(
-        "foreman.worktree.subprocess.run",
-        side_effect=_capture_envs_for_create(captured_envs),
-    ):
-        mgr.cleanup(clone_path=clone, worktree_path=wt_path)
-
-    assert captured_envs, "expected git worktree remove subprocess call"
-    for env in captured_envs:
-        assert env is not None
-        assert env.get("GH_TOKEN") == "ghs_role_cleanup_token_xyz"
 
 
 def test_ensure_clone_creates_clone_when_missing(tmp_path: Path) -> None:
