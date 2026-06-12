@@ -1289,6 +1289,361 @@ Touching 4 files, 6 named code locations:
 
 Estimated effort: 2-4 hours of focused work (mostly mechanical given the spec). Should fit one TDD Worker session.
 
+#### D1 spec sketch — Labels StrEnum module + classification taxonomy (2026-06-11 21:40 PM)
+
+Same lift-and-paste pattern as D9. Decision 1 specified the shape (follow foreman#258 `Outcome` pattern); this sketch grounds it in the canonical 19-label catalogue currently in `init.py:_FOREMAN_LABELS` and identifies the 9 consumer files (skipping the 3 v2-dead-island files that D3 will excise).
+
+##### The canonical 19-label catalogue (read from `init.py:_FOREMAN_LABELS`)
+
+| Label | Bucket | Existing color | Description |
+|---|---|---|---|
+| `foreman:plan` | QUEUE | green | queued for planning |
+| `foreman:plan-approved` | QUEUE | green | spec approved, queued for Worker |
+| `foreman:impl-review` | QUEUE | yellow | impl PR ready for Reviewer |
+| `foreman:impl-approved` | QUEUE | green | impl approved, queued for merge |
+| `foreman:planning` | IN_FLIGHT | yellow | spec phase running |
+| `foreman:merging-plan` | IN_FLIGHT | yellow | attempting to merge spec PR |
+| `foreman:merging-impl` | IN_FLIGHT | yellow | attempting to merge impl PR |
+| `foreman:hold` | BLOCKING | blue | manual pause (blocks all rules) |
+| `foreman:needs-help` | BLOCKING | yellow | surfaced for human intervention |
+| `foreman:spec-fix` | BLOCKING | red | spec PR needs human follow-up |
+| `foreman:impl-fix` | BLOCKING | red | impl PR needs Fixer follow-up |
+| `foreman:impl-attempt-1` | COUNTER | blue | impl cycle attempt 1 of 3 |
+| `foreman:impl-attempt-2` | COUNTER | blue | impl cycle attempt 2 of 3 |
+| `foreman:impl-attempt-3` | COUNTER | blue | impl cycle attempt 3 of 3 |
+| `foreman:fix-attempt-1` | COUNTER | blue | fix cycle attempt 1 of 3 |
+| `foreman:fix-attempt-2` | COUNTER | blue | fix cycle attempt 2 of 3 |
+| `foreman:fix-attempt-3` | COUNTER | blue | fix cycle attempt 3 of 3 |
+| `foreman:done` | TERMINAL | purple | ticket complete |
+| `foreman:failed` | TERMINAL | dark-red | ticket exhausted retries |
+
+Bucket rationale (these are the ones consumers actually need to query, not just visual groupings):
+- **QUEUE** — "this ticket is queued for role X." `next_action` reads these to dispatch.
+- **IN_FLIGHT** — "role X is running." Reconciler observes to enforce "one role at a time per ticket."
+- **BLOCKING** — pauses the loop. Currently maintained as `_BLOCKING_LABELS` tuple in `rules.py`. Migrating to enum-classification eliminates the manual sync.
+- **COUNTER** — attempt-N markers. Stats/retry-limit code currently regex-matches; with enum membership it becomes set-membership.
+- **TERMINAL** — `foreman:done` clears the ticket from active processing; `foreman:failed` clears + marks abandoned.
+
+##### Site 1 — Create `packages/foreman/src/foreman/labels.py` (NEW FILE):
+
+Mirrors `reconciler/outcomes.py` structurally — `LabelClass` enum + `Label` StrEnum with custom `__new__` requiring classification:
+
+```python
+"""Typed catalog of every ``foreman:*`` label written to GitHub.
+
+foreman#194 / foreman#XXX (D1 resurrection): "If we forget to update
+_BLOCKING_LABELS when adding a new label, the rate limiter silently
+treats the new state as non-blocking. The StrEnum machinery makes
+forgetting the classification impossible — Python raises TypeError
+at module load before any test runs."
+
+This module is the single source of truth for foreman label strings.
+The :class:`Label` StrEnum is a ``StrEnum`` so members compare equal
+to their string values — GitHub API calls receive the value verbatim,
+f-string interpolation produces the bare string, and SQL bind sites
+work without ``.value``.
+
+Each member carries its own :class:`LabelClass` classification at the
+point of definition; a contributor who adds a new member as a bare
+string (``NEW = "new"`` instead of ``NEW = ("new", LabelClass.QUEUE)``)
+trips a ``TypeError`` at module load — Python's enum machinery raises
+before any test gets a chance to run. The "forgot to update
+_BLOCKING_LABELS" failure mode that bit us on foreman#194's
+original (orphaned) implementation is now structurally impossible.
+
+The five derived frozensets (:data:`QUEUE_LABELS`,
+:data:`IN_FLIGHT_LABELS`, :data:`BLOCKING_LABELS`,
+:data:`COUNTER_LABELS`, :data:`TERMINAL_LABELS`) are computed at
+module load by filtering the enum on the ``classification`` attribute.
+
+Adding a new label:
+
+1. Add one new line to :class:`Label`:
+   ``NEW = ("new", LabelClass.<bucket>)``.
+2. Mirror the entry into :data:`_FOREMAN_LABELS` in ``init.py`` with
+   color + description (init still owns CREATION metadata).
+3. That's it. Both the enum membership AND the derived frozenset are
+   updated; no separate constant to keep in sync.
+"""
+
+from __future__ import annotations
+
+from enum import Enum, StrEnum
+
+
+class LabelClass(Enum):
+    """The five classification buckets a :class:`Label` can belong to.
+
+    QUEUE: ticket is queued for role X to act on. ``next_action`` reads
+    these to dispatch.
+
+    IN_FLIGHT: a role is currently running. Reconciler observes to
+    enforce "one role at a time per ticket."
+
+    BLOCKING: pauses the loop. Includes manual holds (``foreman:hold``),
+    surfacings to human (``foreman:needs-help``), and fix-needed
+    states (``foreman:spec-fix``, ``foreman:impl-fix``). Was
+    ``_BLOCKING_LABELS`` tuple in rules.py pre-foreman#XXX.
+
+    COUNTER: attempt-N markers. Stats/retry-limit code uses these to
+    count cycles. Membership check replaces regex-matching against
+    label names.
+
+    TERMINAL: ``foreman:done`` clears the ticket from active
+    processing; ``foreman:failed`` clears + marks abandoned after
+    exhausting retries.
+    """
+
+    QUEUE = "queue"
+    IN_FLIGHT = "in_flight"
+    BLOCKING = "blocking"
+    COUNTER = "counter"
+    TERMINAL = "terminal"
+
+
+class Label(StrEnum):
+    """Every ``foreman:*`` label string written to a GitHub issue or PR.
+
+    The enum is a ``StrEnum`` so members compare equal to their string
+    values — PyGithub's ``add_to_labels`` and ``remove_from_labels``
+    receive the value verbatim, and f-string interpolation produces
+    the bare string. Use ``.value`` explicitly when interpolating into
+    SQL DDL (where the result is parsed by SQLite without going
+    through the binder) so the format cannot accidentally produce
+    ``"Label.PLAN"`` instead of ``"foreman:plan"``.
+
+    Each member's right-hand side is a tuple of
+    ``(value: str, classification: LabelClass)``. The custom
+    :meth:`__new__` requires the classification — omitting it raises
+    a ``TypeError`` at class-creation time, before module load
+    completes.
+
+    Adding a new label is one line below. Forgetting the
+    classification is impossible.
+    """
+
+    classification: LabelClass
+
+    def __new__(cls, value: str, classification: LabelClass) -> Label:
+        obj = str.__new__(cls, value)
+        obj._value_ = value
+        obj.classification = classification
+        return obj
+
+    # QUEUE — ticket queued for role X
+    PLAN = ("foreman:plan", LabelClass.QUEUE)
+    PLAN_APPROVED = ("foreman:plan-approved", LabelClass.QUEUE)
+    IMPL_REVIEW = ("foreman:impl-review", LabelClass.QUEUE)
+    IMPL_APPROVED = ("foreman:impl-approved", LabelClass.QUEUE)
+
+    # IN_FLIGHT — role currently running on this ticket
+    PLANNING = ("foreman:planning", LabelClass.IN_FLIGHT)
+    MERGING_PLAN = ("foreman:merging-plan", LabelClass.IN_FLIGHT)
+    MERGING_IMPL = ("foreman:merging-impl", LabelClass.IN_FLIGHT)
+
+    # BLOCKING — pauses the loop
+    HOLD = ("foreman:hold", LabelClass.BLOCKING)
+    NEEDS_HELP = ("foreman:needs-help", LabelClass.BLOCKING)
+    SPEC_FIX = ("foreman:spec-fix", LabelClass.BLOCKING)
+    IMPL_FIX = ("foreman:impl-fix", LabelClass.BLOCKING)
+
+    # COUNTER — attempt markers
+    IMPL_ATTEMPT_1 = ("foreman:impl-attempt-1", LabelClass.COUNTER)
+    IMPL_ATTEMPT_2 = ("foreman:impl-attempt-2", LabelClass.COUNTER)
+    IMPL_ATTEMPT_3 = ("foreman:impl-attempt-3", LabelClass.COUNTER)
+    FIX_ATTEMPT_1 = ("foreman:fix-attempt-1", LabelClass.COUNTER)
+    FIX_ATTEMPT_2 = ("foreman:fix-attempt-2", LabelClass.COUNTER)
+    FIX_ATTEMPT_3 = ("foreman:fix-attempt-3", LabelClass.COUNTER)
+
+    # TERMINAL — final state
+    DONE = ("foreman:done", LabelClass.TERMINAL)
+    FAILED = ("foreman:failed", LabelClass.TERMINAL)
+
+
+QUEUE_LABELS: frozenset[str] = frozenset(
+    m.value for m in Label if m.classification is LabelClass.QUEUE
+)
+"""String values whose classification is :attr:`LabelClass.QUEUE`."""
+
+IN_FLIGHT_LABELS: frozenset[str] = frozenset(
+    m.value for m in Label if m.classification is LabelClass.IN_FLIGHT
+)
+"""String values whose classification is :attr:`LabelClass.IN_FLIGHT`."""
+
+BLOCKING_LABELS: frozenset[str] = frozenset(
+    m.value for m in Label if m.classification is LabelClass.BLOCKING
+)
+"""String values whose classification is :attr:`LabelClass.BLOCKING`.
+
+Replaces the hand-maintained ``_BLOCKING_LABELS`` tuple in
+``reconciler/rules.py``. Any rate-limit / blocked-state check reads
+this directly.
+"""
+
+COUNTER_LABELS: frozenset[str] = frozenset(
+    m.value for m in Label if m.classification is LabelClass.COUNTER
+)
+"""String values whose classification is :attr:`LabelClass.COUNTER`."""
+
+TERMINAL_LABELS: frozenset[str] = frozenset(
+    m.value for m in Label if m.classification is LabelClass.TERMINAL
+)
+"""String values whose classification is :attr:`LabelClass.TERMINAL`."""
+
+
+__all__ = [
+    "BLOCKING_LABELS",
+    "COUNTER_LABELS",
+    "IN_FLIGHT_LABELS",
+    "Label",
+    "LabelClass",
+    "QUEUE_LABELS",
+    "TERMINAL_LABELS",
+]
+```
+
+##### Site 2 — Update `init.py` to consume `Label` instead of hardcoded strings:
+
+`_FOREMAN_LABELS` stays (it's the creation-metadata catalogue — color, description), but the label name in each tuple becomes `Label.PLAN`, `Label.PLANNING`, etc. instead of the hardcoded string. Same data shape, just the name source-of-truth flips. Example diff:
+
+```python
+# BEFORE
+_FOREMAN_LABELS: list[tuple[str, str, str]] = [
+    ("foreman:plan", "0E8A16", "Foreman: queue for planning ..."),
+    ...
+]
+
+# AFTER
+from foreman.labels import Label
+_FOREMAN_LABELS: list[tuple[Label, str, str]] = [
+    (Label.PLAN, "0E8A16", "Foreman: queue for planning ..."),
+    ...
+]
+```
+
+Add a regression test that asserts every `Label.*` member appears exactly once in `_FOREMAN_LABELS`, and that `_FOREMAN_LABELS` introduces no labels not in `Label.*`. Closes the "init catalogue + Label enum drift" failure mode.
+
+##### Site 3 — Migrate 9 consumer files to import from `foreman.labels`:
+
+In-scope (per Grep — files with `"foreman:..."` string literals):
+- `packages/foreman/src/foreman/roles/fixer.py`
+- `packages/foreman/src/foreman/roles/reviewer.py`
+- `packages/foreman/src/foreman/roles/worker.py`
+- `packages/foreman/src/foreman/roles/__init__.py`
+- `packages/foreman/src/foreman/reconciler/rules.py`
+- `packages/foreman/src/foreman/reconciler/actions.py`
+- `packages/foreman/src/foreman/reconciler/observer.py`
+- `packages/foreman/src/foreman/reconciler/daemon.py`
+- `packages/foreman/src/foreman/init.py` (Site 2)
+
+**Out of scope (v2 dead island — leave alone; D3 will delete):**
+- `packages/foreman/src/foreman/dispatcher.py`
+- `packages/foreman/src/foreman/daemon.py` (top-level v2 module, not reconciler/daemon.py)
+- `packages/foreman/src/foreman/daemon_runners.py`
+
+This is a deliberate non-port: migrating dead modules to a new pattern just to delete them next sprint is wasted work. Explicit reference back to the D3 dead-island finding so a future operator doesn't wonder why these three files weren't touched.
+
+Migration pattern per consumer file: replace hardcoded `"foreman:plan"` with `Label.PLAN` (etc.). The hardcoded string and the enum member compare equal (StrEnum), so equality checks against ticket label sets still work. The most-important transformation is in `rules.py`, where the hand-maintained `_BLOCKING_LABELS` tuple gets replaced:
+
+```python
+# BEFORE — rules.py
+_BLOCKING_LABELS: tuple[str, ...] = (
+    "foreman:hold",
+    "foreman:needs-help",
+    "foreman:spec-fix",
+    "foreman:impl-fix",
+)
+
+# AFTER
+from foreman.labels import BLOCKING_LABELS  # frozenset[str], populated by enum
+# (delete the local _BLOCKING_LABELS tuple)
+```
+
+##### Site 4 — Regression tests at `packages/foreman/tests/test_labels.py` (NEW FILE):
+
+Mirror `tests/reconciler/test_outcomes.py` (the foreman#258 reference test that pins the Outcome enum design — same shape applies here):
+
+```python
+"""Pin the foreman.labels Label StrEnum design — every member carries
+its classification at the point of definition; the derived frozensets
+match the membership; adding a label without classification is a
+TypeError at module load."""
+
+import pytest
+from foreman.labels import (
+    BLOCKING_LABELS, COUNTER_LABELS, IN_FLIGHT_LABELS,
+    Label, LabelClass, QUEUE_LABELS, TERMINAL_LABELS,
+)
+
+def test_every_label_has_a_classification():
+    """Forgetting classification is structurally impossible —
+    Python's enum machinery raises TypeError at module load. This
+    test pins that the discipline is in place, so a future refactor
+    that 'simplifies' the enum loses the structural guarantee
+    loudly."""
+    for member in Label:
+        assert isinstance(member.classification, LabelClass), \
+            f"{member.name} missing classification"
+
+def test_derived_frozensets_match_enum_membership():
+    """Every label in the catalogue appears in exactly ONE derived
+    frozenset (the one matching its classification). No label is in
+    two sets; no label is in zero sets."""
+    all_labels = {m.value for m in Label}
+    union = QUEUE_LABELS | IN_FLIGHT_LABELS | BLOCKING_LABELS | COUNTER_LABELS | TERMINAL_LABELS
+    assert union == all_labels, \
+        f"Labels in enum but not in any frozenset: {all_labels - union}; " \
+        f"in frozenset but not enum: {union - all_labels}"
+    # Pairwise disjoint
+    sets = [QUEUE_LABELS, IN_FLIGHT_LABELS, BLOCKING_LABELS, COUNTER_LABELS, TERMINAL_LABELS]
+    for i, a in enumerate(sets):
+        for b in sets[i+1:]:
+            assert a.isdisjoint(b), f"Label appears in two buckets: {a & b}"
+
+def test_blocking_labels_includes_all_four_known_blocking_states():
+    """foreman#194 regression: _BLOCKING_LABELS was a hand-maintained
+    tuple in rules.py; if someone added a new BLOCKING label without
+    updating the tuple, the rate-limiter silently treated the new
+    state as non-blocking. This test pins the contract."""
+    assert BLOCKING_LABELS == frozenset({
+        "foreman:hold",
+        "foreman:needs-help",
+        "foreman:spec-fix",
+        "foreman:impl-fix",
+    })
+
+def test_label_strenum_equality_with_string():
+    """StrEnum invariant: members compare equal to their string values
+    so PyGithub label add/remove calls work transparently."""
+    assert Label.PLAN == "foreman:plan"
+    assert "foreman:plan" == Label.PLAN
+    assert f"{Label.NEEDS_HELP}" == "foreman:needs-help"
+```
+
+##### Site 5 — Init-catalogue sync test in `tests/test_init.py`:
+
+```python
+def test_init_foreman_labels_matches_label_enum():
+    """The init catalogue (_FOREMAN_LABELS, owns color + description)
+    and the Label enum (owns name + classification) must enumerate
+    the same set. Drift is the failure mode foreman#194 was supposed
+    to prevent the first time; this is the durable artifact that
+    catches it next time."""
+    from foreman.init import _FOREMAN_LABELS
+    from foreman.labels import Label
+    init_names = {entry[0] for entry in _FOREMAN_LABELS}
+    enum_names = {m.value for m in Label}
+    assert init_names == enum_names, \
+        f"In init but not enum: {init_names - enum_names}; " \
+        f"in enum but not init: {enum_names - init_names}"
+```
+
+##### Sequencing within Phase 2
+
+D1 can land in parallel with D9 — they touch completely different code surfaces. Recommended order if a single Worker handles both: D9 first (more critical — the loop is broken without it), D1 second (mechanical migration once the loop fix is verified).
+
+Estimated effort: 3-5 hours. The new module + tests is fast (~1 hour with the spec above); the consumer migration is the bulk of the work (~2-3 hours for 9 files, mostly find-and-replace with import-add).
+
 ---
 
 ## Phase 1 closure (2026-06-11 evening)
