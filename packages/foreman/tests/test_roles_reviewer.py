@@ -1609,3 +1609,252 @@ async def test_run_reviewer_logs_exception_with_safe_defaults_when_run_agent_rai
     assert row["model_usage"] is None
     assert row["duration_ms"] == 0
     assert row["num_turns"] == 0
+
+
+# ----------------------------------------------------------------------
+# foreman#294 — _get_pr_diff resilience when the impl PR's base branch
+# has been deleted from origin (auto-delete-on-merge, operator pruned,
+# or future cleanup feature). The pre-fix behavior was a hard crash via
+# CalledProcessError on the ``git diff`` call. The fix routes the fetch
+# through ``foreman.worktree.fetch_origin_branch`` (which carries the
+# foreman#122 prune-stale-ref self-heal) and falls back to a diff
+# against ``origin/<default-branch>`` when the base ref is gone.
+# ----------------------------------------------------------------------
+
+
+def _seed_clone_with_bare_origin(
+    tmp_path: Path, issue_number: int
+) -> tuple[Path, str, Path]:
+    """Seed a working clone + a SEPARATE bare origin holding ``main``,
+    the spec branch, and the impl branch.
+
+    The bare-origin layout is the only safe one for simulating the
+    operator-driven delete-on-merge scenario: removing a ref from the
+    bare repo with ``git update-ref -d`` leaves the working clone's
+    commits intact AND gives the worktree's ``git fetch`` a real
+    ``couldn't find remote ref`` rc=128 condition to recover from
+    (the foreman#122 self-heal path).
+
+    Returns ``(clone_path, impl_head_sha, bare_origin_path)``. The
+    clone is left on the impl branch so the impl head SHA is also the
+    current HEAD; tests that need ``main`` as HEAD must check out
+    explicitly.
+    """
+    clone = tmp_path / "clone"
+    # Build the spec branch first using the existing helper. It leaves
+    # the clone on ``main`` and the origin pointed at itself.
+    _seed_clone_with_spec_branch(clone, issue_number)
+
+    spec_branch_name = f"foreman/issue-{issue_number}"
+    impl_branch_name = f"foreman/impl-{issue_number}"
+
+    # Branch off the spec branch to build the impl branch with a
+    # commit ahead of origin/main. This is what the Worker would
+    # produce.
+    subprocess.run(
+        ["git", "checkout", spec_branch_name],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "checkout", "-b", impl_branch_name],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    src_dir = clone / "src"
+    src_dir.mkdir(parents=True, exist_ok=True)
+    (src_dir / "impl.py").write_text("# foreman#294 impl stub\n")
+    subprocess.run(["git", "add", "."], cwd=clone, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "impl: foreman#294 stub"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    impl_head_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    # Initialize a SEPARATE bare repo to use as origin. ``_seed_clone_with_spec_branch``
+    # set ``origin`` to point at the clone itself; that layout makes
+    # ``update-ref -d`` against the working clone's own refs unsafe
+    # (it would delete the local branches the test still needs).
+    bare_origin = tmp_path / "bare_origin"
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "main", str(bare_origin)],
+        check=True,
+        capture_output=True,
+    )
+    # Repoint origin at the bare repo.
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", str(bare_origin)],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    # Push all three branches up to the bare origin.
+    subprocess.run(
+        ["git", "push", "origin", "main", spec_branch_name, impl_branch_name],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    # Refresh the local ``refs/remotes/origin/*`` so the worktree's
+    # subsequent ``git diff origin/<branch>...<head>`` has a populated
+    # cache to read.
+    subprocess.run(
+        ["git", "fetch", "origin"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+
+    return clone, impl_head_sha, bare_origin
+
+
+def test_get_pr_diff_recovers_from_missing_base_ref(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """foreman#294: when the impl PR's base ref has been deleted from
+    origin (auto-delete-on-merge, operator pruned), ``_get_pr_diff``
+    must NOT raise. It refreshes the base via ``fetch_origin_branch``
+    (which self-heals the stale local ref via foreman#122), falls
+    back to ``origin/<default-branch>...<head>``, and logs a WARNING
+    so an operator can pin on the recovery message.
+    """
+    import logging as _logging
+
+    from foreman.roles import reviewer as reviewer_mod
+
+    clone, impl_head_sha, bare_origin = _seed_clone_with_bare_origin(
+        tmp_path, issue_number=42
+    )
+    # Simulate auto-delete-on-merge: prune the spec branch from the
+    # bare origin. The working clone's local commits stay intact, but
+    # ``git fetch origin foreman/issue-42`` will now rc=128 with
+    # "couldn't find remote ref".
+    subprocess.run(
+        ["git", "update-ref", "-d", "refs/heads/foreman/issue-42"],
+        cwd=bare_origin,
+        check=True,
+        capture_output=True,
+    )
+
+    caplog.set_level(_logging.WARNING, logger="foreman.roles.reviewer")
+
+    diff = reviewer_mod._get_pr_diff(
+        clone,
+        base_branch="foreman/issue-42",
+        head_sha=impl_head_sha,
+        role_token="tok",
+    )
+
+    # The fallback path returned a real diff string. It must include
+    # the impl commit's file (origin/main -> impl head); empty diff
+    # would mean the fallback resolved to the same commit, which the
+    # bare-origin layout precludes.
+    assert "src/impl.py" in diff, (
+        "Expected the fallback diff (origin/main...<impl>) to include "
+        f"the impl-only file path. Got diff:\n{diff!r}"
+    )
+
+    # WARNING-level record exactly as specified — full message
+    # match so a future refactor that drops the SHA or fallback ref
+    # from the message fails this test.
+    expected_message = (
+        f"reviewer._get_pr_diff: base ref origin/foreman/issue-42 missing "
+        f"for head {impl_head_sha}; fell back to origin/main"
+    )
+    expected_triple = ("foreman.roles.reviewer", _logging.WARNING, expected_message)
+    assert expected_triple in caplog.record_tuples, (
+        f"Expected exactly one WARNING record matching the recovery "
+        f"message. Got record_tuples:\n{caplog.record_tuples!r}"
+    )
+
+
+def test_get_pr_diff_normal_path_unchanged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """foreman#294 contract pin: when the impl PR's base ref EXISTS on
+    origin, ``_get_pr_diff`` returns the diff against the spec branch
+    (not the default branch) and emits NO WARNING record. Pins the
+    normal path so a future refactor cannot accidentally always-fall-
+    back.
+    """
+    import logging as _logging
+
+    from foreman.roles import reviewer as reviewer_mod
+
+    clone, impl_head_sha, _bare_origin = _seed_clone_with_bare_origin(
+        tmp_path, issue_number=42
+    )
+    # Don't prune anything — bare origin still has foreman/issue-42.
+
+    caplog.set_level(_logging.WARNING, logger="foreman.roles.reviewer")
+
+    diff = reviewer_mod._get_pr_diff(
+        clone,
+        base_branch="foreman/issue-42",
+        head_sha=impl_head_sha,
+        role_token="tok",
+    )
+
+    # Real diff against the spec branch — includes the impl-only file.
+    assert "src/impl.py" in diff
+
+    # No WARNING records — normal path is unchanged.
+    warning_records = [
+        r
+        for r in caplog.record_tuples
+        if r[0] == "foreman.roles.reviewer" and r[1] == _logging.WARNING
+    ]
+    assert warning_records == [], (
+        "Normal-path _get_pr_diff must NOT emit a WARNING. Got: "
+        f"{warning_records!r}"
+    )
+
+
+def test_get_pr_diff_reraises_when_fallback_also_fails(tmp_path: Path) -> None:
+    """foreman#294 contract pin: when BOTH the base branch AND the
+    fallback default branch are missing from origin, the second
+    ``git diff`` call fails with ``CalledProcessError`` and the
+    error surfaces to ``_on_failure``. Pins the "we don't silently
+    swallow real errors" contract.
+    """
+    from foreman.roles import reviewer as reviewer_mod
+
+    clone, impl_head_sha, bare_origin = _seed_clone_with_bare_origin(
+        tmp_path, issue_number=42
+    )
+    # Prune BOTH the spec branch AND main from the bare origin. The
+    # working clone's commits stay intact, but BOTH fetches will
+    # rc=128 + the self-heal will prune both stale local refs, so
+    # the initial ``git diff origin/foreman/issue-42...`` AND the
+    # fallback ``git diff origin/main...`` will both fail with
+    # ``bad revision``.
+    subprocess.run(
+        ["git", "update-ref", "-d", "refs/heads/foreman/issue-42"],
+        cwd=bare_origin,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "update-ref", "-d", "refs/heads/main"],
+        cwd=bare_origin,
+        check=True,
+        capture_output=True,
+    )
+
+    with pytest.raises(subprocess.CalledProcessError):
+        reviewer_mod._get_pr_diff(
+            clone,
+            base_branch="foreman/issue-42",
+            head_sha=impl_head_sha,
+            role_token="tok",
+        )

@@ -62,6 +62,11 @@ def test_action_enum_covers_spec_catalog() -> None:
         "DISPATCH_REVIEWER_IMPL",
         "DISPATCH_FIXER_SPEC",
         "DISPATCH_FIXER_IMPL",
+        # foreman#294: earlier-firing impl PR retarget so the Reviewer
+        # on impl reads a stable base before any operator-driven or
+        # auto-delete-on-merge prune of the spec branch can crash the
+        # diff fetch.
+        "RETARGET_IMPL_PR_TO_DEFAULT",
         "ADVANCE_LABEL_TO_DONE",
     }
     assert {a.name for a in Action} == expected
@@ -1084,3 +1089,172 @@ def test_attempt_merge_plan_does_not_invoke_retarget_path(
     assert "get_pr_base_ref" not in call_names
     assert "is_pr_merged_for_branch" not in call_names
     assert "get_default_branch" not in call_names
+
+
+# ---------------------------------------------------------------------------
+# foreman#294 — shared retarget helper + earlier-firing
+# RETARGET_IMPL_PR_TO_DEFAULT action. The helper is the deduplication
+# of the D9 retarget block (foreman#279); the new action fires at
+# precedence 138 BEFORE Reviewer-on-impl so the Reviewer's
+# ``_get_pr_diff`` never sees a stale stacked base.
+# ---------------------------------------------------------------------------
+
+
+def test_retarget_impl_pr_to_default_helper_idempotent(tmp_path: Path) -> None:
+    """foreman#294: the shared helper is the single source of truth for
+    the retarget guard. Three sub-cases pin the contract:
+
+    1. base already on default branch -> no host mutation, returns False.
+    2. base == spec branch AND spec PR merged -> exactly one
+       ``retarget_pr_base`` call, returns True.
+    3. base == spec branch BUT spec PR NOT merged -> no host mutation,
+       returns False (safety guard).
+    """
+    from foreman.reconciler.actions import (
+        _retarget_impl_pr_to_default_if_stacked,
+    )
+
+    # --- Sub-case 1: already on default branch ---
+    ctx = _attempt_merge_ctx(
+        tmp_path, head_ref="foreman/impl-143", pr_number=200
+    )
+    host = _FakeHost()
+    host.pr_base_ref_for = {200: "main"}
+    host.spec_pr_merged_for_branch = {"foreman/issue-143": True}
+
+    result = _retarget_impl_pr_to_default_if_stacked(ctx, host)
+
+    assert result is False, (
+        "Helper must return False when base is already on default branch"
+    )
+    call_names = [c[0] for c in host.calls]
+    assert "retarget_pr_base" not in call_names, (
+        "Idempotent: no retarget call when base is already main"
+    )
+
+    # --- Sub-case 2: base == spec branch AND spec PR merged ---
+    ctx2 = _attempt_merge_ctx(
+        tmp_path / "case2", head_ref="foreman/impl-143", pr_number=200
+    )
+    host2 = _FakeHost()
+    host2.pr_base_ref_for = {200: "foreman/issue-143"}
+    host2.spec_pr_merged_for_branch = {"foreman/issue-143": True}
+    host2.default_branch_name = "main"
+
+    result2 = _retarget_impl_pr_to_default_if_stacked(ctx2, host2)
+
+    assert result2 is True, "Helper must return True when retarget fires"
+    retarget_calls = [c for c in host2.calls if c[0] == "retarget_pr_base"]
+    assert len(retarget_calls) == 1, (
+        f"Expected exactly one retarget_pr_base call, got "
+        f"{len(retarget_calls)}: {host2.calls!r}"
+    )
+    assert retarget_calls[0][1]["pr_number"] == 200
+    assert retarget_calls[0][1]["new_base"] == "main"
+
+    # --- Sub-case 3: base == spec branch BUT spec PR NOT merged ---
+    ctx3 = _attempt_merge_ctx(
+        tmp_path / "case3", head_ref="foreman/impl-143", pr_number=200
+    )
+    host3 = _FakeHost()
+    host3.pr_base_ref_for = {200: "foreman/issue-143"}
+    host3.spec_pr_merged_for_branch = {"foreman/issue-143": False}
+
+    result3 = _retarget_impl_pr_to_default_if_stacked(ctx3, host3)
+
+    assert result3 is False, (
+        "Safety guard: helper must return False when spec PR has not merged"
+    )
+    call_names3 = [c[0] for c in host3.calls]
+    assert "retarget_pr_base" not in call_names3, (
+        "Safety: NEVER retarget if the spec PR's content is still unlanded"
+    )
+
+
+def test_execute_retarget_action_calls_helper_and_logs(
+    tmp_path: Path, caplog: Any
+) -> None:
+    """foreman#294: ``Action.RETARGET_IMPL_PR_TO_DEFAULT`` runs the
+    shared helper through ``execute_action``. In the common path (impl
+    PR's base is still the spec branch + spec PR merged), it issues
+    exactly one ``retarget_pr_base`` host call and logs the True
+    return at INFO so the audit trail is clear.
+    """
+    import logging as _logging
+
+    ctx = _attempt_merge_ctx(
+        tmp_path, head_ref="foreman/impl-143", pr_number=200
+    )
+    host = _FakeHost()
+    host.pr_base_ref_for = {200: "foreman/issue-143"}
+    host.spec_pr_merged_for_branch = {"foreman/issue-143": True}
+    host.default_branch_name = "main"
+
+    caplog.set_level(_logging.INFO, logger="foreman.reconciler.actions")
+
+    execute_action(
+        Action.RETARGET_IMPL_PR_TO_DEFAULT,
+        ctx,
+        host=host,
+        rule_name="retarget_impl_pr_to_default",
+        dry_run=False,
+    )
+
+    retarget_calls = [c for c in host.calls if c[0] == "retarget_pr_base"]
+    assert len(retarget_calls) == 1
+    assert retarget_calls[0][1]["pr_number"] == 200
+    assert retarget_calls[0][1]["new_base"] == "main"
+
+    # The action handler logs the bool return so the audit trail
+    # surfaces whether this tick was the actual retarget or a no-op.
+    info_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "foreman.reconciler.actions"
+        and record.levelno == _logging.INFO
+    ]
+    assert any(
+        "retarget_impl_pr_to_default: retargeted=True" in m for m in info_messages
+    ), (
+        "Expected an INFO log line documenting the retarget bool. "
+        f"Got: {info_messages!r}"
+    )
+
+
+def test_handle_attempt_merge_impl_still_retargets_via_shared_helper(
+    tmp_path: Path,
+) -> None:
+    """foreman#294 refactor guard: the D9 retarget regression
+    (foreman#279) stays green after the inline block was extracted
+    into the shared ``_retarget_impl_pr_to_default_if_stacked``
+    helper. Same scenario as
+    ``test_attempt_merge_impl_retargets_base_to_main_when_spec_merged``
+    above; if this fails, the refactor changed behavior — fix the
+    refactor.
+    """
+    ctx = _attempt_merge_ctx(
+        tmp_path, head_ref="foreman/impl-143", pr_number=200
+    )
+    host = _FakeHost()
+    host.pr_base_ref_for = {200: "foreman/issue-143"}
+    host.spec_pr_merged_for_branch = {"foreman/issue-143": True}
+    host.default_branch_name = "main"
+    host.dispatch_mergeability_return = PRMergeability(
+        state="CLEAN",
+        failing_required_check_count=0,
+        pending_required_check_count=0,
+    )
+
+    execute_action(
+        Action.ATTEMPT_MERGE_IMPL,
+        ctx,
+        host=host,
+        rule_name="attempt_merge_impl",
+        dry_run=False,
+    )
+
+    call_names = [c[0] for c in host.calls]
+    assert "retarget_pr_base" in call_names
+    retarget_idx = call_names.index("retarget_pr_base")
+    merge_idx = call_names.index("merge_pr")
+    assert retarget_idx < merge_idx

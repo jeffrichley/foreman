@@ -32,6 +32,7 @@ deterministic" split.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -53,6 +54,8 @@ from foreman.roles import TERMINAL_BLOCKING_LABEL, handle_unhandled_role_excepti
 from foreman.schemas.reviewer import Finding, ReviewerOutput, ReviewerRunResult
 from foreman.stats import log_reviewer_run
 from foreman.worktree import WorktreeManager
+
+_LOG = logging.getLogger(__name__)
 
 _PR_URL_RE = re.compile(
     r"https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)"
@@ -286,30 +289,66 @@ def _get_pr_diff(worktree_path: Path, base_branch: str, head_sha: str, *, role_t
     authenticates as the reviewer bot rather than inheriting whatever
     ``GH_TOKEN`` the daemon's parent process had set (CI runner or dev
     shell). Without this, identity attribution leaks (HIGH #10).
+
+    foreman#294: if ``origin/<base_branch>`` does not exist on origin
+    (auto-delete-on-merge, operator pruned, future cleanup feature),
+    the diff falls back to ``origin/<default-branch>...<head_sha>``.
+    The fetch step routes through
+    :func:`foreman.worktree.fetch_origin_branch` so the existing
+    foreman#122 prune-stale-ref self-heal fires at fetch time. A
+    WARNING log identifies the recovery so an operator running
+    ``docker compose logs daemon`` can pin on the message prefix.
     """
     from foreman._env_filter import filtered_subprocess_env
+    from foreman.worktree import fetch_origin_branch, resolve_default_branch
 
     role_env = filtered_subprocess_env(role_token=role_token)
-    # Ensure we have the base ref locally — the PR's base is typically the
-    # repo default (``main``), which the clone already tracks. Tolerate
-    # fetch failure; the diff command below will surface a clearer error.
-    subprocess.run(
-        ["git", "fetch", "origin", base_branch],
+
+    # Refresh the base ref. Routes through the shared self-heal: if the
+    # base branch was deleted on origin, the local stale ref is pruned
+    # here (foreman#122).
+    fetch_origin_branch(worktree_path, base_branch, role_token=role_token)
+
+    result = subprocess.run(
+        ["git", "diff", f"origin/{base_branch}...{head_sha}"],
         cwd=worktree_path,
         check=False,
         capture_output=True,
         text=True,
         env=role_env,
     )
-    result = subprocess.run(
-        ["git", "diff", f"origin/{base_branch}...{head_sha}"],
+    if result.returncode == 0:
+        return result.stdout
+
+    stderr_lower = (result.stderr or "").lower()
+    missing_ref = (
+        "bad revision" in stderr_lower
+        or "unknown revision" in stderr_lower
+        or "ambiguous argument" in stderr_lower
+    )
+    if not missing_ref:
+        # Other failure (e.g., real corruption). Surface the original
+        # error to the existing _on_failure path.
+        result.check_returncode()  # raises CalledProcessError
+
+    default_branch = resolve_default_branch(worktree_path, role_token=role_token)
+    fetch_origin_branch(worktree_path, default_branch, role_token=role_token)
+    _LOG.warning(
+        "reviewer._get_pr_diff: base ref origin/%s missing for head %s; "
+        "fell back to origin/%s",
+        base_branch,
+        head_sha,
+        default_branch,
+    )
+    fallback = subprocess.run(
+        ["git", "diff", f"origin/{default_branch}...{head_sha}"],
         cwd=worktree_path,
         check=True,
         capture_output=True,
         text=True,
         env=role_env,
     )
-    return result.stdout
+    return fallback.stdout
 
 
 def _read_spec_doc(worktree_path: Path, issue_number: int) -> str | None:

@@ -76,6 +76,16 @@ class Action(enum.Enum):
     DISPATCH_REVIEWER_IMPL = "dispatch_reviewer_impl"
     DISPATCH_FIXER_SPEC = "dispatch_fixer_spec"
     DISPATCH_FIXER_IMPL = "dispatch_fixer_impl"
+    # foreman#294: retarget the impl PR's base from the spec branch to
+    # the default branch BEFORE Reviewer-on-impl dispatches. Without
+    # this, the Reviewer's ``_get_pr_diff`` reads a base ref that the
+    # repo's auto-delete-on-merge (or an operator) may have already
+    # pruned from origin, crashing the dispatch with rc=128. Sharing
+    # the underlying helper with the foreman#279 D9 retarget at
+    # ``attempt_merge_impl`` keeps the behavior bit-for-bit; this
+    # action fires earlier in the state machine (precedence 138,
+    # between ``dispatch_worker`` and ``dispatch_reviewer_impl``).
+    RETARGET_IMPL_PR_TO_DEFAULT = "retarget_impl_pr_to_default"
     ADVANCE_LABEL_TO_DONE = "advance_label_to_done"
 
 
@@ -406,6 +416,62 @@ def _handle_rate_limit_trip(
         )
 
 
+def _retarget_impl_pr_to_default_if_stacked(
+    ctx: ActionContext, host: ReconcilerHost
+) -> bool:
+    """Retarget the impl PR's base from spec branch to default branch.
+
+    Idempotent: returns False (no host call made) if the impl PR's
+    base is already not the spec branch, or if the spec PR has not
+    yet merged (safety guard — never retarget an impl PR that depends
+    on un-landed spec changes).
+
+    Shared between :func:`_handle_attempt_merge` (target=``"impl"``,
+    precedence 162 — D9 / foreman#279) and the new
+    ``RETARGET_IMPL_PR_TO_DEFAULT`` action (precedence 138 —
+    foreman#294). Calling the helper twice in one ticket is harmless:
+    the second call sees ``current_base != spec_branch_name`` and
+    short-circuits.
+    """
+    if ctx.pr is None:
+        return False
+    spec_branch_name = spec_branch(ctx.issue.number)
+    current_base = host.get_pr_base_ref(
+        owner=ctx.snapshot.owner,
+        repo=ctx.snapshot.repo,
+        pr_number=ctx.pr.number,
+    )
+    if current_base != spec_branch_name:
+        return False
+    if not host.is_pr_merged_for_branch(
+        owner=ctx.snapshot.owner,
+        repo=ctx.snapshot.repo,
+        branch=spec_branch_name,
+    ):
+        return False
+    default_branch = host.get_default_branch(
+        owner=ctx.snapshot.owner,
+        repo=ctx.snapshot.repo,
+    )
+    host.retarget_pr_base(
+        owner=ctx.snapshot.owner,
+        repo=ctx.snapshot.repo,
+        pr_number=ctx.pr.number,
+        new_base=default_branch,
+    )
+    logger.info(
+        "retarget_impl_pr_to_default: retargeted PR %s/%s#%d base %s -> %s "
+        "(spec PR for issue #%d has merged)",
+        ctx.snapshot.owner,
+        ctx.snapshot.repo,
+        ctx.pr.number,
+        spec_branch_name,
+        default_branch,
+        ctx.issue.number,
+    )
+    return True
+
+
 def _handle_attempt_merge(
     ctx: ActionContext,
     host: ReconcilerHost,
@@ -450,50 +516,17 @@ def _handle_attempt_merge(
     # lands on the about-to-be-deleted spec branch and the content
     # orphans — exactly the 15-PR regression diagnosed 2026-06-11.
     #
-    # Two conditions guard the retarget:
-    #   1. Current base IS the spec branch (idempotent — skip if
-    #      already retargeted from a prior tick under crash re-enqueue).
-    #   2. Spec PR has merged (safety — never retarget impl-on-main
-    #      with un-landed spec dependencies).
-    #
-    # Mirrors the v1/v2 retarget step in
-    # daemon_runners.merge_impl_pr (lines 234-243); the v3 migration
-    # did not port the guard, hence the orphan regression. Retarget
-    # happens BEFORE get_pr_mergeability because retargeting changes
-    # GitHub's mergeStateStatus computation; we want the mergeability
-    # read below to reflect the post-retarget state.
+    # foreman#294 extracted the body into the shared
+    # ``_retarget_impl_pr_to_default_if_stacked`` helper so the new
+    # earlier-firing ``RETARGET_IMPL_PR_TO_DEFAULT`` action at
+    # precedence 138 can reuse the same guard semantics. The helper
+    # preserves the two original conditions (current base IS spec
+    # branch; spec PR has merged) and is a no-op when neither holds —
+    # so keeping this call site is defense in depth without double
+    # work in the common path (the precedence-138 rule already
+    # retargeted; the helper short-circuits here).
     if target == "impl":
-        spec_branch_name = spec_branch(ctx.issue.number)
-        current_base = host.get_pr_base_ref(
-            owner=ctx.snapshot.owner,
-            repo=ctx.snapshot.repo,
-            pr_number=ctx.pr.number,
-        )
-        if current_base == spec_branch_name and host.is_pr_merged_for_branch(
-            owner=ctx.snapshot.owner,
-            repo=ctx.snapshot.repo,
-            branch=spec_branch_name,
-        ):
-            default_branch = host.get_default_branch(
-                owner=ctx.snapshot.owner,
-                repo=ctx.snapshot.repo,
-            )
-            host.retarget_pr_base(
-                owner=ctx.snapshot.owner,
-                repo=ctx.snapshot.repo,
-                pr_number=ctx.pr.number,
-                new_base=default_branch,
-            )
-            logger.info(
-                "attempt_merge_impl: retargeted PR %s/%s#%d base %s -> %s "
-                "(spec PR for issue #%d has merged; preventing orphan-commit-on-spec-branch)",
-                ctx.snapshot.owner,
-                ctx.snapshot.repo,
-                ctx.pr.number,
-                spec_branch_name,
-                default_branch,
-                ctx.issue.number,
-            )
+        _retarget_impl_pr_to_default_if_stacked(ctx, host)
 
     mergeability = host.get_pr_mergeability(
         owner=ctx.snapshot.owner,
@@ -730,6 +763,19 @@ def execute_action(
             _handle_attempt_merge(ctx, host, target="plan")
         elif action is Action.ATTEMPT_MERGE_IMPL:
             _handle_attempt_merge(ctx, host, target="impl")
+        elif action is Action.RETARGET_IMPL_PR_TO_DEFAULT:
+            # foreman#294: earlier-firing retarget. Reuses the shared
+            # helper extracted from the D9 block at
+            # ``_handle_attempt_merge``. Logging the bool return at
+            # INFO leaves an audit trail showing whether this tick was
+            # the actual retarget or a no-op (e.g., the helper found
+            # the base already on the default branch).
+            retargeted = _retarget_impl_pr_to_default_if_stacked(ctx, host)
+            logger.info(
+                "retarget_impl_pr_to_default: retargeted=%s for issue #%d",
+                retargeted,
+                ctx.issue.number,
+            )
         elif action is Action.ADVANCE_LABEL_TO_PLANNING:
             # foreman#171: ``foreman:plan`` is the queue label; advance to
             # ``foreman:planning`` so ``dispatch_planner`` fires on the
