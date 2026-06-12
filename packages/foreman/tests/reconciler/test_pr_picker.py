@@ -95,6 +95,39 @@ def test_picker_prefers_impl_pr_on_impl_approved() -> None:
     assert _pick_pr_for_ticket(issue, [spec, impl]).head_ref == "foreman/impl-42"
 
 
+def test_picker_prefers_spec_pr_on_merging_plan() -> None:
+    """``foreman:merging-plan`` is spec-phase (the transient
+    ``ATTEMPT_MERGE_PLAN`` window).
+
+    Regression: ``ADVANCE_LABEL_TO_MERGING_PLAN`` keeps ``foreman:plan-approved``
+    alongside ``foreman:merging-plan`` (see ``actions.py:_handle_advance_label``),
+    which hides this case in the production loop. But any path that drops
+    ``plan-approved`` while ``merging-plan`` is still set — operator manual
+    relabel, future executor refactor — leaves the picker returning None,
+    which silently stalls ``attempt_merge_plan``. Surfaced 2026-06-12 during
+    D9 dogfood verification.
+    """
+    issue = _issue(("foreman:merging-plan",))
+    spec = _pr("foreman/issue-42", number=100)
+    impl = _pr("foreman/impl-42", number=200)
+    assert _pick_pr_for_ticket(issue, [impl, spec]).head_ref == "foreman/issue-42"
+
+
+def test_picker_prefers_impl_pr_on_merging_impl() -> None:
+    """``foreman:merging-impl`` is impl-phase (the transient
+    ``ATTEMPT_MERGE_IMPL`` window).
+
+    Same regression as ``test_picker_prefers_spec_pr_on_merging_plan`` —
+    the impl side of the same fragility. ``attempt_merge_impl`` (D9, foreman#279)
+    must reach the executor with ``ctx.pr`` populated, otherwise the retarget
+    guard never runs and content re-orphans on the spec branch.
+    """
+    issue = _issue(("foreman:merging-impl",))
+    spec = _pr("foreman/issue-42", number=100)
+    impl = _pr("foreman/impl-42", number=200)
+    assert _pick_pr_for_ticket(issue, [spec, impl]).head_ref == "foreman/impl-42"
+
+
 def test_picker_prefers_impl_when_both_phases_present() -> None:
     """Transient label state spans both phases — later stage wins (impl)."""
     issue = _issue(("foreman:planning", "foreman:impl-review"))
