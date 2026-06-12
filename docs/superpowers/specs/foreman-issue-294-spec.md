@@ -13,7 +13,7 @@
     1. Resolve the repo's default branch via a new public wrapper `foreman.worktree.resolve_default_branch(worktree_path, role_token=reviewer_token)` (which delegates to the existing private `_resolve_default_branch`).
     2. Refresh `origin/<default-branch>` via `foreman.worktree.fetch_origin_branch(worktree_path, default_branch, role_token=reviewer_token)`.
     3. Run `git diff origin/<default_branch>...<head_sha>` with `check=True`. If THIS fails, the original `CalledProcessError` is re-raised — the fallback exhausted; surfacing the error to the existing `_on_failure` path (which runs the foreman#229 helper) is the correct response.
-  - Emit a structured WARNING via the Python logging module (NOT print-to-stderr) tagged with the PR number, issue number, original base ref, and fallback ref so an operator running `docker compose logs daemon` sees the recovery firing. Log format: `reviewer._get_pr_diff: base ref origin/%s missing for PR #%d (issue #%d); fell back to origin/%s` — fixed message prefix so log scrapers can pin on it.
+  - Emit a structured WARNING via the Python logging module (NOT print-to-stderr) tagged with the original base ref, the head SHA, and the fallback ref so an operator running `docker compose logs daemon` sees the recovery firing. Log format: `reviewer._get_pr_diff: base ref origin/%s missing for head %s; fell back to origin/%s` — three placeholders (base_branch, head_sha, default_branch), matching `_get_pr_diff`'s existing signature so the refactor does NOT need to thread PR/issue numbers through to this function. Fixed message prefix so log scrapers can pin on it. (PR and issue numbers are already in the surrounding Reviewer dispatch log lines emitted from the daemon, so the operator-facing log surface keeps the join visible without changing `_get_pr_diff`'s signature — the reasoning that originally tempted the four-placeholder format.)
 
 - `packages/foreman/src/foreman/worktree.py` gains two NEW public wrappers, both delegating to existing private helpers without altering their semantics:
   - `def fetch_origin_branch(clone_path: Path, branch: str, *, role_token: str | None = None) -> None:` — thin wrapper around `_fetch_origin_branch(clone_path, branch, role_token=role_token)`. Best-effort contract preserved verbatim. Docstring cross-references foreman#294 + foreman#122.
@@ -33,23 +33,29 @@
   - `not ctx.pr.is_merged`
   - `ctx.pr.head_ref.startswith("foreman/impl-")` — impl PR shape
   - `"foreman:impl-review" in ctx.issue.labels` — ticket has reached impl-review (this is the gate against pre-Worker premature fire)
-  - The rule fires every tick the predicate is True; idempotence is enforced INSIDE the action handler (the helper short-circuits on `current_base != spec_branch_name`), NOT via an `ExecutionLog.count_completed` check, because the retarget is a one-shot host call whose effect is observable via `host.get_pr_base_ref` on subsequent ticks. This matches the existing D9 retarget block's idempotence pattern.
+  - **One-shot idempotence gate (REQUIRED to avoid deadlocking the autonomous loop):** `not ctx.log.has_unterminated("retarget_impl_pr_to_default", ctx.ticket_id) and ctx.log.count_completed("retarget_impl_pr_to_default", ctx.ticket_id) == 0`. Without this gate the rule keeps matching every tick (the other conditions are stable throughout the impl-review phase — only the Reviewer can flip the `foreman:impl-review` label, and the Reviewer never fires because precedence-138 wins over precedence-140 in `evaluate_with_rule`'s first-match-wins ordering at `rules.py:756-760`). The gate makes the rule fire AT MOST ONCE per ticket — exactly the shape Layer B needs, since the retarget is a single host call whose effect persists in GitHub state. This is the SAME gate pattern used by `dispatch_reviewer_impl` at `rules.py:482` and `dispatch_fixer_impl` at `rules.py:496-497`. (Different from the existing D9 retarget block at `attempt_merge_impl`, which fires inside an action handler — not via a top-level rule — and so doesn't need a rule-level gate.)
 
-- Existing rule `dispatch_reviewer_impl` (precedence 140) is unchanged. Because rules are evaluated in precedence order and the new retarget rule fires at 138, the retarget completes (changing the impl PR's base on GitHub) BEFORE the same-tick `dispatch_reviewer_impl` would dispatch the Reviewer subprocess — but in practice the reconciler dispatches one action per tick per ticket, so the retarget lands one tick before the Reviewer dispatch. Either ordering is safe: Layer A handles the (impossible-after-Layer-B) case where Reviewer-on-impl still sees a stale stacked base.
+- Existing rule `dispatch_reviewer_impl` (precedence 140) is unchanged. Because rules are evaluated in precedence order and the new retarget rule fires at 138, the retarget lands first; the one-shot gate then flips the predicate False on subsequent ticks, freeing `dispatch_reviewer_impl` at precedence 140 to fire the next time around. Sequence: tick N evaluates retarget rule → predicate True → retarget action runs → execution log records `retarget_impl_pr_to_default` as completed. Tick N+1 evaluates retarget rule → predicate False (count_completed == 1) → falls through to `dispatch_reviewer_impl` → Reviewer dispatches against the now-retargeted base. Layer A handles the (impossible-after-Layer-B) case where Reviewer-on-impl still sees a stale stacked base.
 
 - Existing `attempt_merge_impl` rule + `_handle_attempt_merge(target="impl")` retarget block continue to fire. They're now a no-op in the common path (Layer B already retargeted at precedence 138) but the helper's idempotence makes the duplicate call cost-free. Keeping the existing D9 call site is defense in depth against operators who removed the `foreman:impl-review` label (which would block Layer B from firing).
 
 - New regression test `tests/test_roles_reviewer.py::test_get_pr_diff_recovers_from_missing_base_ref`:
-  - Set up an on-disk worktree (re-use the existing `_seed_clone_with_spec_branch` helper near `test_roles_reviewer.py:938`) with HEAD on `foreman/impl-42` and origin/main present, but with NO `refs/remotes/origin/foreman/issue-42` ref.
-  - Call `_get_pr_diff(worktree, base_branch="foreman/issue-42", head_sha=<impl_head>, role_token="tok")`.
+  - Use a NEW helper `_seed_clone_with_bare_origin(tmp_path, issue_number)` (added in this PR to `test_roles_reviewer.py` alongside the existing `_seed_clone_with_spec_branch` at line 254). The helper:
+    1. Calls `_seed_clone_with_spec_branch(clone, issue_number)` to build the seed + spec-branch commits as today.
+    2. `git init --bare` at a sibling directory `bare_origin` (NOT shared with the clone — separate path).
+    3. In the working clone, replace the origin URL: `git remote set-url origin <bare_origin_path>`.
+    4. Push `main`, the spec branch (`foreman/issue-N`), AND the impl branch (`foreman/impl-N`, created and committed by the helper after switching off `main`) to the bare origin.
+    5. Run `git fetch origin` in the clone so `refs/remotes/origin/main` and `refs/remotes/origin/foreman/issue-N` are populated.
+    6. Returns `(impl_head_sha, bare_origin_path)` so the test can prune the spec ref from the bare origin via `git update-ref -d refs/heads/foreman/issue-N` (run with `cwd=bare_origin_path`) to simulate the operator-driven delete-on-merge scenario. The bare-origin layout is the only one where this `update-ref` is safe: it removes the ref from the remote, leaves the working clone's commits intact, and gives `_fetch_origin_branch`'s rc=128 self-heal a real "couldn't find remote ref" condition to recover from.
+  - After the precondition is set up (bare origin without the spec branch; clone has the stale `refs/remotes/origin/foreman/issue-N` AND a live impl branch ahead of `origin/main`), call `_get_pr_diff(worktree, base_branch="foreman/issue-42", head_sha=impl_head, role_token="tok")`.
   - Assert the call returns a non-empty diff string (the diff against `origin/main`) WITHOUT raising.
-  - Assert a WARNING-level log record was emitted with the fixed prefix `reviewer._get_pr_diff: base ref origin/foreman/issue-42 missing` (use `caplog` fixture at `level=logging.WARNING`).
+  - Assert a WARNING-level log record was emitted matching the full message `reviewer._get_pr_diff: base ref origin/foreman/issue-42 missing for head <impl_head>; fell back to origin/main`. Use `caplog.set_level(logging.WARNING, logger="foreman.roles.reviewer")` and inspect `caplog.record_tuples` for the exact `(logger_name, level, message)` triple rather than prefix-matching, so a future refactor that quietly drops the SHA or the fallback ref from the message fails this test.
 
 - New regression test `tests/test_roles_reviewer.py::test_get_pr_diff_normal_path_unchanged`:
-  - Same worktree fixture as above but WITH `origin/foreman/issue-42` present. Confirm `_get_pr_diff` returns the diff against `origin/foreman/issue-42` (i.e., the spec branch's diff), no WARNING emitted, no fallback path taken. This pins the "normal path is unchanged" contract so a future refactor cannot accidentally always-fall-back.
+  - Use the same `_seed_clone_with_bare_origin` helper but SKIP the spec-ref prune step — the bare origin still has `foreman/issue-N`. Confirm `_get_pr_diff` returns the diff against `origin/foreman/issue-42` (i.e., the spec branch's diff), no WARNING record present in `caplog.record_tuples`, no fallback path taken. This pins the "normal path is unchanged" contract so a future refactor cannot accidentally always-fall-back.
 
 - New regression test `tests/test_roles_reviewer.py::test_get_pr_diff_reraises_when_fallback_also_fails`:
-  - Worktree with neither `origin/foreman/issue-42` NOR `origin/main`. Call `_get_pr_diff` and assert `CalledProcessError` is raised. This pins the "we don't silently swallow real errors" contract — the existing `_on_failure` / runaway-burn helper path must continue to receive the exception.
+  - Use the same `_seed_clone_with_bare_origin` helper, then prune BOTH `refs/heads/foreman/issue-42` AND `refs/heads/main` from the bare origin (`git update-ref -d` each, run with `cwd=bare_origin_path`). The working clone's `git fetch` will then rc=128 on both branches, the self-heal will prune both local stale refs, and BOTH `git diff` calls (initial AND fallback) will fail with `bad revision`. Call `_get_pr_diff` and assert `CalledProcessError` is raised — surfacing through `_on_failure`. This pins the "we don't silently swallow real errors" contract.
 
 - New regression test `tests/reconciler/test_actions.py::test_retarget_impl_pr_to_default_helper_idempotent`:
   - Construct an `ActionContext` for an impl PR whose base is already `main`. Call `_retarget_impl_pr_to_default_if_stacked(ctx, host)` with a fake `host` that records `retarget_pr_base` calls. Assert returns `False` and `retarget_pr_base` was NOT called.
@@ -57,10 +63,17 @@
   - Then construct an `ActionContext` for an impl PR whose base is `foreman/issue-N` BUT the spec PR has NOT merged. Assert returns `False` and `retarget_pr_base` was NOT called (the safety guard fires).
 
 - New regression test `tests/reconciler/test_rules.py::test_retarget_impl_pr_to_default_rule_eligibility`:
-  - Build an `ActionContext` matching the predicate (impl PR open, head=foreman/impl-N, foreman:impl-review label). Assert `_retarget_impl_pr_eligible(ctx)` returns True.
+  - Build an `ActionContext` matching the predicate (impl PR open, head=foreman/impl-N, foreman:impl-review label, fresh ExecutionLog with no completed `retarget_impl_pr_to_default` entries). Assert `_retarget_impl_pr_eligible(ctx)` returns True.
   - Build a context with `is_merged=True` on the PR. Assert False.
   - Build a context without `foreman:impl-review` label. Assert False.
   - Build a context with head=`foreman/issue-N` (spec PR shape). Assert False — never retarget spec PRs.
+  - Build a context where `ctx.log.count_completed("retarget_impl_pr_to_default", ctx.ticket_id) == 1` (the gate already fired). Assert False — pins the one-shot idempotence behavior.
+  - Build a context where `ctx.log.has_unterminated("retarget_impl_pr_to_default", ctx.ticket_id)` is True (a retarget is mid-flight). Assert False — pins the don't-double-fire behavior.
+
+- New regression test `tests/reconciler/test_rules.py::test_retarget_then_dispatch_reviewer_impl_on_next_tick`:
+  - End-to-end pin on the two-tick sequence the predicate's one-shot gate enables. Build a context matching the retarget predicate on tick N. Call `evaluate_with_rule(ctx)` — assert it returns `(Action.RETARGET_IMPL_PR_TO_DEFAULT, "retarget_impl_pr_to_default")`.
+  - Mark the `retarget_impl_pr_to_default` row as completed in `ctx.log` (use whatever test-helper the file already uses to seed log rows — grep `count_completed` in `tests/reconciler/` for the existing fake-log pattern).
+  - Call `evaluate_with_rule(ctx)` again on the SAME otherwise-unchanged context. Assert it now returns `(Action.DISPATCH_REVIEWER_IMPL, "dispatch_reviewer_impl")`. This pins the structural escape valve — if a future refactor removes the one-shot gate, this test fails and the autonomous-loop deadlock is caught at PR-review time, not in production.
 
 - New regression test `tests/reconciler/test_actions.py::test_handle_attempt_merge_impl_still_retargets_via_shared_helper`:
   - Existing D9 retarget regression (foreman#279) stays green after the refactor. The current test should continue to pass without modification; if it doesn't, the refactor changed behavior — fix the refactor.
@@ -83,8 +96,10 @@ The shared `_retarget_impl_pr_to_default_if_stacked` helper is the DRY move that
 
 Rule precedence 138 is the right slot because:
 - `dispatch_worker` at 130 must complete first (impl PR doesn't exist before the Worker creates it).
-- `dispatch_reviewer_impl` at 140 must read the retargeted base — placing the retarget AT 138 means the same-tick rule evaluator sees the retarget before considering the reviewer dispatch (the reconciler dispatches one action per tick per ticket, so the retarget action lands and the reviewer dispatch fires on the next tick after the base flip propagates to the next snapshot).
+- `dispatch_reviewer_impl` at 140 must read the retargeted base. The reconciler dispatches one action per tick per ticket and `evaluate_with_rule` returns the FIRST matching rule (`rules.py:756-760`), so on tick N the retarget rule fires (precedence 138 wins, retarget lands), and on tick N+1 the one-shot idempotence gate flips the retarget predicate False, allowing precedence 140 to evaluate next and dispatch the Reviewer against the freshly-retargeted base.
 - The existing D9 retarget at 162 (`attempt_merge_impl`) is kept as a backstop — if an operator manually removes the `foreman:impl-review` label between Worker completion and a possible Layer B fire, the D9 path still catches the orphan-commit case.
+
+The one-shot idempotence gate (the `count_completed == 0` + `not has_unterminated` pair on the predicate) is load-bearing: without it the retarget rule keeps matching every tick (its other conditions — impl-review label, impl-shape PR, not merged — are stable until the Reviewer fires and the Reviewer can never fire because precedence 138 keeps shadowing precedence 140), and the autonomous loop deadlocks on every impl PR. The gate is the SAME shape that `dispatch_reviewer_impl` at `rules.py:482` and `dispatch_fixer_impl` at `rules.py:496-497` already use for the same reason. The action-handler's internal short-circuit (`current_base != spec_branch_name`) is still useful — it makes a misfire harmless — but it is NOT sufficient on its own because it doesn't keep the predicate's host-call-free condition False on subsequent ticks.
 
 The new public wrappers in `worktree.py` (`fetch_origin_branch`, `resolve_default_branch`) are deliberately thin. The existing private helpers' contracts are battle-tested (foreman#122, #291); the wrappers exist purely so `reviewer.py` doesn't have to import private names. Mirroring `fetch_origin_default_branch`'s shape (introduced by foreman#291) keeps the worktree module's public API coherent — there's now a `fetch_origin_branch(<any>)` AND a `fetch_origin_default_branch(<resolves the name first>)` AND a `resolve_default_branch(<just resolves>)`, each composable.
 
@@ -306,18 +321,34 @@ Per the issue's Out-of-scope list, this spec deliberately does NOT:
        """Eligibility for retargeting the impl PR's base to default branch
        before Reviewer-on-impl dispatches (foreman#294).
 
-       Predicate is intentionally coarse — it doesn't check the current
-       base (snapshot doesn't carry base_ref) or the spec PR's merged
-       state (rules can't make host calls). The action handler's helper
+       Predicate is intentionally coarse on the GitHub-state side — it
+       doesn't check the current base (snapshot doesn't carry base_ref)
+       or the spec PR's merged state (rules can't make host calls). The
+       action handler's helper
        (:func:`_retarget_impl_pr_to_default_if_stacked`) enforces both
-       conditions and short-circuits as a no-op when they aren't met. This
-       matches the existing D9 idempotence pattern at precedence 162.
+       conditions and short-circuits as a no-op when they aren't met.
+
+       The one-shot idempotence gate at the bottom of the predicate is
+       LOAD-BEARING: without it the retarget rule keeps matching every
+       tick (the other conditions are stable throughout impl-review),
+       and ``evaluate_with_rule``'s first-match-wins ordering at
+       ``rules.py:756-760`` would let precedence-138 shadow
+       ``dispatch_reviewer_impl`` at precedence 140 forever — deadlocking
+       the autonomous loop. Same gate shape used by ``dispatch_reviewer_impl``
+       at ``rules.py:482`` and ``dispatch_fixer_impl`` at ``rules.py:496-497``.
        """
        return (
            ctx.pr is not None
            and not ctx.pr.is_merged
            and ctx.pr.head_ref.startswith("foreman/impl-")
            and "foreman:impl-review" in ctx.issue.labels
+           and not ctx.log.has_unterminated(
+               "retarget_impl_pr_to_default", ctx.ticket_id
+           )
+           and ctx.log.count_completed(
+               "retarget_impl_pr_to_default", ctx.ticket_id
+           )
+           == 0
        )
    ```
 
@@ -338,7 +369,7 @@ Per the issue's Out-of-scope list, this spec deliberately does NOT:
    - `test_get_pr_diff_normal_path_unchanged` — pins the normal path.
    - `test_get_pr_diff_reraises_when_fallback_also_fails` — pins the surface-to-failure-handler path.
 
-   Re-use the existing `_seed_clone_with_spec_branch` fixture pattern. For the missing-base-ref test, after seeding the clone, push the impl branch to a bare-repo origin, then delete the `foreman/issue-N` ref from the bare origin (`git update-ref -d refs/heads/foreman/issue-N` against the bare repo). Use `caplog` at `logging.WARNING` to assert the recovery log.
+   Add a NEW helper `_seed_clone_with_bare_origin(tmp_path, issue_number)` alongside the existing `_seed_clone_with_spec_branch` (defined at `test_roles_reviewer.py:254`, not line 938 which is just a use-site — minor citation fix). The new helper composes with `_seed_clone_with_spec_branch` and ADDS: (i) a separate `bare_origin` directory initialized with `git init --bare`; (ii) `git remote set-url origin <bare_origin>` in the working clone so origin no longer points at the clone itself; (iii) `git push origin main foreman/issue-N foreman/impl-N` so the bare origin holds all three branches; (iv) `git fetch origin` to populate the working clone's `refs/remotes/origin/*`. The helper returns `(impl_head_sha, bare_origin_path)`. Each test mutates the bare-origin refs via `git update-ref -d refs/heads/<branch>` (with `cwd=bare_origin_path`) to set up the missing-ref precondition; the working clone's commits stay intact, and `_fetch_origin_branch`'s rc=128 self-heal sees a real "couldn't find remote ref" condition. Use `caplog.set_level(logging.WARNING, logger="foreman.roles.reviewer")` to capture the recovery log and assert via `caplog.record_tuples`.
 
 10. **Write the three reconciler regression tests:**
     - `tests/reconciler/test_actions.py::test_retarget_impl_pr_to_default_helper_idempotent` (three sub-cases per AC).
@@ -357,9 +388,9 @@ Per the issue's Out-of-scope list, this spec deliberately does NOT:
 | `packages/foreman/src/foreman/roles/reviewer.py` | Refactor `_get_pr_diff` (lines 275-312) to route fetch through `worktree.fetch_origin_branch`, run `git diff` with `check=False`, and fall back to `origin/<default>...<head>` on missing-base-ref. Add module-level `_LOG = logging.getLogger(__name__)` if absent. Add `import logging` if absent. |
 | `packages/foreman/src/foreman/reconciler/actions.py` | (a) Extract D9 retarget block at lines 446-496 into new helper `_retarget_impl_pr_to_default_if_stacked(ctx, host) -> bool`. (b) Refactor `_handle_attempt_merge` to delegate. (c) Add `Action.RETARGET_IMPL_PR_TO_DEFAULT` enum value. (d) Add `execute_action` branch for the new action. |
 | `packages/foreman/src/foreman/reconciler/rules.py` | (a) Add `_retarget_impl_pr_eligible` predicate. (b) Add `retarget_impl_pr_to_default` rule at precedence 138 to `_PROGRESS_RULES`. |
-| `packages/foreman/tests/test_roles_reviewer.py` | Add three regression tests: `test_get_pr_diff_recovers_from_missing_base_ref`, `test_get_pr_diff_normal_path_unchanged`, `test_get_pr_diff_reraises_when_fallback_also_fails`. |
+| `packages/foreman/tests/test_roles_reviewer.py` | Add a new `_seed_clone_with_bare_origin(tmp_path, issue_number)` helper alongside the existing `_seed_clone_with_spec_branch` (line 254). Add three regression tests: `test_get_pr_diff_recovers_from_missing_base_ref`, `test_get_pr_diff_normal_path_unchanged`, `test_get_pr_diff_reraises_when_fallback_also_fails`. |
 | `packages/foreman/tests/reconciler/test_actions.py` | Add `test_retarget_impl_pr_to_default_helper_idempotent` (three sub-cases) + `test_handle_attempt_merge_impl_still_retargets_via_shared_helper`. |
-| `packages/foreman/tests/reconciler/test_rules.py` | Add `test_retarget_impl_pr_to_default_rule_eligibility` (four sub-cases). |
+| `packages/foreman/tests/reconciler/test_rules.py` | Add `test_retarget_impl_pr_to_default_rule_eligibility` (six sub-cases: original four + one-shot gate already-fired + has_unterminated mid-flight). Add `test_retarget_then_dispatch_reviewer_impl_on_next_tick` end-to-end pin for the precedence-138→precedence-140 handoff. |
 
 No expected changes to:
 
@@ -383,7 +414,9 @@ No expected changes to:
 
 - **Run the retarget at PR-open time inside the Worker** instead of at the reconciler tick layer. Rejected because the Worker doesn't know whether the spec PR has merged at the moment it creates the impl PR — the safety guard (`is_pr_merged_for_branch`) is a state check that belongs to the reconciler. Plus the Worker is invoked once per ticket; the reconciler ticks repeatedly, so retargeting from the reconciler closes the race window where the Worker happened to create the impl PR before the spec merge completed.
 
-- **Add `base_ref` to `PRState` and let the rule predicate check `ctx.pr.base_ref != default_branch` directly.** Rejected because it expands the GraphQL observer's query surface (one more field to fetch per PR) for no functional gain — the helper's idempotence already handles the no-op case. Cleaner: keep the snapshot minimal, defer the host call to the action handler.
+- **Add `base_ref` to `PRState` and let the rule predicate check `ctx.pr.base_ref != default_branch` directly.** Rejected because it expands the GraphQL observer's query surface (one more field to fetch per PR) for marginal gain — the `count_completed`-based one-shot gate on the predicate already keeps the rule from re-firing without snapshot-level base information. Cleaner: keep the snapshot minimal, defer the host call to the action handler, and rely on the ExecutionLog gate for one-shot idempotence (the same pattern `dispatch_reviewer_impl` and `dispatch_fixer_impl` already use).
+
+- **Skip the predicate-level one-shot gate and rely only on the action-handler's internal short-circuit.** Rejected — this is the deadlock path. The action handler's `current_base != spec_branch_name` check makes a misfire harmless but doesn't keep the predicate False on subsequent ticks. Because `evaluate_with_rule` is first-match-wins and the retarget rule sits at precedence 138 (one slot before `dispatch_reviewer_impl` at 140), a predicate that keeps matching shadows the Reviewer dispatch forever, and the `foreman:impl-review` label never advances. The one-shot gate is the predicate-level mechanism that flips False on tick N+1 so precedence 140 gets a turn.
 
 - **Place the new rule at precedence 142 (after `dispatch_reviewer_impl`).** Rejected — the retarget must precede the reviewer dispatch so the Reviewer sees the post-retarget base. Precedence 138 is correct.
 
@@ -428,4 +461,4 @@ No expected changes to:
   - `packages/foreman/src/foreman/reconciler/rules.py:683-689` — `_PROGRESS_RULES`; gains the new rule at precedence 138.
   - `packages/foreman/src/foreman/reconciler/host.py:106-151` — `retarget_pr_base`, `get_pr_base_ref`, `is_pr_merged_for_branch`, `get_default_branch` host methods (foreman#279); reused by the shared helper.
   - `packages/foreman/src/foreman/roles/worker.py:450-488` — `_create_pull_with_base_fallback`; preserved as defense in depth (not modified by this spec).
-  - `packages/foreman/tests/test_roles_reviewer.py:938` — `_seed_clone_with_spec_branch` fixture pattern reused for the new regression tests.
+  - `packages/foreman/tests/test_roles_reviewer.py:254` — `_seed_clone_with_spec_branch` fixture definition. The new `_seed_clone_with_bare_origin` helper added by this spec composes with it (initializes a separate bare repo, repoints origin, pushes branches) so the missing-ref simulation operates on a real bare origin instead of the working clone itself.
