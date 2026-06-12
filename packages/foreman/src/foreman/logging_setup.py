@@ -11,17 +11,17 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-# foreman#131: marker attribute attached to handlers this module installs,
-# so re-calling ``configure_daemon_logging`` can drop ours-only and leave
-# pytest's ``LogCaptureHandler`` (or any other third-party attachment) in
-# place. Without this, a test_cli case that runs the daemon CLI strips
-# caplog's handler for the rest of the pytest session and downstream
-# tests that depend on ``caplog`` fail mysteriously.
-_FOREMAN_OWNED_HANDLER = "__foreman_owned_handler__"
+# foreman#131: mark handlers we install so re-entry can remove ours
+# without stripping third-party handlers (e.g., pytest's caplog
+# LogCaptureHandler). Without this, calling ``configure_daemon_logging``
+# from a test breaks caplog capture for every downstream test in the
+# same pytest session.
+_FOREMAN_OWNED_HANDLER = "_foreman_owned_handler"
 
 _STANDARD_RECORD_FIELDS = {
     "args",
@@ -85,25 +85,25 @@ def configure_daemon_logging(
     Two handlers attached:
     - **FileHandler** writing JSON lines to ``log_path`` — machine-readable
       audit log, includes every ``extra={...}`` field at the top level.
-    - **RichHandler** writing pretty colored output to stderr — for humans
-      watching the foreground daemon. Suppressed when ``console=False``
-      (e.g., in tests that import this function but don't want terminal
-      output).
+    - **StreamHandler** writing JSON lines to ``sys.stdout`` —
+      machine-readable mirror of the file payload so
+      ``docker logs <container>`` and any log-aggregator that consumes
+      container stdout see the same records, one per line. Suppressed
+      when ``console=False`` (e.g., in tests that import this function
+      but don't want terminal output) — FileHandler only.
 
-    Idempotent — re-calling replaces foreman-installed handlers but
-    preserves any third-party handlers (notably pytest's
-    ``LogCaptureHandler`` for ``caplog``) so test capture isn't
-    disturbed by a CLI invocation. foreman#131: previously
-    ``handlers.clear()`` nuked caplog's handler when a test_cli case
-    ran the daemon CLI, breaking subsequent caplog-based assertions in
-    the same pytest session.
+    foreman#131 guarantee: re-calling this function replaces only the
+    handlers it installed itself — third-party handlers (e.g., pytest's
+    caplog ``LogCaptureHandler``) are preserved. Handlers we install
+    carry the ``_FOREMAN_OWNED_HANDLER`` attribute; the cleanup filter
+    only removes those, leaving everything else attached.
     """
     log_path = Path(log_path).expanduser()
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     foreman_logger = logging.getLogger("foreman")
-    # Drop only handlers we installed (marked with _FOREMAN_OWNED_HANDLER);
-    # keep everything else (pytest LogCaptureHandler, user attachments, etc).
+    # foreman#131: only strip handlers WE installed. Preserves
+    # third-party handlers across re-entry.
     foreman_logger.handlers[:] = [
         h
         for h in foreman_logger.handlers
@@ -116,21 +116,12 @@ def configure_daemon_logging(
     foreman_logger.addHandler(file_handler)
 
     if console:
-        # Imported lazily so tests that don't exercise this branch don't
-        # need rich installed at import time.
-        from rich.console import Console
-        from rich.logging import RichHandler
-
-        rich_handler = RichHandler(
-            console=Console(stderr=True),
-            show_time=True,
-            show_path=False,
-            rich_tracebacks=True,
-            markup=False,
-        )
-        rich_handler.setFormatter(logging.Formatter("%(message)s"))
-        setattr(rich_handler, _FOREMAN_OWNED_HANDLER, True)
-        foreman_logger.addHandler(rich_handler)
+        # foreman#138 (PR #207): mirror to stdout as JSON so
+        # ``docker logs <container>`` sees the same payload as the file.
+        stream_handler = logging.StreamHandler(stream=sys.stdout)
+        stream_handler.setFormatter(_JsonLinesFormatter())
+        setattr(stream_handler, _FOREMAN_OWNED_HANDLER, True)
+        foreman_logger.addHandler(stream_handler)
 
     foreman_logger.setLevel(level.upper())
     foreman_logger.propagate = False
