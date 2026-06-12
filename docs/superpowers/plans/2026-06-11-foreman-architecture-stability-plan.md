@@ -1052,6 +1052,243 @@ The second assertion is the one that would have flagged #197 specifically the mo
 5. **Verify on dogfood** — file a test ticket, run it through the loop, confirm impl PR base is retargeted and merge commit lands on main.
 6. **THEN** D3 dead-code excise can proceed — at this point `daemon_runners.merge_impl_pr` has no unique correctness over the v3 path.
 
+#### D9 spec sketch — exact code-level changes (Worker lift-and-paste, 2026-06-11 21:30 PM)
+
+Read-only investigation produced this concrete spec. Five code locations, all in `packages/foreman/src/foreman/reconciler/` and `packages/foreman/tests/reconciler/`. The Worker doing D9 can lift these blocks verbatim.
+
+**Architectural note on host wrappers:** `V3GitHubHost` (in `reconciler/v3_host.py`) is a thin delegation wrapper around `self._v2` (the v1/v2 `GitHubDaemonHost` in `daemon_host.py`). The four host methods D9 needs already exist on `_v2`. The Worker only writes delegation wrappers, not new implementations. **When Decision 3 excises v2 later, those four wrappers will need to be flattened into V3GitHubHost — replacing `self._v2.foo(...)` with direct implementations.** This sequencing is acceptable: D9 ships fast with delegation, D3's excise pass does the flatten as part of its scope.
+
+**Site 1 — `packages/foreman/src/foreman/reconciler/host.py:43` — extend `ReconcilerHost` Protocol with four method declarations:**
+
+Insert after the existing `update_branch(...)` declaration (around line 105), keeping protocol-stub style (`...` body):
+
+```python
+def retarget_pr_base(
+    self, *, owner: str, repo: str, pr_number: int, new_base: str
+) -> None:
+    """Retarget an open PR's base branch via the GitHub API.
+
+    Used by ``attempt_merge_impl`` to point an impl PR at the default
+    branch before merge when the spec PR has already merged. Without
+    this guard, the impl PR's squash commit lands on the
+    about-to-be-deleted spec branch — an orphan commit unreachable
+    from main (issue #62, recurrence diagnosed in foreman#XXX).
+    """
+    ...
+
+def get_pr_base_ref(
+    self, *, owner: str, repo: str, pr_number: int
+) -> str:
+    """Return the PR's current base branch ref.
+
+    Used by ``attempt_merge_impl`` to decide whether retargeting is
+    needed (idempotency: skip the retarget if base is already the
+    default branch).
+    """
+    ...
+
+def is_pr_merged_for_branch(
+    self, *, owner: str, repo: str, branch: str
+) -> bool:
+    """Return True iff a closed, merged PR exists whose head == ``branch``.
+
+    Used by ``attempt_merge_impl`` as the spec-PR-merged predicate:
+    only retarget the impl PR if the spec PR has actually landed,
+    otherwise we'd merge impl content depending on un-landed spec.
+    """
+    ...
+
+def get_default_branch(self, *, owner: str, repo: str) -> str:
+    """Return the repo's default branch name (typically ``main``).
+
+    Used by ``attempt_merge_impl`` as the retarget destination so the
+    impl PR's squash commit lands on a reachable ref.
+    """
+    ...
+```
+
+**Site 2 — `packages/foreman/src/foreman/reconciler/v3_host.py:474` — add four delegation wrappers to `V3GitHubHost`:**
+
+Insert after the existing `merge_pr(...)` method (around line 497, before `_enqueue_pull_request`):
+
+```python
+def retarget_pr_base(
+    self, *, owner: str, repo: str, pr_number: int, new_base: str
+) -> None:
+    self._v2.retarget_pr_base(f"{owner}/{repo}", pr_number, new_base)
+
+def get_pr_base_ref(
+    self, *, owner: str, repo: str, pr_number: int
+) -> str:
+    return self._v2.get_pr_base_ref(f"{owner}/{repo}", pr_number)
+
+def is_pr_merged_for_branch(
+    self, *, owner: str, repo: str, branch: str
+) -> bool:
+    return self._v2.is_pr_merged_for_branch(f"{owner}/{repo}", branch)
+
+def get_default_branch(self, *, owner: str, repo: str) -> str:
+    return self._v2.get_default_branch(f"{owner}/{repo}")
+```
+
+**Site 3 — `packages/foreman/src/foreman/reconciler/actions.py` — add import and retarget guard:**
+
+3a. Add import near the top of the file (with the other foreman imports):
+
+```python
+from foreman.branches import spec_branch
+```
+
+3b. Modify `_handle_attempt_merge` at line 408. Insert the retarget guard between the existing `if ctx.pr is None:` check (line 440-443) and the `mergeability = host.get_pr_mergeability(...)` call (line 444):
+
+```python
+    # foreman#XXX retarget guard: when handling an impl PR whose base
+    # still points at the spec branch AND the spec PR has merged, the
+    # impl PR must be retargeted to the default branch before merge.
+    # Without this, the squash commit lands on the about-to-be-deleted
+    # spec branch — an orphan commit unreachable from main. Mirrors
+    # the v1 daemon_runners.merge_impl_pr retarget step (issue #62);
+    # the v3 reconciler migration did not port this guard.
+    #
+    # Conditional on two checks:
+    # 1. impl PR's current base IS the spec branch — skip if already
+    #    retargeted (idempotency under crash re-enqueue).
+    # 2. the spec PR has merged — skip if the spec is still pending,
+    #    since retargeting to main and merging would land impl changes
+    #    that depend on un-landed spec changes.
+    if target == "impl":
+        spec_branch_name = spec_branch(ctx.issue.number)
+        current_base = host.get_pr_base_ref(
+            owner=ctx.snapshot.owner,
+            repo=ctx.snapshot.repo,
+            pr_number=ctx.pr.number,
+        )
+        if current_base == spec_branch_name and host.is_pr_merged_for_branch(
+            owner=ctx.snapshot.owner,
+            repo=ctx.snapshot.repo,
+            branch=spec_branch_name,
+        ):
+            default_branch = host.get_default_branch(
+                owner=ctx.snapshot.owner,
+                repo=ctx.snapshot.repo,
+            )
+            host.retarget_pr_base(
+                owner=ctx.snapshot.owner,
+                repo=ctx.snapshot.repo,
+                pr_number=ctx.pr.number,
+                new_base=default_branch,
+            )
+            logger.info(
+                "attempt_merge_impl: retargeted PR %s/%s#%d base %s → %s "
+                "(spec PR for issue #%d has merged; preventing orphan-on-spec-branch)",
+                ctx.snapshot.owner,
+                ctx.snapshot.repo,
+                ctx.pr.number,
+                spec_branch_name,
+                default_branch,
+                ctx.issue.number,
+            )
+```
+
+**Important:** the retarget happens BEFORE `host.get_pr_mergeability(...)` because retargeting changes GitHub's `mergeStateStatus` computation. Reading mergeability after the retarget gives the correct state for the next branch of the state machine.
+
+**Site 4 — `packages/foreman/src/foreman/reconciler/rules.py:557-570` — strengthen `_impl_pr_merged_label_lagging` (belt-and-suspenders defense):**
+
+Currently the rule advances to `foreman:done` on `ctx.pr.is_merged`. Add a merge-target verification so even if the retarget guard at Site 3 ever fails, the loop refuses to label a ticket done with orphaned content:
+
+```python
+# (After the existing is_merged check, before returning True)
+# foreman#XXX defense-in-depth: even if attempt_merge_impl's retarget
+# guard fires correctly, we double-check here that the impl PR's
+# merge commit is reachable from the default branch before marking
+# the issue done. Catches: (a) any future regression of the retarget
+# guard, (b) any direct-API merge that bypasses the guard.
+if not host.is_commit_in_default_branch(
+    owner=ctx.snapshot.owner,
+    repo=ctx.snapshot.repo,
+    commit_oid=ctx.pr.merge_commit_oid,
+):
+    return False  # orphan; will surface via different rule path
+return True
+```
+
+This requires a fifth host method, `is_commit_in_default_branch`, added at the same three sites (Protocol declaration, V3GitHubHost delegation, daemon_host.py implementation — the v1/v2 host doesn't currently have this method, so a real implementation is needed there). **Workable but expanding scope.** Worker call: implement Site 4 only if the dogfood test at step 5 passes cleanly without it; otherwise defer to a follow-up PR. The retarget guard at Site 3 is the primary fix; Site 4 is defense-in-depth.
+
+**Site 5 — `packages/foreman/tests/reconciler/test_reconciler_e2e.py:28` — update `_StubHost` fake:**
+
+Add four (or five, if Site 4 lands) stub methods to `_StubHost` so existing tests still satisfy the extended Protocol. Default behavior: return values that DON'T trigger the retarget (current_base != spec_branch, is_pr_merged_for_branch returns False) so existing tests' merge paths don't change. New test (Q3) drives the retarget path explicitly.
+
+Same treatment for `tests/test_roles_worker.py:370:_StubHost` if and only if the worker test exercises `_handle_attempt_merge` (probably doesn't — worker tests focus on the role, not the reconciler's merge handler — but worth a 30-second check).
+
+**Site 6 — `packages/foreman/tests/reconciler/test_reconciler_e2e.py` — add the Q3 regression test:**
+
+Two new tests, both targeting the retarget path. Concrete shape, mostly setup boilerplate:
+
+```python
+def test_attempt_merge_impl_retargets_base_to_main_when_spec_merged():
+    """foreman#XXX: impl PR's base must be retargeted to main after
+    spec PR merges, otherwise the squash commit orphans on the
+    about-to-be-deleted spec branch."""
+    host = _StubHost()
+    host.set_pr_base_ref("o", "r", 200, "foreman/issue-100")  # impl on spec branch
+    host.set_spec_pr_merged("o", "r", "foreman/issue-100", True)
+    host.set_default_branch("o", "r", "main")
+    host.set_pr_mergeability("o", "r", 200, state="CLEAN")
+    ctx = make_action_context(issue=100, pr_number=200, snapshot_owner="o", snapshot_repo="r")
+
+    _handle_attempt_merge(ctx, host, target="impl")
+
+    assert host.retarget_calls == [
+        {"owner": "o", "repo": "r", "pr_number": 200, "new_base": "main"}
+    ], "Impl PR base must be retargeted to default branch before merge"
+    assert host.merge_calls == [
+        {"owner": "o", "repo": "r", "pr_number": 200, "mechanism": ...}
+    ], "Merge must happen after retarget"
+
+def test_attempt_merge_impl_skips_retarget_when_already_on_main():
+    """Idempotency: if impl PR was already retargeted (e.g., a previous
+    handler invocation succeeded but the dispatcher re-enqueued), the
+    retarget step must skip — we read current_base each tick."""
+    host = _StubHost()
+    host.set_pr_base_ref("o", "r", 200, "main")  # already retargeted
+    host.set_default_branch("o", "r", "main")
+    host.set_pr_mergeability("o", "r", 200, state="CLEAN")
+    ctx = make_action_context(issue=100, pr_number=200, snapshot_owner="o", snapshot_repo="r")
+
+    _handle_attempt_merge(ctx, host, target="impl")
+
+    assert host.retarget_calls == [], "Idempotent: no retarget when base is already default"
+
+def test_attempt_merge_impl_skips_retarget_when_spec_pr_unmerged():
+    """Safety: do NOT retarget the impl PR if the spec PR has not
+    merged yet — merging impl-on-main with unlanded spec dependencies
+    would corrupt main."""
+    host = _StubHost()
+    host.set_pr_base_ref("o", "r", 200, "foreman/issue-100")  # impl on spec branch
+    host.set_spec_pr_merged("o", "r", "foreman/issue-100", False)  # spec PR NOT merged
+    ctx = make_action_context(issue=100, pr_number=200, snapshot_owner="o", snapshot_repo="r")
+
+    _handle_attempt_merge(ctx, host, target="impl")
+
+    assert host.retarget_calls == [], "Safety: no retarget if spec PR unmerged"
+    # The merge attempt should also be skipped or surface needs-help —
+    # impl PR on a still-open spec branch cannot CLEAN merge.
+```
+
+The first test is the **single most important regression guard.** It directly tests the scenario that produced 15+ orphan PRs. If this test ever fails on a future change, that change is reintroducing the orphan bug.
+
+##### Scope-of-D9 summary for the Worker
+
+Touching 4 files, 6 named code locations:
+- `reconciler/host.py` — Protocol additions (Site 1)
+- `reconciler/v3_host.py` — delegation wrappers (Site 2)
+- `reconciler/actions.py` — import + retarget guard in `_handle_attempt_merge` (Site 3)
+- `reconciler/rules.py` — defense-in-depth check (Site 4, conditional)
+- `tests/reconciler/test_reconciler_e2e.py` — stub extensions (Site 5) + new tests (Site 6)
+- Optional: `tests/test_roles_worker.py:_StubHost` if it tests the merge handler
+
+Estimated effort: 2-4 hours of focused work (mostly mechanical given the spec). Should fit one TDD Worker session.
+
 ---
 
 ## Phase 1 closure (2026-06-11 evening)
