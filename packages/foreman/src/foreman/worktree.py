@@ -605,19 +605,6 @@ class WorktreeManager:
         _maybe_sync_worktree_deps(wt_path, role_token=self._role_token)
         return wt_path
 
-    def cleanup(self, clone_path: Path, worktree_path: Path) -> None:
-        """Remove a worktree. Safe to call on already-removed worktrees."""
-        if not worktree_path.exists():
-            return
-        subprocess.run(
-            ["git", "worktree", "remove", "--force", str(worktree_path)],
-            cwd=clone_path,
-            check=True,
-            capture_output=True,
-            text=True,
-            env=self._env(),
-        )
-
 
 def _resolve_default_branch(clone_path: Path, *, role_token: str | None = None) -> str:
     """Return the clone's default branch name (e.g. ``"main"``, ``"master"``).
