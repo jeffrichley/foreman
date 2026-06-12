@@ -14,6 +14,7 @@ from foreman.worktree import (
     WorktreeManager,
     _fetch_origin_branch,
     _origin_branch_exists,
+    fetch_origin_default_branch,
 )
 
 
@@ -1772,3 +1773,126 @@ def test_ensure_clone_creates_clone_when_missing(tmp_path: Path) -> None:
     ensure_clone(repo_url=str(origin), clone_path=target)
     second_mtime = (target / ".git").stat().st_mtime
     assert first_mtime == second_mtime, "ensure_clone must be idempotent on second call"
+
+
+# ----------------------------------------------------------------------
+# foreman#291 — fetch_origin_default_branch + per-dispatch defense in depth
+# ----------------------------------------------------------------------
+
+
+def test_fetch_origin_default_branch_refreshes_origin_default(tmp_path: Path) -> None:
+    """``fetch_origin_default_branch`` resolves the default branch name
+    via ``origin/HEAD`` and calls ``_fetch_origin_branch`` against it.
+    Land a fresh commit on origin (bypassing the client clone) and
+    confirm that calling the helper updates the local
+    ``refs/remotes/origin/main`` ref to the new tip.
+    """
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    origin_path = tmp_path / "origin.git"
+    _init_git_repo(clone, origin_path=origin_path)
+
+    # Pre-fetch baseline.
+    baseline_origin_tip = subprocess.run(
+        ["git", "rev-parse", "origin/main"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    # Land a fresh commit on origin via a side checkout so the client
+    # clone's ``refs/remotes/origin/main`` ref is stale.
+    side = tmp_path / "side"
+    subprocess.run(
+        ["git", "clone", str(origin_path), str(side)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "side@example.com"],
+        cwd=side,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Side"],
+        cwd=side,
+        check=True,
+        capture_output=True,
+    )
+    (side / "new.txt").write_text("upstream advanced\n")
+    subprocess.run(
+        ["git", "add", "new.txt"], cwd=side, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "upstream advanced"],
+        cwd=side,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "push", "origin", "main"], cwd=side, check=True, capture_output=True
+    )
+
+    # Confirm precondition: client clone is still on the old tip.
+    cached_origin_tip = subprocess.run(
+        ["git", "rev-parse", "origin/main"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert cached_origin_tip == baseline_origin_tip, (
+        "test setup: client clone's cached origin/main must NOT have moved "
+        "without a fetch"
+    )
+
+    # The fix: fetch_origin_default_branch resolves the default branch
+    # name and updates the cached origin ref.
+    fetch_origin_default_branch(clone)
+
+    refreshed_origin_tip = subprocess.run(
+        ["git", "rev-parse", "origin/main"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert refreshed_origin_tip != baseline_origin_tip, (
+        "After fetch_origin_default_branch, client's origin/main must "
+        "track the new upstream tip"
+    )
+
+
+def test_create_still_fetches_base_branch_per_dispatch(tmp_path: Path) -> None:
+    """foreman#291 defense in depth: the per-dispatch fetch in
+    ``WorktreeManager.create`` must still fire regardless of whether
+    the per-poll ``OnPollFetch`` strategy is selected at the
+    reconciler scope. Removing one of the two would re-open the drift
+    window the issue exists to close.
+    """
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    _init_git_repo(clone, origin_path=tmp_path / "origin.git")
+
+    real_run = subprocess.run
+    fetched_branches: list[str] = []
+
+    def recording_run(cmd: Any, *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if isinstance(cmd, list) and len(cmd) >= 4 and cmd[0] == "git" and cmd[1] == "fetch":
+            # cmd looks like ['git', 'fetch', '--quiet', '--prune', 'origin', '<branch>']
+            fetched_branches.append(cmd[-1])
+        return real_run(cmd, *args, **kwargs)
+
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+
+    with patch("foreman.worktree.subprocess.run", side_effect=recording_run):
+        mgr.create(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    assert "main" in fetched_branches, (
+        "WorktreeManager.create must still fetch origin/main per dispatch "
+        "even when a per-poll refresh strategy runs at reconciler scope; "
+        f"observed fetches: {fetched_branches!r}"
+    )

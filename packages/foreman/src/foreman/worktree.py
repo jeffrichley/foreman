@@ -671,8 +671,15 @@ def _fetch_origin_branch(
     ``role_token`` overrides ``GH_TOKEN`` so the fetch authenticates as
     the role bot rather than inheriting the daemon's identity.
     """
+    # foreman#291: ``--prune`` evicts refs that no longer exist on
+    # origin (e.g., feature branches deleted via PR merge with
+    # auto-delete). Complementary to the explicit ``update-ref -d``
+    # self-heal below (foreman#122): prune handles general cleanup
+    # silently, while the self-heal targets the specific
+    # "couldn't-find-remote-ref" rc=128 case that fires when the
+    # named branch IS the one that disappeared.
     result = subprocess.run(
-        ["git", "fetch", "--quiet", "origin", branch],
+        ["git", "fetch", "--quiet", "--prune", "origin", branch],
         cwd=clone_path,
         check=False,
         capture_output=True,
@@ -716,6 +723,27 @@ def _fetch_origin_branch(
         f"origin ref. stderr:\n{stderr.strip()}",
         file=sys.stderr,
     )
+
+
+def fetch_origin_default_branch(
+    clone_path: Path,
+    *,
+    role_token: str | None = None,
+) -> None:
+    """Best-effort refresh of ``origin/<default-branch>``.
+
+    Resolves the default-branch name via :func:`_resolve_default_branch`
+    (which handles ``origin/HEAD`` missing by falling back to ``"main"``),
+    then calls :func:`_fetch_origin_branch` against it. Same best-effort
+    contract as the underlying helper: network failures are logged as
+    warnings and swallowed.
+
+    Used by :class:`foreman.reconciler.clone_refresh.OnPollFetch`
+    (foreman#291) to keep the container clone's ``origin/<default>`` ref
+    fresh between role dispatches.
+    """
+    default = _resolve_default_branch(clone_path, role_token=role_token)
+    _fetch_origin_branch(clone_path, default, role_token=role_token)
 
 
 def _local_branch_exists(
