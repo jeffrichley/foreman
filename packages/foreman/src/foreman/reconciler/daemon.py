@@ -48,9 +48,18 @@ def _pick_pr_for_ticket(
     Routing by label phase:
 
     - ``foreman:planning`` / ``foreman:plan-approved`` / ``foreman:spec-fix``
-      → spec PR (``foreman/issue-N``)
+      / ``foreman:merging-plan`` → spec PR (``foreman/issue-N``)
     - ``foreman:impl-review`` / ``foreman:impl-approved`` /
-      ``foreman:impl-fix`` → impl PR (``foreman/impl-N``)
+      ``foreman:impl-fix`` / ``foreman:merging-impl`` → impl PR
+      (``foreman/impl-N``)
+
+    The transitional ``foreman:merging-*`` labels are intentionally in their
+    side's phase set even though ``ADVANCE_LABEL_TO_MERGING_*`` keeps the
+    prior ``*-approved`` label alongside in production (so the picker would
+    have routed correctly via that label). Carrying the merging-* labels in
+    the phase set removes the fragile coupling — surfaced 2026-06-12 when
+    a manual relabel that dropped the approved label silently stalled
+    ``attempt_merge_impl`` for ~75 minutes (D9 dogfood verification).
 
     If the label set spans both phases (transient state during a label
     swap), prefer the impl PR — the later stage wins.
@@ -66,8 +75,18 @@ def _pick_pr_for_ticket(
     if not linked_prs:
         return None
 
-    spec_phase = {"foreman:planning", "foreman:plan-approved", "foreman:spec-fix"}
-    impl_phase = {"foreman:impl-review", "foreman:impl-approved", "foreman:impl-fix"}
+    spec_phase = {
+        "foreman:planning",
+        "foreman:plan-approved",
+        "foreman:spec-fix",
+        "foreman:merging-plan",
+    }
+    impl_phase = {
+        "foreman:impl-review",
+        "foreman:impl-approved",
+        "foreman:impl-fix",
+        "foreman:merging-impl",
+    }
 
     labels = set(issue.labels)
     prefer_spec = bool(labels & spec_phase)
