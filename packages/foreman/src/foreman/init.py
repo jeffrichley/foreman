@@ -49,6 +49,7 @@ from github import Github, GithubException
 
 from foreman.auth import fetch_app_metadata, mint_installation_token
 from foreman.config import AppsConfig, Config, load_config
+from foreman.labels import Label
 
 _log = logging.getLogger(__name__)
 
@@ -73,53 +74,59 @@ _DEFAULT_CONFIG_PATH = Path.home() / ".foreman" / "config.toml"
 # The Foreman labels created on the target repo. Order is intentional:
 # state labels first (in v3 pipeline order), then modifier labels, then
 # attempt counters. The structure mirrors the operator's mental model of
-# the pipeline rather than alphabetic order. Keep in sync with the
-# v3 reconciler rule catalog + role modules.
-_FOREMAN_LABELS: list[tuple[str, str, str]] = [
-    # name, color (no leading '#'), description
+# the pipeline rather than alphabetic order.
+#
+# D1 (architecture stability plan 2026-06-11): the name column is now
+# the :class:`foreman.labels.Label` StrEnum member rather than a raw
+# string. Equality with the bare string still works (StrEnum), and the
+# drift test in ``test_init.py`` pins that this catalog's name column
+# matches the :class:`Label` membership exactly — neither side can grow
+# a label the other doesn't have.
+_FOREMAN_LABELS: list[tuple[Label, str, str]] = [
+    # name (Label member), color (no leading '#'), description
     (
-        "foreman:plan",
+        Label.PLAN,
         "0E8A16",
         "Foreman: queue for planning (auto-transitions to foreman:planning)",
     ),
-    ("foreman:planning", "FBCA04", "Foreman: spec phase (Planner + Reviewer)"),
+    (Label.PLANNING, "FBCA04", "Foreman: spec phase (Planner + Reviewer)"),
     (
-        "foreman:plan-approved",
+        Label.PLAN_APPROVED,
         "0E8A16",
         "Foreman: spec approved, queued for Worker",
     ),
     (
-        "foreman:merging-plan",
+        Label.MERGING_PLAN,
         "FBCA04",
         "Foreman: attempting to merge the spec PR",
     ),
-    ("foreman:spec-fix", "D93F0B", "Foreman: spec PR needs human follow-up"),
-    ("foreman:impl-review", "FBCA04", "Foreman: impl PR ready for Reviewer"),
+    (Label.SPEC_FIX, "D93F0B", "Foreman: spec PR needs human follow-up"),
+    (Label.IMPL_REVIEW, "FBCA04", "Foreman: impl PR ready for Reviewer"),
     (
-        "foreman:impl-approved",
+        Label.IMPL_APPROVED,
         "0E8A16",
         "Foreman: impl approved, queued for merge",
     ),
     (
-        "foreman:merging-impl",
+        Label.MERGING_IMPL,
         "FBCA04",
         "Foreman: attempting to merge the impl PR",
     ),
-    ("foreman:impl-fix", "D93F0B", "Foreman: impl PR needs Fixer follow-up"),
+    (Label.IMPL_FIX, "D93F0B", "Foreman: impl PR needs Fixer follow-up"),
     (
-        "foreman:needs-help",
+        Label.NEEDS_HELP,
         "FBCA04",
         "Foreman: surfaced for human intervention",
     ),
-    ("foreman:hold", "BFD4F2", "Foreman: manual pause (blocks all rules)"),
-    ("foreman:done", "6F42C1", "Foreman: ticket complete"),
-    ("foreman:failed", "B60205", "Foreman: ticket exhausted retries (terminal)"),
-    ("foreman:impl-attempt-1", "BFD4F2", "Foreman: impl cycle attempt 1 of 3"),
-    ("foreman:impl-attempt-2", "BFD4F2", "Foreman: impl cycle attempt 2 of 3"),
-    ("foreman:impl-attempt-3", "BFD4F2", "Foreman: impl cycle attempt 3 of 3"),
-    ("foreman:fix-attempt-1", "BFD4F2", "Foreman: fix cycle attempt 1 of 3"),
-    ("foreman:fix-attempt-2", "BFD4F2", "Foreman: fix cycle attempt 2 of 3"),
-    ("foreman:fix-attempt-3", "BFD4F2", "Foreman: fix cycle attempt 3 of 3"),
+    (Label.HOLD, "BFD4F2", "Foreman: manual pause (blocks all rules)"),
+    (Label.DONE, "6F42C1", "Foreman: ticket complete"),
+    (Label.FAILED, "B60205", "Foreman: ticket exhausted retries (terminal)"),
+    (Label.IMPL_ATTEMPT_1, "BFD4F2", "Foreman: impl cycle attempt 1 of 3"),
+    (Label.IMPL_ATTEMPT_2, "BFD4F2", "Foreman: impl cycle attempt 2 of 3"),
+    (Label.IMPL_ATTEMPT_3, "BFD4F2", "Foreman: impl cycle attempt 3 of 3"),
+    (Label.FIX_ATTEMPT_1, "BFD4F2", "Foreman: fix cycle attempt 1 of 3"),
+    (Label.FIX_ATTEMPT_2, "BFD4F2", "Foreman: fix cycle attempt 2 of 3"),
+    (Label.FIX_ATTEMPT_3, "BFD4F2", "Foreman: fix cycle attempt 3 of 3"),
 ]
 
 # The four role names init knows about; mirrors :mod:`foreman.identity`.

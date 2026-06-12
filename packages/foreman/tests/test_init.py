@@ -854,3 +854,57 @@ def test_template_render_is_timestamp_stable() -> None:
             f"Template contains time-volatile marker {marker!r}; "
             "rendered output will drift across runs."
         )
+
+
+# ---------------------------------------------------------------------------
+# D1 (architecture stability plan 2026-06-11): drift detection between the
+# init catalog and the Label StrEnum. Init owns CREATION metadata (color +
+# description); labels module owns the string + classification. The two must
+# enumerate the same set; if they drift, the next ``foreman init`` either
+# creates labels the rules don't understand or omits labels that rules do.
+# ---------------------------------------------------------------------------
+
+
+def test_init_foreman_labels_matches_label_enum() -> None:
+    """Pin that the init catalog and the Label enum enumerate the same set.
+
+    Drift is the failure mode foreman#194 was supposed to prevent the
+    first time around (and the orphan-PR bug let regression sneak back
+    in). This is the durable artifact that catches it next time —
+    explicitly testing the cross-module agreement so adding a label in
+    one place without the other breaks loudly.
+    """
+    from foreman.labels import Label
+
+    init_names = {entry[0].value for entry in _FOREMAN_LABELS}
+    enum_names = {m.value for m in Label}
+    assert init_names == enum_names, (
+        f"In init catalog but not Label enum: {init_names - enum_names}; "
+        f"in Label enum but not init catalog: {enum_names - init_names}"
+    )
+
+
+def test_init_foreman_labels_uses_label_members_not_strings() -> None:
+    """The init catalog's name column must be a :class:`Label` member,
+    not a bare string. StrEnum equality means a bare string would
+    silently work at runtime; this test enforces the discipline that
+    the catalog goes through the typed source-of-truth."""
+    from foreman.labels import Label
+
+    for entry in _FOREMAN_LABELS:
+        assert isinstance(entry[0], Label), (
+            f"init catalog entry {entry!r} uses bare string for name; "
+            f"must be a Label member so drift-detection is structural"
+        )
+
+
+def test_init_foreman_labels_has_no_duplicate_names() -> None:
+    """Each Label must appear at most once in the init catalog. A
+    duplicate would cause ``_ensure_labels`` to attempt to create the
+    same label twice on a fresh repo, and the second create would 422
+    — currently silently treated as 'already existed.' Better to catch
+    duplicates in the catalog up front."""
+    names = [entry[0] for entry in _FOREMAN_LABELS]
+    assert len(names) == len(set(names)), (
+        f"Duplicate label in _FOREMAN_LABELS: {[n for n in names if names.count(n) > 1]}"
+    )
