@@ -636,10 +636,10 @@ class _FakeHost:
 def test_executor_rate_limit_trip_transitions_to_needs_help(
     tmp_path: Path,
 ) -> None:
-    """RATE_LIMIT_TRIP must: (a) remove the in-flight label, (b) add
-    ``foreman:needs-help``, (c) post a comment, and (d) write a
-    ``rate_limit_reset`` sentinel so the human's re-queue gives a fresh
-    window."""
+    """RATE_LIMIT_TRIP must: (a) add ``foreman:needs-help``, (b) post a
+    comment, and (c) write a ``rate_limit_reset`` sentinel so the human's
+    re-queue gives a fresh window. The in-flight label is NOT stripped
+    (cosmetic-only side effect dropped — see :ref:`test_executor_rate_limit_trip_preserves_in_flight_label`)."""
     issue = _issue(labels=("foreman:planning",))
     ctx = _ctx(tmp_path, issue)
     # Pre-seed 3 failures so the comment-builder has something to render.
@@ -655,12 +655,9 @@ def test_executor_rate_limit_trip_transitions_to_needs_help(
     )
     call_kinds = [c[0] for c in host.calls]
     assert "add_label" in call_kinds, host.calls
-    assert "remove_label" in call_kinds, host.calls
     assert "post_comment" in call_kinds, host.calls
     added = [c[1]["label"] for c in host.calls if c[0] == "add_label"]
-    removed = [c[1]["label"] for c in host.calls if c[0] == "remove_label"]
     assert "foreman:needs-help" in added, host.calls
-    assert "foreman:planning" in removed, host.calls
     # Reset sentinel written: count_recent_failures now reads 0.
     assert (
         ctx.log.count_recent_failures(
@@ -669,6 +666,81 @@ def test_executor_rate_limit_trip_transitions_to_needs_help(
             within_seconds=1800,
         )
         == 0
+    )
+
+
+def test_executor_rate_limit_trip_preserves_in_flight_label(
+    tmp_path: Path,
+) -> None:
+    """Pepper's criterion-check follow-up (2026-06-12): the trip does NOT
+    strip the role's in-flight label.
+
+    Keeping the in-flight label alongside ``foreman:needs-help`` after a
+    trip:
+      • Preserves the operational diagnostic ("tripped while planning")
+        so the human can see which phase the ticket was in at trip time
+      • Removes the crash-cascade footgun where the human re-adds the
+        wrong entry-point label at resume time → another set of failures
+        → another trip
+      • Makes the GitHub label-history audit trail strictly more
+        diagnostic ("Planner tripped, then needs-help applied")
+
+    Pinned positive: no ``remove_label`` call lands for the in-flight
+    label (the only label-write the trip emits is the ``add_label`` for
+    ``foreman:needs-help``).
+    """
+    issue = _issue(labels=("foreman:planning",))
+    ctx = _ctx(tmp_path, issue)
+    for _ in range(3):
+        _record_failure(ctx.log, ticket_id=ctx.ticket_id, action="dispatch_planner")
+    host = _FakeHost()
+    execute_action(
+        Action.RATE_LIMIT_TRIP,
+        ctx,
+        host=host,
+        rule_name="rate_limit_consecutive_failures:dispatch_planner",
+        dry_run=False,
+    )
+    removed = [c[1]["label"] for c in host.calls if c[0] == "remove_label"]
+    assert "foreman:planning" not in removed, host.calls
+    assert removed == [], (
+        f"trip must not emit any remove_label call; got {removed}"
+    )
+
+
+def test_post_trip_predicate_state_does_not_redispatch_despite_in_flight(
+    tmp_path: Path,
+) -> None:
+    """Pepper's criterion-check follow-up (2026-06-12): keeping the
+    in-flight label after a trip MUST NOT let the daemon re-dispatch
+    the same role on the next tick.
+
+    The safety story: ``needs-help`` at higher precedence
+    (``needs_help_label`` rule) short-circuits all forward-progress
+    rules. So even with ``foreman:planning`` still present after the
+    trip, evaluating the full rule catalog against the post-trip state
+    yields NOOP (no DISPATCH_*) — preserving the trip's protection
+    contract regardless of whether the in-flight label was stripped.
+    """
+    from foreman.reconciler.rules import RULES
+
+    # Simulate the post-trip state: in-flight label coexists with needs-help.
+    issue = _issue(labels=("foreman:planning", "foreman:needs-help"))
+    ctx = _ctx(tmp_path, issue)
+    # Seed a fresh batch of failures — the in-flight presence alone could
+    # tempt a dispatch rule, but needs-help at higher precedence prevents it.
+    for _ in range(3):
+        _record_failure(ctx.log, ticket_id=ctx.ticket_id, action="dispatch_planner")
+    action = evaluate(ctx, rules=RULES)
+    # Trip's own predicate also returns False (needs-help gates it),
+    # so RATE_LIMIT_TRIP cannot re-fire either.
+    assert action is not Action.DISPATCH_PLANNER, (
+        f"dispatcher must not re-dispatch Planner while needs-help is set; "
+        f"got {action}"
+    )
+    assert action is not Action.RATE_LIMIT_TRIP, (
+        f"trip's predicate must not re-match while needs-help is set; "
+        f"got {action}"
     )
 
 
@@ -1026,6 +1098,8 @@ def test_runaway_pattern_is_killed_by_rate_limit_within_n_plus_one_dispatches(
 
     # The trip transitioned the ticket to foreman:needs-help so the
     # next observer fetch will route it to the safety tier rather than
-    # forward-progress.
+    # forward-progress. The in-flight label is intentionally preserved
+    # (foreman#228 cosmetic-strip dropped 2026-06-12) — see
+    # ``test_executor_rate_limit_trip_preserves_in_flight_label``.
     assert "foreman:needs-help" in current_issue.labels
-    assert "foreman:planning" not in current_issue.labels
+    assert "foreman:planning" in current_issue.labels

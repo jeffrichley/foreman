@@ -338,18 +338,29 @@ def _handle_rate_limit_trip(
     #      trip's protection is broken. Wrap and log loudly, but do
     #      NOT abort the remaining steps — a label-add failure today
     #      is far more recoverable than a permanently-stuck loop.
-    #   2. ``remove_label(in_flight)`` — hygiene. A failed remove
-    #      leaves the ticket double-labeled (in-flight + needs-help);
-    #      the higher-precedence ``needs_help_label`` rule wins, so
-    #      forward-progress dispatch stays gated.
-    #   3. ``post_comment`` — diagnostic. Operator loses the last-N
+    #   2. ``post_comment`` — diagnostic. Operator loses the last-N
     #      failure summary if this fails; the label transition (and
     #      the structural protection) still holds.
-    #   4. ``write_rate_limit_reset`` — load-bearing for the contract.
+    #   3. ``write_rate_limit_reset`` — load-bearing for the contract.
     #      Without the sentinel, a same-window human re-queue trips
     #      immediately at N=1 (the re-trip whiplash Pepper warned
     #      about). Log loudly on failure: this is the one to wake
     #      somebody for.
+    #
+    # foreman#228 originally stripped the role's in-flight label as a
+    # fourth step ("clean label state"). That strip was cosmetic, not
+    # load-bearing — verified with Pepper 2026-06-12. Two reasons it
+    # got removed:
+    #   • Operationally it deletes a useful diagnostic ("tripped while
+    #     planning") and forces the operator to remember which entry-
+    #     point label to re-add at resume time. Getting that wrong
+    #     induces a crash cascade — another set of failures, another
+    #     trip, another cycle.
+    #   • Keeping the in-flight label alongside needs-help makes the
+    #     GitHub label-history audit trail strictly more diagnostic.
+    # The trip predicate gates on ``needs-help in labels: return False``
+    # FIRST so the rule cannot re-fire on its own output, regardless
+    # of whether the in-flight label is still present.
     try:
         host.add_label(
             owner=ctx.snapshot.owner,
@@ -366,21 +377,6 @@ def _handle_rate_limit_trip(
             ctx.issue.number,
             rule_name,
         )
-    if in_flight_label in ctx.issue.labels:
-        try:
-            host.remove_label(
-                owner=ctx.snapshot.owner,
-                repo=ctx.snapshot.repo,
-                issue=ctx.issue.number,
-                label=in_flight_label,
-            )
-        except Exception:
-            logger.exception(
-                "RATE_LIMIT_TRIP: failed to remove %s on issue %d; ticket "
-                "will carry both labels until the next reconcile cycle",
-                in_flight_label,
-                ctx.issue.number,
-            )
     try:
         host.post_comment(
             owner=ctx.snapshot.owner,
