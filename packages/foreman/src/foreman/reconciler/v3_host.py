@@ -94,6 +94,14 @@ class _V2HostLike(Protocol):
     def post_issue_comment(self, repo: str, issue_number: int, body: str) -> None: ...
     def merge_pull_request(self, repo: str, pr_number: int) -> None: ...
 
+    # foreman#279 — v2 surface for the impl-PR retarget guard. V3GitHubHost
+    # delegates the new ReconcilerHost methods to these existing v2
+    # implementations on ``daemon_host.GitHubDaemonHost``.
+    def retarget_pr_base(self, repo: str, pr_number: int, new_base: str) -> None: ...
+    def get_pr_base_ref(self, repo: str, pr_number: int) -> str: ...
+    def is_pr_merged_for_branch(self, repo: str, branch: str) -> bool: ...
+    def get_default_branch(self, repo: str) -> str: ...
+
 
 class _SubprocessLike(Protocol):
     """The minimal subprocess surface V3 needs."""
@@ -494,6 +502,28 @@ class V3GitHubHost:
             )
         else:
             self._v2.merge_pull_request(f"{owner}/{repo}", pr_number)
+
+    def retarget_pr_base(
+        self, *, owner: str, repo: str, pr_number: int, new_base: str
+    ) -> None:
+        """Delegate to v2 daemon_host. See ReconcilerHost.retarget_pr_base."""
+        self._v2.retarget_pr_base(f"{owner}/{repo}", pr_number, new_base)
+
+    def get_pr_base_ref(
+        self, *, owner: str, repo: str, pr_number: int
+    ) -> str:
+        """Delegate to v2 daemon_host. See ReconcilerHost.get_pr_base_ref."""
+        return self._v2.get_pr_base_ref(f"{owner}/{repo}", pr_number)
+
+    def is_pr_merged_for_branch(
+        self, *, owner: str, repo: str, branch: str
+    ) -> bool:
+        """Delegate to v2 daemon_host. See ReconcilerHost.is_pr_merged_for_branch."""
+        return self._v2.is_pr_merged_for_branch(f"{owner}/{repo}", branch)
+
+    def get_default_branch(self, *, owner: str, repo: str) -> str:
+        """Delegate to v2 daemon_host. See ReconcilerHost.get_default_branch."""
+        return self._v2.get_default_branch(f"{owner}/{repo}")
 
     def _enqueue_pull_request(
         self, *, owner: str, repo: str, pr_number: int
