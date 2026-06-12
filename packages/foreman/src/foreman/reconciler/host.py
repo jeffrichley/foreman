@@ -103,6 +103,52 @@ class ReconcilerHost(Protocol):
         re-evaluates.
         """
         ...
+    def retarget_pr_base(
+        self, *, owner: str, repo: str, pr_number: int, new_base: str
+    ) -> None:
+        """Retarget an open PR's base branch via the GitHub API.
+
+        Used by ``attempt_merge_impl`` to point an impl PR at the
+        default branch before merge once the spec PR has merged.
+        Without this guard, the impl PR's squash commit lands on the
+        about-to-be-deleted spec branch — an orphan commit unreachable
+        from main (see daemon_runners.merge_impl_pr's docstring for the
+        v1/v2 reference implementation and issue #62 for the original
+        failure mode; this v3 port closes foreman#279, the 15-orphan-PR
+        regression diagnosed 2026-06-11).
+
+        Raises on GitHub errors so the executor's catch path can record
+        an ``error`` termination row; the next poll re-evaluates.
+        """
+        ...
+    def get_pr_base_ref(
+        self, *, owner: str, repo: str, pr_number: int
+    ) -> str:
+        """Return the PR's current base branch ref name.
+
+        Used by ``attempt_merge_impl`` to decide whether retargeting is
+        needed (idempotency: skip the retarget if the PR's base is
+        already the default branch).
+        """
+        ...
+    def is_pr_merged_for_branch(
+        self, *, owner: str, repo: str, branch: str
+    ) -> bool:
+        """Return True iff a closed, merged PR exists with the given head branch.
+
+        Used by ``attempt_merge_impl`` as the spec-PR-merged predicate:
+        only retarget the impl PR if the spec PR has actually landed,
+        otherwise we'd be retargeting an impl PR whose changes depend
+        on unlanded spec changes.
+        """
+        ...
+    def get_default_branch(self, *, owner: str, repo: str) -> str:
+        """Return the repo's default branch name (typically ``main``).
+
+        Used by ``attempt_merge_impl`` as the retarget destination so
+        the impl PR's squash commit lands on a reachable ref.
+        """
+        ...
     def dispatch_role(
         self,
         *,

@@ -223,6 +223,63 @@ class _FakeHost:
         )
         return self.dispatch_role_return
 
+    # foreman#279 — retarget-guard test seams. Per-test override of
+    # the PR's current base ref + the spec-PR-merged predicate +
+    # the default branch. Defaults are tuned so existing
+    # attempt_merge_* tests stay green: current base is "main" (so
+    # the retarget conditional sees "already on default" and skips),
+    # spec PR is reported merged (irrelevant when base is already
+    # main), and the default branch is "main".
+    pr_base_ref_for: dict[int, str] = field(default_factory=dict)
+    spec_pr_merged_for_branch: dict[str, bool] = field(default_factory=dict)
+    default_branch_name: str = "main"
+
+    def retarget_pr_base(
+        self, *, owner: str, repo: str, pr_number: int, new_base: str
+    ) -> None:
+        self.calls.append(
+            (
+                "retarget_pr_base",
+                {
+                    "owner": owner,
+                    "repo": repo,
+                    "pr_number": pr_number,
+                    "new_base": new_base,
+                },
+            )
+        )
+
+    def get_pr_base_ref(
+        self, *, owner: str, repo: str, pr_number: int
+    ) -> str:
+        self.calls.append(
+            (
+                "get_pr_base_ref",
+                {"owner": owner, "repo": repo, "pr_number": pr_number},
+            )
+        )
+        return self.pr_base_ref_for.get(pr_number, "main")
+
+    def is_pr_merged_for_branch(
+        self, *, owner: str, repo: str, branch: str
+    ) -> bool:
+        self.calls.append(
+            (
+                "is_pr_merged_for_branch",
+                {"owner": owner, "repo": repo, "branch": branch},
+            )
+        )
+        return self.spec_pr_merged_for_branch.get(branch, True)
+
+    def get_default_branch(self, *, owner: str, repo: str) -> str:
+        self.calls.append(
+            (
+                "get_default_branch",
+                {"owner": owner, "repo": repo},
+            )
+        )
+        return self.default_branch_name
+
 
 def test_execute_noop_does_nothing(tmp_path: Path) -> None:
     log = ExecutionLog(tmp_path / "log.sqlite")
@@ -843,3 +900,187 @@ def test_attempt_merge_plan_dry_run_skips_host(tmp_path: Path) -> None:
             "SELECT outcome FROM execution_log ORDER BY id DESC LIMIT 1"
         ).fetchone()[0]
     assert outcome == "dry_run"
+
+
+# ---------------------------------------------------------------------------
+# foreman#279 — impl PR retarget guard (D9 from the 2026-06-11
+# architecture stability plan). Without these tests, the autonomous
+# loop silently orphans impl content onto the about-to-be-deleted
+# spec branch — 15 historical PRs were merged into orphan branches
+# this way before the empirical audit caught it. The v1/v2 daemon
+# had this guard in daemon_runners.merge_impl_pr; the v3 reconciler
+# migration did not port it. These tests pin the v3 port.
+# ---------------------------------------------------------------------------
+
+
+def test_attempt_merge_impl_retargets_base_to_main_when_spec_merged(
+    tmp_path: Path,
+) -> None:
+    """foreman#279 — primary regression guard.
+
+    Scenario: impl PR's base still points at ``foreman/issue-143``
+    (the spec branch), the spec PR for issue 143 has merged. The
+    handler MUST retarget the impl PR's base to the default branch
+    BEFORE merging — otherwise the squash commit lands on the
+    about-to-be-deleted spec branch and the content orphans.
+
+    This is the test that would have caught the orphan-PR bug the
+    moment it ran. If it ever fails on a future change, that change
+    is reintroducing the bug.
+    """
+    ctx = _attempt_merge_ctx(
+        tmp_path, head_ref="foreman/impl-143", pr_number=200
+    )
+    host = _FakeHost()
+    # Impl PR's base is still the spec branch (the bug scenario).
+    host.pr_base_ref_for = {200: "foreman/issue-143"}
+    # Spec PR for issue 143 has merged.
+    host.spec_pr_merged_for_branch = {"foreman/issue-143": True}
+    host.default_branch_name = "main"
+    host.dispatch_mergeability_return = PRMergeability(
+        state="CLEAN",
+        failing_required_check_count=0,
+        pending_required_check_count=0,
+    )
+
+    execute_action(
+        Action.ATTEMPT_MERGE_IMPL,
+        ctx,
+        host=host,
+        rule_name="attempt_merge_impl",
+        dry_run=False,
+    )
+
+    call_names = [c[0] for c in host.calls]
+    assert "retarget_pr_base" in call_names, (
+        "Impl PR with base=spec-branch + spec PR merged must be retargeted. "
+        "Without retarget, merge_pr produces an orphan commit on the spec "
+        "branch — the v3 regression that orphaned 15 PRs before being "
+        "diagnosed 2026-06-11."
+    )
+    # Retarget happens BEFORE merge (ordering matters — merging
+    # before retarget produces the orphan we're guarding against).
+    retarget_idx = call_names.index("retarget_pr_base")
+    merge_idx = call_names.index("merge_pr")
+    assert retarget_idx < merge_idx, (
+        f"retarget_pr_base must come BEFORE merge_pr; "
+        f"got order {call_names}"
+    )
+    # The retarget targeted the correct PR + new_base.
+    retarget_call = next(
+        c for c in host.calls if c[0] == "retarget_pr_base"
+    )
+    assert retarget_call[1]["pr_number"] == 200
+    assert retarget_call[1]["new_base"] == "main"
+
+
+def test_attempt_merge_impl_skips_retarget_when_base_is_already_default(
+    tmp_path: Path,
+) -> None:
+    """Idempotency: if the impl PR's base is already the default
+    branch (e.g., a previous handler invocation succeeded but the
+    dispatcher re-enqueued after a crash), the retarget step must
+    skip. We read current_base each tick so this is safe."""
+    ctx = _attempt_merge_ctx(
+        tmp_path, head_ref="foreman/impl-143", pr_number=200
+    )
+    host = _FakeHost()
+    # Impl PR's base is already main — already retargeted from a
+    # prior tick, or it never needed retargeting.
+    host.pr_base_ref_for = {200: "main"}
+    host.spec_pr_merged_for_branch = {"foreman/issue-143": True}
+    host.dispatch_mergeability_return = PRMergeability(
+        state="CLEAN",
+        failing_required_check_count=0,
+        pending_required_check_count=0,
+    )
+
+    execute_action(
+        Action.ATTEMPT_MERGE_IMPL,
+        ctx,
+        host=host,
+        rule_name="attempt_merge_impl",
+        dry_run=False,
+    )
+
+    call_names = [c[0] for c in host.calls]
+    assert "retarget_pr_base" not in call_names, (
+        "Idempotent: when base is already the default branch, no "
+        "retarget call should fire."
+    )
+    # Merge still happens (this is the happy CLEAN path).
+    assert "merge_pr" in call_names
+
+
+def test_attempt_merge_impl_skips_retarget_when_spec_pr_not_merged(
+    tmp_path: Path,
+) -> None:
+    """Safety: do NOT retarget the impl PR if the spec PR has not
+    merged yet. Retargeting impl-on-main with a still-pending spec
+    would merge impl changes that depend on unlanded spec changes —
+    same bug shape from the opposite direction.
+
+    In production this state typically doesn't reach
+    ATTEMPT_MERGE_IMPL because the impl PR cannot CLEAN-merge while
+    its base spec PR is open — but the guard is here as defense
+    against any rule path that reaches the handler in an unexpected
+    state.
+    """
+    ctx = _attempt_merge_ctx(
+        tmp_path, head_ref="foreman/impl-143", pr_number=200
+    )
+    host = _FakeHost()
+    host.pr_base_ref_for = {200: "foreman/issue-143"}
+    # Spec PR for issue 143 is NOT merged yet.
+    host.spec_pr_merged_for_branch = {"foreman/issue-143": False}
+    host.dispatch_mergeability_return = PRMergeability(
+        state="CLEAN",
+        failing_required_check_count=0,
+        pending_required_check_count=0,
+    )
+
+    execute_action(
+        Action.ATTEMPT_MERGE_IMPL,
+        ctx,
+        host=host,
+        rule_name="attempt_merge_impl",
+        dry_run=False,
+    )
+
+    call_names = [c[0] for c in host.calls]
+    assert "retarget_pr_base" not in call_names, (
+        "Safety: when the spec PR has not merged, the impl PR must "
+        "NOT be retargeted — impl changes depend on unlanded spec "
+        "changes."
+    )
+
+
+def test_attempt_merge_plan_does_not_invoke_retarget_path(
+    tmp_path: Path,
+) -> None:
+    """Plan target is unaffected: ATTEMPT_MERGE_PLAN must not call
+    any of the retarget-guard host methods. The plan PR's base IS
+    main by construction (planner always opens spec PRs against the
+    default branch); querying the base ref + spec-merged predicate
+    on the plan path would be pointless work and noise."""
+    ctx = _attempt_merge_ctx(tmp_path)  # default head_ref is spec-shape
+    host = _FakeHost()
+    host.dispatch_mergeability_return = PRMergeability(
+        state="CLEAN",
+        failing_required_check_count=0,
+        pending_required_check_count=0,
+    )
+
+    execute_action(
+        Action.ATTEMPT_MERGE_PLAN,
+        ctx,
+        host=host,
+        rule_name="attempt_merge_plan",
+        dry_run=False,
+    )
+
+    call_names = [c[0] for c in host.calls]
+    assert "retarget_pr_base" not in call_names
+    assert "get_pr_base_ref" not in call_names
+    assert "is_pr_merged_for_branch" not in call_names
+    assert "get_default_branch" not in call_names

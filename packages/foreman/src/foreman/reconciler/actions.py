@@ -10,6 +10,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from foreman.branches import spec_branch
 from foreman.config import MergeMechanism
 from foreman.reconciler.exec_log import ExecutionLog
 from foreman.reconciler.host import ReconcilerHost
@@ -441,6 +442,59 @@ def _handle_attempt_merge(
         raise RuntimeError(
             f"attempt_merge_{target} requires a PR in context"
         )
+
+    # foreman#279 (D9) — impl PR retarget guard. When the impl PR's
+    # base still points at the spec branch AND the spec PR has merged,
+    # retarget the impl PR's base to the default branch BEFORE we read
+    # mergeability + call merge_pr. Without this, the squash commit
+    # lands on the about-to-be-deleted spec branch and the content
+    # orphans — exactly the 15-PR regression diagnosed 2026-06-11.
+    #
+    # Two conditions guard the retarget:
+    #   1. Current base IS the spec branch (idempotent — skip if
+    #      already retargeted from a prior tick under crash re-enqueue).
+    #   2. Spec PR has merged (safety — never retarget impl-on-main
+    #      with un-landed spec dependencies).
+    #
+    # Mirrors the v1/v2 retarget step in
+    # daemon_runners.merge_impl_pr (lines 234-243); the v3 migration
+    # did not port the guard, hence the orphan regression. Retarget
+    # happens BEFORE get_pr_mergeability because retargeting changes
+    # GitHub's mergeStateStatus computation; we want the mergeability
+    # read below to reflect the post-retarget state.
+    if target == "impl":
+        spec_branch_name = spec_branch(ctx.issue.number)
+        current_base = host.get_pr_base_ref(
+            owner=ctx.snapshot.owner,
+            repo=ctx.snapshot.repo,
+            pr_number=ctx.pr.number,
+        )
+        if current_base == spec_branch_name and host.is_pr_merged_for_branch(
+            owner=ctx.snapshot.owner,
+            repo=ctx.snapshot.repo,
+            branch=spec_branch_name,
+        ):
+            default_branch = host.get_default_branch(
+                owner=ctx.snapshot.owner,
+                repo=ctx.snapshot.repo,
+            )
+            host.retarget_pr_base(
+                owner=ctx.snapshot.owner,
+                repo=ctx.snapshot.repo,
+                pr_number=ctx.pr.number,
+                new_base=default_branch,
+            )
+            logger.info(
+                "attempt_merge_impl: retargeted PR %s/%s#%d base %s -> %s "
+                "(spec PR for issue #%d has merged; preventing orphan-commit-on-spec-branch)",
+                ctx.snapshot.owner,
+                ctx.snapshot.repo,
+                ctx.pr.number,
+                spec_branch_name,
+                default_branch,
+                ctx.issue.number,
+            )
+
     mergeability = host.get_pr_mergeability(
         owner=ctx.snapshot.owner,
         repo=ctx.snapshot.repo,

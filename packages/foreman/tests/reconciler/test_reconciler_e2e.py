@@ -44,6 +44,25 @@ class _StubHost:
         self.calls.append(("dispatch_role", kwargs))
         return 12345
 
+    # foreman#279 — retarget-guard test seams. Defaults are tuned so
+    # existing tests stay green: any PR's base is reported as "main"
+    # (so the retarget conditional sees "already on default" and skips
+    # without recording a retarget call).
+    def retarget_pr_base(self, **kwargs) -> None:
+        self.calls.append(("retarget_pr_base", kwargs))
+
+    def get_pr_base_ref(self, **kwargs) -> str:
+        self.calls.append(("get_pr_base_ref", kwargs))
+        return "main"
+
+    def is_pr_merged_for_branch(self, **kwargs) -> bool:
+        self.calls.append(("is_pr_merged_for_branch", kwargs))
+        return True
+
+    def get_default_branch(self, **kwargs) -> str:
+        self.calls.append(("get_default_branch", kwargs))
+        return "main"
+
 
 def _gh_with(
     issues: list[dict],
