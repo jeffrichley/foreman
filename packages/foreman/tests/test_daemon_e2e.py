@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from foreman.config import AdminConfig, AppsConfig, Config, DaemonConfig, ProjectConfig
+from foreman.config import AppsConfig, Config, DaemonConfig, ProjectConfig
 from foreman.daemon import Daemon
 from foreman.dispatcher import Action, ActionKind, Ticket
 from foreman.worker import RoleResult
@@ -80,7 +80,6 @@ class _PipelineFakeDispatcher:
 
 def _config(tmp_path: Path) -> Config:
     return Config(
-        admin=AdminConfig(),
         daemon=DaemonConfig(
             poll_interval_seconds=5,
             sqlite_path=str((tmp_path / "f.sqlite").as_posix()),
