@@ -36,6 +36,12 @@ gh release edit <tag> --draft=false
 - Subject must NOT start with an uppercase letter
 - All allowed types: feat, fix, chore, docs, refactor, test, style, build, ci, perf, revert
 
+## Design
+
+Calibrated bias toward structural patterns (per Decision 4 of `docs/superpowers/plans/2026-06-11-foreman-architecture-stability-plan.md`):
+
+> Before proposing a non-trivial design, name the GoF pattern and/or the Google engineering principle (SRP / OCP / DIP / "make the right thing easy") the design embodies. If neither applies cleanly, say so explicitly — "no pattern fits, this is straightforward X" is a legitimate output. Pattern-fishing produces worse code than no pattern at all.
+
 ## Architecture
 
 See `docs/superpowers/specs/foreman-v1-architectural-spec.md` for the full v1
