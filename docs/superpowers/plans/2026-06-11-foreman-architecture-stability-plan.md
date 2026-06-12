@@ -926,4 +926,52 @@ Each finding gets one decision row. Format: finding summary, decision, rationale
 - **Sequencing dependency:** Decision 7 framework lands first (need `import-linter` configured before rules can land); audit runs as a Phase 2 task; Tier 1 rules ship in the framework PR or a fast-follow PR.
 - **Next-step ticket:** TBD after Phase 1 closes. Should reference (a) the audit as a Phase 2 task that produces the tier table as an artifact in the repo (e.g. `docs/architecture/library-boundaries.md`), (b) Tier 1 rules ship at audit-completion time, (c) the Tier 3 explicit-non-bind discipline so future operators don't reflexively add rules.
 
+### Decision 9 — Impl-PR-base-retarget bug in the autonomous loop (the actual durability problem from Decision 1's §7)
+
+- **Empirical root cause** (verified 2026-06-11 PM):
+  - Issue #194 ("centralize foreman:* label constants") was closed today with `foreman:done` label.
+  - **PR #196 (spec):** `base=main`, `head=foreman/issue-194`. Files: ONLY `docs/superpowers/specs/foreman-issue-194-spec.md (+490/-0)`. Merged to main 2026-06-07 18:06.
+  - **PR #197 (impl):** `base=foreman/issue-194`, `head=foreman/impl-194`. Files: `labels.py (+169/-0)`, `test_labels_keystone.py (+285/-0)`, plus 7 modified consumers across `init/reconciler/roles`. Merged into `foreman/issue-194` at 19:30 — **NOT into main.**
+  - Branch protection on main is `main-gate` ruleset with `strict_required_status_checks_policy=True` (verified). So the strict-up-to-date rebase cycle Jeff suspected as Hypothesis 2 IS real-but-separate; it did not cause Labels loss.
+  - Verified via `git show main:packages/foreman/src/foreman/labels.py` → "fatal: path does not exist." The file lives only on the orphan branches `foreman/issue-194` and `foreman/impl-194`.
+- **Diagnosis:** **The autonomous loop's PR-base-retarget step is missing or broken.** Expected lifecycle:
+  1. Planner creates spec PR (base=main, head=foreman/issue-N) and impl PR (base=foreman/issue-N, head=foreman/impl-N)
+  2. Spec PR merges to main → spec branch should auto-delete OR impl PR's base should be retargeted to main
+  3. Impl PR merges to main
+  4. Daemon marks issue `foreman:done`
+  - In the observed sequence: step 2's retarget did not happen; step 3 became "impl PR merges into the orphan spec branch"; step 4 fired anyway because it only checked PR-merged, not merge-target.
+- **Neither hypothesis from this morning was right.** Worth recording explicitly so the diagnostic dead-ends don't get re-walked:
+  - NOT Hypothesis 1 (merge-flurry overwrite) — git log shows no later commit deleted labels.py from main; it was never there.
+  - NOT Hypothesis 2 (rebase cycle loses content) — strict-up-to-date IS enforced; the rebase cycle is a real smell but not the cause here.
+  - Actual cause: structural bug in the autonomous loop's state machine.
+- **Decision:** **File this as a high-priority Phase 2 investigation with three specific questions to answer.** No code change here in Phase 1; we don't know enough yet to specify the fix. Phase 1 records the finding and the investigation questions.
+  - **Q1 — Scope: how many other "done" tickets are orphaned?** Audit: for every `foreman:done` issue in foreman/voice/agent_core, check whether the impl PR's mergeCommit is reachable from `origin/main`. If not, the work is orphaned. Cheap script (~20 lines via `gh pr list` + `git merge-base --is-ancestor`). Kicked off in parallel with this Decision being recorded.
+  - **Q2 — Code: where in the autonomous loop is the retarget supposed to happen?** Suspected sites: `daemon_runners.merge_spec_pr` (should issue `gh pr edit <impl-pr> --base main` for the corresponding impl PR after the spec merges); or `dispatcher`/`reconciler` action sequencing where the "spec merged, retarget impl" state transition lives. Verify in code.
+  - **Q3 — Test: what's the regression test that would have caught this?** Shape: after `merge_spec_pr(spec_pr)`, assert the corresponding impl PR's `baseRefName == "main"`. AND after `merge_impl_pr(impl_pr)`, assert the merge commit is reachable from main. The second assertion is what would have flagged #194 specifically.
+- **Why this is the real §7 from Decision 1:**
+  - Decision 1 deferred "the durability mechanism" — how to prevent the Labels-pattern regression from recurring silently.
+  - I previously thought the four-layer defense (Decisions 3/4/6/7) answered §7 in aggregate. It does NOT. The four layers protect against *human/Wren errors* (bias, drift, dead code, boundary violations). They don't catch a *foreman autonomous-loop bug* that lies about completion.
+  - The autonomous loop reporting "done" on content that never landed is the canonical untrustworthy-machinery problem. Tests-green + dispatch-clean + `foreman:done`-label all said success; main never had the code.
+  - This finding therefore *re-opens* §7 specifically: durability against the autonomous loop's own failure modes. The audit (Q1) is the empirical scoping; the code change (Q2) and the test (Q3) are the durability artifact.
+- **Composes with prior decisions:**
+  - Decision 3 (vulture + reachability) — if labels.py had been referenced from main code as if it existed, the reachability sweep would have flagged the missing module. (Did the dependency exist? Verify in Phase 2.)
+  - Decision 4 (artifact discipline) — the artifact here would be the Q3 test: post-merge-target assertion.
+  - Decision 6 (verify-and-pin lifecycle invariants) — Q3 is a verify-and-pin of the merge-target invariant.
+  - Decision 7 (import-linter R3 dead-island prevention) — would have flagged `labels.py` callers on main as importing-from-missing-module.
+- **Sequencing dependency:** none for Phase 1 closure. Q1 audit ran in parallel with this entry being written; results below.
+- **Q1 RESULTS — orphan-content audit (2026-06-11 20:50 PM):**
+  - **15 merged PRs are orphaned** (mergeCommit not reachable from `origin/main`). Every single one has `base=foreman/issue-N` instead of `base=main`. Dates range from 2026-06-02 (#58) to 2026-06-11 (#273).
+  - **3 of the 15 were manually rescued today** via "promote ... to main" PRs:
+    - #266 GoF provider boundary → rescued by **#274** "refactor(provider): promote ProviderAdapter + RecoveryChain boundary to main"
+    - #268 reviewer-budget gate → rescued by **#275** "fix(reconciler): promote reviewer-budget gate fix to main (foreman#268)"
+    - #256 dead Literal cleanup → rescued by **#276** "chore(stats): promote dead *_failed Literal cleanup to main (foreman#256)"
+  - **The morning's stability sprint was actually a rescue sprint.** The status note at the top of this plan claimed "All five overnight PRs landed on main" — true only because three of the five required manual `promote ... to main` PRs. The original impl PRs (#271, #273, #260) all merged into orphan branches.
+  - **At least 2 orphans are confirmed still missing from main:**
+    - #207 (`feat(logging): mirror daemon log to stdout as JSON for docker logs`) — verified by `git grep` on `logging_setup.py`; this is exactly the regression Phase 0's Lens A flagged about logging.
+    - #197 (`refactor(labels): centralize foreman:* label constants`) — the original Decision 1 motivating case.
+  - **~10 more orphans remain unaudited:** #58, #159, #168, #186, #189, #192, #202, #206, #212, #225. Need per-PR check: was the content rescued by a later "promote" PR, by a separate refactor that re-implemented it, or is it still missing? (#168's `attempt_merge` symbol DOES appear on main, suggesting it was implicitly rescued by a later commit.)
+- **Updated diagnosis** (in light of audit results): the bug is NOT "newly discovered today." It has been silently failing the autonomous loop for at least 9 days (since 2026-06-02 #58). The team has been working around it manually via "promote ... to main" rescue PRs — but the workaround is incomplete. The team also has not realized this is a single systemic bug; each rescue has been treated as a one-off "weird, the merge went sideways" fix.
+- **Updated severity:** **CRITICAL.** The autonomous loop has been reporting `foreman:done` on content that never reached main for over a week. Every "completed" ticket needs verification. The container that's been running in production is built off a main that's missing ~12 of the last month's structural fixes. We've been building today's architecture review on the implicit assumption that those fixes are in place; the assumption is FALSE.
+- **Next-step ticket:** **HIGH-PRIORITY** foreman issue with the three investigation questions, the empirical evidence above, the audit results, and a fix-the-loop scope. Title: `bug: autonomous loop merges impl PR into orphan spec branch; content never reaches main; daemon labels done anyway`. Must be addressed before any further autonomous-loop tickets run (otherwise the orphan list keeps growing). Pair with: a rescue sprint that audits the remaining ~10 orphans and either re-promotes their content or filed-as-known-dropped tickets.
+
 
