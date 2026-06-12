@@ -4,14 +4,19 @@
 
 This plan lives in the repo (not in an issue body) so we can iterate on it as the review produces decisions. Tracking ticket: foreman#269.
 
-## Status note (2026-06-11 morning — CORRECTED EVENING)
+## Status note (2026-06-11 morning — CORRECTED EVENING — UPDATED 2026-06-12 AM)
 
 - Morning state (as I believed it at the time): "All five overnight PRs landed on main: #266 (GoF provider boundary), #268 (reviewer-budget gate), #256 (dead Literals), #215 (git identity), #258 (typed Outcome enum)."
 - **Evening correction (see Decision 9):** that statement was only true via three *manual rescue PRs* (#274, #275, #276 — "promote ... to main") that re-landed the orphaned impl content. The original impl PRs (#271, #273, #260) all merged into orphan spec branches, not main. We did NOT realize at the time that the rescue work was rescue work; we believed it was normal stability sprint merging. This is the same impl-PR-base-retarget bug Decision 9 names.
 - Container rebuilt on `a6c6956` and ran healthy through the day.
 - **Container STOPPED 2026-06-11 20:54 PM** per Jeff's decision after Decision 9's audit findings. The autonomous loop is paused on all three registered projects (foreman, voice, agent_core) pending the fix.
+- **D9 LANDED 2026-06-12 06:59 ET** as PR #280 → commit `f26ceb4` on main. Tracking issue foreman#279 closed. Container is still stopped pending rebuild + dogfood verification.
 - Architecture review session was **today** (Jeff corrected the timing — I had been calling it "tomorrow").
 - Two structural bugs surfaced during deployment: container clone staleness, crash-cascade leaves ticket label-less.
+
+### Rescue scope correction (2026-06-12 AM)
+
+When D9's rescue sprint runs, **skip #197 (Labels keystone)** — Decision 1 explicitly supersedes it with a StrEnum pattern (not the original class-attribute pattern). Rescuing #197 then doing D1 would put the old pattern on main only to replace it via D1 — wasted churn. **The rescue list contracts to 4 PRs: #207, #159, #212, #186.** D1's implementation covers what #197 was supposed to do, in the better-designed shape Decision 1 specified.
 
 ---
 
