@@ -555,6 +555,9 @@ def _build_reconciler_projects(config: Config) -> tuple[Any, ...]:
                 auto_merge_spec=config.reconciler.effective_auto_merge_spec(proj_cfg),
                 auto_merge_impl=config.reconciler.effective_auto_merge_impl(proj_cfg),
                 merge_mechanism=config.reconciler.effective_merge_mechanism(proj_cfg),
+                # foreman#291: thread the clone path through so the
+                # per-poll clone-refresh strategy knows where to fetch.
+                local_clone_path=proj_cfg.local_clone_path,
             )
         )
     return tuple(projects_list)
@@ -747,6 +750,24 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
                 fresh_config = load_config(cfg_path)
                 return _build_reconciler_projects(fresh_config)
 
+            # foreman#291: pick the clone refresh strategy from the
+            # config knob. Default (auto_fetch_on_poll=True) is
+            # OnPollFetch — the container's local clone tracks
+            # upstream within one poll cycle. Operators in
+            # air-gapped or bandwidth-throttled environments flip
+            # the flag to opt into OnDispatchFetchOnly.
+            from foreman.reconciler.clone_refresh import (
+                CloneRefreshStrategy,
+                OnDispatchFetchOnly,
+                OnPollFetch,
+            )
+
+            clone_refresh_strategy: CloneRefreshStrategy = (
+                OnPollFetch()
+                if config.reconciler.auto_fetch_on_poll
+                else OnDispatchFetchOnly()
+            )
+
             reconciler = Reconciler(
                 projects=projects,
                 log=log,
@@ -765,6 +786,7 @@ def daemon_v3_start(dry_run: bool, max_ticks: int | None) -> None:
                     config.reconciler.rate_limit_max_consecutive_failures
                 ),
                 rate_limit_window_seconds=(config.reconciler.rate_limit_window_seconds),
+                clone_refresh_strategy=clone_refresh_strategy,
             )
 
             async def _shutdown_watcher(

@@ -286,6 +286,22 @@ class ReconcilerConfig(BaseModel):
             "disabling the rate-limit."
         ),
     )
+    auto_fetch_on_poll: bool = Field(
+        default=True,
+        description=(
+            "foreman#291: when True (the default), the reconciler "
+            "fetches ``origin/<default-branch>`` for each registered "
+            "project once per poll cycle so the container's local "
+            "clone never grows more than ~``poll_interval_seconds`` "
+            "stale. When False, falls back to the pre-#291 behavior — "
+            "only the per-dispatch fetch in "
+            "``WorktreeManager.create()`` refreshes the clone. Same "
+            "operator-opts-OUT framing as ``max_concurrent_dispatches=1``: "
+            "the default ships the safer behavior; paranoid / "
+            "air-gapped / bandwidth-throttled environments flip the "
+            "flag explicitly."
+        ),
+    )
     merge_mechanism: MergeMechanism = Field(
         default="direct",
         description=(

@@ -1,6 +1,11 @@
 """Foreman v3 declarative reconciler."""
 
 from foreman.reconciler.actions import Action, ActionContext, execute_action
+from foreman.reconciler.clone_refresh import (
+    CloneRefreshStrategy,
+    OnDispatchFetchOnly,
+    OnPollFetch,
+)
 from foreman.reconciler.daemon import Reconciler, ReconcilerProject
 from foreman.reconciler.exec_log import ExecutionLog
 from foreman.reconciler.gh_graphql import HttpxGHGraphQLClient
@@ -25,6 +30,7 @@ from foreman.reconciler.v3_host import V3GitHubHost
 __all__ = [
     "Action",
     "ActionContext",
+    "CloneRefreshStrategy",
     "ExecutionLog",
     "GHGraphQLClient",
     "HttpxGHGraphQLClient",
@@ -32,6 +38,8 @@ __all__ = [
     "ObserverError",
     "ObserverRateLimited",
     "ObserverUnreachable",
+    "OnDispatchFetchOnly",
+    "OnPollFetch",
     "PRState",
     "PrecedenceTier",
     "ProjectSnapshot",

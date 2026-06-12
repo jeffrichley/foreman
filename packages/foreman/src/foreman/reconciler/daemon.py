@@ -16,6 +16,7 @@ from pathlib import Path
 
 from foreman.config import MergeMechanism
 from foreman.reconciler.actions import Action, ActionContext, execute_action
+from foreman.reconciler.clone_refresh import CloneRefreshStrategy, OnPollFetch
 from foreman.reconciler.exec_log import ExecutionLog
 from foreman.reconciler.host import ReconcilerHost
 from foreman.reconciler.observer import (
@@ -126,6 +127,15 @@ class ReconcilerProject:
     ``merge_mechanism`` similarly carries the EFFECTIVE per-project merge
     mechanism — see ``ReconcilerConfig.effective_merge_mechanism`` and
     foreman#158. Default is ``"direct"`` (matches global default).
+
+    ``local_clone_path`` carries the on-disk path to the project's
+    clone, threaded through from ``ProjectConfig.local_clone_path`` by
+    ``foreman.cli._build_reconciler_projects``. The
+    :class:`~foreman.reconciler.clone_refresh.CloneRefreshStrategy`
+    reads this per tick to know which clone to fetch into. The default
+    is an empty string ("no clone known; skip per-poll refresh") so
+    tests that construct ``ReconcilerProject`` positionally without
+    threading a clone path keep passing untouched. See foreman#291.
     """
 
     name: str
@@ -134,6 +144,7 @@ class ReconcilerProject:
     auto_merge_spec: bool = True
     auto_merge_impl: bool = False
     merge_mechanism: MergeMechanism = "direct"
+    local_clone_path: str = ""
 
 
 class Reconciler:
@@ -154,6 +165,7 @@ class Reconciler:
         reload_sentinel_path: Path | str | None = None,
         rate_limit_max_consecutive_failures: int = 3,
         rate_limit_window_seconds: int = 1800,
+        clone_refresh_strategy: CloneRefreshStrategy | None = None,
     ) -> None:
         self.projects = projects
         self.log = log
@@ -189,6 +201,16 @@ class Reconciler:
             if reload_sentinel_path is not None
             else None
         )
+        # foreman#291: per-poll clone refresh strategy. ``None`` →
+        # production-safe :class:`OnPollFetch` default so a fresh
+        # ``foreman daemon v3-start`` keeps the container clone within
+        # one poll cycle of upstream truth. Operators in air-gapped or
+        # bandwidth-throttled environments can swap in
+        # :class:`OnDispatchFetchOnly` via
+        # ``ReconcilerConfig.auto_fetch_on_poll = False``.
+        self._clone_refresh_strategy: CloneRefreshStrategy = (
+            clone_refresh_strategy if clone_refresh_strategy is not None else OnPollFetch()
+        )
 
     async def tick(self) -> None:
         """Run one reconciliation pass over every project."""
@@ -203,6 +225,23 @@ class Reconciler:
             self._apply_reload()
 
         for project in self.projects:
+            # foreman#291: refresh the project's local clone BEFORE the
+            # GraphQL snapshot fetch. Snapshots are GraphQL-only so the
+            # ordering doesn't matter to them, but role dispatches
+            # emitted later in this tick worktree-add from the clone —
+            # the fresh ``origin/<default>`` ref must be in place
+            # first. The reconciler-boundary try/except is defense in
+            # depth: even a strategy that forgets its own try/except
+            # must not crash the daemon.
+            try:
+                self._clone_refresh_strategy.refresh(project)
+            except Exception:
+                logger.exception(
+                    "clone_refresh_strategy raised for project=%s; "
+                    "continuing tick (best-effort contract)",
+                    project.name,
+                )
+
             try:
                 snapshot = fetch_project_state(
                     project=project.name,
