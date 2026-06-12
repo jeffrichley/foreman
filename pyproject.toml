@@ -17,6 +17,11 @@ dev = [
     "mypy>=1.11",
     # gitleaks pre-commit hook driver (.pre-commit-config.yaml). See RUNBOOK.
     "pre-commit>=4.0",
+    # Dead-code finder. Run via ``uv run vulture packages/foreman/src``.
+    # Decision 3 of the 2026-06-11 architecture stability plan. The
+    # ``[tool.vulture]`` block below pins the threshold + allowlist for
+    # signal-handler / duck-typing false positives.
+    "vulture>=2.13",
 ]
 
 [tool.ruff]
@@ -74,6 +79,60 @@ check_untyped_defs = true
 #     "some_optional_lib",
 # ]
 # ignore_missing_imports = true
+
+[tool.vulture]
+# Decision 3 (2026-06-11 architecture stability plan): vulture finds
+# dead code (unused functions, classes, methods, variables, imports).
+# Run via: ``uv run vulture packages/foreman/src``
+#
+# Threshold + scope:
+#   - ``min_confidence = 80`` catches structurally-dead code without
+#     false-positives from dynamic attribute access patterns Python
+#     can't introspect statically. At 60-70 the noise floor swamps
+#     real findings; at 90+ we miss subtle cases (the unused
+#     ``combined_output`` parameter in foreman#299 was 100%).
+#   - Tests aren't scanned. Pytest fixtures + parametrize patterns
+#     reference test functions via discovery, not import — vulture
+#     would flag them all as dead. Test directories are excluded.
+#
+# Allowlist conventions (``ignore_names``):
+#   - Signal-handler params (``signum``, ``frame``) are required by
+#     ``signal.signal()``'s callback signature. The Python convention
+#     is to name them ``_signum``, ``_frame`` to mark intentional
+#     non-use, but the API contract still binds the position.
+#   - ``**kwargs`` on NullRunner-style duck-typed stub methods exists
+#     so the stubs match the real runner signatures; vulture sees
+#     ``kwargs`` itself as unused even though removing it would break
+#     callers. Same for class-attribute classifications consumed via
+#     ``Outcome.<MEMBER>.classification`` (StrEnum + custom ``__new__``
+#     pattern — see ``foreman.reconciler.outcomes`` for the canonical
+#     example).
+min_confidence = 80
+paths = ["packages/foreman/src"]
+exclude = [
+    "packages/foreman/tests",
+    "**/__pycache__",
+    ".venv",
+    ".tmp",
+]
+ignore_names = [
+    # Signal-handler API conventions
+    "signum",
+    "frame",
+    # Duck-typed stub method **kwargs
+    "kwargs",
+    # StrEnum classification attribute populated by ``__new__`` and
+    # consumed by derived frozenset comprehensions; vulture can't see
+    # the comprehension side
+    "classification",
+]
+ignore_decorators = [
+    # Click/typer command callbacks are referenced by the framework
+    # via decorator registration, not by direct import
+    "@cli.command",
+    "@daemon.command",
+    "@*.command",
+]
 
 [tool.pytest.ini_options]
 testpaths = [
