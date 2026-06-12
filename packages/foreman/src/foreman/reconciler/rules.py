@@ -483,6 +483,41 @@ def _impl_review_green(ctx: ActionContext) -> bool:
     )
 
 
+def _retarget_impl_pr_eligible(ctx: ActionContext) -> bool:
+    """Eligibility for retargeting the impl PR's base to default branch
+    before Reviewer-on-impl dispatches (foreman#294).
+
+    Predicate is intentionally coarse on the GitHub-state side — it
+    doesn't check the current base (snapshot doesn't carry base_ref)
+    or the spec PR's merged state (rules can't make host calls). The
+    action handler's helper
+    (:func:`foreman.reconciler.actions._retarget_impl_pr_to_default_if_stacked`)
+    enforces both conditions and short-circuits as a no-op when they
+    aren't met.
+
+    The one-shot idempotence gate at the bottom of the predicate is
+    LOAD-BEARING: without it the retarget rule keeps matching every
+    tick (the other conditions are stable throughout impl-review),
+    and ``evaluate_with_rule``'s first-match-wins ordering would let
+    precedence 138 shadow ``dispatch_reviewer_impl`` at precedence
+    140 forever — deadlocking the autonomous loop. Same gate shape
+    used by ``dispatch_reviewer_impl`` and ``dispatch_fixer_impl``.
+    """
+    return (
+        ctx.pr is not None
+        and not ctx.pr.is_merged
+        and ctx.pr.head_ref.startswith("foreman/impl-")
+        and "foreman:impl-review" in ctx.issue.labels
+        and not ctx.log.has_unterminated(
+            "retarget_impl_pr_to_default", ctx.ticket_id
+        )
+        and ctx.log.count_completed(
+            "retarget_impl_pr_to_default", ctx.ticket_id
+        )
+        == 0
+    )
+
+
 def _impl_fix_pending(ctx: ActionContext) -> bool:
     # Impl-side Fixer flow. Pairs with ``_fix_attempts_exhausted`` above —
     # both scope to ``dispatch_fixer_impl`` so a future spec-side Fixer
@@ -679,6 +714,19 @@ _PROGRESS_RULES: tuple[Rule, ...] = (
         precedence=130,
         when=_plan_approved_no_impl_pr,
         then=Action.DISPATCH_WORKER,
+    ),
+    Rule(
+        name="retarget_impl_pr_to_default",
+        tier=PrecedenceTier.FORWARD_PROGRESS,
+        # Precedence 138 — slotted between ``dispatch_worker`` (130)
+        # and ``dispatch_reviewer_impl`` (140) so the retarget lands
+        # BEFORE Reviewer-on-impl reads the PR's base ref. The one-
+        # shot idempotence gate inside ``_retarget_impl_pr_eligible``
+        # flips the predicate False on subsequent ticks so
+        # precedence-140 can fire next time. See foreman#294.
+        precedence=138,
+        when=_retarget_impl_pr_eligible,
+        then=Action.RETARGET_IMPL_PR_TO_DEFAULT,
     ),
     Rule(
         name="dispatch_reviewer_impl",

@@ -746,6 +746,44 @@ def fetch_origin_default_branch(
     _fetch_origin_branch(clone_path, default, role_token=role_token)
 
 
+def fetch_origin_branch(
+    clone_path: Path,
+    branch: str,
+    *,
+    role_token: str | None = None,
+) -> None:
+    """Best-effort refresh of ``origin/<branch>`` with stale-ref self-heal.
+
+    Public wrapper around :func:`_fetch_origin_branch`. Same best-effort
+    contract: network failures are logged as warnings and swallowed;
+    rc=128 ``couldn't find remote ref`` triggers the foreman#122
+    prune-stale-ref self-heal so a stale ``refs/remotes/origin/<branch>``
+    is evicted at fetch time, not silently kept.
+
+    Added in foreman#294 so :func:`foreman.roles.reviewer._get_pr_diff`
+    can route through the shared self-heal instead of shelling out to
+    ``git fetch`` directly.
+    """
+    _fetch_origin_branch(clone_path, branch, role_token=role_token)
+
+
+def resolve_default_branch(
+    clone_path: Path,
+    *,
+    role_token: str | None = None,
+) -> str:
+    """Return the repo's default branch name (fallback to ``"main"``).
+
+    Public wrapper around :func:`_resolve_default_branch`. Reads
+    ``origin/HEAD`` via ``git symbolic-ref``; falls back to ``"main"``
+    if ``origin/HEAD`` is missing — existing behavior preserved.
+
+    Added in foreman#294 so :func:`foreman.roles.reviewer._get_pr_diff`
+    can resolve the fallback base ref without importing a private name.
+    """
+    return _resolve_default_branch(clone_path, role_token=role_token)
+
+
 def _local_branch_exists(
     clone_path: Path, branch: str, *, role_token: str | None = None
 ) -> bool:

@@ -173,6 +173,26 @@ def _ctx_with(
     )
 
 
+def _seed_retarget_completed(ctx: ActionContext) -> None:
+    """Seed a completed ``retarget_impl_pr_to_default`` row.
+
+    foreman#294: existing impl-review tests that pre-date the
+    precedence-138 retarget rule need to advance past the one-shot
+    gate so they continue exercising ``dispatch_reviewer_impl`` at
+    precedence 140 (the rule under test). The minimal precondition
+    is one completed retarget row in the execution log.
+    """
+    start_id = ctx.log.write_action(
+        ticket_id=ctx.ticket_id,
+        project="foreman",
+        rule_name="retarget_impl_pr_to_default",
+        action="retarget_impl_pr_to_default",
+        outcome="running",
+        details={},
+    )
+    ctx.log.terminate_action(parent_log_id=start_id, outcome="success", details={})
+
+
 def _seed_advance_label_row_at(
     log: ExecutionLog,
     *,
@@ -616,12 +636,19 @@ def test_dispatch_worker_fires_on_plan_approved(tmp_path: Path) -> None:
 
 
 def test_dispatch_reviewer_impl_fires_on_impl_review_green(tmp_path: Path) -> None:
+    # foreman#294: a new rule ``retarget_impl_pr_to_default`` at
+    # precedence 138 fires once on the first tick of a fresh
+    # ``foreman:impl-review`` ticket, BEFORE Reviewer-on-impl
+    # dispatches. Seed the completed retarget row so the one-shot
+    # gate flips False and the test continues to exercise the
+    # ``dispatch_reviewer_impl`` rule — the test's original intent.
     from foreman.reconciler.rules import RULES
     ctx = _ctx_with(
         tmp_path,
         _issue(labels=("foreman:impl-review",)),
         _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143"),
     )
+    _seed_retarget_completed(ctx)
     assert evaluate(ctx, rules=RULES) is Action.DISPATCH_REVIEWER_IMPL
 
 
@@ -1369,6 +1396,10 @@ def test_dispatch_reviewer_impl_fires_after_many_completed_dispatches_with_no_ne
         _issue(labels=("foreman:impl-review",)),
         _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143"),
     )
+    # foreman#294: seed the completed retarget row so the
+    # precedence-138 one-shot gate flips False and the test continues
+    # to exercise the dispatch_reviewer_impl rule.
+    _seed_retarget_completed(ctx)
     for outcome in ("needs_fix", "success", "needs_fix", "success", "success"):
         _write_reviewer_termination(
             ctx, action="dispatch_reviewer_impl", outcome=outcome
@@ -1531,3 +1562,147 @@ def test_attempt_merge_impl_skipped_on_merged_impl_pr(tmp_path: Path) -> None:
         _pr(is_merged=True, head_ref="foreman/impl-143"),
     )
     assert evaluate(ctx, rules=RULES) is not Action.ATTEMPT_MERGE_IMPL
+
+
+# ---------------------------------------------------------------------------
+# foreman#294 — earlier-firing impl PR retarget (precedence 138).
+# Six sub-cases pin the predicate; one end-to-end test pins the
+# precedence-138 -> precedence-140 handoff via the one-shot gate.
+# ---------------------------------------------------------------------------
+
+
+def test_retarget_impl_pr_to_default_rule_eligibility(tmp_path: Path) -> None:
+    """foreman#294: pin the ``_retarget_impl_pr_eligible`` predicate
+    across the contract surface.
+
+    Sub-cases:
+    1. Happy path (impl PR + impl-review label + clean log) -> True.
+    2. PR is merged -> False (no reason to retarget a closed PR).
+    3. Missing ``foreman:impl-review`` label -> False (premature fire).
+    4. Spec-shaped PR -> False (never retarget spec PRs).
+    5. ``count_completed`` already 1 -> False (one-shot gate fired).
+    6. ``has_unterminated`` True -> False (don't double-fire).
+    """
+    from foreman.reconciler.rules import _retarget_impl_pr_eligible
+
+    # --- Sub-case 1: happy path ---
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-review",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143"),
+    )
+    assert _retarget_impl_pr_eligible(ctx) is True
+
+    # --- Sub-case 2: PR is merged ---
+    ctx2 = _ctx_with(
+        tmp_path / "case2",
+        _issue(labels=("foreman:impl-review",)),
+        _pr(
+            mergeable="MERGEABLE",
+            ci_status="SUCCESS",
+            head_ref="foreman/impl-143",
+            is_merged=True,
+        ),
+    )
+    assert _retarget_impl_pr_eligible(ctx2) is False
+
+    # --- Sub-case 3: missing impl-review label ---
+    ctx3 = _ctx_with(
+        tmp_path / "case3",
+        _issue(labels=("foreman:plan-approved",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143"),
+    )
+    assert _retarget_impl_pr_eligible(ctx3) is False
+
+    # --- Sub-case 4: spec-shaped PR ---
+    ctx4 = _ctx_with(
+        tmp_path / "case4",
+        _issue(labels=("foreman:impl-review",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/issue-143"),
+    )
+    assert _retarget_impl_pr_eligible(ctx4) is False
+
+    # --- Sub-case 5: one-shot gate already fired (count_completed == 1) ---
+    ctx5 = _ctx_with(
+        tmp_path / "case5",
+        _issue(labels=("foreman:impl-review",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143"),
+    )
+    start_id = ctx5.log.write_action(
+        ticket_id=ctx5.ticket_id,
+        project="foreman",
+        rule_name="retarget_impl_pr_to_default",
+        action="retarget_impl_pr_to_default",
+        outcome="running",
+        details={},
+    )
+    ctx5.log.terminate_action(parent_log_id=start_id, outcome="success", details={})
+    assert _retarget_impl_pr_eligible(ctx5) is False
+
+    # --- Sub-case 6: has_unterminated (mid-flight) ---
+    ctx6 = _ctx_with(
+        tmp_path / "case6",
+        _issue(labels=("foreman:impl-review",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143"),
+    )
+    ctx6.log.write_action(
+        ticket_id=ctx6.ticket_id,
+        project="foreman",
+        rule_name="retarget_impl_pr_to_default",
+        action="retarget_impl_pr_to_default",
+        outcome="running",
+        details={},
+    )
+    # NOT terminated -> has_unterminated is True.
+    assert _retarget_impl_pr_eligible(ctx6) is False
+
+
+def test_retarget_then_dispatch_reviewer_impl_on_next_tick(
+    tmp_path: Path,
+) -> None:
+    """foreman#294: end-to-end pin on the two-tick sequence the
+    one-shot gate enables. Tick N evaluates the retarget rule
+    (precedence 138) first; tick N+1, with the row marked completed,
+    falls through to ``dispatch_reviewer_impl`` (precedence 140).
+
+    If a future refactor removes the one-shot gate, this test fails
+    at PR-review time rather than deadlocking the autonomous loop in
+    production.
+    """
+    from foreman.reconciler.rules import RULES, evaluate_with_rule
+
+    ctx = _ctx_with(
+        tmp_path,
+        _issue(labels=("foreman:impl-review",)),
+        _pr(mergeable="MERGEABLE", ci_status="SUCCESS", head_ref="foreman/impl-143"),
+    )
+
+    # Tick N: retarget rule fires.
+    action_n, rule_n = evaluate_with_rule(ctx, rules=RULES)
+    assert action_n is Action.RETARGET_IMPL_PR_TO_DEFAULT
+    assert rule_n == "retarget_impl_pr_to_default"
+
+    # Simulate the executor terminating the retarget row with success.
+    start_id = ctx.log.write_action(
+        ticket_id=ctx.ticket_id,
+        project="foreman",
+        rule_name="retarget_impl_pr_to_default",
+        action="retarget_impl_pr_to_default",
+        outcome="running",
+        details={},
+    )
+    ctx.log.terminate_action(parent_log_id=start_id, outcome="success", details={})
+
+    # Tick N+1: same context (label still impl-review, PR still impl-
+    # shaped), but the one-shot gate flips the retarget predicate
+    # False. Evaluator falls through to dispatch_reviewer_impl at
+    # precedence 140.
+    action_n_plus_1, rule_n_plus_1 = evaluate_with_rule(ctx, rules=RULES)
+    assert action_n_plus_1 is Action.DISPATCH_REVIEWER_IMPL, (
+        f"After the retarget completes, the next tick must fall through "
+        f"to dispatch_reviewer_impl (precedence 140). The one-shot gate "
+        f"on the retarget rule is load-bearing — without it the rule "
+        f"would keep matching forever and deadlock the autonomous loop. "
+        f"Got action={action_n_plus_1!r}, rule={rule_n_plus_1!r}."
+    )
+    assert rule_n_plus_1 == "dispatch_reviewer_impl"
