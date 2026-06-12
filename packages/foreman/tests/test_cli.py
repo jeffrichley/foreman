@@ -1063,20 +1063,19 @@ def test_resolve_lock_path_falls_back_to_default_without_config(
     assert _resolve_lock_path(None) == Path("~/.foreman/reconciler.lock").expanduser()
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason=(
-        "Windows daemon_stop intentionally skips os.kill(SIGTERM) — there it "
-        "maps to TerminateProcess (a hard kill that delivers no signal), so "
-        "the daemon's graceful-shutdown handlers never run. Windows uses "
-        "the sentinel-file path only; that path is covered by "
-        "test_daemon_stop_writes_shutdown_sentinel below."
-    ),
-)
 def test_daemon_stop_reads_lock_file_pid_and_sends_sigterm(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """daemon_stop must read the lock file's PID and send SIGTERM."""
+    """daemon_stop must read the lock file's PID and send SIGTERM.
+
+    Forces the POSIX shutdown code path so this test runs identically on
+    every host OS. The Windows production short-circuit at
+    ``cli.py:1025`` (``if sys.platform == "win32": return``) is the
+    only behavior preventing this test on a real Windows host — patching
+    ``foreman.cli.sys.platform`` lets us exercise the SIGTERM path
+    cross-platform, removing the pre-2026-06-12 skipif decorator.
+    """
+    monkeypatch.setattr("foreman.cli.sys.platform", "linux")
     lock_path = tmp_path / "d.lock"
     lock_path.write_text(str(os.getpid()))
 
@@ -1112,20 +1111,17 @@ def test_daemon_stop_reads_lock_file_pid_and_sends_sigterm(
     assert "Daemon stopped cleanly." in result.output
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason=(
-        "Windows daemon_stop skips os.kill(SIGTERM) and the grace-period "
-        "polling that follows it (TerminateProcess can't run the daemon's "
-        "cleanup path); shutdown is sentinel-only on Windows."
-    ),
-)
 def test_daemon_stop_reports_when_daemon_does_not_exit(
     tmp_path: Path, monkeypatch
 ) -> None:
     """When the polled process refuses to die within the grace period,
     `stop` reports it. We don't remove the lock file ourselves — the
-    OS will release the lock when the process eventually dies."""
+    OS will release the lock when the process eventually dies.
+
+    Forces the POSIX shutdown code path so the grace-period polling
+    runs on any host (see ``test_daemon_stop_reads_lock_file_pid_and_sends_sigterm``).
+    """
+    monkeypatch.setattr("foreman.cli.sys.platform", "linux")
     lock_path = tmp_path / "d.lock"
     lock_path.write_text(str(os.getpid()))
 
@@ -1179,22 +1175,18 @@ def test_daemon_stop_with_missing_lock_file_gives_actionable_message(
     assert ("tasklist" in result.output) or ("ps aux" in result.output)
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason=(
-        "Windows daemon_stop skips os.kill entirely; stale-PID detection "
-        "relies on os.kill(pid, SIGTERM) raising ProcessLookupError, which "
-        "the Windows code path doesn't reach. Stale lock files on Windows "
-        "are detected lazily by the next `daemon start`."
-    ),
-)
 def test_daemon_stop_with_dead_pid_reports_stale(
     tmp_path: Path, monkeypatch
 ) -> None:
     """When the lock file's PID is dead, `stop` reports the stale
     state. The file is left in place — the OS lock is already free
     (the dead daemon's fd is gone), so the next `daemon start` will
-    succeed and overwrite the file content."""
+    succeed and overwrite the file content.
+
+    Forces the POSIX shutdown code path so the stale-PID detection
+    via ``ProcessLookupError`` runs cross-platform.
+    """
+    monkeypatch.setattr("foreman.cli.sys.platform", "linux")
     lock_path = tmp_path / "d.lock"
     lock_path.write_text("999999999")
 
@@ -1251,20 +1243,17 @@ def test_daemon_stop_with_unreadable_lock_content_reports(
     assert kill_called == []  # never tried to signal an unknown PID
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason=(
-        "Windows daemon_stop skips os.kill(SIGTERM); SIGTERM-assertion "
-        "tests don't apply there. The cross-platform sentinel write is "
-        "still exercised in test_daemon_stop_writes_shutdown_sentinel."
-    ),
-)
 def test_daemon_stop_works_without_config_file(
     tmp_path: Path, monkeypatch
 ) -> None:
     """Operator without a config file can still stop the daemon —
     falls back to the default lock path via FOREMAN_LOCK_PATH or
-    ~/.foreman/reconciler.lock (v3 canonical)."""
+    ~/.foreman/reconciler.lock (v3 canonical).
+
+    Forces the POSIX shutdown code path so the SIGTERM assertion runs
+    cross-platform.
+    """
+    monkeypatch.setattr("foreman.cli.sys.platform", "linux")
     monkeypatch.delenv("FOREMAN_CONFIG", raising=False)
 
     default_lock_path = tmp_path / "default.lock"
@@ -1617,17 +1606,6 @@ def test_daemon_status_reports_stale_when_lock_pid_dead(
     assert "stale" in result.output.lower()
 
 
-# TODO(foreman#98): re-enable on CI Windows once subprocess hang is root-caused.
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason=(
-        "CI Windows Server 2025 hangs in pytest when this test runs, "
-        "even though the same test passes on local Windows 11 with the "
-        "same Python / uv / cmd.exe shell. The lock-file-as-PID contract "
-        "is otherwise covered by the unit-level CliRunner tests above. "
-        "Root cause + Windows-safe restoration tracked in foreman#98."
-    ),
-)
 def test_daemon_subprocess_writes_pid_and_releases_lock_on_exit(
     tmp_path: Path,
 ) -> None:
