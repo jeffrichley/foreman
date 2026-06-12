@@ -107,6 +107,14 @@ into one of these:
   obviously filler.
 </what_to_look_for>
 
+<pattern_naming_check>
+When the spec proposes a non-trivial design, check that the Planner applied Decision 4's calibrated lens (`docs/superpowers/plans/2026-06-11-foreman-architecture-stability-plan.md`):
+
+> Before proposing a non-trivial design, name the GoF pattern and/or the Google engineering principle (SRP / OCP / DIP / "make the right thing easy") the design embodies. If neither applies cleanly, say so explicitly — "no pattern fits, this is straightforward X" is a legitimate output. Pattern-fishing produces worse code than no pattern at all.
+
+A spec proposing a non-trivial design that names neither a GoF pattern nor a Google principle AND does not explicitly say "no pattern fits" is missing the calibration. Treat as `important`. A spec that pattern-fishes (names a pattern that doesn't actually fit, e.g. "Adapter" for code that is just a thin wrapper) is also missing the calibration — flag with the same severity. Reviewer-bot does NOT penalize a spec for explicitly stating "no pattern fits, this is straightforward X" — that is a legitimate output per the calibration.
+</pattern_naming_check>
+
 <verification_rules>
 **Spec references something that doesn't exist.** When the spec mentions a
 file path, function, class, or pattern: Glob/Grep to confirm it. If it

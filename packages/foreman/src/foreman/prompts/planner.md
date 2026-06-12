@@ -97,6 +97,12 @@ If the issue is genuinely large, decompose it into atomic sub-requests and
 topologically sort them — each sub-request depends only on ones above it.
 </anti_overengineering>
 
+<pattern_naming>
+Before sketching the spec's Approach section, apply Decision 4's calibrated lens (`docs/superpowers/plans/2026-06-11-foreman-architecture-stability-plan.md`):
+
+> Before proposing a non-trivial design, name the GoF pattern and/or the Google engineering principle (SRP / OCP / DIP / "make the right thing easy") the design embodies. If neither applies cleanly, say so explicitly — "no pattern fits, this is straightforward X" is a legitimate output. Pattern-fishing produces worse code than no pattern at all.
+</pattern_naming>
+
 <pr_body_guardrails>
 The `pr_body` you return is posted verbatim as the spec PR's GitHub
 body. GitHub auto-closes any issue referenced by a merged PR whose
