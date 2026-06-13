@@ -6904,7 +6904,7 @@ Phase 4 completion criterion (from the outline): **lifecycle test flows through 
 
 The substrate is correct; nothing real yet drives it. Phase 5 makes two changes:
 
-1. **Each of the four role CLIs emits `FOREMAN_OUTCOME:` JSON on stdout as its terminal line.** Replaces the v3 label-writing exit path. Role prompts + role logic stay unchanged — only the exit-shape changes.
+1. **Each of the four role CLIs emits `FOREMAN_OUTCOME:` JSON on stdout as its terminal line.** Replaces the existing label-writing exit path outright — nothing is running v3 to preserve, so the cutover is mechanical, not flag-gated. Role prompts + role bodies stay unchanged; only the CLI tail changes.
 2. **`SubprocessRoleDispatcher`** — the production `RoleDispatcher` impl that shells out to `foreman <role>` with the appropriate per-role identity (PAT / App token) and returns stdout.
 
 Roles affected (all in the **survival set** — they pre-date v4 and the bodies stay):
@@ -6913,7 +6913,7 @@ Roles affected (all in the **survival set** — they pre-date v4 and the bodies 
 - `foreman/roles/fixer.py` + `foreman/cli.py:cmd_fix` (target-aware)
 - `foreman/roles/worker.py` + `foreman/cli.py:cmd_implement`
 
-Each role's existing label-write tail is REPLACED with an emitter call. The v3 label-writing code paths are not deleted in Phase 5; they're guarded behind a `--v4-outcome` flag so v3 can keep running during the transition. Phase 8 removes the v3 path entirely.
+Each role's label-writing tail is **deleted** in the same task that adds the emit call. The label-write imports + helper calls in `cli.py` go too; whatever's left in `foreman.labels` after Phase 5 is dead code and disappears in Phase 8.
 
 ### Task 5.1: Outcome emitter utility
 
@@ -7034,11 +7034,11 @@ git commit -m "feat(v4): add emit_outcome — role-side counterpart of parser"
 ### Task 5.2: Planner emits Outcome
 
 **Files:**
-- Modify: `packages/foreman/src/foreman/roles/planner.py` (add `--v4-outcome` exit path)
-- Modify: `packages/foreman/src/foreman/cli.py` (`cmd_plan` accepts the flag)
+- Modify: `packages/foreman/src/foreman/roles/planner.py` (rewrite CLI exit path)
+- Modify: `packages/foreman/src/foreman/cli.py` (`cmd_plan` calls the new exit)
 - Test: `packages/foreman/tests/v4/roles/test_planner_outcome.py`
 
-The Planner already returns a result internally — opens a spec PR, or returns NEEDS_HELP if the ticket is under-specified. The change is the exit shape: under `--v4-outcome`, the role calls `emit_outcome(...)` instead of writing labels. v3 path stays in place for now.
+The Planner already returns a result internally — opens a spec PR, or returns NEEDS_HELP if the ticket is under-specified. The change is the exit shape: `emit_outcome(...)` replaces the label-writing tail outright. Nothing is running the old behavior, so the cutover is mechanical.
 
 Mapping to Outcome kinds:
 - Planner opened a spec PR successfully → `CLEAN` with `artifacts.pr_number` + `artifacts.pr_url`
@@ -7053,7 +7053,7 @@ Mapping to Outcome kinds:
 
 ```python
 # packages/foreman/tests/v4/roles/test_planner_outcome.py
-"""Planner CLI emits Outcome under --v4-outcome."""
+"""Planner CLI emits FOREMAN_OUTCOME on exit."""
 from __future__ import annotations
 
 import json
@@ -7061,7 +7061,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from foreman.roles.planner import run_planner_with_v4_outcome
+from foreman.roles.planner import run_planner_cli
 from foreman.v4.outcome import OutcomeKind, parse_outcome_from_stdout
 
 
@@ -7083,7 +7083,7 @@ def test_planner_success_emits_clean_outcome(capsys):
         summary="spec PR opened",
     )
     with patch("foreman.roles.planner.build_planner", return_value=fake_planner):
-        exit_code = run_planner_with_v4_outcome(project="p", issue_number=1)
+        exit_code = run_planner_cli(project="p", issue_number=1)
     assert exit_code == 0
     captured = capsys.readouterr()
     outcome = parse_outcome_from_stdout(captured.out)
@@ -7101,7 +7101,7 @@ def test_planner_low_confidence_emits_needs_help(capsys):
     fake_planner = MagicMock()
     fake_planner.run.return_value = fake_result
     with patch("foreman.roles.planner.build_planner", return_value=fake_planner):
-        exit_code = run_planner_with_v4_outcome(project="p", issue_number=1)
+        exit_code = run_planner_cli(project="p", issue_number=1)
     assert exit_code == 0  # zero exit even on NEEDS_HELP — stdout carries the verdict
     captured = capsys.readouterr()
     outcome = parse_outcome_from_stdout(captured.out)
@@ -7112,7 +7112,7 @@ def test_planner_exception_emits_error(capsys):
     fake_planner = MagicMock()
     fake_planner.run.side_effect = RuntimeError("provider timeout")
     with patch("foreman.roles.planner.build_planner", return_value=fake_planner):
-        exit_code = run_planner_with_v4_outcome(project="p", issue_number=1)
+        exit_code = run_planner_cli(project="p", issue_number=1)
     assert exit_code == 1
     captured = capsys.readouterr()
     outcome = parse_outcome_from_stdout(captured.out)
@@ -7123,14 +7123,14 @@ def test_planner_exception_emits_error(capsys):
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest packages/foreman/tests/v4/roles/test_planner_outcome.py -v`
-Expected: FAIL with `ImportError: cannot import name 'run_planner_with_v4_outcome'`
+Expected: FAIL with `ImportError: cannot import name 'run_planner_cli'`
 
-- [ ] **Step 3: Add the v4 exit path to `planner.py`**
+- [ ] **Step 3: Replace the planner's CLI exit path**
 
-The exact insertion site depends on the planner module's current shape. The pattern, applied to whatever `cmd_plan` / `main(...)` is in `planner.py`:
+Delete the existing label-writing tail in `planner.py` (whatever helper writes `foreman:plan-approved` / sets `needs-help`) along with its imports from `foreman.labels`. Add the emit-based entry point:
 
 ```python
-# Append to packages/foreman/src/foreman/roles/planner.py
+# packages/foreman/src/foreman/roles/planner.py — replace the existing CLI exit tail
 
 from foreman.v4.emit import emit_outcome
 from foreman.v4.outcome import (
@@ -7141,12 +7141,11 @@ from foreman.v4.outcome import (
 )
 
 
-def run_planner_with_v4_outcome(*, project: str, issue_number: int) -> int:
-    """Run the planner and emit a v4 Outcome JSON line on stdout.
+def run_planner_cli(*, project: str, issue_number: int) -> int:
+    """Run the planner; emit FOREMAN_OUTCOME JSON; return exit code.
 
-    This is the entry point invoked by the v4 SubprocessRoleDispatcher
-    (Task 5.6). v3's label-writing exit path remains as a separate
-    function for now and is removed in Phase 8.
+    This is the entry point the SubprocessRoleDispatcher (Task 5.6)
+    forks. The label-writing tail is gone; nothing reads labels in v4.
     """
     try:
         planner = build_planner(project=project, issue_number=issue_number)
@@ -7181,26 +7180,22 @@ def run_planner_with_v4_outcome(*, project: str, issue_number: int) -> int:
 
 If `build_planner` doesn't exist by that name in the current module, identify the existing factory (e.g., the function that constructs the Planner with config + identity + provider) and adapt the import. The test's `patch` target matches the function name actually used.
 
-- [ ] **Step 4: Add `--v4-outcome` flag to `cmd_plan` in `cli.py`**
+- [ ] **Step 4: Rewrite `cmd_plan` in `cli.py`**
+
+Replace the existing `cmd_plan` body. No flag — every `foreman plan` invocation now emits Outcome:
 
 ```python
-# In packages/foreman/src/foreman/cli.py, alongside the existing cmd_plan:
+# packages/foreman/src/foreman/cli.py
 
 @cli.command("plan")
 @click.option("--project", required=True)
 @click.option("--issue-number", "issue_number", type=int, required=True)
-@click.option("--v4-outcome", is_flag=True,
-              help="Emit FOREMAN_OUTCOME: JSON on stdout (v4 mode)")
-def cmd_plan(project: str, issue_number: int, v4_outcome: bool) -> None:
-    if v4_outcome:
-        from foreman.roles.planner import run_planner_with_v4_outcome
-        sys.exit(run_planner_with_v4_outcome(
-            project=project, issue_number=issue_number,
-        ))
-    # ... existing v3 path stays here unchanged
+def cmd_plan(project: str, issue_number: int) -> None:
+    from foreman.roles.planner import run_planner_cli
+    sys.exit(run_planner_cli(project=project, issue_number=issue_number))
 ```
 
-(If the v3 `cmd_plan` already exists, modify in place rather than duplicating. Keep the v3 branch reachable when `--v4-outcome` is absent.)
+The previous body (whatever wrote labels via `foreman.labels`) is deleted in this same commit. Any imports from `foreman.labels` that became orphaned go with it.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -7211,14 +7206,14 @@ Expected: 3 passed
 
 ```bash
 git add packages/foreman/src/foreman/roles/planner.py packages/foreman/src/foreman/cli.py packages/foreman/tests/v4/roles/__init__.py packages/foreman/tests/v4/roles/test_planner_outcome.py
-git commit -m "feat(v4): planner emits FOREMAN_OUTCOME under --v4-outcome"
+git commit -m "feat(v4): planner emits FOREMAN_OUTCOME (replaces label-writing exit)"
 ```
 
 ### Task 5.3: Reviewer emits Outcome (target-aware)
 
 **Files:**
 - Modify: `packages/foreman/src/foreman/roles/reviewer.py`
-- Modify: `packages/foreman/src/foreman/cli.py` (`cmd_review` accepts `--v4-outcome`)
+- Modify: `packages/foreman/src/foreman/cli.py` (`cmd_review` rewritten)
 - Test: `packages/foreman/tests/v4/roles/test_reviewer_outcome.py`
 
 The Reviewer is target-aware: `reviewer-spec` reviews the spec PR; `reviewer-impl` reviews the impl PR. The internal logic already branches on target; v4's contribution is the exit-emission.
@@ -7234,14 +7229,14 @@ Findings translate from the Reviewer's internal shape into `Finding` (severity /
 
 ```python
 # packages/foreman/tests/v4/roles/test_reviewer_outcome.py
-"""Reviewer (spec + impl) emits Outcome under --v4-outcome."""
+"""Reviewer (spec + impl) emits FOREMAN_OUTCOME on exit."""
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from foreman.roles.reviewer import run_reviewer_with_v4_outcome
+from foreman.roles.reviewer import run_reviewer_cli
 from foreman.v4.outcome import OutcomeKind, parse_outcome_from_stdout
 
 
@@ -7271,7 +7266,7 @@ def _rejected_result(pr_number: int):
 def test_approved_emits_clean(target, capsys):
     fake = MagicMock(); fake.run.return_value = _approved_result(7)
     with patch("foreman.roles.reviewer.build_reviewer", return_value=fake):
-        exit_code = run_reviewer_with_v4_outcome(
+        exit_code = run_reviewer_cli(
             project="p", issue_number=1, target=target,
         )
     assert exit_code == 0
@@ -7284,7 +7279,7 @@ def test_approved_emits_clean(target, capsys):
 def test_changes_requested_emits_needs_fix_with_findings(target, capsys):
     fake = MagicMock(); fake.run.return_value = _rejected_result(7)
     with patch("foreman.roles.reviewer.build_reviewer", return_value=fake):
-        run_reviewer_with_v4_outcome(
+        run_reviewer_cli(
             project="p", issue_number=1, target=target,
         )
     outcome = parse_outcome_from_stdout(capsys.readouterr().out)
@@ -7296,7 +7291,7 @@ def test_changes_requested_emits_needs_fix_with_findings(target, capsys):
 def test_reviewer_exception_emits_error(capsys):
     fake = MagicMock(); fake.run.side_effect = RuntimeError("rate limit")
     with patch("foreman.roles.reviewer.build_reviewer", return_value=fake):
-        exit_code = run_reviewer_with_v4_outcome(
+        exit_code = run_reviewer_cli(
             project="p", issue_number=1, target="spec",
         )
     assert exit_code == 1
@@ -7324,7 +7319,7 @@ from foreman.v4.outcome import (
 )
 
 
-def run_reviewer_with_v4_outcome(
+def run_reviewer_cli(
     *, project: str, issue_number: int, target: str,
 ) -> int:
     try:
@@ -7362,7 +7357,7 @@ def run_reviewer_with_v4_outcome(
     return 0
 ```
 
-- [ ] **Step 4: Wire `--v4-outcome` into `cmd_review` in `cli.py`** (same pattern as `cmd_plan`, with the existing `--target` flag preserved).
+- [ ] **Step 4: Rewrite `cmd_review` in `cli.py`** — same shape as `cmd_plan`, preserving the existing `--target` flag, body becomes a one-liner that calls `run_reviewer_cli(...)` and exits with its return code. Delete the prior label-writing tail.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -7395,14 +7390,14 @@ Same shape as Reviewer: target-aware (`fixer-spec`, `fixer-impl`), three outcome
 
 ```python
 # packages/foreman/tests/v4/roles/test_fixer_outcome.py
-"""Fixer (spec + impl) emits Outcome under --v4-outcome."""
+"""Fixer (spec + impl) emits FOREMAN_OUTCOME on exit."""
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from foreman.roles.fixer import run_fixer_with_v4_outcome
+from foreman.roles.fixer import run_fixer_cli
 from foreman.v4.outcome import OutcomeKind, parse_outcome_from_stdout
 
 
@@ -7428,7 +7423,7 @@ def _escalated_result():
 def test_pushed_emits_clean(target, capsys):
     fake = MagicMock(); fake.run.return_value = _pushed_result(11)
     with patch("foreman.roles.fixer.build_fixer", return_value=fake):
-        exit_code = run_fixer_with_v4_outcome(
+        exit_code = run_fixer_cli(
             project="p", issue_number=1, target=target,
         )
     assert exit_code == 0
@@ -7441,7 +7436,7 @@ def test_pushed_emits_clean(target, capsys):
 def test_escalated_emits_needs_help(target, capsys):
     fake = MagicMock(); fake.run.return_value = _escalated_result()
     with patch("foreman.roles.fixer.build_fixer", return_value=fake):
-        run_fixer_with_v4_outcome(
+        run_fixer_cli(
             project="p", issue_number=1, target=target,
         )
     outcome = parse_outcome_from_stdout(capsys.readouterr().out)
@@ -7451,7 +7446,7 @@ def test_escalated_emits_needs_help(target, capsys):
 def test_fixer_exception_emits_error(capsys):
     fake = MagicMock(); fake.run.side_effect = RuntimeError("push rejected")
     with patch("foreman.roles.fixer.build_fixer", return_value=fake):
-        exit_code = run_fixer_with_v4_outcome(
+        exit_code = run_fixer_cli(
             project="p", issue_number=1, target="spec",
         )
     assert exit_code == 1
@@ -7474,7 +7469,7 @@ from foreman.v4.outcome import (
 )
 
 
-def run_fixer_with_v4_outcome(
+def run_fixer_cli(
     *, project: str, issue_number: int, target: str,
 ) -> int:
     try:
@@ -7504,7 +7499,7 @@ def run_fixer_with_v4_outcome(
     return 0
 ```
 
-- [ ] **Step 4: Wire `--v4-outcome` into `cmd_fix`** in `cli.py`.
+- [ ] **Step 4: Rewrite `cmd_fix` in `cli.py`** — one-liner calling `run_fixer_cli(...)` with `--target` preserved; delete the prior label-writing tail.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -7538,12 +7533,12 @@ The Worker is the only role that produces `BLOCKED` (the impl PR was opened but 
 
 ```python
 # packages/foreman/tests/v4/roles/test_worker_outcome.py
-"""Worker emits Outcome under --v4-outcome (CLEAN/BLOCKED/NEEDS_HELP/ERROR)."""
+"""Worker emits FOREMAN_OUTCOME on exit (CLEAN/BLOCKED/NEEDS_HELP/ERROR)."""
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from foreman.roles.worker import run_worker_with_v4_outcome
+from foreman.roles.worker import run_worker_cli
 from foreman.v4.outcome import OutcomeKind, parse_outcome_from_stdout
 
 
@@ -7558,7 +7553,7 @@ def _result(*, status: str, pr_number: int | None = None, summary: str = "x"):
 def test_ci_passing_emits_clean(capsys):
     fake = MagicMock(); fake.run.return_value = _result(status="ci_passing", pr_number=99)
     with patch("foreman.roles.worker.build_worker", return_value=fake):
-        run_worker_with_v4_outcome(project="p", issue_number=1)
+        run_worker_cli(project="p", issue_number=1)
     outcome = parse_outcome_from_stdout(capsys.readouterr().out)
     assert outcome.kind == OutcomeKind.CLEAN
     assert outcome.artifacts.pr_number == 99
@@ -7567,7 +7562,7 @@ def test_ci_passing_emits_clean(capsys):
 def test_ci_in_flight_emits_blocked(capsys):
     fake = MagicMock(); fake.run.return_value = _result(status="ci_in_flight", pr_number=99)
     with patch("foreman.roles.worker.build_worker", return_value=fake):
-        run_worker_with_v4_outcome(project="p", issue_number=1)
+        run_worker_cli(project="p", issue_number=1)
     outcome = parse_outcome_from_stdout(capsys.readouterr().out)
     assert outcome.kind == OutcomeKind.BLOCKED
     assert outcome.artifacts.pr_number == 99
@@ -7576,7 +7571,7 @@ def test_ci_in_flight_emits_blocked(capsys):
 def test_give_up_emits_needs_help(capsys):
     fake = MagicMock(); fake.run.return_value = _result(status="give_up", summary="3 baseline failures")
     with patch("foreman.roles.worker.build_worker", return_value=fake):
-        run_worker_with_v4_outcome(project="p", issue_number=1)
+        run_worker_cli(project="p", issue_number=1)
     outcome = parse_outcome_from_stdout(capsys.readouterr().out)
     assert outcome.kind == OutcomeKind.NEEDS_HELP
 
@@ -7584,7 +7579,7 @@ def test_give_up_emits_needs_help(capsys):
 def test_worker_exception_emits_error(capsys):
     fake = MagicMock(); fake.run.side_effect = RuntimeError("worktree corrupted")
     with patch("foreman.roles.worker.build_worker", return_value=fake):
-        exit_code = run_worker_with_v4_outcome(project="p", issue_number=1)
+        exit_code = run_worker_cli(project="p", issue_number=1)
     assert exit_code == 1
     outcome = parse_outcome_from_stdout(capsys.readouterr().out)
     assert outcome.kind == OutcomeKind.ERROR
@@ -7605,7 +7600,7 @@ from foreman.v4.outcome import (
 )
 
 
-def run_worker_with_v4_outcome(*, project: str, issue_number: int) -> int:
+def run_worker_cli(*, project: str, issue_number: int) -> int:
     try:
         worker = build_worker(project=project, issue_number=issue_number)
         result = worker.run()
@@ -7645,7 +7640,7 @@ def run_worker_with_v4_outcome(*, project: str, issue_number: int) -> int:
     return 0
 ```
 
-- [ ] **Step 4: Wire `--v4-outcome` into `cmd_implement`** in `cli.py`.
+- [ ] **Step 4: Rewrite `cmd_implement` in `cli.py`** — one-liner calling `run_worker_cli(...)`; delete the prior label-writing tail.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -7665,7 +7660,7 @@ git commit -m "feat(v4): worker emits FOREMAN_OUTCOME (CLEAN/BLOCKED/NEEDS_HELP/
 - Create: `packages/foreman/src/foreman/v4/subprocess_dispatcher.py`
 - Test: `packages/foreman/tests/v4/test_subprocess_dispatcher.py`
 
-The production `RoleDispatcher` impl. Shells out to `foreman <role> --v4-outcome --project <p> --issue-number <n>` with the appropriate per-role identity (PAT or App token) in `GH_TOKEN`. Captures stdout + stderr; returns stdout for the state machine's verify hook to parse.
+The production `RoleDispatcher` impl. Shells out to `foreman <role> --project <p> --issue-number <n>` with the appropriate per-role identity (PAT or App token) in `GH_TOKEN`. Captures stdout + stderr; returns stdout for the state machine's verify hook to parse. (Every `foreman <role>` invocation emits `FOREMAN_OUTCOME:` now — no flag.)
 
 Per-role identity wiring lives in `foreman.identity` (survival set). For each role string the dispatcher receives, it resolves to a token via `identity.get_role_token(role_name)`.
 
@@ -7682,7 +7677,7 @@ Per-role identity wiring lives in `foreman.identity` (survival set). For each ro
 
 ```python
 # packages/foreman/tests/v4/test_subprocess_dispatcher.py
-"""SubprocessRoleDispatcher — shells out to foreman <role> --v4-outcome."""
+"""SubprocessRoleDispatcher — shells out to foreman <role> for v4 dispatch."""
 from __future__ import annotations
 
 import subprocess
@@ -7703,7 +7698,7 @@ def _stub_identity():
     return mod
 
 
-def test_planner_dispatch_invokes_foreman_plan_with_v4_outcome():
+def test_planner_dispatch_invokes_foreman_plan():
     completed = subprocess.CompletedProcess(
         args=[], returncode=0,
         stdout=(
@@ -7722,7 +7717,7 @@ def test_planner_dispatch_invokes_foreman_plan_with_v4_outcome():
     assert "FOREMAN_OUTCOME:" in stdout
     args = run.call_args
     cmd = args[0][0] if args[0] else args[1].get("args")
-    assert "--v4-outcome" in cmd
+    assert "plan" in cmd
     assert "--project" in cmd
     assert "1" in cmd
     # GH_TOKEN injected via env, not arg
@@ -7805,7 +7800,7 @@ Expected: FAIL with `ModuleNotFoundError`
 # packages/foreman/src/foreman/v4/subprocess_dispatcher.py
 """SubprocessRoleDispatcher — production RoleDispatcher impl.
 
-Shells out to ``foreman <subcmd> --v4-outcome ...`` with the role's
+Shells out to ``foreman <subcmd> ...`` with the role's
 identity token injected as GH_TOKEN. Returns the subprocess's stdout
 for the state machine's verify hook to parse.
 
@@ -7869,7 +7864,6 @@ class SubprocessRoleDispatcher:
 
         cmd = [
             *self._foreman_cli, inv.subcommand,
-            "--v4-outcome",
             "--project", project,
             "--issue-number", str(issue_number),
         ]
@@ -7978,6 +7972,6 @@ git commit -m "test(v4): phase 5 e2e — real subprocess fork + outcome parse"
 - [ ] **Run:** `just check`
 - [ ] **Expected:** all green; isolation guard still passes (new modules under `foreman/v4/` and modifications scoped to survival-set role files only).
 
-Phase 5 completion criterion (from the outline): **roles produce stdout-parsable outcomes parseable by the state machine's verify hook**. Achieved at Task 5.7. The v3 label-writing exit paths still exist behind the `--v4-outcome` flag's absence; Phase 8 removes them. The substrate now has a real production path: Poller → QueueManager → WorkerPool → SubprocessRoleDispatcher → real `foreman <role>` subprocess → Outcome JSON → state machine.
+Phase 5 completion criterion (from the outline): **roles produce stdout-parsable outcomes parseable by the state machine's verify hook**. Achieved at Task 5.7. The label-writing exit paths are deleted in this phase along with their `foreman.labels` imports. The substrate now has a real production path: Poller → QueueManager → WorkerPool → SubprocessRoleDispatcher → real `foreman <role>` subprocess → Outcome JSON → state machine.
 
 ---
