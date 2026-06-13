@@ -27,11 +27,13 @@ The redesign uses standard SOLID principles and three GoF patterns explicitly:
 
 - **State pattern** for the workflow. Each phase is a concrete `TicketState` subclass with its own enter/execute/exit semantics. The state machine holds a current state and transitions via state-returned next-state.
 - **Template Method pattern** on the abstract `TicketState`. The base class defines a `transition()` Template Method that orchestrates the five-hook lifecycle in fixed order with per-phase failure handlers; subclasses override individual hooks.
-- **Mediator pattern** for the `QueueManager`. Producers (two distinct pollers — see below), the State Machine, and the Worker Pool all talk through the QueueManager, never directly. Decouples the producer-consumer surface.
-- **Two distinct GitHub pollers (SRP)**, both producers for the QueueManager. Neither reads workflow state — that lives in SQLite. They read *world state about GitHub*:
-  - **`TriggerPoller`** — detects new tickets by polling open issues for the trigger label. Emits `NewTicketEvent` per match. One poll per project, every N seconds.
-  - **`ArtifactPoller`** — polls GitHub for the state of artifacts the State Machine is currently waiting on (PR mergeable status, CI verdict, MergeQueue position). Reads SQLite to know which artifacts to ask about, polls only those. Emits `CIVerdictEvent` / `PRMergedEvent` / `PRClosedEvent` / `MergeQueueRejectedEvent` per change.
-  - Both write to the QueueManager via the Event interface; the State Machine decides whether each event causes a transition for the affected ticket. A future webhook receiver would be a third producer with the same Event shape — additive, not a rewrite.
+- **Mediator pattern** for the `QueueManager`. Producers (webhook receiver + reconciliation poller — see below), the State Machine, and the Worker Pool all talk through the QueueManager, never directly. Decouples the producer-consumer surface.
+- **Webhook-driven event ingestion (primary), reconciliation polling (fallback).** Neither reads workflow state — that lives in SQLite. Both read *world state about GitHub* and emit Events to the QueueManager:
+  - **`WebhookReceiver`** — small HTTP server (FastAPI + uvicorn — Pydantic-native, matches the rest of foreman). Exposed publicly via **tailscale funnel** so GitHub.com can reach it. Verifies HMAC-SHA256 signatures with per-repo secrets, normalizes GitHub event payloads (`issues.labeled`, `pull_request.closed`, `check_suite.completed`, `workflow_run.completed`, `merge_group.checks_requested`, etc.) into domain Events (`NewTicketEvent`, `CIVerdictEvent`, `PRMergedEvent`, `MergeQueueRejectedEvent`), and feeds the QueueManager. Webhook delivery is at-least-once; receiver deduplicates by event ID.
+  - **`ReconciliationPoller`** — fallback catch-up after daemon downtime. Runs at a slower cadence (every few minutes, not seconds). Queries SQLite for `state_instances WHERE exited_at IS NULL`, fetches each waiting artifact's current state from GitHub, emits delta events for anything the webhook stream missed during the downtime window. Also covers the rare case of dropped webhook deliveries. Same Event interface — the State Machine doesn't care whether an event came from webhook or poll.
+  - Both producers feed the same Event interface. The receiver vs. poller distinction is purely about *how* the daemon learned of the change, not what action it takes.
+
+**Per-project setup** for webhook delivery: one-time configuration per repo (webhook URL = tailscale funnel + receiver path; shared secret stored in foreman's existing secrets surface). Documented in `docs/RUNBOOK.md` as part of v4 cutover.
 - **Observer pattern** for side effects. State hooks emit Events; concrete observers (SQLite persistence, GitHub label writes, structured logging) subscribe. SRP per observer; new observability surfaces are additive.
 - **Repository pattern** for SQLite. `TicketRepository` is the only seam between domain code and SQLite. Test doubles use an in-memory implementation.
 - **Strategy pattern** for CLI output formatting. `TableFormatter`, `JsonFormatter`, `YamlFormatter` implement a common interface; `--format=X` flag selects.
@@ -63,7 +65,7 @@ The redesign uses standard SOLID principles and three GoF patterns explicitly:
 9. **Wire rich logging** — `RichHandler` for stdout, `JsonLinesHandler` for file. Daemon startup configures both.
 10. **MergeQueue default** — set `MergeMechanism = queue` as the default in `DaemonConfig`. Verify the existing queue path handles draft → ready transitions.
 11. **Delete `rules.py`** and `reconciler/actions.py`'s label-mutating action handlers. Replace `_LABEL_TO_ACTION` map with state-machine dispatch.
-12. **Add producer split** — `TriggerPoller` and `ArtifactPoller` as two distinct concrete `Producer` classes feeding the QueueManager via Events. SRP: trigger-detection logic separate from artifact-watching logic.
+12. **Add webhook ingestion** — `WebhookReceiver` FastAPI app verifying HMAC-SHA256 signatures, normalizing GitHub webhook payloads (`issues.labeled`, `pull_request.*`, `check_suite.completed`, `workflow_run.*`, `merge_group.*`) into domain Events, deduplicating by event ID. `ReconciliationPoller` runs at a slower cadence as fallback for downtime/dropped-delivery catch-up. Both producers feed the same Event interface to QueueManager. Tailscale-funnel setup documented in `docs/RUNBOOK.md`.
 13. **Update CLAUDE.md + per-project instruction files** with the v4 model. Role prompts unchanged.
 14. **Quality gate**: `just check` green. New tests under `tests/state_machine/`, `tests/cli_v4/`, `tests/observers/`. Existing tests update for the v4 substrate or move to `tests/legacy/` if irrelevant.
 
@@ -80,6 +82,8 @@ The redesign uses standard SOLID principles and three GoF patterns explicitly:
 | `packages/foreman/src/foreman/observers/{sqlite,label,log,metrics}.py` | NEW. Concrete observers. |
 | `packages/foreman/src/foreman/queue_manager.py` | NEW. Mediator implementation. |
 | `packages/foreman/src/foreman/commands.py` | NEW. Command pattern classes for queue work. |
+| `packages/foreman/src/foreman/webhook/{server,routes,signature,normalize}.py` | NEW. FastAPI webhook receiver — HTTP server, route handlers, HMAC-SHA256 signature verification, GitHub-payload → domain-Event normalization with per-delivery-ID dedup. |
+| `packages/foreman/src/foreman/reconciliation_poller.py` | NEW. Slow-cadence fallback producer — reads in-flight `state_instances`, polls only the artifacts the State Machine is waiting on, emits delta Events for changes the webhook stream missed. |
 | `packages/foreman/src/foreman/cli_v4/{ps,show,log,queue,daemon,hold,resume,retry,skip,drop,set_state,plan,review,fix,implement}.py` | NEW. One typer command per file. |
 | `packages/foreman/src/foreman/cli_v4/__init__.py` | NEW. Top-level typer app dispatcher. |
 | `packages/foreman/src/foreman/logging_setup.py` | UPDATE. Add `RichHandler` alongside `JsonLinesHandler`. |
@@ -181,6 +185,8 @@ Acceptable because foreman's ticket volume is low (low single digits in flight a
 - **Trigger label name.** Today `foreman:plan`. Keep, or rename to `foreman:queue` to reflect the v4 model? Worker should decide during impl PR.
 - **Multi-project state isolation.** v4 SQLite has one DB shared across projects. Per-project DBs are an option for stronger isolation. Defer until v4 ships and we observe contention.
 - **MergeQueue branch-protection requirements.** GitHub's MergeQueue requires specific branch-protection rules + workflow file. Document the per-repo setup checklist in `docs/RUNBOOK.md`; surface as a one-time enable step.
+- **Tailscale funnel URL stability.** Confirm the daemon's funnel URL is stable across daemon restarts. If not, document the URL-rotation procedure for the per-repo webhook config.
+- **Webhook secret rotation.** Per-repo HMAC secrets — same lifecycle as the existing GitHub App tokens. Confirm rotation procedure is documented.
 - **PR draft → ready API permissions.** Need to confirm Planner-bot has permission to open as draft AND Worker-bot has permission to flip to ready, or designate one identity for the flip.
 
 Confidence: medium. The State pattern + Mediator + Observer combination is well-understood; the unknowns are the GitHub-side mechanics (MergeQueue per-repo setup, App permission boundaries).
