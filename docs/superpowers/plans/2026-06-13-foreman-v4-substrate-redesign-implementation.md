@@ -7993,20 +7993,67 @@ Command surface — six groups:
 
 Phase 5 left the role commands in Click `cli.py` as one-liner shims; Phase 6 replaces the entire `cli.py` body with a thin import that mounts the typer app. Console script entry point in `pyproject.toml` already maps `foreman` → `foreman.cli:main`; we keep that and rewrite `main` to invoke the typer app.
 
-### Task 6.1: Formatter Strategy + typer app skeleton
+### Task 6.1: Formatter Strategy + typer app skeleton + `CliContext` builder
 
 **Files:**
 - Create: `packages/foreman/src/foreman/v4/cli/__init__.py`
+- Create: `packages/foreman/src/foreman/v4/cli/context.py`
 - Create: `packages/foreman/src/foreman/v4/cli/formatters.py`
+- Test: `packages/foreman/tests/v4/cli/test_context.py`
 - Test: `packages/foreman/tests/v4/cli/test_formatters.py`
 - Test: `packages/foreman/tests/v4/cli/test_app_skeleton.py`
 
 Strategy pattern per the spec: `TableFormatter`, `JsonFormatter`, `YamlFormatter` implement a common `format(rows: list[dict]) -> str` interface. CLI selects via `--format`.
 
+**Single source of construction for the per-invocation context.** Every typer command needs the same handful of injected dependencies (repo, qm, daemon, etc.). Only one function builds that context — `build_cli_context()`. Production startup calls it. Tests call it. There is NO ad-hoc `obj={"repo": r, "qm": q}` anywhere; if a test or production site assembles those fields by hand, the typed `CliContext` shape would catch it at static check time and `build_cli_context` would catch any missing-required-dependency at runtime. This is the "one builder, no drift" discipline.
+
+`CliContext` is a frozen dataclass with explicit fields; commands access dependencies as `ctx.obj.repo`, never via dict subscript. Adding a new dependency means: add a field to `CliContext`, add a parameter to `build_cli_context`, update production wiring once. Type checker flags every site that missed the rename.
+
 - [ ] **Step 1: Write the failing tests**
 
 ```python
 # packages/foreman/tests/v4/cli/__init__.py
+```
+
+```python
+# packages/foreman/tests/v4/cli/test_context.py
+"""CliContext — single source of construction for per-invocation deps."""
+from __future__ import annotations
+
+import pytest
+
+from foreman.v4.cli.context import CliContext, build_cli_context
+from foreman.v4.queue_manager import QueueManager
+from foreman.v4.sqlite_repository import SqliteTicketRepository
+
+
+def test_build_returns_frozen_dataclass():
+    repo = SqliteTicketRepository.in_memory()
+    ctx = build_cli_context(repo=repo)
+    assert isinstance(ctx, CliContext)
+    with pytest.raises(AttributeError):
+        ctx.repo = None  # frozen
+
+
+def test_repo_is_required():
+    with pytest.raises(TypeError):
+        build_cli_context()  # missing repo
+
+
+def test_optional_fields_default_to_none():
+    ctx = build_cli_context(repo=SqliteTicketRepository.in_memory())
+    assert ctx.qm is None
+    assert ctx.daemon is None
+    assert ctx.git is None
+    assert ctx.dispatcher is None
+
+
+def test_all_fields_passed_through():
+    repo = SqliteTicketRepository.in_memory()
+    qm = QueueManager(repo=repo, max_in_flight=2)
+    ctx = build_cli_context(repo=repo, qm=qm)
+    assert ctx.repo is repo
+    assert ctx.qm is qm
 ```
 
 ```python
@@ -8164,6 +8211,62 @@ def get_formatter(name: str) -> OutputFormatter:
         raise ValueError(f"unknown format: {name}") from exc
 ```
 
+```python
+# packages/foreman/src/foreman/v4/cli/context.py
+"""CliContext — the one-and-only builder for per-invocation deps.
+
+Production startup (Phase 7 daemon entry) calls build_cli_context()
+with concretes. Tests call it with fakes. There is no other call site
+that assembles these fields — adding a new dep means adding a field
+here and updating both call sites once.
+
+Why frozen + typed: ad-hoc dict construction (``obj={"repo": r}``) is
+how drift sneaks in — a test forgets the new field, production forgets
+the rename. Frozen dataclass makes the shape a single point of edit;
+the type checker flags every site that hasn't migrated.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from foreman.v4.daemon import Daemon
+    from foreman.v4.git_provider import GitProvider
+    from foreman.v4.queue_manager import QueueManager
+    from foreman.v4.repository import TicketRepository
+    from foreman.v4.role_dispatcher import RoleDispatcher
+
+
+@dataclass(frozen=True, slots=True)
+class CliContext:
+    """Per-invocation context passed via typer's ctx.obj."""
+    repo: "TicketRepository"
+    qm: "QueueManager | None" = None
+    daemon: "Daemon | None" = None
+    git: "GitProvider | None" = None
+    dispatcher: "RoleDispatcher | None" = None
+
+
+def build_cli_context(
+    *,
+    repo: "TicketRepository",
+    qm: "QueueManager | None" = None,
+    daemon: "Daemon | None" = None,
+    git: "GitProvider | None" = None,
+    dispatcher: "RoleDispatcher | None" = None,
+) -> CliContext:
+    """The single point of construction for CliContext.
+
+    Do NOT instantiate CliContext directly. Do NOT pass raw dicts as
+    ``obj=`` to runner.invoke / typer. Both paths route through here.
+    """
+    return CliContext(
+        repo=repo, qm=qm, daemon=daemon, git=git, dispatcher=dispatcher,
+    )
+```
+
 - [ ] **Step 4: Write the typer app skeleton**
 
 ```python
@@ -8283,6 +8386,7 @@ import json
 from typer.testing import CliRunner
 
 from foreman.v4.cli import app
+from foreman.v4.cli.context import build_cli_context
 from foreman.v4.outcome import OutcomeKind
 from foreman.v4.queue_manager import QueueManager
 from foreman.v4.sqlite_repository import SqliteTicketRepository
@@ -8302,7 +8406,7 @@ def _setup_repo_with_two_tickets() -> SqliteTicketRepository:
 def test_ps_lists_open_tickets_as_table():
     repo = _setup_repo_with_two_tickets()
     runner = CliRunner()
-    result = runner.invoke(app, ["ps"], obj={"repo": repo})
+    result = runner.invoke(app, ["ps"], obj=build_cli_context(repo=repo))
     assert result.exit_code == 0
     # Only the non-terminal ticket shows by default
     assert "Planning" in result.output
@@ -8312,7 +8416,7 @@ def test_ps_lists_open_tickets_as_table():
 def test_ps_all_includes_terminal_tickets():
     repo = _setup_repo_with_two_tickets()
     runner = CliRunner()
-    result = runner.invoke(app, ["ps", "--all"], obj={"repo": repo})
+    result = runner.invoke(app, ["ps", "--all"], obj=build_cli_context(repo=repo))
     assert "Planning" in result.output
     assert "Done" in result.output
 
@@ -8320,7 +8424,7 @@ def test_ps_all_includes_terminal_tickets():
 def test_ps_format_json_emits_parseable_json():
     repo = _setup_repo_with_two_tickets()
     runner = CliRunner()
-    result = runner.invoke(app, ["ps", "--format", "json"], obj={"repo": repo})
+    result = runner.invoke(app, ["ps", "--format", "json"], obj=build_cli_context(repo=repo))
     assert result.exit_code == 0
     rows = json.loads(result.output)
     assert isinstance(rows, list)
@@ -8340,7 +8444,7 @@ def test_show_renders_state_history_tree():
     )
     repo.close_state_instance(inst1.id, now=now)
     runner = CliRunner()
-    result = runner.invoke(app, ["show", str(ticket.id)], obj={"repo": repo})
+    result = runner.invoke(app, ["show", str(ticket.id)], obj=build_cli_context(repo=repo))
     assert result.exit_code == 0
     assert "Queued" in result.output
     assert "clean" in result.output.lower()
@@ -8349,7 +8453,7 @@ def test_show_renders_state_history_tree():
 def test_show_unknown_ticket_returns_nonzero():
     repo = SqliteTicketRepository.in_memory()
     runner = CliRunner()
-    result = runner.invoke(app, ["show", "999"], obj={"repo": repo})
+    result = runner.invoke(app, ["show", "999"], obj=build_cli_context(repo=repo))
     assert result.exit_code != 0
 
 
@@ -8360,7 +8464,7 @@ def test_queue_reports_depth_and_in_flight():
     qm.dequeue()  # 1 in flight, 0 queued
     qm.enqueue(WorkItem(ticket_id=2, state_name="Done"))  # +1 queued
     runner = CliRunner()
-    result = runner.invoke(app, ["queue"], obj={"repo": repo, "qm": qm})
+    result = runner.invoke(app, ["queue"], obj=build_cli_context(repo=repo, qm=qm))
     assert result.exit_code == 0
     assert "in_flight" in result.output.lower() or "in flight" in result.output.lower()
     assert "1" in result.output  # 1 in flight or 1 queued
@@ -8392,7 +8496,7 @@ def cmd_ps(
     show_all: bool = typer.Option(False, "--all", help="Include terminal states"),
     format: str = typer.Option("table", "--format", help="table|json|yaml"),
 ) -> None:
-    repo: TicketRepository = ctx.obj["repo"]
+    repo: TicketRepository = ctx.obj.repo
     tickets = repo.list_open_tickets() if not show_all else _list_all(repo)
     rows = [
         {
@@ -8438,7 +8542,7 @@ def cmd_show(
     ctx: typer.Context,
     ticket_id: int = typer.Argument(...),
 ) -> None:
-    repo: TicketRepository = ctx.obj["repo"]
+    repo: TicketRepository = ctx.obj.repo
     try:
         ticket = repo.get_ticket(ticket_id)
     except TicketNotFoundError:
@@ -8493,7 +8597,7 @@ def cmd_queue(
     ctx: typer.Context,
     format: str = typer.Option("table", "--format"),
 ) -> None:
-    qm = ctx.obj.get("qm")
+    qm = ctx.obj.qm
     if qm is None:
         typer.echo("queue manager not configured", err=True)
         raise typer.Exit(code=1)
@@ -8554,6 +8658,8 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from foreman.v4.cli import app
+from foreman.v4.cli.context import build_cli_context
+from foreman.v4.sqlite_repository import SqliteTicketRepository
 
 
 def _write_log(path: Path, lines: list[dict]) -> None:
@@ -8573,7 +8679,7 @@ def test_log_prints_recent_lines(tmp_path: Path):
     runner = CliRunner()
     result = runner.invoke(
         app, ["log", "--log-path", str(log_path)],
-        obj={},
+        obj=build_cli_context(repo=SqliteTicketRepository.in_memory()),
     )
     assert result.exit_code == 0
     assert "state_entered" in result.output
@@ -8589,7 +8695,7 @@ def test_log_filter_by_ticket(tmp_path: Path):
     runner = CliRunner()
     result = runner.invoke(
         app, ["log", "--log-path", str(log_path), "--ticket", "1"],
-        obj={},
+        obj=build_cli_context(repo=SqliteTicketRepository.in_memory()),
     )
     assert "Planning" in result.output
     assert "SpecReview" not in result.output
@@ -8604,7 +8710,7 @@ def test_log_filter_by_state(tmp_path: Path):
     runner = CliRunner()
     result = runner.invoke(
         app, ["log", "--log-path", str(log_path), "--state", "Merging"],
-        obj={},
+        obj=build_cli_context(repo=SqliteTicketRepository.in_memory()),
     )
     assert "Merging" in result.output
     assert "Planning" not in result.output
@@ -8619,7 +8725,7 @@ def test_log_limit_caps_output(tmp_path: Path):
     runner = CliRunner()
     result = runner.invoke(
         app, ["log", "--log-path", str(log_path), "--limit", "5"],
-        obj={},
+        obj=build_cli_context(repo=SqliteTicketRepository.in_memory()),
     )
     assert result.output.count("state_entered") == 5
 ```
@@ -8769,6 +8875,7 @@ import datetime as dt
 from typer.testing import CliRunner
 
 from foreman.v4.cli import app
+from foreman.v4.cli.context import build_cli_context
 from foreman.v4.queue_manager import QueueManager
 from foreman.v4.sqlite_repository import SqliteTicketRepository
 from foreman.v4.work import WorkItem
@@ -8786,7 +8893,7 @@ def test_hold_sets_held_columns():
     runner = CliRunner()
     result = runner.invoke(
         app, ["hold", str(tid), "--reason", "vacation", "--by", "jeff"],
-        obj={"repo": repo},
+        obj=build_cli_context(repo=repo),
     )
     assert result.exit_code == 0
     assert repo.get_ticket(tid).is_held
@@ -8797,7 +8904,7 @@ def test_resume_clears_held_columns():
     repo, tid = _make()
     repo.hold_ticket(tid, held_by="jeff", reason="x", now=dt.datetime(2026, 6, 13))
     runner = CliRunner()
-    result = runner.invoke(app, ["resume", str(tid)], obj={"repo": repo})
+    result = runner.invoke(app, ["resume", str(tid)], obj=build_cli_context(repo=repo))
     assert result.exit_code == 0
     assert not repo.get_ticket(tid).is_held
 
@@ -8808,7 +8915,7 @@ def test_retry_enqueues_workitem_for_current_state():
     runner = CliRunner()
     result = runner.invoke(
         app, ["retry", str(tid)],
-        obj={"repo": repo, "qm": qm},
+        obj=build_cli_context(repo=repo, qm=qm),
     )
     assert result.exit_code == 0
     assert qm.dequeue() == WorkItem(ticket_id=tid, state_name="Planning")
@@ -8819,7 +8926,7 @@ def test_set_state_changes_current_state():
     runner = CliRunner()
     result = runner.invoke(
         app, ["set-state", str(tid), "SpecReview"],
-        obj={"repo": repo},
+        obj=build_cli_context(repo=repo),
     )
     assert result.exit_code == 0
     assert repo.get_ticket(tid).current_state == "SpecReview"
@@ -8830,7 +8937,7 @@ def test_set_state_unknown_state_errors():
     runner = CliRunner()
     result = runner.invoke(
         app, ["set-state", str(tid), "NotAState"],
-        obj={"repo": repo},
+        obj=build_cli_context(repo=repo),
     )
     assert result.exit_code != 0
 
@@ -8838,7 +8945,7 @@ def test_set_state_unknown_state_errors():
 def test_drop_sets_failed():
     repo, tid = _make()
     runner = CliRunner()
-    result = runner.invoke(app, ["drop", str(tid)], obj={"repo": repo})
+    result = runner.invoke(app, ["drop", str(tid)], obj=build_cli_context(repo=repo))
     assert repo.get_ticket(tid).current_state == "Failed"
 
 
@@ -8847,7 +8954,7 @@ def test_skip_targets_next_state():
     runner = CliRunner()
     result = runner.invoke(
         app, ["skip", str(tid), "ImplReview"],
-        obj={"repo": repo},
+        obj=build_cli_context(repo=repo),
     )
     assert repo.get_ticket(tid).current_state == "ImplReview"
 ```
@@ -8882,7 +8989,7 @@ from foreman.v4.work import WorkItem
 
 
 def _resolve(ctx: typer.Context, ticket_id: int):
-    repo: TicketRepository = ctx.obj["repo"]
+    repo: TicketRepository = ctx.obj.repo
     try:
         ticket = repo.get_ticket(ticket_id)
     except TicketNotFoundError:
@@ -8921,7 +9028,7 @@ def cmd_retry(
     ticket_id: int = typer.Argument(...),
 ) -> None:
     repo, ticket = _resolve(ctx, ticket_id)
-    qm: QueueManager | None = ctx.obj.get("qm")
+    qm: QueueManager | None = ctx.obj.qm
     if qm is None:
         typer.echo("retry requires a queue manager", err=True)
         raise typer.Exit(code=1)
@@ -9174,11 +9281,11 @@ _PID_PATH = Path.home() / ".foreman" / "v4" / "daemon.pid"
 def cmd_daemon_start(ctx: typer.Context) -> None:
     """Start the daemon in the foreground.
 
-    Tests inject the prepared Daemon via ctx.obj['daemon']. Production
-    wiring builds the Daemon from config in the cmd_daemon_start_main
-    entry that this command delegates to.
+    Tests inject the prepared Daemon via build_cli_context(daemon=...).
+    Production wiring builds the Daemon from config and feeds it into
+    build_cli_context the same way.
     """
-    daemon = ctx.obj.get("daemon")
+    daemon = ctx.obj.daemon
     if daemon is None:
         typer.echo("daemon not configured", err=True)
         raise typer.Exit(code=1)
@@ -9242,13 +9349,15 @@ from unittest.mock import patch
 from typer.testing import CliRunner
 
 from foreman.v4.cli import app
+from foreman.v4.cli.context import build_cli_context
+from foreman.v4.sqlite_repository import SqliteTicketRepository
 
 
 def test_status_when_no_pid_file(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         "foreman.v4.cli.daemon._PID_PATH", tmp_path / "missing.pid",
     )
-    result = CliRunner().invoke(app, ["daemon", "status"], obj={})
+    result = CliRunner().invoke(app, ["daemon", "status"], obj=build_cli_context(repo=SqliteTicketRepository.in_memory()))
     assert "not running" in result.output
 
 
@@ -9258,7 +9367,7 @@ def test_status_when_pid_alive(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("foreman.v4.cli.daemon._PID_PATH", pid_path)
     with patch("os.kill") as mock_kill:
         mock_kill.return_value = None
-        result = CliRunner().invoke(app, ["daemon", "status"], obj={})
+        result = CliRunner().invoke(app, ["daemon", "status"], obj=build_cli_context(repo=SqliteTicketRepository.in_memory()))
     assert "running" in result.output
     assert "12345" in result.output
 
@@ -9268,7 +9377,7 @@ def test_status_when_pid_stale(tmp_path: Path, monkeypatch):
     pid_path.write_text("99999")
     monkeypatch.setattr("foreman.v4.cli.daemon._PID_PATH", pid_path)
     with patch("os.kill", side_effect=ProcessLookupError):
-        result = CliRunner().invoke(app, ["daemon", "status"], obj={})
+        result = CliRunner().invoke(app, ["daemon", "status"], obj=build_cli_context(repo=SqliteTicketRepository.in_memory()))
     assert "stale" in result.output
 ```
 
@@ -9471,6 +9580,7 @@ import datetime as dt
 from typer.testing import CliRunner
 
 from foreman.v4.cli import app
+from foreman.v4.cli.context import build_cli_context
 from foreman.v4.queue_manager import QueueManager
 from foreman.v4.sqlite_repository import SqliteTicketRepository
 
@@ -9481,7 +9591,7 @@ def test_hold_ps_resume_retry_queue_workflow():
     repo.set_ticket_state(t.id, "Planning", now=dt.datetime(2026, 6, 13))
     qm = QueueManager(repo=repo, max_in_flight=4)
     runner = CliRunner()
-    ctx = {"repo": repo, "qm": qm}
+    ctx = build_cli_context(repo=repo, qm=qm)
 
     # 1. hold
     r1 = runner.invoke(app, ["hold", str(t.id), "--reason", "test"], obj=ctx)
