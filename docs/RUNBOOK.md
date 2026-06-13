@@ -187,6 +187,43 @@ because operator error is the dominant secret-leak vector.
 
 ---
 
+## Import-graph boundaries (`import-linter`)
+
+foreman uses [`import-linter`](https://import-linter.readthedocs.io) as a
+CI gate to enforce architectural boundaries that aren't expressible at the
+AST/type-checker level. Config lives at `[tool.importlinter]` in the
+workspace-root `pyproject.toml`. Decision 7 of the
+2026-06-11 architecture stability plan owns the rule-source discipline.
+
+Run locally:
+
+```bash
+just import-linter                            # gate (matches CI)
+PYTHONPATH=packages/foreman uv run --no-sync lint-imports   # direct
+```
+
+Failure output shape: import-linter prints `Contracts: N kept / M broken`.
+For a broken contract, the report names the contract, the source module
+that violated it, and the forbidden import chain. Example:
+
+```
+R1: production code does not import from tests BROKEN
+
+foreman is not allowed to import tests:
+-   foreman.roles.worker -> tests.conftest (l.70)
+```
+
+Decode: a production module under `foreman.*` gained an import from the
+test tree. Either move the helper into `foreman/*` proper so it isn't a
+test-tree dependency, or remove the import. The historical motivating bug
+is foreman#19 (test-fixture pollution surfaced at pre-push).
+
+How to add a new rule: see
+`docs/superpowers/plans/2026-06-11-foreman-architecture-stability-plan.md`
+Decision 7 § How to add a rule.
+
+---
+
 ## What survives what
 
 | Action                         | Container | foreman-repos | foreman-state | foreman-logs | image |

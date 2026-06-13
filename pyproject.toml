@@ -14,6 +14,8 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.14",
+    # Import-graph boundary enforcement. Decision 7 of the 2026-06-11 architecture stability plan.
+    "import-linter>=2.0",
     "mypy>=1.11",
     # gitleaks pre-commit hook driver (.pre-commit-config.yaml). See RUNBOOK.
     "pre-commit>=4.0",
@@ -144,3 +146,24 @@ addopts = "--import-mode=importlib"
 # markers = [
 #     "real_engine: requires real engine + heavy deps. Skipped without FOREMAN_REAL_ENGINE_OK=1.",
 # ]
+
+[tool.importlinter]
+# Decision 7 of the 2026-06-11 architecture stability plan. The rule-source
+# discipline ("only when a decision creates the boundary") is documented in
+# that plan's Decision 7 section under "How to add a rule".
+#
+# Both ``foreman`` and ``tests`` must be root_packages so grimp's import
+# graph visits both. Without ``tests`` as a root, a stray ``from tests import
+# X`` inside ``foreman.*`` would not be visible to the contract walker and
+# the R1 rule below would silently no-op.
+root_packages = ["foreman", "tests"]
+include_external_packages = false
+
+# R1: production code (foreman.*) must not import from the test tree.
+# Justification: foreman#19 (2026-06-01) — test-fixture pollution
+# at pre-push hook. Decision 7 of 2026-06-11 architecture stability plan.
+[[tool.importlinter.contracts]]
+name = "R1: production code does not import from tests"
+type = "forbidden"
+source_modules = ["foreman"]
+forbidden_modules = ["tests"]
