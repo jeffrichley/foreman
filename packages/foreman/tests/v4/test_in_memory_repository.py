@@ -11,6 +11,7 @@ import pytest
 from foreman.v4.outcome import OutcomeKind
 from foreman.v4.repository import (
     InMemoryTicketRepository,
+    StateInstanceNotFoundError,
     TicketAlreadyExistsError,
     TicketNotFoundError,
 )
@@ -43,6 +44,11 @@ def test_create_ticket_duplicate_raises(repo: InMemoryTicketRepository):
 def test_get_ticket_missing_raises(repo: InMemoryTicketRepository):
     with pytest.raises(TicketNotFoundError):
         repo.get_ticket(999)
+
+
+def test_get_state_instance_missing_raises(repo: InMemoryTicketRepository):
+    with pytest.raises(StateInstanceNotFoundError):
+        repo.get_state_instance(999)
 
 
 def test_get_ticket_by_issue(repo: InMemoryTicketRepository):

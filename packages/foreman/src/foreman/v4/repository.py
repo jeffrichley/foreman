@@ -78,6 +78,8 @@ class InMemoryTicketRepository:
     Behavior must match SqliteTicketRepository — the same test suite runs
     against both. If you find a behavior gap, the bug is in whichever impl
     diverges from the test.
+
+    Not thread-safe; single-threaded test use only.
     """
 
     def __init__(self) -> None:
