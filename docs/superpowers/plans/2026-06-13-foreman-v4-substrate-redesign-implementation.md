@@ -10,11 +10,97 @@
 
 **Branch:** All work lands on `feat/foreman-v4-substrate` off `main`. Single PR.
 
-**Pre-push gate:** `just check` (ruff + mypy + import-linter + pytest) must stay green at every commit. Pre-push hook is host-native Windows; pytest runs against the host venv.
+**Pre-push gate:** `just check` (ruff + mypy + pytest) must stay green at every commit. Pre-push hook is host-native Windows; pytest runs against the host venv.
 
 **Commit cadence:** Frequent. Each task ends with a commit. Conventional commits, lowercase subjects. Stage specific files (no `git add -A`).
 
 **Source of truth:** `docs/superpowers/specs/2026-06-13-foreman-v4-substrate-redesign-design.md`. Cite section names when referencing it from a task.
+
+---
+
+## v4 isolation principle — "delete v2/v3 by `rm -rf`"
+
+Every task in this plan is written so that Phase 8 (cutover) can delete v2 + v3 with directory-level operations alone. No grep-and-patch. No untangling. The discipline that makes this true:
+
+**1. Namespace.** All v4 code lives under `packages/foreman/src/foreman/v4/`. All v4 tests live under `packages/foreman/tests/v4/`. The `foreman.v4.*` import path is the v4 boundary forever — there is no rename at cutover. (Same shape protects future v5 from the same churn.)
+
+**2. v4 never imports legacy modules.** A v4 module MAY import from:
+
+  - the Python standard library
+  - third-party deps already in `pyproject.toml` (pydantic, typer, rich, pygithub, sqlalchemy if added, etc.)
+  - other `foreman.v4.*` modules
+  - the **survival set** named below — modules that pre-date v4 but are not v2/v3-specific (auth, config, identity, worktree, etc.)
+
+  A v4 module MUST NOT import from the **kill set** named below. Any task whose code or test reaches into the kill set is a bug in the task — fix the task, not the import.
+
+**3. Survival set.** These files pre-date v4, are not coupled to the v2/v3 state-machine substrate, and v4 calls into them:
+
+  - `foreman/auth.py` — GitHub PAT + App-token loading
+  - `foreman/config.py` — TOML loading + env override (v4 adds keys, doesn't replace the loader)
+  - `foreman/identity.py` — per-role PyGithub clients
+  - `foreman/init.py` — `foreman init` project bootstrap (CLI command moves to typer wrapper in Phase 6, but the function survives)
+  - `foreman/instructions.py` — CLAUDE.md fragment writer
+  - `foreman/locks.py` — generic file-locking primitive
+  - `foreman/git_host.py` + `foreman/git_hosts/` — Git provider abstraction
+  - `foreman/provider.py` + `foreman/providers/` — LLM provider abstraction
+  - `foreman/roles/{planner,reviewer,fixer,worker}.py` — role logic (Phase 5 modifies only the CLI exit path to emit `FOREMAN_OUTCOME:` JSON; the role bodies stay)
+  - `foreman/prompts/` — role prompt files (unchanged)
+  - `foreman/worktree.py` — per-ticket git worktree
+  - `foreman/_env_filter.py` — env scrubbing
+  - `foreman/logging_setup.py` — Phase 7 extends; doesn't replace
+
+**4. Kill set — Phase 8 `git rm`-able with no v4 fallout.** These are pure v2/v3 substrate; nothing in `foreman.v4.*` reaches them:
+
+  - `foreman/reconciler/` — entire directory (rules engine, v3 daemon, v3 host adapter, label-mutating actions)
+  - `foreman/daemon.py` — v3 daemon main loop
+  - `foreman/daemon_runners.py` — v3 label-triggered role dispatch entrypoints (replaced by `foreman.v4.dispatch`)
+  - `foreman/daemon_host.py` — v3 daemon GitHub adapter (replaced by `foreman.v4.poller` direct PyGithub use)
+  - `foreman/daemon_lock.py` — v3 lock file (replaced by `foreman.v4.daemon_lock` if needed)
+  - `foreman/dispatcher.py` — the `_LABEL_TO_ACTION` map; v4 has no analog
+  - `foreman/dispatch_recorder.py` — v3 dispatch journal (replaced by `state_instances` table)
+  - `foreman/poller.py` — v3 poller (replaced by `foreman.v4.poller`)
+  - `foreman/queue.py` — v3 queue (replaced by `foreman.v4.queue_manager`)
+  - `foreman/storage.py` — v3 SQLite schema (replaced by `foreman.v4.sqlite_repository` + `schema.sql`)
+  - `foreman/worker.py` — v3 worker loop (replaced by `foreman.v4.worker_pool`)
+  - `foreman/role_dispatch.py` — v3 role dispatch helper
+  - `foreman/stats.py` — v3 stats (the v4 CLI computes from `state_instances` directly)
+  - `foreman/ps.py` — v3 `ps` command (replaced by `foreman.v4.cli.ps`)
+  - `foreman/labels.py` — v3 label catalog. v4's `LabelObservabilityObserver` ships its own minimal write-only label vocabulary; nothing reads from `labels.py`. **DELETE in Phase 8.**
+  - `foreman/branches.py` — v3 branch resolution (replaced by `foreman.v4.branches` if any survives)
+  - `foreman/v3_bus_endpoint.py` — v3 bus integration
+  - `foreman/cli.py` — top-level CLI dispatcher. Phase 6 moves the v4 commands into `foreman/v4/cli/`; Phase 8 deletes the v2/v3 commands and rewrites this file to a thin wrapper that exposes only the typer app from `foreman.v4.cli`.
+
+**5. Tests.** v4 tests live under `tests/v4/` and never import fixtures from `tests/reconciler/`, `tests/daemon/`, `tests/dispatcher/`, etc. Phase 8 deletes the legacy test directories alongside the legacy code.
+
+**6. v4 SQLite is a new file.** v4 connects to a different DB path (`<project>/.foreman/v4/state.db`) than v3 used. Cutover does not require schema migration — v3 DB is abandoned in place. Phase 8 documents the path change in `docs/RUNBOOK.md`.
+
+**Phase 8 cutover, in one shot:**
+
+```bash
+# Remove the kill set
+git rm -r packages/foreman/src/foreman/reconciler/
+git rm packages/foreman/src/foreman/daemon.py
+git rm packages/foreman/src/foreman/daemon_runners.py
+git rm packages/foreman/src/foreman/daemon_host.py
+git rm packages/foreman/src/foreman/daemon_lock.py
+git rm packages/foreman/src/foreman/dispatcher.py
+git rm packages/foreman/src/foreman/dispatch_recorder.py
+git rm packages/foreman/src/foreman/poller.py
+git rm packages/foreman/src/foreman/queue.py
+git rm packages/foreman/src/foreman/storage.py
+git rm packages/foreman/src/foreman/worker.py
+git rm packages/foreman/src/foreman/role_dispatch.py
+git rm packages/foreman/src/foreman/stats.py
+git rm packages/foreman/src/foreman/ps.py
+git rm packages/foreman/src/foreman/labels.py
+git rm packages/foreman/src/foreman/branches.py
+git rm packages/foreman/src/foreman/v3_bus_endpoint.py
+git rm -r packages/foreman/tests/reconciler packages/foreman/tests/daemon packages/foreman/tests/dispatcher
+# Rewrite foreman/cli.py to wrap foreman.v4.cli (~10 lines)
+# Run just check; expect green.
+```
+
+If `just check` is green after these `git rm`s, the isolation discipline held. If it's red, the failing import is the receipt for which task or module violated the principle — fix the source, not the symptom.
 
 ---
 
@@ -2091,6 +2177,131 @@ git add packages/foreman/src/foreman/v4/state.py packages/foreman/tests/v4/test_
 git commit -m "feat(v4): add Template Method transition() with per-phase failure handlers"
 ```
 
+### Task 1.10: v4 isolation guard test
+
+**Files:**
+- Create: `packages/foreman/tests/v4/test_isolation.py`
+
+Cites the **v4 isolation principle** section. This is the load-bearing piece that makes Phase 8's `git rm` safe: a test that AST-walks every `foreman/v4/**/*.py` file and asserts none of them import from the kill set. If a future task accidentally adds an import like `from foreman.reconciler.actions import merge_pr`, this test fails at commit time — not at Phase 8.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# packages/foreman/tests/v4/test_isolation.py
+"""v4 isolation guard.
+
+Phase 8 deletes v2/v3 by `git rm`. That's only safe if foreman.v4 never
+imports from the kill set. This test AST-walks every v4 source file and
+verifies the discipline holds.
+
+If this test fails, the failing module reached into a legacy package.
+Either move the dependency into foreman.v4 (correct) or reconsider whether
+the legacy module belongs in the survival set instead (cite a reason).
+"""
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+import pytest
+
+V4_ROOT = (
+    Path(__file__).resolve().parents[2]
+    / "src"
+    / "foreman"
+    / "v4"
+)
+
+# Modules whose entire purpose is the v2/v3 substrate. v4 must NOT import them.
+KILL_SET = frozenset(
+    {
+        "foreman.reconciler",
+        "foreman.daemon",
+        "foreman.daemon_runners",
+        "foreman.daemon_host",
+        "foreman.daemon_lock",
+        "foreman.dispatcher",
+        "foreman.dispatch_recorder",
+        "foreman.poller",
+        "foreman.queue",
+        "foreman.storage",
+        "foreman.worker",
+        "foreman.role_dispatch",
+        "foreman.stats",
+        "foreman.ps",
+        "foreman.labels",
+        "foreman.branches",
+        "foreman.v3_bus_endpoint",
+    }
+)
+
+
+def _iter_v4_files() -> list[Path]:
+    assert V4_ROOT.is_dir(), f"v4 package missing at {V4_ROOT}"
+    return sorted(V4_ROOT.rglob("*.py"))
+
+
+def _imports_in(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                found.add(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module is not None and node.level == 0:
+                found.add(node.module)
+    return found
+
+
+@pytest.mark.parametrize("path", _iter_v4_files(), ids=lambda p: p.name)
+def test_v4_module_does_not_import_kill_set(path: Path) -> None:
+    imports = _imports_in(path)
+    forbidden = {
+        imp for imp in imports
+        if any(imp == k or imp.startswith(k + ".") for k in KILL_SET)
+    }
+    assert not forbidden, (
+        f"{path.relative_to(V4_ROOT)} imports from the kill set: {forbidden}. "
+        "v4 modules must not depend on v2/v3 substrate. See the 'v4 isolation "
+        "principle' section in the implementation plan."
+    )
+
+
+def test_kill_set_and_survival_set_are_disjoint() -> None:
+    """Defensive: catch typos that would put a module on both lists."""
+    survival_set = {
+        "foreman.auth",
+        "foreman.config",
+        "foreman.identity",
+        "foreman.init",
+        "foreman.instructions",
+        "foreman.locks",
+        "foreman.git_host",
+        "foreman.git_hosts",
+        "foreman.provider",
+        "foreman.providers",
+        "foreman.roles",
+        "foreman.prompts",
+        "foreman.worktree",
+        "foreman._env_filter",
+        "foreman.logging_setup",
+    }
+    assert KILL_SET.isdisjoint(survival_set), KILL_SET & survival_set
+```
+
+- [ ] **Step 2: Run test to verify it passes**
+
+Run: `uv run pytest packages/foreman/tests/v4/test_isolation.py -v`
+Expected: all parametrized cases pass (one per v4 .py file). If any fail at this point, a prior task introduced a forbidden import — fix the source, not the test.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add packages/foreman/tests/v4/test_isolation.py
+git commit -m "test(v4): add isolation guard against v2/v3 substrate imports"
+```
+
 ### Phase 1 — `just check` gate
 
 After Task 1.9, run the full pre-push gate.
@@ -2099,6 +2310,6 @@ After Task 1.9, run the full pre-push gate.
 - [ ] **Expected:** ruff + mypy + import-linter + full pytest all pass.
 - [ ] **If a test fails:** investigate the actual failure (do not skip hooks). Foundation tasks introduce a new package; existing tests must remain green. The new tests prove the new code works.
 
-Phase 1 completion criterion (from the outline): **state machine works in isolation**. By Task 1.9 we have an in-memory state machine that runs a state's full five-hook lifecycle with persistent journaling, plus a SQLite-backed Repository ready for the daemon to use later. Concrete states + their next-state logic come in Phase 3; the orchestration mechanics are done.
+Phase 1 completion criterion (from the outline): **state machine works in isolation**. By Task 1.10 we have an in-memory state machine that runs a state's full five-hook lifecycle with persistent journaling, a SQLite-backed Repository ready for the daemon to use later, AND a parametrized isolation test that will trip any future task that accidentally couples v4 to the v2/v3 substrate. Concrete states + their next-state logic come in Phase 3; the orchestration mechanics are done.
 
 ---
