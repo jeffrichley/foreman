@@ -36,7 +36,8 @@ The redesign uses standard SOLID principles and three GoF patterns explicitly:
 - **Observer pattern** for side effects. State hooks emit Events; concrete observers (SQLite persistence, GitHub label writes, structured logging) subscribe. SRP per observer; new observability surfaces are additive.
 - **Repository pattern** for SQLite. `TicketRepository` is the only seam between domain code and SQLite. Test doubles use an in-memory implementation.
 - **Strategy pattern** for CLI output formatting. `TableFormatter`, `JsonFormatter`, `YamlFormatter` implement a common interface; `--format=X` flag selects.
-- **Command pattern** for queue work. `DispatchRoleCommand`, `EnqueuePRCommand`, etc. are concrete Commands serialized into SQLite and pulled by the Worker Pool.
+
+Command pattern was considered for queue work and rejected per the 2026-06-13 adversarial review M2 — polling reconstructs intended work from `(in-flight state-instances, GitHub artifact state)` on every tick, so there's no need for an in-flight queue of serialized Command objects. The QueueManager dispatches role subprocesses directly; that's sufficient for v4.
 
 **Topological order of the rewrite:**
 
@@ -80,13 +81,12 @@ The redesign uses standard SOLID principles and three GoF patterns explicitly:
 | `packages/foreman/src/foreman/events.py` | NEW. `Event` base + concrete event classes + `EventBus`. |
 | `packages/foreman/src/foreman/observers/{sqlite,label,log,metrics}.py` | NEW. Concrete observers. |
 | `packages/foreman/src/foreman/queue_manager.py` | NEW. Mediator implementation. |
-| `packages/foreman/src/foreman/commands.py` | NEW. Command pattern classes for queue work. |
 | `packages/foreman/src/foreman/v4/poller.py` | NEW. Single polling loop — reads SQLite (in-flight state instances + open tickets), queries GitHub, normalizes to domain Events, dedups by (ticket, state-instance, artifact-state). No HTTP server, no webhooks. |
 | `packages/foreman/src/foreman/cli_v4/{ps,show,log,queue,daemon,hold,resume,retry,skip,drop,set_state,plan,review,fix,implement}.py` | NEW. One typer command per file. |
 | `packages/foreman/src/foreman/cli_v4/__init__.py` | NEW. Top-level typer app dispatcher. |
 | `packages/foreman/src/foreman/logging_setup.py` | UPDATE. Add `RichHandler` alongside `JsonLinesHandler`. |
 | `packages/foreman/src/foreman/reconciler/rules.py` | DELETE. Replaced by state machine. |
-| `packages/foreman/src/foreman/reconciler/actions.py` | DELETE label-mutating handlers; keep PR-merge and observation-only handlers if used by state-machine commands. |
+| `packages/foreman/src/foreman/reconciler/actions.py` | DELETE entirely. The PR-merge and observation-only handlers move to the state-machine layer: PR-merge is owned by `MergingState.execute()`, observation-only reads are inlined into the Poller. Half-deletion was rejected by the 2026-06-13 adversarial review (I5) as architecturally inconsistent. |
 | `packages/foreman/src/foreman/daemon_host.py` | UPDATE. Read methods retained (`get_issue_labels`, etc.); label-write methods routed through `LabelObservabilityObserver` only. |
 | `packages/foreman/src/foreman/roles/{planner,reviewer,fixer,worker}.py` | UPDATE. Each role's exit emits `Outcome` JSON on stdout instead of writing labels. Role prompt + logic unchanged. |
 | `packages/foreman/src/foreman/config.py` | UPDATE. Add `merge_mechanism` default = `"queue"` for autonomous-loop PRs. |
@@ -158,6 +158,95 @@ The same pattern serves the daemon's own shutdown: graceful stop = "drain in-fli
 ### Auditability
 
 `foreman show <ticket>` walks `state_instances` for the ticket and renders the full state history with timing per state, outcome per execute, and failure reason per failure. Every state transition is a row; nothing is lost.
+
+## Outcome JSON — role-side reporting contract
+
+Every role (Planner, Reviewer-on-spec, Fixer-on-spec, Worker, Reviewer-on-impl, Fixer-on-impl) reports the result of one invocation to the daemon via a single line of structured JSON on stdout. This contract replaces the v3 label-writing mechanism that the roles currently use to communicate "I'm done; here's what happened" to the daemon.
+
+The contract is small and explicit. The state machine reads stdout, parses the trailing JSON line, validates against a pydantic `Outcome` model, decides the next state, and writes the parsed outcome to `state_instances.outcome_payload`. If parsing fails, the state transitions to `Failed` with `failure_phase="verify"` (the daemon's verify hook owns parsing) and `failure_reason` carrying the raw stdout tail.
+
+### Schema
+
+```python
+from enum import Enum
+from typing import Literal
+from pydantic import BaseModel, Field
+
+class OutcomeKind(str, Enum):
+    CLEAN = "clean"              # work completed; advance
+    NEEDS_FIX = "needs_fix"      # reviewer found issues; route to fixer
+    BLOCKED = "blocked"          # external dependency (CI, MergeQueue) — re-poll later
+    NEEDS_HELP = "needs_help"    # escalate to human
+    ERROR = "error"              # role itself failed (subprocess crash, internal exception)
+
+class OutcomeConfidence(str, Enum):
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+class Finding(BaseModel):
+    """One reviewer-flagged issue. Only present when kind == NEEDS_FIX."""
+    severity: Literal["critical", "important", "minor"]
+    location: str = Field(..., description="file:line or 'general'")
+    description: str
+
+class OutcomeArtifacts(BaseModel):
+    """URLs / IDs the next state may need. All optional."""
+    pr_url: str | None = None
+    pr_number: int | None = None
+    commit_sha: str | None = None
+    branch: str | None = None
+    spec_doc_path: str | None = None
+
+class Outcome(BaseModel):
+    """The contract every role's CLI writes to stdout as its terminal line."""
+    schema_version: Literal[1] = 1
+    kind: OutcomeKind
+    confidence: OutcomeConfidence
+    summary: str = Field(..., max_length=500)
+    findings: list[Finding] = []
+    artifacts: OutcomeArtifacts = Field(default_factory=OutcomeArtifacts)
+    raw_role_output_path: str | None = Field(
+        None,
+        description="Path to a file on disk holding the role's full reasoning trace, if too large for stdout"
+    )
+```
+
+### Per-role kind matrix
+
+| Role | Emits these `kind` values |
+| --- | --- |
+| Planner | `CLEAN` (spec PR open) · `NEEDS_HELP` (ticket under-specified) · `ERROR` |
+| Reviewer-on-spec | `CLEAN` (approve + merge) · `NEEDS_FIX` (with findings) · `ERROR` |
+| Fixer-on-spec | `CLEAN` (amended spec PR pushed) · `NEEDS_HELP` (cannot resolve) · `ERROR` |
+| Worker | `CLEAN` (impl PR open) · `BLOCKED` (CI in flight) · `NEEDS_HELP` · `ERROR` |
+| Reviewer-on-impl | `CLEAN` (approve + enqueue MergeQueue) · `NEEDS_FIX` · `ERROR` |
+| Fixer-on-impl | `CLEAN` (amended impl PR pushed) · `NEEDS_HELP` · `ERROR` |
+
+`BLOCKED` is the case the Poller turns into a re-poll: the state machine writes `outcome_kind="blocked"`, stays in the same logical state but advances the sequence counter, and the Poller picks it up next tick to check whether the blocking artifact has changed (CI verdict, MergeQueue verdict).
+
+### Stdout shape
+
+The role's stdout has two distinct sections:
+
+1. **Human-readable trace** (everything before the marker). Rich-formatted log lines for the operator reading `foreman log --tail`.
+2. **Terminal Outcome line** — a single line beginning with the marker `FOREMAN_OUTCOME:` followed by the JSON. The daemon scans stdout in reverse for the marker, parses the suffix as JSON, validates as `Outcome`.
+
+The marker prefix keeps Outcome parsing robust to any log lines the role emits, including ones that happen to look like JSON.
+
+### Versioning
+
+`schema_version: 1` is the only valid value at v4 ship. Future schema changes append fields (default-valued) and bump the version. Roles never read other roles' outcomes; only the daemon's state machine consumes them. This keeps version churn contained to one parser.
+
+### Validation failure handling
+
+Outcome parsing happens in `state.verify(ctx, raw_stdout)`. The default `verify` implementation:
+
+1. Scans stdout in reverse for `FOREMAN_OUTCOME:`. If missing → raise `OutcomeMissingError`.
+2. Parses the suffix as JSON. If malformed → raise `OutcomeMalformedError` with the raw text.
+3. Validates against `Outcome`. If validation fails → raise `OutcomeInvalidError` with the pydantic errors.
+
+All three raise; the Template Method `transition()` catches them in the verify phase and routes to `FailedState` with `failure_phase="verify"`, `failure_reason` carrying the exception detail.
 
 ## Migration path
 
