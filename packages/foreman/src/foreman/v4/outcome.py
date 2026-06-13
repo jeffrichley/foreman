@@ -53,3 +53,54 @@ class Outcome(BaseModel):
     findings: list[Finding] = Field(default_factory=list)
     artifacts: OutcomeArtifacts = Field(default_factory=OutcomeArtifacts)
     raw_role_output_path: str | None = None
+
+
+OUTCOME_MARKER = "FOREMAN_OUTCOME:"
+
+
+class OutcomeMissingError(Exception):
+    """Stdout did not contain the FOREMAN_OUTCOME: marker."""
+
+
+class OutcomeMalformedError(Exception):
+    """FOREMAN_OUTCOME: marker present but the suffix is not parseable JSON."""
+
+    def __init__(self, raw: str) -> None:
+        super().__init__(f"malformed outcome JSON: {raw!r}")
+        self.raw = raw
+
+
+class OutcomeInvalidError(Exception):
+    """FOREMAN_OUTCOME: JSON parsed but failed schema validation."""
+
+    def __init__(self, raw: str, pydantic_errors: object) -> None:
+        super().__init__(f"invalid outcome: {pydantic_errors}")
+        self.raw = raw
+        self.pydantic_errors = pydantic_errors
+
+
+def parse_outcome_from_stdout(stdout: str) -> Outcome:
+    """Scan stdout in reverse for the FOREMAN_OUTCOME: marker; parse + validate.
+
+    Reverse scan so log lines that happen to contain JSON earlier in stdout
+    cannot poison the parse. If multiple marker lines are present, the last
+    one wins — roles that re-emit on retry overwrite the earlier value.
+    """
+    import json
+
+    from pydantic import ValidationError
+
+    for line in reversed(stdout.splitlines()):
+        idx = line.find(OUTCOME_MARKER)
+        if idx == -1:
+            continue
+        suffix = line[idx + len(OUTCOME_MARKER):].strip()
+        try:
+            payload = json.loads(suffix)
+        except json.JSONDecodeError as exc:
+            raise OutcomeMalformedError(suffix) from exc
+        try:
+            return Outcome.model_validate(payload)
+        except ValidationError as exc:
+            raise OutcomeInvalidError(suffix, exc.errors()) from exc
+    raise OutcomeMissingError("no FOREMAN_OUTCOME: marker found in stdout")
