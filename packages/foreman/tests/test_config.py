@@ -14,9 +14,6 @@ def test_load_config_returns_config(tmp_path: Path) -> None:
     config_file = tmp_path / "config.toml"
     config_file.write_text(
         """
-[admin]
-github_token_env = "FOREMAN_ADMIN_TOKEN"
-
 [projects.voice]
 repo = "jeffrichley/voice"
 local_clone_path = "e:/workspaces/ai/agents/voice"
@@ -522,7 +519,7 @@ planner_private_key_path = "/tmp/planner.pem"
 
 def test_daemon_config_has_sane_defaults(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
-    config_path.write_text('[admin]\ngithub_token_env = "FOREMAN_ADMIN_TOKEN"\n')
+    config_path.write_text("")
     cfg = load_config(config_path)
     assert cfg.daemon.poll_interval_seconds == 30
     assert cfg.daemon.max_concurrent_workers == 1
@@ -535,7 +532,7 @@ def test_daemon_config_has_sane_defaults(tmp_path: Path) -> None:
 def test_daemon_config_rejects_max_workers_above_one(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        '[admin]\ngithub_token_env = "FOREMAN_ADMIN_TOKEN"\n[daemon]\nmax_concurrent_workers = 4\n'
+        "[daemon]\nmax_concurrent_workers = 4\n"
     )
     with pytest.raises(ValidationError, match="max_concurrent_workers"):
         load_config(config_path)
@@ -548,7 +545,6 @@ def test_daemon_config_rejects_timeout_below_floor(tmp_path: Path) -> None:
     default remains None (no cap)."""
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        '[admin]\ngithub_token_env = "FOREMAN_ADMIN_TOKEN"\n'
         "[daemon]\nrole_dispatch_timeout_seconds = 10\n"
     )
     with pytest.raises(ValidationError, match="role_dispatch_timeout_seconds"):
@@ -561,7 +557,6 @@ def test_daemon_config_accepts_explicit_timeout(tmp_path: Path) -> None:
     through TOML loading after switching its default to None."""
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        '[admin]\ngithub_token_env = "FOREMAN_ADMIN_TOKEN"\n'
         "[daemon]\nrole_dispatch_timeout_seconds = 1800\n"
     )
     cfg = load_config(config_path)
@@ -573,7 +568,6 @@ def test_project_config_auto_merge_defaults_to_none(tmp_path: Path) -> None:
     resolver can fall back to the global default (Task 4)."""
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        '[admin]\ngithub_token_env = "FOREMAN_ADMIN_TOKEN"\n'
         "[projects.voice]\n"
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
@@ -587,7 +581,6 @@ def test_project_config_auto_merge_defaults_to_none(tmp_path: Path) -> None:
 def test_project_config_auto_merge_reads_true_from_toml(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        '[admin]\ngithub_token_env = "FOREMAN_ADMIN_TOKEN"\n'
         "[projects.voice]\n"
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
@@ -871,7 +864,7 @@ planner_private_key_path = "/tmp/planner.pem"
 
 def test_orchestrator_config_defaults_when_block_absent(tmp_path: Path) -> None:
     config_file = tmp_path / "config.toml"
-    config_file.write_text('[admin]\ngithub_token_env = "FOREMAN_ADMIN_TOKEN"\n')
+    config_file.write_text("")
     cfg = load_config(config_file)
     assert cfg.orchestrator.app_id is None
     assert cfg.orchestrator.private_key_path is None
@@ -881,7 +874,6 @@ def test_orchestrator_config_defaults_when_block_absent(tmp_path: Path) -> None:
 def test_orchestrator_config_reads_from_toml(tmp_path: Path) -> None:
     config_file = tmp_path / "config.toml"
     config_file.write_text(
-        '[admin]\ngithub_token_env = "FOREMAN_ADMIN_TOKEN"\n'
         "[orchestrator]\n"
         "app_id = 3934489\n"
         'private_key_path = "/tmp/orchestrator.pem"\n'
@@ -894,7 +886,6 @@ def test_orchestrator_config_reads_from_toml(tmp_path: Path) -> None:
 def test_orchestrator_resolve_app_id_prefers_env(tmp_path: Path, monkeypatch) -> None:
     config_file = tmp_path / "config.toml"
     config_file.write_text(
-        '[admin]\ngithub_token_env = "FOREMAN_ADMIN_TOKEN"\n'
         "[orchestrator]\napp_id = 100\n"
     )
     cfg = load_config(config_file)
@@ -906,7 +897,7 @@ def test_orchestrator_resolve_app_id_raises_when_unset(
     tmp_path: Path, monkeypatch
 ) -> None:
     config_file = tmp_path / "config.toml"
-    config_file.write_text('[admin]\ngithub_token_env = "X"\n')
+    config_file.write_text("")
     cfg = load_config(config_file)
     monkeypatch.delenv("FOREMAN_ORCHESTRATOR_APP_ID", raising=False)
     with pytest.raises(RuntimeError, match="orchestrator app_id"):
@@ -916,7 +907,6 @@ def test_orchestrator_resolve_app_id_raises_when_unset(
 def test_orchestrator_resolve_private_key_path_returns_path(tmp_path: Path) -> None:
     config_file = tmp_path / "config.toml"
     config_file.write_text(
-        '[admin]\ngithub_token_env = "X"\n'
         "[orchestrator]\n"
         "app_id = 999\n"
         'private_key_path = "/tmp/orch.pem"\n'
@@ -927,7 +917,7 @@ def test_orchestrator_resolve_private_key_path_returns_path(tmp_path: Path) -> N
 
 def test_orchestrator_resolve_private_key_path_raises_when_unset(tmp_path: Path) -> None:
     config_file = tmp_path / "config.toml"
-    config_file.write_text('[admin]\ngithub_token_env = "X"\n')
+    config_file.write_text("")
     cfg = load_config(config_file)
     with pytest.raises(RuntimeError, match="orchestrator.private_key_path"):
         cfg.orchestrator.resolve_private_key_path()
@@ -938,10 +928,7 @@ def test_foreman_config_path_env_var_overrides(
 ) -> None:
     """FOREMAN_CONFIG_PATH overrides the default host location."""
     custom = tmp_path / "custom-config.toml"
-    custom.write_text(
-        "[admin]\n"
-        "github_token_env = \"FOREMAN_ADMIN_TOKEN\"\n"
-    )
+    custom.write_text("")
     monkeypatch.setenv("FOREMAN_CONFIG_PATH", str(custom))
     from foreman.config import resolve_config_path
     assert resolve_config_path() == custom

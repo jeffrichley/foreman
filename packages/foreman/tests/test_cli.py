@@ -545,7 +545,6 @@ def test_cli_init_defaults_name_from_repo_tail(tmp_path: Path, monkeypatch) -> N
 def test_daemon_status_when_not_running(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f'[admin]\ngithub_token_env = "X"\n'
         f'[daemon]\nlock_path = "{(tmp_path / "d.lock").as_posix()}"\n'
     )
     monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
@@ -563,7 +562,6 @@ def test_daemon_start_foreground_runs_and_exits_clean(tmp_path: Path, monkeypatc
     """Foreground daemon start respects --max-iterations test mode."""
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f'[admin]\ngithub_token_env = "X"\n'
         f"[daemon]\n"
         f'sqlite_path = "{(tmp_path / "f.sqlite").as_posix()}"\n'
         f'log_path = "{(tmp_path / "d.log").as_posix()}"\n'
@@ -590,7 +588,6 @@ def test_daemon_start_refuses_when_lock_held(
     lock_path = tmp_path / "d.lock"
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f'[admin]\ngithub_token_env = "X"\n'
         f"[daemon]\n"
         f'lock_path = "{lock_path.as_posix()}"\n'
         f'sqlite_path = "{(tmp_path / "f.sqlite").as_posix()}"\n'
@@ -622,7 +619,6 @@ def test_daemon_start_acquires_lock_and_releases_on_exit(
     lock_path = tmp_path / "d.lock"
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f'[admin]\ngithub_token_env = "X"\n'
         f"[daemon]\n"
         f'lock_path = "{lock_path.as_posix()}"\n'
         f'sqlite_path = "{(tmp_path / "f.sqlite").as_posix()}"\n'
@@ -661,7 +657,6 @@ def test_daemon_start_honors_foreman_lock_path_env(
     env_lock = tmp_path / "from_env.lock"
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f'[admin]\ngithub_token_env = "X"\n'
         f"[daemon]\n"
         f'lock_path = "{config_lock.as_posix()}"\n'
         f'sqlite_path = "{(tmp_path / "f.sqlite").as_posix()}"\n'
@@ -711,7 +706,6 @@ def test_daemon_start_handles_unreadable_lock_content_gracefully(
 
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f'[admin]\ngithub_token_env = "X"\n'
         f"[daemon]\n"
         f'lock_path = "{lock_path.as_posix()}"\n'
         f'sqlite_path = "{(tmp_path / "f.sqlite").as_posix()}"\n'
@@ -763,7 +757,6 @@ def test_daemon_start_refuses_second_instance(tmp_path: Path) -> None:
     lock_path = tmp_path / "d.lock"
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f'[admin]\ngithub_token_env = "X"\n'
         f"[daemon]\n"
         f'lock_path = "{lock_path.as_posix()}"\n'
         f'sqlite_path = "{(tmp_path / "f.sqlite").as_posix()}"\n'
@@ -843,7 +836,6 @@ def test_daemon_start_refuses_second_instance(tmp_path: Path) -> None:
 def test_ps_shows_active_tickets(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f'[admin]\ngithub_token_env = "X"\n'
         f'[daemon]\nsqlite_path = "{(tmp_path / "f.sqlite").as_posix()}"\n'
     )
     monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
@@ -870,7 +862,6 @@ def test_ps_shows_active_tickets(tmp_path: Path, monkeypatch) -> None:
 def test_pipeline_detail_shows_node_runs(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f'[admin]\ngithub_token_env = "X"\n'
         f'[daemon]\nsqlite_path = "{(tmp_path / "f.sqlite").as_posix()}"\n'
     )
     monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
@@ -903,7 +894,6 @@ def test_pipeline_detail_shows_node_runs(tmp_path: Path, monkeypatch) -> None:
 def test_worktree_clean_removes_directory(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f'[admin]\ngithub_token_env = "X"\n'
         f'[daemon]\nsqlite_path = "{(tmp_path / "f.sqlite").as_posix()}"\n'
         f"[projects.voice]\n"
         f'repo = "jeffrichley/voice"\n'
@@ -1081,7 +1071,6 @@ def test_daemon_stop_reads_lock_file_pid_and_sends_sigterm(
 
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f'[admin]\ngithub_token_env = "X"\n'
         f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
     )
     monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
@@ -1127,7 +1116,6 @@ def test_daemon_stop_reports_when_daemon_does_not_exit(
 
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f'[admin]\ngithub_token_env = "X"\n'
         f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
     )
     monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
@@ -1158,7 +1146,6 @@ def test_daemon_stop_with_missing_lock_file_gives_actionable_message(
     lock_path = tmp_path / "d.lock"  # never created
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f'[admin]\ngithub_token_env = "X"\n'
         f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
     )
     monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
@@ -1192,7 +1179,6 @@ def test_daemon_stop_with_dead_pid_reports_stale(
 
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f'[admin]\ngithub_token_env = "X"\n'
         f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
     )
     monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
@@ -1222,7 +1208,6 @@ def test_daemon_stop_with_unreadable_lock_content_reports(
 
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f'[admin]\ngithub_token_env = "X"\n'
         f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
     )
     monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
@@ -1312,7 +1297,6 @@ def test_daemon_stop_writes_shutdown_sentinel(
 
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f'[admin]\ngithub_token_env = "X"\n'
         f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
         f'[reconciler]\nshutdown_sentinel_path = "{sentinel_path.as_posix()}"\n'
     )
@@ -1344,7 +1328,6 @@ def test_daemon_stop_does_not_write_sentinel_when_no_daemon_running(
 
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f'[admin]\ngithub_token_env = "X"\n'
         f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
         f'[reconciler]\nshutdown_sentinel_path = "{sentinel_path.as_posix()}"\n'
     )
@@ -1434,7 +1417,6 @@ def test_daemon_reload_writes_sentinel_when_lock_present(
 
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f'[admin]\ngithub_token_env = "X"\n'
         f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
         f'[reconciler]\nreload_sentinel_path = "{sentinel_path.as_posix()}"\n'
     )
@@ -1470,7 +1452,6 @@ def test_daemon_reload_refuses_when_no_lock_file(
 
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f'[admin]\ngithub_token_env = "X"\n'
         f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
         f'[reconciler]\nreload_sentinel_path = "{sentinel_path.as_posix()}"\n'
     )
@@ -1505,7 +1486,6 @@ def test_daemon_reload_refuses_when_lock_pid_unreadable(
 
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f'[admin]\ngithub_token_env = "X"\n'
         f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
         f'[reconciler]\nreload_sentinel_path = "{sentinel_path.as_posix()}"\n'
     )
@@ -1570,7 +1550,6 @@ def test_daemon_status_reports_running_when_lock_pid_alive(
 
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f'[admin]\ngithub_token_env = "X"\n'
         f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
     )
     monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
@@ -1590,7 +1569,6 @@ def test_daemon_status_reports_stale_when_lock_pid_dead(
 
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f'[admin]\ngithub_token_env = "X"\n'
         f'[daemon]\nlock_path = "{lock_path.as_posix()}"\n'
     )
     monkeypatch.setenv("FOREMAN_CONFIG", str(config_path))
@@ -1626,7 +1604,6 @@ def test_daemon_subprocess_writes_pid_and_releases_lock_on_exit(
     lock_path = tmp_path / "d.lock"
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f'[admin]\ngithub_token_env = "X"\n'
         f"[daemon]\n"
         f'lock_path = "{lock_path.as_posix()}"\n'
         f'sqlite_path = "{(tmp_path / "f.sqlite").as_posix()}"\n'

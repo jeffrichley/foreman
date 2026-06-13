@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from foreman.config import AdminConfig, AppsConfig, Config, DaemonConfig, ProjectConfig
+from foreman.config import AppsConfig, Config, DaemonConfig, ProjectConfig
 from foreman.daemon_runners import DaemonRunners
 from foreman.dispatcher import Ticket
 
@@ -24,7 +24,6 @@ def _ticket(issue: int = 42, labels: set[str] | None = None) -> Ticket:
 
 def _config(tmp_path: Path) -> Config:
     return Config(
-        admin=AdminConfig(),
         daemon=DaemonConfig(sqlite_path=str(tmp_path / "f.sqlite")),
         projects={
             "voice": ProjectConfig(

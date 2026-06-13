@@ -415,9 +415,8 @@ def init(
     )
 
     # Admin client uses the operator's PAT for label creation. The
-    # token env var name matches AdminConfig's default
-    # (``FOREMAN_ADMIN_TOKEN``); operators can still set ``GH_TOKEN``
-    # / ``GITHUB_TOKEN`` for parity with ``gh``.
+    # default env var is ``FOREMAN_ADMIN_TOKEN``; operators can still
+    # set ``GH_TOKEN`` / ``GITHUB_TOKEN`` for parity with ``gh``.
     admin_token = (
         os.environ.get("FOREMAN_ADMIN_TOKEN")
         or os.environ.get("GH_TOKEN")
