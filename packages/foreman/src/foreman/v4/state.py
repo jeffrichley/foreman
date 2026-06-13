@@ -18,7 +18,16 @@ import datetime as dt
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
+from foreman.v4.event_bus import EventBus
+from foreman.v4.events import (
+    ExecuteCompletedEvent,
+    ExecuteStartedEvent,
+    StateEnteredEvent,
+    StateExitedEvent,
+    StateFailedEvent,
+)
 from foreman.v4.outcome import Outcome
 from foreman.v4.records import StateInstanceRecord, TicketRecord
 from foreman.v4.repository import TicketRepository
@@ -32,6 +41,24 @@ class StateContext:
     instance: StateInstanceRecord
     repo: TicketRepository
     clock: Callable[[], dt.datetime]
+    bus: EventBus | None = None
+
+
+def _publish(ctx: StateContext, event_type: type, **kwargs: Any) -> None:
+    """Publish ``event_type`` on ``ctx.bus`` with the common envelope fields.
+
+    No-op when ``ctx.bus is None`` so headless transitions stay green.
+    """
+    if ctx.bus is None:
+        return
+    ctx.bus.publish(event_type(
+        ticket_id=ctx.ticket.id,
+        instance_id=ctx.instance.id,
+        state_name=ctx.instance.state_name,
+        sequence=ctx.instance.sequence,
+        at=ctx.clock(),
+        **kwargs,
+    ))
 
 
 class TicketState(ABC):
@@ -94,6 +121,7 @@ class TicketState(ABC):
                 ctx.instance.id, now=ctx.clock(),
                 failure_phase="can_run", failure_reason="held",
             )
+            _publish(ctx, StateFailedEvent, failure_phase="can_run", failure_reason="held")
             return None
 
         try:
@@ -103,12 +131,15 @@ class TicketState(ABC):
                 ctx.instance.id, now=ctx.clock(),
                 failure_phase="enter", failure_reason=repr(exc),
             )
+            _publish(ctx, StateFailedEvent, failure_phase="enter", failure_reason=repr(exc))
             # Skip exit: enter never returned, so no resources to release.
             return None
+        _publish(ctx, StateEnteredEvent)
 
         outcome: Outcome | None = None
         try:
             ctx.repo.mark_execute_started(ctx.instance.id, now=ctx.clock())
+            _publish(ctx, ExecuteStartedEvent)
             try:
                 outcome = self.execute(ctx)
             except Exception as exc:
@@ -116,6 +147,7 @@ class TicketState(ABC):
                     ctx.instance.id, now=ctx.clock(),
                     failure_phase="execute", failure_reason=repr(exc),
                 )
+                _publish(ctx, StateFailedEvent, failure_phase="execute", failure_reason=repr(exc))
                 return None
 
             try:
@@ -125,6 +157,7 @@ class TicketState(ABC):
                     ctx.instance.id, now=ctx.clock(),
                     failure_phase="verify", failure_reason=repr(exc),
                 )
+                _publish(ctx, StateFailedEvent, failure_phase="verify", failure_reason=repr(exc))
                 return None
 
             next_ = self.next_state(outcome)
@@ -132,6 +165,11 @@ class TicketState(ABC):
                 ctx.instance.id, now=ctx.clock(),
                 outcome_kind=outcome.kind,
                 outcome_payload=outcome.model_dump(mode="json"),
+                next_state=next_.state_name if next_ is not None else "",
+            )
+            _publish(
+                ctx, ExecuteCompletedEvent,
+                outcome=outcome,
                 next_state=next_.state_name if next_ is not None else "",
             )
             if next_ is not None:
@@ -147,4 +185,6 @@ class TicketState(ABC):
                     ctx.instance.id, now=ctx.clock(),
                     failure_phase="exit", failure_reason=repr(exc),
                 )
+                _publish(ctx, StateFailedEvent, failure_phase="exit", failure_reason=repr(exc))
             ctx.repo.close_state_instance(ctx.instance.id, now=ctx.clock())
+            _publish(ctx, StateExitedEvent, outcome=outcome)
