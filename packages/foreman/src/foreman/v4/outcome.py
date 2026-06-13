@@ -11,13 +11,13 @@ suffix, and validates against ``Outcome``. See the spec section
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 
-class OutcomeKind(str, Enum):
+class OutcomeKind(StrEnum):
     CLEAN = "clean"
     NEEDS_FIX = "needs_fix"
     BLOCKED = "blocked"
@@ -25,7 +25,7 @@ class OutcomeKind(str, Enum):
     ERROR = "error"
 
 
-class OutcomeConfidence(str, Enum):
+class OutcomeConfidence(StrEnum):
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
