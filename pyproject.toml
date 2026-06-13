@@ -121,10 +121,6 @@ ignore_names = [
     "frame",
     # Duck-typed stub method **kwargs
     "kwargs",
-    # StrEnum classification attribute populated by ``__new__`` and
-    # consumed by derived frozenset comprehensions; vulture can't see
-    # the comprehension side
-    "classification",
 ]
 ignore_decorators = [
     # Click/typer command callbacks are referenced by the framework
