@@ -136,8 +136,9 @@ class SqliteTicketRepository:
         return _ticket_row_to_record(row)
 
     def list_open_tickets(self) -> list[TicketRecord]:
+        placeholders = ",".join(["?"] * len(_TERMINAL_STATES))
         rows = self._conn.execute(
-            "SELECT * FROM tickets WHERE current_state NOT IN (?, ?)",
+            f"SELECT * FROM tickets WHERE current_state NOT IN ({placeholders})",
             _TERMINAL_STATES,
         ).fetchall()
         return [_ticket_row_to_record(r) for r in rows]
