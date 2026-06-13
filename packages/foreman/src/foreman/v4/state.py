@@ -81,3 +81,70 @@ class TicketState(ABC):
     @abstractmethod
     def next_state(self, outcome: Outcome) -> TicketState | None:
         """Decide what comes next. Return None to halt the state machine."""
+
+    # --- Template Method ---
+
+    def transition(self, ctx: StateContext) -> TicketState | None:
+        """Orchestrate the five-hook lifecycle. The base class controls the
+        flow; subclasses control the steps. See the docstring of each hook
+        for what its handler does on failure."""
+
+        if not self.can_run(ctx):
+            ctx.repo.record_failure(
+                ctx.instance.id, now=ctx.clock(),
+                failure_phase="can_run", failure_reason="held",
+            )
+            return None
+
+        try:
+            self.enter(ctx)
+        except Exception as exc:
+            ctx.repo.record_failure(
+                ctx.instance.id, now=ctx.clock(),
+                failure_phase="enter", failure_reason=repr(exc),
+            )
+            # Skip exit: enter never returned, so no resources to release.
+            return None
+
+        outcome: Outcome | None = None
+        try:
+            ctx.repo.mark_execute_started(ctx.instance.id, now=ctx.clock())
+            try:
+                outcome = self.execute(ctx)
+            except Exception as exc:
+                ctx.repo.record_failure(
+                    ctx.instance.id, now=ctx.clock(),
+                    failure_phase="execute", failure_reason=repr(exc),
+                )
+                return None
+
+            try:
+                self.verify(ctx, outcome)
+            except Exception as exc:
+                ctx.repo.record_failure(
+                    ctx.instance.id, now=ctx.clock(),
+                    failure_phase="verify", failure_reason=repr(exc),
+                )
+                return None
+
+            next_ = self.next_state(outcome)
+            ctx.repo.mark_execute_completed(
+                ctx.instance.id, now=ctx.clock(),
+                outcome_kind=outcome.kind,
+                outcome_payload=outcome.model_dump(mode="json"),
+                next_state=next_.state_name if next_ is not None else "",
+            )
+            if next_ is not None:
+                ctx.repo.set_ticket_state(
+                    ctx.ticket.id, next_.state_name, now=ctx.clock(),
+                )
+            return next_
+        finally:
+            try:
+                self.exit(ctx, outcome)
+            except Exception as exc:
+                ctx.repo.record_failure(
+                    ctx.instance.id, now=ctx.clock(),
+                    failure_phase="exit", failure_reason=repr(exc),
+                )
+            ctx.repo.close_state_instance(ctx.instance.id, now=ctx.clock())
