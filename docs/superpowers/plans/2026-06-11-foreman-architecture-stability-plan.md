@@ -904,6 +904,16 @@ Each finding gets one decision row. Format: finding summary, decision, rationale
   - Without CI enforcement, every one of Decisions 2/3/5 relies on reviewer vigilance during PR review. Reviewer vigilance has already been demonstrated insufficient — see the v2 dispatcher dead island, the provider-package split confusion, the zombie `__all__` export.
   - Soft conventions in CLAUDE.md / prompts (Decision 4) bias initial proposals but do not catch the case where someone explicitly chooses to violate the convention "just this once."
 - **Sequencing dependency:** R1, R2, R3 land *with* their respective parent decisions (5, 2, 3) — the import-linter rule and the boundary it enforces ship in the same PR so the rule is testing the new shape, not retrofitting the old. The `import-linter` framework itself can land independently first.
+
+  #### How to add a rule (Decision 7 procedure)
+
+  1. A new rule is added only when a Decision in this plan (or a successor plan) names the boundary it enforces. Speculative rules are rejected at review time.
+  2. The rule's `name` field MUST include the "R<N>" trace handle so future readers can map rule → decision.
+  3. The rule's docstring/comment cites the Decision number AND the originating ticket (e.g. `# R0 — LabelManager owns label-writes. Decision 1 / foreman#307.`).
+  4. Add the rule in the SAME PR that lands the code-level boundary, not a follow-up PR. Reason: the rule is meaningless until the code it constrains exists; landing them together prevents drift.
+  5. If a future refactor needs to RELAX a rule, the PR description must justify the relaxation against the originating Decision — the rule does not get silently weakened.
+  6. See `pyproject.toml` `[tool.importlinter]` for the current rule set.
+
 - **Next-step ticket:** TBD after Phase 1 closes. Should reference (a) `import-linter` adoption as the framework PR (independent), (b) the rule-set discipline ("only when a decision creates the boundary"), and (c) the three initial rules with their parent-decision linkage so the rule provenance survives memory drift.
 
 ### Decision 8 — Library-boundary audit with tier table (extends Decision 7's rule-source discipline)

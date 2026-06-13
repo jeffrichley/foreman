@@ -13,7 +13,7 @@ default:
     @just --list
 
 # Composite gate (recommended before push)
-check: lint typecheck test
+check: lint typecheck import-linter test
 
 # Developer convenience: apply lint auto-fixes + formatter
 fix:
@@ -27,6 +27,15 @@ lint:
 # Type-check
 typecheck:
     uv run --no-sync mypy packages/foreman/src
+
+# Import-graph boundary enforcement (Decision 7).
+# Config lives at [tool.importlinter] in workspace-root pyproject.toml.
+# PYTHONPATH=packages/foreman exposes the ``tests`` package to grimp so the
+# R1 contract's ``forbidden_modules = ["tests"]`` reference resolves.
+# Without it, grimp's graph walker never visits the test tree and the rule
+# would silently no-op against a ``from tests import X`` line in src/.
+import-linter:
+    PYTHONPATH=packages/foreman uv run --no-sync lint-imports
 
 # Tests
 test:

@@ -40,3 +40,10 @@ with the running daemon (no restart needed).
 
 `just check` for the full quality gate. See `CLAUDE.md` for the working
 conventions.
+
+## Architectural boundaries
+
+foreman uses [`import-linter`](https://import-linter.readthedocs.io) to
+enforce architectural boundaries at the import-graph level. `just check`
+runs it transitively. See `docs/RUNBOOK.md` § Import-graph boundaries for
+how to run it locally, read failure output, and add new rules.
