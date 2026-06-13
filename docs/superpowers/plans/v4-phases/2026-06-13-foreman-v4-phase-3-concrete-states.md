@@ -226,7 +226,7 @@ the shape + the fake.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Protocol
 
 
@@ -241,7 +241,7 @@ class PRState:
     ci_passing: bool
 
 
-class MergeVerdict(str, Enum):
+class MergeVerdict(StrEnum):
     PENDING = "pending"     # in MergeQueue, no decision yet
     MERGED = "merged"       # MergeQueue completed the merge
     REJECTED = "rejected"   # MergeQueue rejected (CI fail, conflict)
