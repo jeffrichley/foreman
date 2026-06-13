@@ -27,7 +27,11 @@ The redesign uses standard SOLID principles and three GoF patterns explicitly:
 
 - **State pattern** for the workflow. Each phase is a concrete `TicketState` subclass with its own enter/execute/exit semantics. The state machine holds a current state and transitions via state-returned next-state.
 - **Template Method pattern** on the abstract `TicketState`. The base class defines a `transition()` Template Method that orchestrates the five-hook lifecycle in fixed order with per-phase failure handlers; subclasses override individual hooks.
-- **Mediator pattern** for the `QueueManager`. Producers (Pollers watching GitHub for trigger labels), the State Machine, and the Worker Pool all talk through the QueueManager, never directly. Decouples the producer-consumer surface.
+- **Mediator pattern** for the `QueueManager`. Producers (two distinct pollers — see below), the State Machine, and the Worker Pool all talk through the QueueManager, never directly. Decouples the producer-consumer surface.
+- **Two distinct GitHub pollers (SRP)**, both producers for the QueueManager. Neither reads workflow state — that lives in SQLite. They read *world state about GitHub*:
+  - **`TriggerPoller`** — detects new tickets by polling open issues for the trigger label. Emits `NewTicketEvent` per match. One poll per project, every N seconds.
+  - **`ArtifactPoller`** — polls GitHub for the state of artifacts the State Machine is currently waiting on (PR mergeable status, CI verdict, MergeQueue position). Reads SQLite to know which artifacts to ask about, polls only those. Emits `CIVerdictEvent` / `PRMergedEvent` / `PRClosedEvent` / `MergeQueueRejectedEvent` per change.
+  - Both write to the QueueManager via the Event interface; the State Machine decides whether each event causes a transition for the affected ticket. A future webhook receiver would be a third producer with the same Event shape — additive, not a rewrite.
 - **Observer pattern** for side effects. State hooks emit Events; concrete observers (SQLite persistence, GitHub label writes, structured logging) subscribe. SRP per observer; new observability surfaces are additive.
 - **Repository pattern** for SQLite. `TicketRepository` is the only seam between domain code and SQLite. Test doubles use an in-memory implementation.
 - **Strategy pattern** for CLI output formatting. `TableFormatter`, `JsonFormatter`, `YamlFormatter` implement a common interface; `--format=X` flag selects.
@@ -59,7 +63,7 @@ The redesign uses standard SOLID principles and three GoF patterns explicitly:
 9. **Wire rich logging** — `RichHandler` for stdout, `JsonLinesHandler` for file. Daemon startup configures both.
 10. **MergeQueue default** — set `MergeMechanism = queue` as the default in `DaemonConfig`. Verify the existing queue path handles draft → ready transitions.
 11. **Delete `rules.py`** and `reconciler/actions.py`'s label-mutating action handlers. Replace `_LABEL_TO_ACTION` map with state-machine dispatch.
-12. **Migration script** `foreman migrate-v3-to-v4` — reads current GitHub label state per active ticket, writes v4 SQLite rows, sets resumption point. Runs once at v4 deploy.
+12. **Add producer split** — `TriggerPoller` and `ArtifactPoller` as two distinct concrete `Producer` classes feeding the QueueManager via Events. SRP: trigger-detection logic separate from artifact-watching logic.
 13. **Update CLAUDE.md + per-project instruction files** with the v4 model. Role prompts unchanged.
 14. **Quality gate**: `just check` green. New tests under `tests/state_machine/`, `tests/cli_v4/`, `tests/observers/`. Existing tests update for the v4 substrate or move to `tests/legacy/` if irrelevant.
 
@@ -70,7 +74,7 @@ The redesign uses standard SOLID principles and three GoF patterns explicitly:
 | `packages/foreman/src/foreman/state_machine/__init__.py` | NEW. State machine package marker. |
 | `packages/foreman/src/foreman/state_machine/base.py` | NEW. `TicketState` ABC, Template Method `transition()`, default failure handlers, `Outcome` model. |
 | `packages/foreman/src/foreman/state_machine/states/{queued,planning,spec_review,spec_fix,implementing,impl_review,impl_fix,merging,done,failed,needs_help}.py` | NEW. One concrete state per file. |
-| `packages/foreman/src/foreman/storage_v4.py` | NEW. SQLite v4 schema + migrations from v3. |
+| `packages/foreman/src/foreman/storage_v4.py` | NEW. SQLite v4 schema — `tickets` (with `held_by`/`held_at`/`held_reason` columns), `state_instances` (the journal table; see Durability section), `events`. No migration from v3 — clean break per the Migration path section. |
 | `packages/foreman/src/foreman/repository.py` | NEW. `TicketRepository` abstract + SQLite impl + in-memory impl. |
 | `packages/foreman/src/foreman/events.py` | NEW. `Event` base + concrete event classes + `EventBus`. |
 | `packages/foreman/src/foreman/observers/{sqlite,label,log,metrics}.py` | NEW. Concrete observers. |
@@ -90,18 +94,80 @@ The redesign uses standard SOLID principles and three GoF patterns explicitly:
 | `packages/foreman/tests/repository/` | NEW. `TicketRepository` tests (in-memory + SQLite). |
 | `packages/foreman/tests/lifecycle/` | NEW. End-to-end ticket-lifecycle test using `FakeGitProvider` (port the test from foreman#307 LabelManager branch). |
 
+## Durability + resume
+
+Every state's lifecycle leaves a permanent trail in `state_instances`. This table IS the journal — the same data backs the audit log (`foreman show <ticket>`), the crash-recovery procedure, and the operator pause/resume mechanic.
+
+### `state_instances` schema
+
+```sql
+CREATE TABLE state_instances (
+    id INTEGER PRIMARY KEY,
+    ticket_id INTEGER NOT NULL,
+    state_name TEXT NOT NULL,             -- e.g. "PlanningState"
+    sequence INTEGER NOT NULL,            -- 1st, 2nd, ... time this ticket was in this state
+    entered_at TIMESTAMP NOT NULL,        -- enter() returned successfully
+    execute_started_at TIMESTAMP,         -- execute() began
+    execute_completed_at TIMESTAMP,       -- execute() returned (success or failure)
+    exited_at TIMESTAMP,                  -- exit() returned (always runs)
+    outcome_kind TEXT,                    -- "clean" | "needs_fix" | "error" | "timeout" | NULL if in progress
+    outcome_payload JSON,                 -- the structured outcome from execute()
+    next_state TEXT,                      -- the next state we transitioned to (NULL if in progress)
+    failure_phase TEXT,                   -- "can_run" | "enter" | "execute" | "verify" | "exit" | NULL
+    failure_reason TEXT,
+    UNIQUE(ticket_id, sequence)
+);
+```
+
+Each timestamp marks one of the five lifecycle hooks completing. A row with `exited_at IS NULL` is an in-flight transition.
+
+### Crash recovery is a query, not a separate component
+
+On daemon restart:
+
+```sql
+SELECT * FROM state_instances WHERE exited_at IS NULL ORDER BY ticket_id, sequence;
+```
+
+For each in-flight row, the resume logic dispatches on which timestamps are set:
+
+1. **Mid-execute crash** (row has `execute_started_at` but no `execute_completed_at`): the role subprocess died with the daemon. Daemon checks if the subprocess is still alive (PID check); if not, **re-dispatches** the role. Roles are designed idempotent — Planner checks "is there already a PR for this issue?" before opening one; Reviewer is purely read+report; Worker checks worktree state before mutating.
+2. **Between-state crash** (row has all timestamps including `next_state`, but no new row for that next state): the daemon committed the outcome but crashed before entering the next state. Resume creates the new `state_instance` row and calls `enter()`.
+3. **During-exit crash** (`exited_at IS NULL` but `execute_completed_at` is set): re-run `exit()`. Required to be idempotent — release resources, log; both naturally idempotent.
+
+This **retires the v3 reconciler entirely.** v3 had a separate `reconciler.py` for crash recovery that diffed labels against expected state. v4 doesn't need it — SQLite IS the source of truth, the query above IS the recovery procedure.
+
+### Operator pause / resume
+
+Operator pause is layered on top of the state machine, NOT a state change. Three columns on the `tickets` row:
+
+```sql
+ALTER TABLE tickets ADD COLUMN held_by TEXT;
+ALTER TABLE tickets ADD COLUMN held_at TIMESTAMP;
+ALTER TABLE tickets ADD COLUMN held_reason TEXT;
+```
+
+- `foreman hold 307` sets `held_by='jeffrichley', held_at=NOW(), held_reason="manual"`. State machine refuses to dispatch new work while `held_by IS NOT NULL`.
+- **Any in-flight `execute()` is allowed to complete** — pause takes effect at the next state boundary, not mid-LLM-call. This is intentional; aborting mid-LLM wastes the work and leaves artifact state inconsistent.
+- `foreman resume 307` clears the hold; next poll picks the ticket up from its current state.
+
+The same pattern serves the daemon's own shutdown: graceful stop = "drain in-flight execute() calls, don't dispatch new ones, exit when SQLite shows no in-flight rows." Hard stop = exit immediately; resume on restart via the crash-recovery query.
+
+### Auditability
+
+`foreman show <ticket>` walks `state_instances` for the ticket and renders the full state history with timing per state, outcome per execute, and failure reason per failure. Every state transition is a row; nothing is lost.
+
 ## Migration path
 
-The v3 → v4 cutover is one-shot, not gradual:
+Clean break, no migration script:
 
-1. **Land v4 substrate** in a single PR (this spec's implementation plan). v3 substrate stays running on `main` until cutover.
-2. **Deploy stop-the-world** — drain the v3 daemon (let in-flight roles finish, refuse new dispatches).
-3. **Run `foreman migrate-v3-to-v4`** — for each active ticket: read current GitHub label state, write v4 SQLite rows for the equivalent state, set resumption point. Document mapping in the migration script.
-4. **Start v4 daemon** — picks up where v3 left off using SQLite as source of truth.
-5. **Verify** — run `foreman ps` against the new daemon; assert active tickets show correct states; spot-check a few `foreman show <ticket>` outputs.
-6. **Tombstone v3 code** — keep v3 reconciler files for one release window then delete in a follow-up PR.
+1. **Land v4 substrate** as a single PR.
+2. **Stop v3 daemon.** Don't drain — just kill. Any in-flight tickets get abandoned (their work-in-progress PRs are still on GitHub; can be manually re-triggered or left for cleanup).
+3. **Delete v3 code** in the same PR (`reconciler/rules.py`, label-mutating action handlers, label-driven `_LABEL_TO_ACTION` map, the `reconciler.py` crash-recovery module).
+4. **Start v4 daemon.** Fresh SQLite, new state machine, ready for new tickets.
+5. **Verify** — `foreman ps` is empty initially; first new ticket flows through end-to-end.
 
-The cutover is a stop-the-world window because the two daemons can't share state. Acceptable because foreman's ticket volume is low (low single digits in flight at any time); the window is minutes, not hours.
+Acceptable because foreman's ticket volume is low (low single digits in flight at any time) and Jeff is explicit that any in-flight work at cutover time is okay to lose. Cleaner than a stop-the-world migration script that has its own bug surface.
 
 ## Alternatives considered
 
