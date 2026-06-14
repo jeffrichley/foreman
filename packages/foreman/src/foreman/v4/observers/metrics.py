@@ -19,17 +19,17 @@ from foreman.v4.events import (
 
 
 class MetricsBackend(Protocol):
-    def increment(self, name: str, *, tags: dict) -> None: ...
-    def observe(self, name: str, value: float, *, tags: dict) -> None: ...
+    def increment(self, name: str, *, tags: dict[str, str]) -> None: ...
+    def observe(self, name: str, value: float, *, tags: dict[str, str]) -> None: ...
 
 
 class NoopMetricsBackend:
     """Default backend — discards everything."""
 
-    def increment(self, name: str, *, tags: dict) -> None:
+    def increment(self, name: str, *, tags: dict[str, str]) -> None:
         return None
 
-    def observe(self, name: str, value: float, *, tags: dict) -> None:
+    def observe(self, name: str, value: float, *, tags: dict[str, str]) -> None:
         return None
 
 

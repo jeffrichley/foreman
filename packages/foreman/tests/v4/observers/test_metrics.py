@@ -29,13 +29,13 @@ def test_default_backend_is_noop():
 def test_custom_backend_receives_increment_and_observation_calls():
     class RecordingBackend:
         def __init__(self) -> None:
-            self.increments: list[tuple[str, dict]] = []
-            self.observations: list[tuple[str, float, dict]] = []
+            self.increments: list[tuple[str, dict[str, str]]] = []
+            self.observations: list[tuple[str, float, dict[str, str]]] = []
 
-        def increment(self, name: str, *, tags: dict) -> None:
+        def increment(self, name: str, *, tags: dict[str, str]) -> None:
             self.increments.append((name, tags))
 
-        def observe(self, name: str, value: float, *, tags: dict) -> None:
+        def observe(self, name: str, value: float, *, tags: dict[str, str]) -> None:
             self.observations.append((name, value, tags))
 
     backend = RecordingBackend()
