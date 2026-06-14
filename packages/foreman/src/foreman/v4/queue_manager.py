@@ -56,7 +56,7 @@ class QueueManager:
         self._queued: set[WorkItem] = set()
         self._in_flight: set[WorkItem] = set()
         self._in_flight_tickets: set[int] = set()
-        self._lock = threading.RLock()
+        self._lock = threading.RLock()  # RLock so future observers can reenter QM safely
 
     def enqueue(self, item: WorkItem) -> None:
         with self._lock:
@@ -76,17 +76,19 @@ class QueueManager:
             try:
                 while self._heap:
                     entry = heapq.heappop(self._heap)
+                    # Claim the entry now so any exception below leaves it in
+                    # skipped (and therefore re-pushed by the finally clause).
+                    # On the success path we pop it back off before dispatch.
+                    skipped.append(entry)
                     _, _, candidate = entry
                     if candidate.ticket_id in self._in_flight_tickets:
-                        skipped.append(entry)  # per-ticket FIFO — wait for prior
-                        continue
+                        continue  # per-ticket FIFO — wait for prior
                     ticket = self._repo.get_ticket(candidate.ticket_id)
                     if ticket.is_held:
-                        skipped.append(entry)
                         continue
                     if self._repo.list_unmet_dependencies(candidate.ticket_id):
-                        skipped.append(entry)
                         continue
+                    skipped.pop()  # un-claim on success — entry won't be re-pushed
                     self._queued.discard(candidate)
                     self._in_flight.add(candidate)
                     self._in_flight_tickets.add(candidate.ticket_id)
@@ -97,6 +99,7 @@ class QueueManager:
                     heapq.heappush(self._heap, entry)
 
     def mark_done(self, item: WorkItem) -> None:
+        """Idempotent: no-op if item was not in flight."""
         with self._lock:
             self._in_flight.discard(item)
             self._in_flight_tickets.discard(item.ticket_id)

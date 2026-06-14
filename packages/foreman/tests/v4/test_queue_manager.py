@@ -142,6 +142,53 @@ def test_dep_blocked_ticket_is_skipped_until_upstream_done(repo):
     assert second is not None and second.ticket_id == downstream
 
 
+def test_repo_exception_leaves_entry_in_heap(repo):
+    """If the repo raises mid-dequeue, the popped entry must not be lost."""
+    tid = _ticket(repo, 1)
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    qm.enqueue(WorkItem(ticket_id=tid, state_name="Planning"))
+
+    # Patch get_ticket to raise on first call, succeed after
+    original_get_ticket = repo.get_ticket
+    call_count = {"n": 0}
+    def flaky_get_ticket(ticket_id):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("simulated transient repo error")
+        return original_get_ticket(ticket_id)
+    repo.get_ticket = flaky_get_ticket  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="simulated"):
+        qm.dequeue()
+
+    # Entry must still be in heap; subsequent dequeue must succeed
+    assert qm.queue_depth() == 1
+    item = qm.dequeue()
+    assert item is not None and item.ticket_id == tid
+
+
+def test_held_and_dep_blocked_stays_in_heap_until_both_clear(repo):
+    upstream = _ticket(repo, 1, state="Implementing")
+    target = _ticket(repo, 2, state="Planning")
+    repo.set_ticket_dependencies(target, deps=[upstream])
+    repo.hold_ticket(target, held_by="jeff", reason="x", now=dt.datetime(2026, 6, 13))
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    qm.enqueue(WorkItem(ticket_id=upstream, state_name="Implementing"))
+    qm.enqueue(WorkItem(ticket_id=target, state_name="Planning"))
+    # Upstream dispatches; target is filtered by BOTH held and unmet-deps
+    first = qm.dequeue()
+    assert first is not None and first.ticket_id == upstream
+    assert qm.dequeue() is None
+    qm.mark_done(first)
+    # Release hold — still dep-blocked
+    repo.resume_ticket(target, now=dt.datetime(2026, 6, 13))
+    assert qm.dequeue() is None
+    # Resolve dep — now eligible
+    repo.set_ticket_state(upstream, "Done", now=dt.datetime(2026, 6, 13))
+    second = qm.dequeue()
+    assert second is not None and second.ticket_id == target
+
+
 def test_in_flight_count_and_queue_depth(repo):
     a = _ticket(repo, 1)
     b = _ticket(repo, 2)
