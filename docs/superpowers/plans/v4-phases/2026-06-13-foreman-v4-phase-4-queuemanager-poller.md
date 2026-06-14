@@ -1696,4 +1696,20 @@ git commit -m "test(v4): Phase 4 e2e — 3 concurrent tickets + dep-blocked down
 
 Phase 4 completion criterion (from the outline): **lifecycle test flows through the QueueManager driven by the Poller**. Achieved at Task 4.7. The daemon's runtime triad — Poller, QueueManager, WorkerPool — moves a ticket end-to-end with no manual wiring. Phase 5 swaps the `FakeRoleDispatcher` for a real subprocess-backed impl and modifies role CLIs to emit `FOREMAN_OUTCOME:` JSON.
 
+### Deferred follow-ups (from code-quality reviews)
+
+These were surfaced during Phase 4 SDD reviews and consciously deferred. Logged here so they're recoverable if anyone touches these modules in Phase 5+. Trigger conditions noted where applicable; if a trigger fires, promote to a real ticket.
+
+**Phase 4 module polish (low-priority — fix opportunistically when touching the file):**
+
+- `repository.py:~250` — dead `or {}` guard in `InMemoryTicketRepository.latest_pr_number_for_ticket`. The `if not inst.outcome_payload: continue` above already makes the `(inst.outcome_payload or {}).get(...)` redundant. Drop the `or {}`.
+- `repository.py` + `sqlite_repository.py` — `list(json.loads(row["depends_on"]))` no-op wrappers. `json.loads("[1,2,3]")` already returns a list; the `list(...)` is dead. Either drop, or keep AND add a one-line comment saying it's a defensive copy against caller-aliasing.
+- `records.py` — `depends_on: list[int]` field on a frozen+slots dataclass is mutable-by-Python (caller could `record.depends_on.append(99)`). Either switch to `tuple[int, ...]` for true immutability OR add a docstring note "treat as read-only; mutation goes through `set_ticket_dependencies`." Design call; tuple is cleaner if Pepper would accept the public-shape change.
+- `repository.py` Protocol — add one-line docstring to `latest_pr_number_for_ticket` clarifying "most recent by sequence; sequence is monotonic per ticket." Load-bearing assumption sits in two places undocumented.
+- `queue_manager.py:~55` — `_counter = itertools.count()` comment `# tie-breaker = enqueue order` is adequate but doesn't explain *why* (WorkItem isn't comparable, heappush TypeErrors on priority ties). Optional polish.
+- `worker_pool.py:57` — trailing comma in `ThreadPoolExecutor` kwargs. Style nit; ruff/black would reformat to multi-line on next save.
+- `sqlite_repository.py:__init__` — `_SCHEMA.read_text(...)` runs disk read on every construction. Cache-able as `_SCHEMA_SQL = _SCHEMA.read_text(encoding="utf-8")` at module level if it ever shows up on a profile flame graph.
+
+**`set_ticket_dependencies` — name only the first missing dep:** currently `raise TicketNotFoundError(str(missing[0]))` when `list_unmet_dependencies` finds ghosts. For batch-import debuggability, `", ".join(map(str, missing))` would name all of them at near-zero cost. Defer until a real batch-import flow surfaces it.
+
 ---

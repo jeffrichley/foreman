@@ -5,6 +5,12 @@
 
 ## Phase 5 — Role-side Outcome reporting + real subprocess dispatch
 
+### Carry-overs from Phase 4
+
+- **`WorkerPool.in_flight_count()` convenience helper** — surfaced during Task 4.4 review. Today tests reach through `qm.in_flight_count()`. If Phase 5's `SubprocessRoleDispatcher` work or the Phase 7 daemon shell wants to inspect the worker pool's load directly, add a one-liner: `def in_flight_count(self) -> int: return self._qm.in_flight_count()`. Defer if no caller materializes.
+
+### Goal
+
 The substrate is correct; nothing real yet drives it. Phase 5 makes two changes:
 
 1. **Each of the four role CLIs emits `FOREMAN_OUTCOME:` JSON on stdout as its terminal line.** Replaces the existing label-writing exit path outright — nothing is running v3 to preserve, so the cutover is mechanical, not flag-gated. Role prompts + role bodies stay unchanged; only the CLI tail changes.

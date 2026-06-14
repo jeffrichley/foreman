@@ -5,6 +5,27 @@
 
 ## Phase 8 — v3 deletion + cutover docs + PR
 
+### Dogfood watch-points (from Phase 4 code-quality reviews)
+
+These are real-world behaviors that the v4 mocked test suite cannot exercise. They were consciously deferred because no current test surfaces them; Phase 8 cutover is the first time real PyGithub + real GitHub talks to v4 code. If any trigger fires during dogfood, file a ticket and fix before declaring v4 stable.
+
+1. **`SqliteTicketRepository.latest_pr_number_for_ticket` — N+1 JSON decode under RLock.** Reads every non-null `outcome_payload` for the ticket, JSON-decodes each row Python-side, walks until pr_number found. Lock held the whole time. For v4 dogfood scale (tickets with ≤30 state instances) this is sub-ms. **Trigger to promote:** any single ticket exceeds 50 state instances (pathological BLOCKED loop) OR `tick()` observed >10ms in production logs. **Fix when triggered:** push `artifacts.pr_number` filter into SQL with `json_extract`:
+   ```sql
+   SELECT json_extract(outcome_payload, '$.artifacts.pr_number') AS pr
+   FROM state_instances
+   WHERE ticket_id = ? AND pr IS NOT NULL
+   ORDER BY sequence DESC LIMIT 1
+   ```
+   Lock released before Python-side decode of N rows.
+
+2. **`PyGithubGitProvider._gh._Github__requester` private-attr fragility.** PyGithub doesn't expose a typed GraphQL surface; we reach into the name-mangled `__requester` for the GraphQL mutations (`enqueue_merge_queue`, `merge_verdict`). The `# type: ignore[attr-defined]` is required because mypy can't see the mangled name. **Trigger to promote:** PyGithub minor-version bump that renames or removes the attribute. **Fix when triggered:** introduce a thin GraphQL wrapper, OR switch to `requests` directly for the two GraphQL methods (REST surface stays on PyGithub).
+
+3. **GraphQL `payload is None` defensive unwrap.** `merge_verdict` does `(payload.get("data") or {}).get("node", {}).get("mergeQueueEntry")`. If `payload` itself is None (5xx response body), this raises AttributeError on `.get("data")`. PyGithub historically always returns a dict, but a real GitHub outage could surface it. **Trigger to promote:** any AttributeError on `merge_verdict` in production logs. **Fix when triggered:** wrap with `(payload or {}).get(...)`.
+
+4. **GraphQL `node is None` semantic ambiguity in `merge_verdict`.** Currently returns `MergeVerdict.PENDING` when the GraphQL node is None. That's correct if "node is None" means "not in queue yet." It's WRONG if "node is None" means "PR has been deleted as a graph node." Today both map to PENDING, and the WorkerPool just keeps polling — an infinite loop on a deleted PR. **Trigger to promote:** any merge_verdict observed stuck in PENDING for >24h in production logs. **Fix when triggered:** separately query for PR existence; if PR was deleted, raise `PRNotFoundError` so MergingState can handle it correctly (move ticket to Failed or NeedsHelp).
+
+### Goal
+
 The v4 substrate is complete; v3 still occupies space in the repo. Phase 8 deletes it in one shot, fixes any survival-set files that broke, writes the operator-facing RUNBOOK additions, runs the standing adversarial-review pass, and opens the v4 PR.
 
 The deletion is mechanical because the **v4 isolation principle** (set up at Phase 1) made it so: `foreman.v4.*` never imports from the kill set, the Task 1.10 isolation guard enforces that on every commit, and Phase 5 already deleted the role files' last reaches into `foreman.labels`. What's left is `git rm` plus survival-set cleanup.
