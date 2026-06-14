@@ -18,7 +18,7 @@ import datetime as dt
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from foreman.v4.event_bus import EventBus
 from foreman.v4.events import (
@@ -31,6 +31,10 @@ from foreman.v4.events import (
 from foreman.v4.outcome import Outcome
 from foreman.v4.records import StateInstanceRecord, TicketRecord
 from foreman.v4.repository import TicketRepository
+from foreman.v4.role_dispatcher import RoleDispatcher
+
+if TYPE_CHECKING:
+    from foreman.v4.git_provider import GitProvider
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,8 @@ class StateContext:
     repo: TicketRepository
     clock: Callable[[], dt.datetime]
     bus: EventBus | None = None
+    role_dispatcher: RoleDispatcher | None = None
+    git: GitProvider | None = None
 
 
 def _publish(ctx: StateContext, event_type: type, **kwargs: Any) -> None:
