@@ -135,40 +135,15 @@ Expected sites (based on Phase 5 plan):
 - `packages/foreman/src/foreman/roles/worker.py` — same shape
 - `packages/foreman/src/foreman/cli.py` — legacy `plan`/`review`/`fix`/`implement` command bodies + decorator stacks
 
-- [ ] **Step 1c: Rename `-v4` CLI commands to unsuffixed names**
-
-After legacy commands are deleted, the `-v4`-suffixed commands can take their natural names:
+- [ ] **Step 1c: Verify zero remaining sentinels**
 
 ```bash
-# In packages/foreman/src/foreman/cli.py:
-sed -i 's/@cli.command("plan-v4")/@cli.command("plan")/' packages/foreman/src/foreman/cli.py
-sed -i 's/@cli.command("review-v4")/@cli.command("review")/' packages/foreman/src/foreman/cli.py
-sed -i 's/@cli.command("fix-v4")/@cli.command("fix")/' packages/foreman/src/foreman/cli.py
-sed -i 's/@cli.command("implement-v4")/@cli.command("implement")/' packages/foreman/src/foreman/cli.py
-```
-
-And in `packages/foreman/src/foreman/v4/subprocess_dispatcher.py`, update the `_ROLE_TO_INVOCATION` table:
-
-```python
-_ROLE_TO_INVOCATION: dict[str, _Invocation] = {
-    "planner":       _Invocation(subcommand="plan",      target=None),
-    "reviewer-spec": _Invocation(subcommand="review",    target="spec"),
-    "reviewer-impl": _Invocation(subcommand="review",    target="impl"),
-    "fixer-spec":    _Invocation(subcommand="fix",       target="spec"),
-    "fixer-impl":    _Invocation(subcommand="fix",       target="impl"),
-    "worker":        _Invocation(subcommand="implement", target=None),
-}
-```
-
-Remove the `# v4-PHASE-8-RENAME` comment from that file too. Tests in `tests/v4/test_subprocess_dispatcher.py` need their parametrize entries updated (`"plan"` instead of `"plan-v4"`, etc.).
-
-- [ ] **Step 1d: Verify zero remaining sentinels**
-
-```bash
-git grep -n 'v4-PHASE-8-KILL\|v4-PHASE-8-RENAME' packages/foreman/ && echo "STILL PRESENT — FIX BEFORE COMMIT" || echo "all clear"
+git grep -n 'v4-PHASE-8-KILL' packages/foreman/ && echo "STILL PRESENT — FIX BEFORE COMMIT" || echo "all clear"
 ```
 
 If anything matches, find and delete it before committing.
+
+(The `-v4` → unsuffixed rename step that previously lived here is gone — Phase 6 commit `b29632e` already dropped the `-v4` suffix from `SubprocessRoleDispatcher._ROLE_TO_INVOCATION` and the typer app uses unsuffixed names from day one. The Phase 5 `v4-PHASE-8-RENAME` sentinel was removed in the same commit.)
 
 - [ ] **Step 2: Run the test gate to see what broke**
 
@@ -181,9 +156,11 @@ If `just check` is GREEN immediately, the isolation discipline held perfectly �
 
 ```bash
 git add -u  # stages the deletions + in-place edits
-git add packages/foreman/src/foreman/cli.py packages/foreman/src/foreman/v4/subprocess_dispatcher.py
+git add packages/foreman/src/foreman/cli.py
 git commit -m "feat(v4): delete v3 substrate (reconciler/, daemon, role legacy CLIs + tests)"
 ```
+
+After this commit, the `foreman` binary entry point in `pyproject.toml` (already pointing at `foreman.v4.cli:main` since Phase 6) continues to work unchanged. The legacy `foreman/cli.py` is now an empty/minimal file — consider deleting it entirely if no tests or imports remain (`git grep 'from foreman.cli'` to confirm).
 
 ### Task 8.2: Repair any survival-set files that referenced the kill set
 

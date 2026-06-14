@@ -5,6 +5,17 @@
 
 ## Phase 6 — Typer CLI (operator surface)
 
+### Pre-flight notes (read before dispatching)
+
+**Naming:** `foreman` is the typer CLI starting in Phase 6. The legacy Click app in `foreman/cli.py` stays for `tests/test_roles_*.py` + `tests/test_cli.py` (they import the `cli` Click object directly via `CliRunner` — they don't shell out). The legacy Click commands have NO binary entry point after Phase 6.
+
+**`-v4` suffix already gone.** Commit `b29632e` (before Phase 6) dropped the `-v4` suffix from `SubprocessRoleDispatcher._ROLE_TO_INVOCATION` and deleted the `plan-v4`/`review-v4`/`fix-v4`/`implement-v4` Click commands from `foreman/cli.py`. The dispatcher now invokes `foreman plan --project p --issue-number 1`. Phase 6 makes that actually work by giving typer those command names.
+
+**Verifications done:**
+- `typer.testing.CliRunner.invoke(app, [...], obj=ctx)` passes through to `ctx.obj` when the typer app has a `@app.callback()` to force multi-command mode. Plan's `_root` callback (Task 6.1) already does this.
+- PyYAML is available in the venv but NOT declared in `packages/foreman/pyproject.toml`. Task 6.1 adds both `typer` and `pyyaml`.
+- Repository currently has `list_open_tickets()` only. Task 6.2 adds `list_state_instances_for_ticket()` AND `list_all_tickets()` to the Protocol + InMem + SQLite + contract tests.
+
 The substrate runs but there's no way for a human to look at it. Phase 6 builds the operator-facing CLI in typer + rich, mounted at `foreman.v4.cli`.
 
 Command surface — six groups:
@@ -23,12 +34,20 @@ Phase 5 left the role commands in Click `cli.py` as one-liner shims; Phase 6 rep
 ### Task 6.1: Formatter Strategy + typer app skeleton + `CliContext` builder
 
 **Files:**
+- Modify: `packages/foreman/pyproject.toml` (add `typer` + `pyyaml` to deps)
 - Create: `packages/foreman/src/foreman/v4/cli/__init__.py`
 - Create: `packages/foreman/src/foreman/v4/cli/context.py`
 - Create: `packages/foreman/src/foreman/v4/cli/formatters.py`
 - Test: `packages/foreman/tests/v4/cli/test_context.py`
 - Test: `packages/foreman/tests/v4/cli/test_formatters.py`
 - Test: `packages/foreman/tests/v4/cli/test_app_skeleton.py`
+
+**FIRST: add the deps.** In `packages/foreman/pyproject.toml`, add to the `[project.dependencies]` list:
+```toml
+"typer>=0.12,<1",
+"pyyaml>=6,<7",
+```
+Then run `uv sync` to install. These are required for the imports in the new modules.
 
 Strategy pattern per the spec: `TableFormatter`, `JsonFormatter`, `YamlFormatter` implement a common `format(rows: list[dict]) -> str` interface. CLI selects via `--format`.
 
@@ -546,7 +565,7 @@ def _list_all(repo: TicketRepository) -> list:
     return repo.list_open_tickets()
 ```
 
-If the test expects `--all` to show terminal tickets too, extend the Repository Protocol with `list_all_tickets()` and add it to both impls (mirror the `list_open_tickets()` shape). Add a contract test for it in `_repository_contract.py`.
+**`list_all_tickets()` is REQUIRED** (not "if needed"). The test `test_ps_all_includes_terminal_tickets` asserts `"Done"` appears in `--all` output, which means `--all` must surface terminal tickets. Extend the Repository Protocol with `list_all_tickets() -> list[TicketRecord]` and add it to both impls (mirror `list_open_tickets()` shape). Add a contract test for it in `_repository_contract.py`.
 
 - [ ] **Step 4: Implement `show`**
 
@@ -1133,7 +1152,9 @@ git commit -m "feat(v4): mutation commands — hold/resume/retry/skip/drop/set-s
 - Test: `packages/foreman/tests/v4/cli/test_daemon_commands.py`
 - Test: `packages/foreman/tests/v4/test_daemon.py`
 
-`Daemon` class (in `v4/daemon.py`) hosts the Poller + QueueManager + WorkerPool, runs a tick loop on a configurable cadence, handles SIGTERM/SIGINT gracefully (drain in-flight, exit). PID file under `~/.foreman/v4/daemon.pid`.
+`Daemon` class (in `v4/daemon.py`) hosts a list of Pollers + shared QueueManager + WorkerPool. **Built multi-project from the start** (don't build single-project here and refactor in Phase 7 — pull the multi-project shape forward). Runs a tick loop on a configurable cadence, handles SIGTERM/SIGINT gracefully (drain in-flight, exit). PID file under `~/.foreman/v4/daemon.pid`.
+
+Daemon takes `pollers: list[Poller]` (one per project). Shared QM + WorkerPool across projects. Tick loop calls `tick()` on every poller in turn, then drains the pool. Per-project concurrency is enforced at the QM (max_in_flight cap is global). Phase 7 then only adds bootstrap wiring on top — no refactor.
 
 CLI commands:
 - `daemon start` — start in the foreground (or `--background` for nohup-style detach later); writes PID file
@@ -1172,10 +1193,15 @@ def test_daemon_one_tick_processes_one_ticket():
     dispatcher = FakeRoleDispatcher(responses={
         ("planner", "p", 1): _canned("clean"),
     })
+    poller = Poller(
+        repo=repo, qm=None, git=git,
+        project="p", trigger_label="foreman:plan",
+        clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
+    )
     daemon = Daemon(
         repo=repo, git=git, dispatcher=dispatcher,
-        config=DaemonConfig(project="p", trigger_label="foreman:plan",
-                            tick_seconds=0, max_in_flight=4),
+        pollers=[poller],
+        config=DaemonConfig(tick_seconds=0, max_in_flight=4),
         clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
     )
     daemon.tick_once()
@@ -1234,19 +1260,23 @@ from foreman.v4.worker_pool import WorkerPool
 
 @dataclass
 class DaemonConfig:
-    project: str
-    trigger_label: str
     tick_seconds: float
     max_in_flight: int
 
 
 class Daemon:
+    """Multi-project daemon. Holds a list of Pollers (one per project)
+    sharing one QueueManager + one WorkerPool. Per-project Pollers can
+    be constructed without a QM; the Daemon injects its shared QM into
+    any Poller that arrived without one."""
+
     def __init__(
         self,
         *,
         repo: TicketRepository,
         git: GitProvider,
         dispatcher: RoleDispatcher,
+        pollers: list[Poller],
         config: DaemonConfig,
         clock: Callable[[], dt.datetime],
         bus: EventBus | None = None,
@@ -1258,19 +1288,24 @@ class Daemon:
         self._clock = clock
         self._bus = bus
         self._qm = QueueManager(repo=repo, max_in_flight=config.max_in_flight)
-        self._poller = Poller(
-            repo=repo, qm=self._qm, git=git,
-            project=config.project, trigger_label=config.trigger_label,
-            clock=clock,
-        )
+        # Wire the shared QM into every Poller that was constructed without one.
+        self._pollers = [self._with_qm(p) for p in pollers]
         self._pool = WorkerPool(
             repo=repo, qm=self._qm, dispatcher=dispatcher,
             git=git, bus=bus, clock=clock,
         )
         self._stop = threading.Event()
 
+    def _with_qm(self, poller: Poller) -> Poller:
+        # Pollers can be constructed without a QM at config time;
+        # inject the daemon's shared QM here.
+        if poller._qm is None:  # type: ignore[attr-defined]
+            poller._qm = self._qm  # type: ignore[attr-defined]
+        return poller
+
     def tick_once(self) -> None:
-        self._poller.tick()
+        for poller in self._pollers:
+            poller.tick()
         self._pool.run_until_empty()
 
     def run_forever(self) -> None:
@@ -1435,15 +1470,17 @@ git add packages/foreman/src/foreman/v4/daemon.py packages/foreman/src/foreman/v
 git commit -m "feat(v4): Daemon class + daemon start/stop/reload/status CLI"
 ```
 
-### Task 6.6: Role commands migrated to typer + console script
+### Task 6.6: Role commands in typer + console script swap
 
 **Files:**
 - Modify: `packages/foreman/src/foreman/v4/cli/__init__.py` (register `plan/review/fix/implement`)
-- Modify: `packages/foreman/src/foreman/cli.py` (thin wrapper around the typer app)
-- Modify: `packages/foreman/pyproject.toml` (entry point)
+- Modify: `packages/foreman/pyproject.toml` (entry point: `foreman = "foreman.v4.cli:main"`)
 - Test: `packages/foreman/tests/v4/cli/test_role_commands.py`
 
-The four role commands move from Phase 5's Click `cmd_plan` etc. into the typer app. They delegate to the same `run_<role>_cli` functions from Phase 5, so no behavior change — just a different framework wrapping them.
+**Files NOT touched in this task:**
+- `packages/foreman/src/foreman/cli.py` — legacy Click app stays intact. The legacy positional-`<issue_url>` `plan`/`review`/`fix`/`implement` commands stay (tagged `# v4-PHASE-8-KILL` since Phase 5). `tests/test_roles_*.py` and `tests/test_cli.py` import the `cli` Click object directly and exercise via `CliRunner` — no binary needed. Phase 8 atomic cutover deletes the entire Click `cli.py` + the 5 legacy test files.
+
+The four role commands `plan`/`review`/`fix`/`implement` go into the typer app. They delegate to the `run_<role>_cli` functions from Phase 5 (in `foreman/roles/*.py`), so no behavior change — just a different framework wrapping them. The `-v4` suffix is gone (cleanup commit `b29632e` before Phase 6).
 
 - [ ] **Step 1: Add the typer commands**
 
@@ -1462,6 +1499,7 @@ def cmd_plan(
     project: str = _typer.Option(..., "--project"),
     issue_number: int = _typer.Option(..., "--issue-number"),
 ) -> None:
+    """Run the v4 Planner: emit FOREMAN_OUTCOME; exit code carries success/failure."""
     raise _typer.Exit(code=run_planner_cli(project=project, issue_number=issue_number))
 
 
@@ -1471,6 +1509,7 @@ def cmd_review(
     issue_number: int = _typer.Option(..., "--issue-number"),
     target: str = _typer.Option(..., "--target", help="spec|impl"),
 ) -> None:
+    """Run the v4 Reviewer (target-aware): emit FOREMAN_OUTCOME; exit code carries verdict."""
     raise _typer.Exit(code=run_reviewer_cli(
         project=project, issue_number=issue_number, target=target,
     ))
@@ -1482,6 +1521,7 @@ def cmd_fix(
     issue_number: int = _typer.Option(..., "--issue-number"),
     target: str = _typer.Option(..., "--target", help="spec|impl"),
 ) -> None:
+    """Run the v4 Fixer (target-aware): emit FOREMAN_OUTCOME; exit code carries verdict."""
     raise _typer.Exit(code=run_fixer_cli(
         project=project, issue_number=issue_number, target=target,
     ))
@@ -1492,38 +1532,36 @@ def cmd_implement(
     project: str = _typer.Option(..., "--project"),
     issue_number: int = _typer.Option(..., "--issue-number"),
 ) -> None:
+    """Run the v4 Worker: emit FOREMAN_OUTCOME; exit code carries verdict."""
     raise _typer.Exit(code=run_worker_cli(
         project=project, issue_number=issue_number,
     ))
 ```
 
-- [ ] **Step 2: Rewrite the top-level `cli.py`**
+- [ ] **Step 2: Add typer `main()` entry point in `foreman/v4/cli/__init__.py`**
 
 ```python
-# packages/foreman/src/foreman/cli.py
-"""Top-level CLI entry point. Delegates to the v4 typer app.
-
-Phase 8 deletes the legacy commands this file used to host.
-"""
-
-from foreman.v4.cli import app
-
-
 def main() -> None:
+    """Console-script entry point. Invokes the typer app."""
     app()
 ```
 
-The previous `cli.py` body (Click app with `cmd_plan`/`cmd_review`/`cmd_fix`/`cmd_implement`) is gone — those role commands are now in the typer app, calling the same `run_<role>_cli` functions.
+This sits alongside the existing `app = typer.Typer(...)` declaration.
 
-- [ ] **Step 3: Confirm pyproject entry point is unchanged**
+- [ ] **Step 3: Swap `pyproject.toml` entry point to typer**
 
-`pyproject.toml` should already have:
+In `packages/foreman/pyproject.toml`, change:
 ```toml
 [project.scripts]
 foreman = "foreman.cli:main"
 ```
+to:
+```toml
+[project.scripts]
+foreman = "foreman.v4.cli:main"
+```
 
-If it's pointing at a Click command function directly, update it to point at `foreman.cli:main` so the typer app is invoked.
+After `uv sync` (or `pip install -e .`), `foreman plan --project p --issue-number 1` invokes the typer app. The legacy Click app in `foreman/cli.py` is unreachable via the binary BUT still importable by tests as `from foreman.cli import cli` for `CliRunner` (this is what `tests/test_roles_*.py` + `tests/test_cli.py` do). DO NOT delete the legacy `foreman/cli.py` — Phase 8 handles that as part of the atomic cutover.
 
 - [ ] **Step 4: Write the failing tests**
 
@@ -1584,8 +1622,8 @@ Phase 5's `tests/v4/roles/test_*_outcome.py` tests still pass against the same `
 - [ ] **Step 6: Commit**
 
 ```bash
-git add packages/foreman/src/foreman/v4/cli/__init__.py packages/foreman/src/foreman/cli.py packages/foreman/pyproject.toml packages/foreman/tests/v4/cli/test_role_commands.py
-git commit -m "feat(v4): migrate role commands to typer; collapse cli.py to thin wrapper"
+git add packages/foreman/src/foreman/v4/cli/__init__.py packages/foreman/pyproject.toml packages/foreman/tests/v4/cli/test_role_commands.py
+git commit -m "feat(v4): add role commands to typer; swap foreman entry to v4 cli (legacy cli.py untouched)"
 ```
 
 ### Task 6.7: End-to-end CLI smoke
