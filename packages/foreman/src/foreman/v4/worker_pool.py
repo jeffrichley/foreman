@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import datetime as dt
+import logging
 from typing import Callable
 
 from foreman.v4.event_bus import EventBus
@@ -31,6 +32,8 @@ from foreman.v4.role_dispatcher import RoleDispatcher
 from foreman.v4.state import StateContext
 from foreman.v4.states.registry import build_state
 from foreman.v4.work import WorkItem
+
+_LOG = logging.getLogger(__name__)
 
 
 class WorkerPool:
@@ -66,11 +69,29 @@ class WorkerPool:
                 return submitted
             future = self._executor.submit(self._run_transition, item)
             # `_item=item` default-arg captures by value — avoids the classic
-            # "all lambdas see the last loop iteration" bug. The done_callback
-            # fires on both success AND exception, so mark_done is guaranteed
-            # to free the per-ticket slot even if transition() raised.
+            # "all lambdas see the last loop iteration" bug. Both callbacks
+            # fire on success AND exception:
+            #   1. mark_done first so the per-ticket slot frees before logging
+            #      takes any time.
+            #   2. _log_exception surfaces any worker-thread crash — without
+            #      it, exceptions raised in _run_transition (e.g.
+            #      TicketNotFoundError, sqlite3.OperationalError) are
+            #      silently captured by the future and never reach an
+            #      operator, turning a stuck pipeline into guess-and-check.
             future.add_done_callback(lambda _f, _item=item: self._qm.mark_done(_item))
+            future.add_done_callback(lambda _f, _item=item: self._log_exception(_f, _item))
             submitted += 1
+
+    def _log_exception(
+        self, future: concurrent.futures.Future, item: WorkItem,
+    ) -> None:
+        exc = future.exception()
+        if exc is not None:
+            _LOG.exception(
+                "WorkerPool transition raised for ticket %d state=%s",
+                item.ticket_id, item.state_name,
+                exc_info=exc,
+            )
 
     def _run_transition(self, item: WorkItem) -> None:
         ticket = self._repo.get_ticket(item.ticket_id)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import threading
 import time
 
 from foreman.v4.queue_manager import QueueManager
@@ -94,14 +95,34 @@ def test_three_tickets_dispatch_concurrently():
 
 
 def test_same_ticket_serialized_across_concurrent_submissions():
-    """Per-ticket FIFO holds even under thread pressure."""
+    """Per-ticket FIFO holds even under thread pressure.
+
+    Without a blocking dispatcher, the FakeRoleDispatcher transition
+    completes in microseconds — possibly BEFORE tick()'s inner loop calls
+    dequeue() again. That would let the second WorkItem (same ticket)
+    become eligible and tick() would return submitted=2, even though
+    only ever one was running at a time. Race-prone on Windows under
+    load.
+
+    The invariant is per-ticket FIFO: at most one transition for a
+    given ticket is in-flight at any moment. Hold the first transition
+    open with an Event so we can observe in_flight_count == 1 and
+    submitted == 1 deterministically.
+    """
     repo = SqliteTicketRepository.in_memory()
     t = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
     repo.set_ticket_state(t.id, "Planning", now=dt.datetime(2026, 6, 13))
     qm = QueueManager(repo=repo, max_in_flight=4)
-    dispatcher = FakeRoleDispatcher(responses={
-        ("planner", "p", 1): _canned("clean"),
-    })
+
+    release = threading.Event()
+    base = FakeRoleDispatcher(responses={("planner", "p", 1): _canned("clean")})
+
+    class BlockingDispatcher:
+        def dispatch(self, **kwargs):
+            release.wait(timeout=5.0)
+            return base.dispatch(**kwargs)
+
+    dispatcher = BlockingDispatcher()
     pool = WorkerPool(
         repo=repo, qm=qm, dispatcher=dispatcher,
         git=None, bus=None,
@@ -113,6 +134,16 @@ def test_same_ticket_serialized_across_concurrent_submissions():
         qm.enqueue(WorkItem(ticket_id=t.id, state_name="Planning"))
         qm.enqueue(WorkItem(ticket_id=t.id, state_name="SpecReview"))
         submitted = pool.tick()
-        assert submitted == 1  # only one in flight per ticket
+        # Only ONE in flight per ticket — second waits behind the per-ticket
+        # FIFO filter inside QM.dequeue().
+        assert submitted == 1
+        assert qm.in_flight_count() == 1
+        # Release the first transition; mark_done fires; second WorkItem
+        # becomes eligible the next time something dequeues. We don't drive
+        # tick() again here — we just verify the worker drains cleanly.
+        release.set()
+        _wait_until_idle(qm)
     finally:
+        # Ensure cleanup even if an assertion above failed mid-flight.
+        release.set()
         pool.shutdown(wait=True)
