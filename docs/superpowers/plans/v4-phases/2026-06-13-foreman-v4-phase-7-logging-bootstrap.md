@@ -461,7 +461,8 @@ Schema:
     log_dir        - directory for rich-stdout + jsonl
     log_level      - default INFO
     tick_seconds   - cadence between Poller ticks (default 30)
-    max_in_flight  - QueueManager concurrency cap (default 4)
+    max_in_flight  - QueueManager concurrency cap (default 1; opt in to higher)
+    max_workers    - ThreadPoolExecutor size in WorkerPool (default 1)
     merge_mechanism - "queue" (default) | "merge" | "squash" | "rebase"
 
   [[projects]]
@@ -494,7 +495,8 @@ class V4Config(BaseModel):
     log_dir: str
     log_level: str = "INFO"
     tick_seconds: float = 30.0
-    max_in_flight: int = 4
+    max_in_flight: int = 1
+    max_workers: int = 1
     merge_mechanism: Literal["queue", "merge", "squash", "rebase"] = "queue"
     projects: list[ProjectConfig] = Field(default_factory=list)
 
@@ -955,7 +957,8 @@ def test_full_boot_from_toml_to_done(tmp_path: Path, monkeypatch):
         f'db_path = "{db_path.as_posix()}"\n'
         f'log_dir = "{log_dir.as_posix()}"\n'
         f'tick_seconds = 0\n'
-        f'max_in_flight = 4\n'
+        f'max_in_flight = 1\n'
+        f'max_workers = 1\n'
         f'[[projects]]\n'
         f'name = "p"\n'
         f'repo = "owner/p"\n'

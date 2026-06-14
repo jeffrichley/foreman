@@ -804,6 +804,8 @@ git commit -m "feat(v4): QueueManager — priority heap with per-ticket / held /
 
 **Per-submission callback** marks the WorkItem done on the QM as soon as the transition future completes, freeing the per-ticket slot for the next dequeue cycle.
 
+**Defaults: serial.** `max_workers=1` and (in Phase 7's `V4Config`) `max_in_flight=1`. Concurrency is **opt-in via config** — operators dial it up after observing dogfood stability. The threading machinery is there from day one so the upgrade is config-only, but the out-of-the-box behavior is one ticket at a time. Tests that exercise concurrency explicitly override (`max_workers=3` in the 3-ticket cases).
+
 **Sequence assignment** uses `repo.count_state_instances_for_ticket(ticket_id) + 1` (helper added in Task 4.1). No more reaching into private impl details.
 
 - [ ] **Step 1: Write the failing test**
@@ -988,7 +990,7 @@ class WorkerPool:
         git: GitProvider | None,
         bus: EventBus | None,
         clock: Callable[[], dt.datetime],
-        max_workers: int = 4,
+        max_workers: int = 1,
     ) -> None:
         self._repo = repo
         self._qm = qm
