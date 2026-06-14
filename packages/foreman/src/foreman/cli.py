@@ -228,6 +228,7 @@ def review_v4(project: str, issue_number: int, target: str) -> None:
     )
 
 
+# v4-PHASE-8-KILL-BEGIN: legacy issue-url/pr-url fixer CLI; replaced by `fix-v4` (below). Remove this command + decorator stack + label-write imports in Phase 8.
 @cli.command()
 @click.option(
     "--issue-url",
@@ -315,6 +316,22 @@ def fix(
     click.echo(
         f"{llm.outcome}: {result.attempt}/3 attempt, {addressed} fixed, {unaddressed} unaddressed"
     )
+# v4-PHASE-8-KILL-END
+
+
+# v4: additive CLI using --issue-number + --target; SubprocessRoleDispatcher invokes this.
+@cli.command("fix-v4")
+@click.option("--project", required=True)
+@click.option("--issue-number", "issue_number", type=int, required=True)
+@click.option("--target", type=click.Choice(["spec", "impl"]), required=True)
+def fix_v4(project: str, issue_number: int, target: str) -> None:
+    """Run the v4 Fixer: emit FOREMAN_OUTCOME on stdout; exit-code carries success/failure."""
+    # Local import keeps cli.py's module-level import graph unchanged so
+    # `tests/test_cli.py`'s command-discovery assertions don't see a new
+    # side-effect import at collection time.
+    from foreman.roles.fixer import run_fixer_cli
+
+    sys.exit(run_fixer_cli(project=project, issue_number=issue_number, target=target))
 
 
 @cli.command()

@@ -406,6 +406,7 @@ def _unaddressed_by_reason_histogram(output: FixerOutput) -> dict[str, int]:
     return hist
 
 
+# v4-PHASE-8-KILL: legacy fixer entry-point used by the `fix` CLI command (cli.py); emits via label-writing tail. Replaced by run_fixer_cli (below) + fix-v4 CLI command. Remove this function and the legacy label-writing tail in Phase 8.
 async def run_fixer(
     *,
     issue_url: str,
@@ -865,3 +866,212 @@ async def run_fixer(
         # non-provider failures (worktree ops, host I/O, GitHub 5xx).
         _on_failure(exc)
         raise
+
+
+# ============================================================
+# v4 emit path — additive alongside the legacy label-writing entry-point.
+# The legacy code path (above) stays running through Phase 7. Phase 8
+# deletes the legacy entry-point + everything tagged with v4-PHASE-8-KILL
+# and removes this banner.
+# ============================================================
+import asyncio  # noqa: E402  (kept here so legacy import block above stays untouched)
+
+from foreman.config import load_config  # noqa: E402
+from foreman.providers import make_provider  # noqa: E402
+from foreman.v4.emit import emit_outcome  # noqa: E402
+from foreman.v4.outcome import (  # noqa: E402
+    Outcome,
+    OutcomeArtifacts,
+    OutcomeConfidence,
+    OutcomeKind,
+)
+
+# v4 RoleDispatcher uses "spec" / "impl"; the legacy Fixer internals
+# (entry-label gate, prompt loader, target routing) speak "spec_pr" /
+# "impl_pr". Translation lives only at the v4 boundary so legacy paths
+# keep their existing vocabulary verbatim.
+_V4_TARGET_TO_LEGACY: dict[str, Literal["spec_pr", "impl_pr"]] = {
+    "spec": "spec_pr",
+    "impl": "impl_pr",
+}
+
+# Head-branch shape per target — used to locate the open PR the v4
+# Fixer is about to amend. The legacy Fixer takes an issue URL and
+# derives the PR from the issue's branch convention; v4's
+# SubprocessRoleDispatcher only knows the issue number + target.
+_V4_TARGET_TO_BRANCH_PREFIX: dict[str, str] = {
+    "spec": "foreman/issue-",
+    "impl": "foreman/impl-",
+}
+
+
+class _V4FixerResult:
+    """Flat-shape result for the v4 emit path.
+
+    The legacy ``FixerRunResult`` nests outcome under
+    ``llm_output.outcome`` ("fixed" / "incomplete") with an ``attempt``
+    counter and full ``addressed_findings`` / ``unaddressed_findings``
+    breakdown. The v4 emit path consumes the boolean ``pushed`` +
+    ``escalated`` + a ``pr_number`` so ``run_fixer_cli`` can pick
+    CLEAN vs NEEDS_HELP without re-interpreting legacy shape. The
+    Fixer's outcome surface is intentionally narrower than the
+    Reviewer's — findings do NOT propagate; the downstream v4 state
+    machine routes the amended PR back to the Reviewer, which
+    re-emits its own NEEDS_FIX/CLEAN verdict. Both this class and the
+    helper that builds instances disappear in Phase 8.
+    """
+
+    def __init__(
+        self,
+        *,
+        pushed: bool,
+        escalated: bool,
+        pr_number: int | None,
+        summary: str,
+    ) -> None:
+        self.pushed = pushed
+        self.escalated = escalated
+        self.pr_number = pr_number
+        self.summary = summary
+
+
+def _run_fixer_for_v4(
+    *, project: str, issue_number: int, target: str
+) -> _V4FixerResult:
+    """Run the fixer the same way the legacy ``fix`` command does,
+    but without label-writing on top.
+
+    Option B per the Phase 5.2/5.3 plan: duplicate the fixer-invocation
+    sequence rather than refactor the legacy ``run_fixer`` body. The
+    legacy ``run_fixer`` is re-used here — it already contains the
+    full preflight → worktree → LLM → commit-push sequence, and v3's
+    label-writing behavior is benign for v4 callers (the v4 state
+    machine drives off the FOREMAN_OUTCOME emitted below, not off
+    GitHub labels). The label-writing tail goes away in Phase 8.
+
+    ``target`` arrives in v4 vocabulary ("spec" / "impl"); the legacy
+    ``run_fixer`` takes the "spec_pr" / "impl_pr" form for its
+    entry-label gate and prompt selection. Translation happens at the
+    boundary; the legacy vocabulary is preserved inside ``run_fixer``.
+
+    Escalation detection: the legacy ``run_fixer`` raises
+    ``_FixerPreflightRefusal`` when the max-attempts cap is hit (the
+    refusal IS the escalation surface) — that exception bubbles out
+    here and ``run_fixer_cli`` maps it to ``NEEDS_HELP``. A "soft"
+    incomplete (LLM returned ``outcome="incomplete"`` but attempt is
+    still below the cap) maps to NEEDS_HELP as well; the v4 state
+    machine treats both as "this attempt didn't land — surface to a
+    human" without distinguishing further.
+    """
+    cfg_path = os.environ.get("FOREMAN_CONFIG_PATH") or os.environ.get("FOREMAN_CONFIG")
+    if cfg_path is None:
+        cfg_path = str(Path("~/.foreman/config.toml").expanduser())
+    cfg = load_config(cfg_path)
+    project_cfg = cfg.projects[project]
+
+    # Locate the open PR for this issue. The Fixer's legacy entry-
+    # point takes an issue URL — v4's SubprocessRoleDispatcher only
+    # knows the issue number + target. Resolve via the fixer App's
+    # client (read-only get_pulls is in scope for the fixer identity).
+    registry = IdentityRegistry(project_cfg)
+    fixer_client: Github = registry.get_fixer_client()
+    repo: Repository = fixer_client.get_repo(project_cfg.repo)
+    owner = project_cfg.repo.split("/", 1)[0]
+    branch_prefix = _V4_TARGET_TO_BRANCH_PREFIX[target]
+    branch = f"{branch_prefix}{issue_number}"
+    head_qualifier = f"{owner}:{branch}"
+    pulls = list(repo.get_pulls(state="open", head=head_qualifier))
+    if not pulls:
+        raise RuntimeError(
+            f"No open PR found for branch {branch!r} in {project_cfg.repo!r}. "
+            f"The v4 Fixer expects the {target}-side PR to be open for "
+            f"issue #{issue_number}."
+        )
+    pr = pulls[0]
+    issue_url = f"https://github.com/{project_cfg.repo}/issues/{issue_number}"
+
+    worktrees_root = Path(
+        os.environ.get(
+            "FOREMAN_WORKTREES_ROOT",
+            str(Path.home() / ".foreman" / "worktrees"),
+        )
+    )
+    provider = make_provider()
+    legacy_target = _V4_TARGET_TO_LEGACY[target]
+    legacy_result = asyncio.run(
+        run_fixer(
+            issue_url=issue_url,
+            config=cfg,
+            project_name=project,
+            worktrees_root=worktrees_root,
+            provider=provider,
+            identity_registry=registry,
+            target=legacy_target,
+        )
+    )
+
+    # Flatten legacy → v4 shape. The legacy ``FixerOutput.outcome`` is
+    # "fixed" or "incomplete"; the legacy ``attempt`` counter tells us
+    # whether we're at the cap. The v4 surface needs a binary
+    # ``pushed`` (CLEAN) vs ``escalated`` (NEEDS_HELP) — anything
+    # short of "fixed" is treated as needing human help. The
+    # ``_FixerPreflightRefusal`` cap-hit case is handled one layer up
+    # in ``run_fixer_cli`` because it surfaces as an exception, not a
+    # ``FixerRunResult``.
+    llm = legacy_result.llm_output
+    pushed = llm.outcome == "fixed"
+    summary = (
+        llm.fix_comment[:500]
+        if llm.fix_comment
+        else f"{llm.outcome} (attempt {legacy_result.attempt})"
+    )
+    return _V4FixerResult(
+        pushed=pushed,
+        escalated=not pushed,
+        pr_number=pr.number,
+        summary=summary,
+    )
+
+
+def run_fixer_cli(*, project: str, issue_number: int, target: str) -> int:
+    """v4 CLI entry-point. Emits FOREMAN_OUTCOME JSON; returns exit code.
+
+    ``target`` is the v4 vocab ("spec" / "impl"). The
+    SubprocessRoleDispatcher (Task 5.6) forks ``foreman fix-v4
+    --target spec|impl`` which calls this. Legacy ``fix`` command +
+    label-writing tail in this module are tagged ``v4-PHASE-8-KILL``
+    and deleted together in Phase 8.
+    """
+    try:
+        result = _run_fixer_for_v4(
+            project=project, issue_number=issue_number, target=target
+        )
+    except Exception as exc:
+        emit_outcome(
+            Outcome(
+                kind=OutcomeKind.ERROR,
+                confidence=OutcomeConfidence.HIGH,
+                summary=f"fixer raised: {exc}"[:500],
+            )
+        )
+        return 1
+
+    if getattr(result, "escalated", False):
+        emit_outcome(
+            Outcome(
+                kind=OutcomeKind.NEEDS_HELP,
+                confidence=OutcomeConfidence.HIGH,
+                summary=getattr(result, "summary", None) or "fixer exhausted attempts",
+            )
+        )
+        return 0
+
+    emit_outcome(
+        Outcome(
+            kind=OutcomeKind.CLEAN,
+            confidence=OutcomeConfidence.HIGH,
+            summary=getattr(result, "summary", None) or "fix pushed",
+            artifacts=OutcomeArtifacts(pr_number=getattr(result, "pr_number", None)),
+        )
+    )
+    return 0
