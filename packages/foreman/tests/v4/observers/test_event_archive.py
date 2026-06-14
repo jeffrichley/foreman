@@ -9,6 +9,7 @@ import pytest
 from foreman.v4.events import (
     ExecuteCompletedEvent,
     StateEnteredEvent,
+    StateExitedEvent,
     StateFailedEvent,
 )
 from foreman.v4.observers.event_archive import EventArchiveObserver
@@ -81,3 +82,32 @@ def test_events_are_append_only(repo_and_ticket):
         ))
     rows = repo._conn.execute("SELECT * FROM events ORDER BY id").fetchall()
     assert [r["sequence"] for r in rows] == [1, 2, 3]
+
+
+def test_state_exited_payload_carries_outcome_kind(repo_and_ticket):
+    repo, ticket = repo_and_ticket
+    obs = EventArchiveObserver(conn=repo._conn)
+    obs(StateExitedEvent(
+        ticket_id=ticket.id, instance_id=99,
+        state_name="Planning", sequence=1, at=_T0,
+        outcome=Outcome(
+            kind=OutcomeKind.CLEAN, confidence=OutcomeConfidence.HIGH,
+            summary="ok",
+        ),
+    ))
+    row = repo._conn.execute("SELECT * FROM events").fetchone()
+    payload = json.loads(row["payload"])
+    assert payload["outcome_kind"] == "clean"
+
+
+def test_state_exited_payload_none_when_no_outcome(repo_and_ticket):
+    repo, ticket = repo_and_ticket
+    obs = EventArchiveObserver(conn=repo._conn)
+    obs(StateExitedEvent(
+        ticket_id=ticket.id, instance_id=99,
+        state_name="Planning", sequence=1, at=_T0,
+        outcome=None,
+    ))
+    row = repo._conn.execute("SELECT * FROM events").fetchone()
+    payload = json.loads(row["payload"])
+    assert payload["outcome_kind"] is None
