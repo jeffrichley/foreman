@@ -140,6 +140,7 @@ def _strip_auto_close_keywords(body: str) -> str:
     return _AUTO_CLOSE_KEYWORDS_RE.sub("", body)
 
 
+# v4-PHASE-8-KILL: legacy planner entry-point used by the `plan` CLI command (cli.py); emits via label-writing tail. Replaced by run_planner_cli (below) + plan-v4 CLI command. Remove this function and the legacy label-writing tail in Phase 8.
 async def run_planner(
     *,
     issue_url: str,
@@ -467,3 +468,138 @@ async def run_planner(
         # ProviderError`` arm above (foreman#266) via ``_on_failure``.
         _on_failure(exc)
         raise
+
+
+# ============================================================
+# v4 emit path — additive alongside the legacy label-writing entry-point.
+# The legacy code path (above) stays running through Phase 7. Phase 8
+# deletes the legacy entry-point + everything tagged with v4-PHASE-8-KILL
+# and removes this banner.
+# ============================================================
+import asyncio  # noqa: E402  (kept here so legacy import block above stays untouched)
+import os  # noqa: E402
+
+from foreman.config import load_config  # noqa: E402
+from foreman.providers import make_provider  # noqa: E402
+from foreman.v4.emit import emit_outcome  # noqa: E402
+from foreman.v4.outcome import (  # noqa: E402
+    Outcome,
+    OutcomeArtifacts,
+    OutcomeConfidence,
+    OutcomeKind,
+)
+
+
+class _V4PlannerResult:
+    """Flat-shape result for the v4 emit path.
+
+    The legacy ``PlannerRunResult`` nests ``pr.url`` / ``pr.number`` under
+    a ``PRRef``; the v4 emit path consumes a flat shape (``pr_url`` /
+    ``pr_number`` / ``summary`` / ``confidence``) so ``run_planner_cli``
+    can stay agnostic to whatever helper produced it. Both this class and
+    the helper that builds instances disappear in Phase 8.
+    """
+
+    def __init__(
+        self,
+        *,
+        pr_url: str | None,
+        pr_number: int | None,
+        summary: str,
+        confidence: str,
+    ) -> None:
+        self.pr_url = pr_url
+        self.pr_number = pr_number
+        self.summary = summary
+        self.confidence = confidence
+
+
+def _run_planner_for_v4(*, project: str, issue_number: int) -> _V4PlannerResult:
+    """Run the planner the same way the legacy ``plan`` command does, but
+    without label-writing on top.
+
+    Option B per the Phase 5.2 plan: duplicate the planner-invocation
+    sequence rather than refactor the legacy ``run_planner`` body.
+    The legacy ``run_planner`` is intentionally re-used here — it already
+    contains the full worktree → LLM → commit → push → open-PR sequence,
+    and v3's label-writing behavior is benign for v4 callers (the v4
+    state machine drives off the FOREMAN_OUTCOME emitted below, not off
+    GitHub labels). The label-writing tail goes away in Phase 8.
+
+    The legacy entry-point takes ``issue_url``; v4's SubprocessRoleDispatcher
+    passes ``--issue-number``. Synthesize the URL from the project's
+    configured repo so the v4 CLI stays positional-arg-free without
+    requiring upstream callers to know about GitHub URL shape.
+    """
+    cfg_path = os.environ.get("FOREMAN_CONFIG_PATH") or os.environ.get("FOREMAN_CONFIG")
+    if cfg_path is None:
+        cfg_path = str(Path("~/.foreman/config.toml").expanduser())
+    cfg = load_config(cfg_path)
+    project_cfg = cfg.projects[project]
+    issue_url = f"https://github.com/{project_cfg.repo}/issues/{issue_number}"
+
+    worktrees_root = Path(
+        os.environ.get(
+            "FOREMAN_WORKTREES_ROOT",
+            str(Path.home() / ".foreman" / "worktrees"),
+        )
+    )
+    provider = make_provider()
+    legacy_result = asyncio.run(
+        run_planner(
+            issue_url=issue_url,
+            config=cfg,
+            project_name=project,
+            worktrees_root=worktrees_root,
+            provider=provider,
+        )
+    )
+    return _V4PlannerResult(
+        pr_url=legacy_result.pr.url,
+        pr_number=legacy_result.pr.number,
+        summary=legacy_result.llm_output.summary,
+        confidence=legacy_result.llm_output.confidence,
+    )
+
+
+def run_planner_cli(*, project: str, issue_number: int) -> int:
+    """v4 CLI entry-point. Emits FOREMAN_OUTCOME JSON; returns exit code.
+
+    The SubprocessRoleDispatcher (Task 5.6) forks ``foreman plan-v4`` which
+    calls this. Legacy ``plan`` command + label-writing tail in this module
+    are tagged ``v4-PHASE-8-KILL`` and deleted together in Phase 8.
+    """
+    try:
+        result = _run_planner_for_v4(project=project, issue_number=issue_number)
+    except Exception as exc:
+        emit_outcome(
+            Outcome(
+                kind=OutcomeKind.ERROR,
+                confidence=OutcomeConfidence.HIGH,
+                summary=f"planner raised: {exc}"[:500],
+            )
+        )
+        return 1
+
+    if getattr(result, "confidence", "high") == "low":
+        emit_outcome(
+            Outcome(
+                kind=OutcomeKind.NEEDS_HELP,
+                confidence=OutcomeConfidence.LOW,
+                summary=getattr(result, "summary", None) or "ticket under-specified",
+            )
+        )
+        return 0
+
+    emit_outcome(
+        Outcome(
+            kind=OutcomeKind.CLEAN,
+            confidence=OutcomeConfidence.HIGH,
+            summary=getattr(result, "summary", None) or "spec PR opened",
+            artifacts=OutcomeArtifacts(
+                pr_url=getattr(result, "pr_url", None),
+                pr_number=getattr(result, "pr_number", None),
+            ),
+        )
+    )
+    return 0

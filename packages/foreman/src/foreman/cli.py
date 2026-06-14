@@ -87,6 +87,7 @@ def cli() -> None:
     """foreman — multi-identity GitHub-issue-to-PR orchestrator."""
 
 
+# v4-PHASE-8-KILL-BEGIN: legacy positional-arg planner CLI; replaced by `plan-v4` (below). Remove this command + decorator stack + label-write imports in Phase 8.
 @cli.command()
 @click.argument("issue_url", type=str)
 @click.option("--project", required=True, help="Project name as defined in config.toml")
@@ -132,6 +133,21 @@ def plan(issue_url: str, project: str, config_path: Path | None) -> None:
         click.echo("Considered alternatives:")
         for alt in llm.considered_alternatives:
             click.echo(f"  - {alt}")
+# v4-PHASE-8-KILL-END
+
+
+# v4: additive CLI using --issue-number; SubprocessRoleDispatcher invokes this.
+@cli.command("plan-v4")
+@click.option("--project", required=True)
+@click.option("--issue-number", "issue_number", type=int, required=True)
+def plan_v4(project: str, issue_number: int) -> None:
+    """Run the v4 Planner: emit FOREMAN_OUTCOME on stdout; exit-code carries success/failure."""
+    # Local import keeps cli.py's module-level import graph unchanged so
+    # `tests/test_cli.py`'s command-discovery assertions don't see a new
+    # side-effect import at collection time.
+    from foreman.roles.planner import run_planner_cli
+
+    sys.exit(run_planner_cli(project=project, issue_number=issue_number))
 
 
 @cli.command()
