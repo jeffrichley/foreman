@@ -579,6 +579,7 @@ def _label_names(issue_labels: set[str], extra: str | None = None) -> set[str]:
     return issue_labels | {extra}
 
 
+# v4-PHASE-8-KILL: legacy worker entry-point used by the `implement` CLI command (cli.py); emits via label-writing tail. Replaced by run_worker_cli (below) + implement-v4 CLI command. Remove this function and the legacy label-writing tail in Phase 8.
 async def run_worker(
     *,
     issue_url: str,
@@ -1333,3 +1334,257 @@ async def run_worker(
                     issue_number,
                     attempt,
                 )
+
+
+# ============================================================
+# v4 emit path — additive alongside the legacy label-writing entry-point.
+# The legacy code path (above) stays running through Phase 7. Phase 8
+# deletes the legacy entry-point + everything tagged with v4-PHASE-8-KILL
+# and removes this banner.
+#
+# Worker is the LAST role in the pipeline and the ONLY role that emits
+# BLOCKED. BLOCKED semantics: the v4 state machine's
+# ``ImplementingState.next_state`` returns a fresh ``ImplementingState()``
+# on BLOCKED so the Worker gets re-dispatched on the next tick.
+# Worker is also NOT target-aware — the impl PR is unambiguous from the
+# issue number, so ``run_worker_cli`` has no ``target`` kwarg.
+# ============================================================
+import asyncio  # noqa: E402  (kept here so legacy import block above stays untouched)
+
+from foreman.config import load_config  # noqa: E402
+from foreman.providers import make_provider  # noqa: E402
+from foreman.v4.emit import emit_outcome  # noqa: E402
+from foreman.v4.outcome import (  # noqa: E402
+    Outcome,
+    OutcomeArtifacts,
+    OutcomeConfidence,
+    OutcomeKind,
+)
+
+
+class _V4WorkerResult:
+    """Flat-shape result for the v4 emit path.
+
+    The legacy ``WorkerRunResult`` nests outcome under
+    ``llm_output.outcome`` ("implemented" / "incomplete" / "spec_invalid")
+    with a ``pr_url``, an attempt counter, and the orchestrator-verified
+    ``final_did_check_pass``. The v4 emit path consumes a coarser
+    ``status`` field — one of ``"ci_passing"`` / ``"ci_in_flight"`` /
+    ``"give_up"`` — so ``run_worker_cli`` can pick CLEAN / BLOCKED /
+    NEEDS_HELP without re-interpreting legacy shape.
+
+    Status mapping (computed in ``_run_worker_for_v4``):
+
+    - ``implemented`` + impl PR opened + check passed → ``ci_passing``
+      (CLEAN). The orchestrator's post-Worker re-run of
+      ``check_command`` is the "CI" surface for v3 — when it passed,
+      the impl PR is green and ready for Reviewer dispatch.
+    - ``implemented`` + impl PR opened but check did NOT pass →
+      ``ci_in_flight`` (BLOCKED). The Worker landed code but CI hasn't
+      converged; the v4 state machine re-polls. In practice the
+      orchestrator's check-rerun already overrides ``implemented`` →
+      ``incomplete`` when new failures appear, so this branch is rare;
+      kept for the contract.
+    - ``incomplete`` / ``spec_invalid`` → ``give_up`` (NEEDS_HELP).
+      The Worker self-reported it couldn't finish (or the spec is
+      invalid); operator triage required.
+
+    ``_WorkerPreflightRefusal`` (missing entry label, max-attempts cap)
+    surfaces as an exception, NOT a ``WorkerRunResult`` — handled one
+    layer up in ``run_worker_cli`` and mapped to NEEDS_HELP.
+
+    Both this class and the helper that builds instances disappear in
+    Phase 8.
+    """
+
+    def __init__(
+        self,
+        *,
+        status: str,
+        pr_number: int | None,
+        summary: str,
+    ) -> None:
+        self.status = status
+        self.pr_number = pr_number
+        self.summary = summary
+
+
+def _run_worker_for_v4(*, project: str, issue_number: int) -> _V4WorkerResult:
+    """Run the worker same way the legacy ``implement`` command does,
+    no label-writing on top.
+
+    Option B per the Phase 5.2/5.3/5.4 plan: duplicate the worker-
+    invocation sequence rather than refactor the legacy ``run_worker``
+    body. The legacy ``run_worker`` is re-used here — it already
+    contains the full preflight → worktree → LLM → commit-push → impl
+    PR open sequence, and v3's label-writing behavior is benign for
+    v4 callers (the v4 state machine drives off the FOREMAN_OUTCOME
+    emitted below, not off GitHub labels). The label-writing tail
+    goes away in Phase 8.
+
+    Worker is NOT target-aware (unlike Reviewer/Fixer): the impl PR is
+    unambiguous from the issue number — only one impl branch per
+    issue. So no ``target`` kwarg here.
+
+    Refusal detection: the legacy ``run_worker`` raises
+    ``_WorkerPreflightRefusal`` when the issue lacks
+    ``foreman:plan-approved`` (operator intent) or the impl-attempt
+    counter has hit ``max_impl_attempts`` (the cap IS the escalation
+    surface). That exception bubbles out here and ``run_worker_cli``
+    maps it to ``NEEDS_HELP``.
+    """
+    cfg_path = os.environ.get("FOREMAN_CONFIG_PATH") or os.environ.get("FOREMAN_CONFIG")
+    if cfg_path is None:
+        cfg_path = str(Path("~/.foreman/config.toml").expanduser())
+    cfg = load_config(cfg_path)
+    project_cfg = cfg.projects[project]
+
+    # The legacy ``run_worker`` takes an issue URL — v4's
+    # SubprocessRoleDispatcher only knows the issue number. Construct
+    # the URL from the project's configured repo slug.
+    issue_url = f"https://github.com/{project_cfg.repo}/issues/{issue_number}"
+
+    worktrees_root = Path(
+        os.environ.get(
+            "FOREMAN_WORKTREES_ROOT",
+            str(Path.home() / ".foreman" / "worktrees"),
+        )
+    )
+    provider = make_provider()
+    legacy_result = asyncio.run(
+        run_worker(
+            issue_url=issue_url,
+            config=cfg,
+            project_name=project,
+            worktrees_root=worktrees_root,
+            provider=provider,
+        )
+    )
+
+    # Flatten legacy → v4 shape. The v3 ``run_worker`` runs the project's
+    # ``check_command`` as belt-and-suspenders post-LLM verification —
+    # ``final_did_check_pass`` is the orchestrator's ground truth, not
+    # the Worker's self-report. For the v4 surface:
+    #
+    # - ``implemented`` + ``pr_url`` + check passed → CI passing
+    # - ``implemented`` + ``pr_url`` but check did NOT pass → CI still
+    #   in flight (rare — see _V4WorkerResult docstring)
+    # - anything else (``incomplete`` / ``spec_invalid``) → give-up
+    llm = legacy_result.llm_output
+    pr_url = legacy_result.pr_url
+    pr_number: int | None = None
+    if pr_url:
+        try:
+            pr_number = int(pr_url.rsplit("/", 1)[-1])
+        except ValueError:
+            pr_number = None
+
+    if llm.outcome == "implemented" and pr_url is not None:
+        if legacy_result.final_did_check_pass:
+            status = "ci_passing"
+            summary = "impl PR open, check passed"
+        else:
+            status = "ci_in_flight"
+            summary = "impl PR open, check still in flight"
+    else:
+        status = "give_up"
+        summary = f"{llm.outcome} (attempt {legacy_result.attempt})"
+
+    return _V4WorkerResult(status=status, pr_number=pr_number, summary=summary)
+
+
+def run_worker_cli(*, project: str, issue_number: int) -> int:
+    """v4 CLI entry-point. Emits FOREMAN_OUTCOME JSON; returns exit code.
+
+    Worker has 4 outcome paths (the only role with this many):
+
+    - ``ci_passing`` → CLEAN with ``pr_number`` on artifacts
+    - ``ci_in_flight`` → BLOCKED with ``pr_number`` (state machine re-polls)
+    - ``give_up`` → NEEDS_HELP (operator triage)
+    - exception → ERROR (exit 1)
+
+    ``_WorkerPreflightRefusal`` is caught BEFORE the broad
+    ``except Exception:`` arm and mapped to NEEDS_HELP — see the Fixer
+    fix in commit 35cd4cd for the same lesson. Routing to ERROR would
+    land the ticket in FailedState (no-recovery terminal) when the
+    cap-hit is actually the operator-resumable escalation surface
+    (``foreman resume``).
+
+    Legacy ``implement`` command + label-writing tail in this module
+    are tagged ``v4-PHASE-8-KILL`` and deleted together in Phase 8.
+    """
+    try:
+        result = _run_worker_for_v4(project=project, issue_number=issue_number)
+    except _WorkerPreflightRefusal as exc:
+        # Refusal (missing entry label OR max-attempts cap) IS the
+        # resumable escalation surface. Route to NEEDS_HELP so the v4
+        # state machine moves to NeedsHelpState (operator-resumable via
+        # ``foreman resume``), NOT FailedState (no-recovery terminal).
+        # See the legacy ``run_worker`` comment at the cap-hit raise:
+        # "the max-attempts gate IS the escalation surface to human
+        # intervention." This catch must precede the broad
+        # ``except Exception`` arm because ``_WorkerPreflightRefusal``
+        # subclasses ``RuntimeError`` and would otherwise be swallowed
+        # into ERROR → FailedState. Mirror of 5.4's fix commit
+        # (35cd4cd) for the Fixer.
+        emit_outcome(
+            Outcome(
+                kind=OutcomeKind.NEEDS_HELP,
+                confidence=OutcomeConfidence.HIGH,
+                summary=str(exc)[:500],
+            )
+        )
+        return 0
+    except Exception as exc:
+        emit_outcome(
+            Outcome(
+                kind=OutcomeKind.ERROR,
+                confidence=OutcomeConfidence.HIGH,
+                summary=f"worker raised: {exc}"[:500],
+            )
+        )
+        return 1
+
+    status = getattr(result, "status", None)
+    artifacts = OutcomeArtifacts(pr_number=getattr(result, "pr_number", None))
+
+    if status == "ci_passing":
+        emit_outcome(
+            Outcome(
+                kind=OutcomeKind.CLEAN,
+                confidence=OutcomeConfidence.HIGH,
+                summary=getattr(result, "summary", None) or "impl PR open, CI green",
+                artifacts=artifacts,
+            )
+        )
+        return 0
+    if status == "ci_in_flight":
+        emit_outcome(
+            Outcome(
+                kind=OutcomeKind.BLOCKED,
+                confidence=OutcomeConfidence.HIGH,
+                summary=getattr(result, "summary", None) or "impl PR open, CI in flight",
+                artifacts=artifacts,
+            )
+        )
+        return 0
+    if status == "give_up":
+        emit_outcome(
+            Outcome(
+                kind=OutcomeKind.NEEDS_HELP,
+                confidence=OutcomeConfidence.HIGH,
+                summary=getattr(result, "summary", None) or "worker hit give-up condition",
+                artifacts=artifacts,
+            )
+        )
+        return 0
+    # Unknown status — surface as ERROR so the state machine doesn't
+    # silently advance on a contract violation.
+    emit_outcome(
+        Outcome(
+            kind=OutcomeKind.ERROR,
+            confidence=OutcomeConfidence.HIGH,
+            summary=f"unknown worker status: {status}",
+        )
+    )
+    return 1
