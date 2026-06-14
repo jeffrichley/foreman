@@ -6,10 +6,9 @@ matches the Protocol from foreman.v4.git_provider.
 
 from __future__ import annotations
 
-from github import Github, GithubException  # type: ignore[import-not-found]
+from github import Github, GithubException
 
 from foreman.v4.git_provider import MergeVerdict, PRNotFoundError, PRState
-
 
 _CI_PASSING_STATES = frozenset({"clean", "unstable"})
 

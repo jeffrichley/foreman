@@ -26,7 +26,6 @@ import threading
 from foreman.v4.repository import TicketRepository
 from foreman.v4.work import WorkItem
 
-
 _STATE_PRIORITY = {
     "Merging":      1,
     "ImplReview":   2,

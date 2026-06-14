@@ -47,9 +47,14 @@ def test_get_pr_state_missing_raises(mock_github, mock_repo):
 
 
 def test_list_open_issues_with_label(mock_github, mock_repo):
-    issue1 = MagicMock(); issue1.number = 1; issue1.pull_request = None
-    issue2 = MagicMock(); issue2.number = 2; issue2.pull_request = None
-    issue_pr = MagicMock(); issue_pr.number = 3
+    issue1 = MagicMock()
+    issue1.number = 1
+    issue1.pull_request = None
+    issue2 = MagicMock()
+    issue2.number = 2
+    issue2.pull_request = None
+    issue_pr = MagicMock()
+    issue_pr.number = 3
     issue_pr.pull_request = MagicMock()  # PRs come back from get_issues too
     mock_repo.get_issues.return_value = [issue1, issue2, issue_pr]
     provider = PyGithubGitProvider(github=mock_github, repo_full_name="owner/p")
@@ -72,7 +77,8 @@ def test_enqueue_merge_queue_looks_up_pr(mock_github, mock_repo):
     """MergeQueue enqueue uses GitHub's GraphQL API. The Protocol contract
     is just 'PR has been requested to enter the merge queue.' We assert the
     PR was looked up; the GraphQL call surface is an implementation detail."""
-    mock_pr = MagicMock(); mock_pr.node_id = "PR_node_abc"
+    mock_pr = MagicMock()
+    mock_pr.node_id = "PR_node_abc"
     mock_repo.get_pull.return_value = mock_pr
     provider = PyGithubGitProvider(github=mock_github, repo_full_name="owner/p")
     provider.enqueue_merge_queue(project="p", pr_number=11)

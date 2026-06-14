@@ -22,7 +22,7 @@ from __future__ import annotations
 import concurrent.futures
 import datetime as dt
 import logging
-from typing import Callable
+from collections.abc import Callable
 
 from foreman.v4.event_bus import EventBus
 from foreman.v4.git_provider import GitProvider
@@ -78,8 +78,18 @@ class WorkerPool:
             #      TicketNotFoundError, sqlite3.OperationalError) are
             #      silently captured by the future and never reach an
             #      operator, turning a stuck pipeline into guess-and-check.
-            future.add_done_callback(lambda _f, _item=item: self._qm.mark_done(_item))
-            future.add_done_callback(lambda _f, _item=item: self._log_exception(_f, _item))
+            def _on_done_mark(
+                _f: concurrent.futures.Future, _item: WorkItem = item,
+            ) -> None:
+                self._qm.mark_done(_item)
+
+            def _on_done_log(
+                _f: concurrent.futures.Future, _item: WorkItem = item,
+            ) -> None:
+                self._log_exception(_f, _item)
+
+            future.add_done_callback(_on_done_mark)
+            future.add_done_callback(_on_done_log)
             submitted += 1
 
     def _log_exception(
