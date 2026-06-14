@@ -35,17 +35,13 @@ class _Invocation:
     target: str | None
 
 
-# v4-PHASE-8-RENAME: subcommand strings carry "-v4" suffix to coexist with
-# legacy v3 commands during Phases 5-7. Phase 8 strips the suffix after
-# the legacy commands are deleted. This is the ONLY change required here
-# during cutover.
 _ROLE_TO_INVOCATION: dict[str, _Invocation] = {
-    "planner":       _Invocation(subcommand="plan-v4",      target=None),
-    "reviewer-spec": _Invocation(subcommand="review-v4",    target="spec"),
-    "reviewer-impl": _Invocation(subcommand="review-v4",    target="impl"),
-    "fixer-spec":    _Invocation(subcommand="fix-v4",       target="spec"),
-    "fixer-impl":    _Invocation(subcommand="fix-v4",       target="impl"),
-    "worker":        _Invocation(subcommand="implement-v4", target=None),
+    "planner":       _Invocation(subcommand="plan",      target=None),
+    "reviewer-spec": _Invocation(subcommand="review",    target="spec"),
+    "reviewer-impl": _Invocation(subcommand="review",    target="impl"),
+    "fixer-spec":    _Invocation(subcommand="fix",       target="spec"),
+    "fixer-impl":    _Invocation(subcommand="fix",       target="impl"),
+    "worker":        _Invocation(subcommand="implement", target=None),
 }
 
 

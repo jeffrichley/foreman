@@ -1,4 +1,4 @@
-"""SubprocessRoleDispatcher — shells out to foreman <role>-v4 for v4 dispatch."""
+"""SubprocessRoleDispatcher — shells out to foreman <role> for v4 dispatch."""
 from __future__ import annotations
 
 import subprocess
@@ -19,7 +19,7 @@ def _stub_identity():
     return mod
 
 
-def test_planner_dispatch_invokes_foreman_plan_v4():
+def test_planner_dispatch_invokes_foreman_plan():
     completed = subprocess.CompletedProcess(
         args=[], returncode=0,
         stdout=(
@@ -38,7 +38,7 @@ def test_planner_dispatch_invokes_foreman_plan_v4():
     assert "FOREMAN_OUTCOME:" in stdout
     args = run.call_args
     cmd = args[0][0] if args[0] else args[1].get("args")
-    assert "plan-v4" in cmd
+    assert "plan" in cmd
     assert "--project" in cmd
     assert "1" in cmd
     # GH_TOKEN injected via env, not arg
@@ -49,12 +49,12 @@ def test_planner_dispatch_invokes_foreman_plan_v4():
 @pytest.mark.parametrize(
     "role,subcmd,target",
     [
-        ("planner", "plan-v4", None),
-        ("reviewer-spec", "review-v4", "spec"),
-        ("reviewer-impl", "review-v4", "impl"),
-        ("fixer-spec", "fix-v4", "spec"),
-        ("fixer-impl", "fix-v4", "impl"),
-        ("worker", "implement-v4", None),
+        ("planner", "plan", None),
+        ("reviewer-spec", "review", "spec"),
+        ("reviewer-impl", "review", "impl"),
+        ("fixer-spec", "fix", "spec"),
+        ("fixer-impl", "fix", "impl"),
+        ("worker", "implement", None),
     ],
 )
 def test_role_to_subcommand_mapping(role, subcmd, target):
