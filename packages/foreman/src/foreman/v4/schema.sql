@@ -46,3 +46,17 @@ CREATE INDEX IF NOT EXISTS idx_state_instances_inflight
 CREATE INDEX IF NOT EXISTS idx_tickets_held
     ON tickets(held_by)
     WHERE held_by IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_id       INTEGER NOT NULL,
+    instance_id     INTEGER NOT NULL,
+    event_type      TEXT    NOT NULL,
+    state_name      TEXT    NOT NULL,
+    sequence        INTEGER NOT NULL,
+    at              TEXT    NOT NULL,
+    payload         TEXT    NOT NULL  -- JSON-encoded extra fields
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_ticket
+    ON events(ticket_id, at);
