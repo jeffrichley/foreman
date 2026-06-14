@@ -161,3 +161,58 @@ class RepositoryContract:
         fetched = repo.get_state_instance(inst.id)
         assert fetched.failure_phase == "execute"
         assert fetched.failure_reason == "subprocess timed out"
+
+    def test_latest_pr_number_for_ticket_returns_most_recent(self, repo: TicketRepository):
+        t = repo.create_ticket(project="p", issue_number=1, now=_now())
+        # First state has no PR
+        i1 = repo.open_state_instance(
+            ticket_id=t.id, state_name="Queued", sequence=1, now=_now(),
+        )
+        repo.mark_execute_completed(
+            i1.id, now=_now(),
+            outcome_kind=OutcomeKind.CLEAN,
+            outcome_payload={"artifacts": {}},
+            next_state="Planning",
+        )
+        repo.close_state_instance(i1.id, now=_now())
+        # Second state records PR 42
+        i2 = repo.open_state_instance(
+            ticket_id=t.id, state_name="Planning", sequence=2, now=_now(),
+        )
+        repo.mark_execute_completed(
+            i2.id, now=_now(),
+            outcome_kind=OutcomeKind.CLEAN,
+            outcome_payload={"artifacts": {"pr_number": 42}},
+            next_state="SpecReview",
+        )
+        repo.close_state_instance(i2.id, now=_now())
+        assert repo.latest_pr_number_for_ticket(t.id) == 42
+
+    def test_latest_pr_number_returns_none_when_no_outcomes(self, repo: TicketRepository):
+        t = repo.create_ticket(project="p", issue_number=2, now=_now())
+        assert repo.latest_pr_number_for_ticket(t.id) is None
+
+    def test_latest_pr_number_skips_outcomes_without_pr(self, repo: TicketRepository):
+        t = repo.create_ticket(project="p", issue_number=3, now=_now())
+        # Most recent outcome has no PR; earlier outcome had PR 7 — return 7.
+        i1 = repo.open_state_instance(
+            ticket_id=t.id, state_name="Queued", sequence=1, now=_now(),
+        )
+        repo.mark_execute_completed(
+            i1.id, now=_now(),
+            outcome_kind=OutcomeKind.CLEAN,
+            outcome_payload={"artifacts": {"pr_number": 7}},
+            next_state="Planning",
+        )
+        repo.close_state_instance(i1.id, now=_now())
+        i2 = repo.open_state_instance(
+            ticket_id=t.id, state_name="Planning", sequence=2, now=_now(),
+        )
+        repo.mark_execute_completed(
+            i2.id, now=_now(),
+            outcome_kind=OutcomeKind.CLEAN,
+            outcome_payload={"artifacts": {}},
+            next_state="SpecReview",
+        )
+        repo.close_state_instance(i2.id, now=_now())
+        assert repo.latest_pr_number_for_ticket(t.id) == 7

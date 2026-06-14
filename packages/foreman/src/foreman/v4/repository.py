@@ -68,6 +68,10 @@ class TicketRepository(Protocol):
     ) -> None: ...
     def list_in_flight_state_instances(self) -> list[StateInstanceRecord]: ...
 
+    # --- Helpers used by states ---
+
+    def latest_pr_number_for_ticket(self, ticket_id: int) -> int | None: ...
+
 
 _TERMINAL_STATES = frozenset({"Done", "Failed"})
 
@@ -225,3 +229,18 @@ class InMemoryTicketRepository:
 
     def list_in_flight_state_instances(self) -> list[StateInstanceRecord]:
         return [i for i in self._instances.values() if i.is_in_flight]
+
+    # --- Helpers used by states ---
+
+    def latest_pr_number_for_ticket(self, ticket_id: int) -> int | None:
+        candidates = [
+            i for i in self._instances.values() if i.ticket_id == ticket_id
+        ]
+        candidates.sort(key=lambda i: i.sequence, reverse=True)
+        for inst in candidates:
+            if not inst.outcome_payload:
+                continue
+            pr_number = (inst.outcome_payload or {}).get("artifacts", {}).get("pr_number")
+            if pr_number is not None:
+                return int(pr_number)
+        return None

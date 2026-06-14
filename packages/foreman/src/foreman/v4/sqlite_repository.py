@@ -255,3 +255,19 @@ class SqliteTicketRepository:
             "SELECT * FROM state_instances WHERE exited_at IS NULL ORDER BY ticket_id, sequence"
         ).fetchall()
         return [_instance_row_to_record(r) for r in rows]
+
+    # --- Helpers used by states ---
+
+    def latest_pr_number_for_ticket(self, ticket_id: int) -> int | None:
+        rows = self._conn.execute(
+            "SELECT outcome_payload FROM state_instances "
+            "WHERE ticket_id = ? AND outcome_payload IS NOT NULL "
+            "ORDER BY sequence DESC",
+            (ticket_id,),
+        ).fetchall()
+        for row in rows:
+            payload = json.loads(row["outcome_payload"])
+            pr_number = payload.get("artifacts", {}).get("pr_number")
+            if pr_number is not None:
+                return int(pr_number)
+        return None

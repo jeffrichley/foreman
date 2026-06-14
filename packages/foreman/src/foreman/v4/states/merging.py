@@ -24,16 +24,13 @@ class MergingState(TicketState):
     state_name = "Merging"
 
     def _pr_number_for(self, ctx: StateContext) -> int:
-        """Find the impl PR number from the ticket's most recent ExecuteCompleted outcome.
-
-        Implementation note: walks state_instances in reverse from current
-        sequence, looking for the most recent outcome_payload with an
-        artifacts.pr_number set. Production wiring uses Phase 4's Repository
-        query helper; Phase 3 tests stub via monkeypatch.
-        """
-        # Placeholder for the read; real impl uses ctx.repo's journal walk.
-        # Subclassed tests override this method with the PR number directly.
-        raise NotImplementedError("override or wire via ctx.repo journal walk")
+        pr = ctx.repo.latest_pr_number_for_ticket(ctx.ticket.id)
+        if pr is None:
+            raise RuntimeError(
+                f"MergingState for ticket {ctx.ticket.id} has no PR number "
+                "in any prior state outcome"
+            )
+        return pr
 
     def enter(self, ctx: StateContext) -> None:
         if ctx.git is None:
