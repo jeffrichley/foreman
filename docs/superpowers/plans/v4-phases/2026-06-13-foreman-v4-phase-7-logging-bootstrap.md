@@ -9,6 +9,15 @@ The substrate, observers, role plumbing, and CLI are all in place but disconnect
 
 Phase 7 also handles **multi-project daemon support**: foreman today runs against `[projects.voice]`, `[projects.foreman]`, etc. The Phase 4 Poller was single-project; here we extend the Daemon to hold a list of `(project_config, Poller)` pairs and tick them all in one loop pass. Shared QueueManager, shared WorkerPool, per-project poller — minimum churn for multi-project support.
 
+### Carry-overs from prior phases
+
+**From Phase 4 (Task 4.4 review):**
+- **`WorkerPool.in_flight_count()` convenience helper** — today tests reach through `qm.in_flight_count()`. If Phase 7's daemon shell wants to inspect the worker pool's load directly, add a one-liner: `def in_flight_count(self) -> int: return self._qm.in_flight_count()`. Defer if no caller materializes.
+
+**From Phase 5 (Tasks 5.6 + 5.7 reviews):**
+- **`SubprocessRoleDispatcher.timeout_seconds` is hardcoded (600s default).** Currently a constructor parameter. V4Config should expose this as a config knob — add `role_timeout_seconds: int = 600` to the `V4Config` Pydantic model + thread through `bootstrap_cli_context` to the dispatcher constructor.
+- **Real-fork integration test under bootstrap harness.** Phase 5.7 e2e (`test_phase5_e2e_subprocess.py`) tests the dispatcher↔subprocess↔parser seam against a stub Python script — NOT the real `foreman` CLI. Phase 4.7 e2e uses `FakeRoleDispatcher`. No single test exercises Poller → QM → WorkerPool → SubprocessRoleDispatcher → real `foreman <role>-v4` subprocess. Add an integration test under Phase 7's bootstrap that invokes the installed `foreman` CLI end-to-end (use `uv run foreman ...` or a `pip install -e .` fixture). This is the seam where the real-foreman-binary contract first meets the v4 substrate.
+
 ### Task 7.1: JsonLinesHandler
 
 **Files:**

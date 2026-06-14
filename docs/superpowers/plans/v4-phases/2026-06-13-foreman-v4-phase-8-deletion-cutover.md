@@ -24,6 +24,8 @@ These are real-world behaviors that the v4 mocked test suite cannot exercise. Th
 
 4. **GraphQL `node is None` semantic ambiguity in `merge_verdict`.** Currently returns `MergeVerdict.PENDING` when the GraphQL node is None. That's correct if "node is None" means "not in queue yet." It's WRONG if "node is None" means "PR has been deleted as a graph node." Today both map to PENDING, and the WorkerPool just keeps polling — an infinite loop on a deleted PR. **Trigger to promote:** any merge_verdict observed stuck in PENDING for >24h in production logs. **Fix when triggered:** separately query for PR existence; if PR was deleted, raise `PRNotFoundError` so MergingState can handle it correctly (move ticket to Failed or NeedsHelp).
 
+5. **`SubprocessRoleDispatcher` UTF-8 decode brittleness.** `subprocess.run(..., text=True)` decodes stdout/stderr as UTF-8. If a role's stdout contains non-UTF-8 bytes (binary stack trace from a crashed subprocess, weird-locale traceback, embedded ANSI escapes that confuse the decoder), the dispatcher raises `UnicodeDecodeError` BEFORE returning — the marker line is never read even if it was written cleanly. **Trigger to promote:** any `UnicodeDecodeError` from `SubprocessRoleDispatcher.dispatch` in production logs. **Fix when triggered:** switch to `text=False` + manual `result.stdout.decode("utf-8", errors="replace")`, OR pass `errors="replace"` via `subprocess.run` (Python 3.10+). The marker scan is ASCII-only, so error-replacement is safe for the parse path.
+
 ### Goal
 
 The v4 substrate is complete; v3 still occupies space in the repo. Phase 8 deletes it in one shot, fixes any survival-set files that broke, writes the operator-facing RUNBOOK additions, runs the standing adversarial-review pass, and opens the v4 PR.
