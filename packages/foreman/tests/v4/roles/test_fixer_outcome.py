@@ -91,3 +91,25 @@ def test_fixer_exception_emits_error(capsys):
     outcome = parse_outcome_from_stdout(capsys.readouterr().out)
     assert outcome.kind == OutcomeKind.ERROR
     assert "push rejected" in outcome.summary
+
+
+def test_preflight_refusal_emits_needs_help(capsys):
+    """Cap-hit raises _FixerPreflightRefusal — must route to NEEDS_HELP, not ERROR.
+
+    Routing to ERROR would land the ticket in FailedState (no-recovery terminal),
+    but the cap-hit IS the resumable escalation surface — operator resolves the
+    underlying issue and runs ``foreman resume``. ``_FixerPreflightRefusal``
+    subclasses ``RuntimeError``, so without a dedicated catch arm it would
+    slip through the broad ``except Exception`` and emit ERROR.
+    """
+    from foreman.roles.fixer import _FixerPreflightRefusal
+
+    with patch(
+        "foreman.roles.fixer._run_fixer_for_v4",
+        side_effect=_FixerPreflightRefusal("max fix attempts reached"),
+    ):
+        exit_code = run_fixer_cli(project="p", issue_number=1, target="spec")
+    assert exit_code == 0  # zero exit — stdout carries the verdict
+    outcome = parse_outcome_from_stdout(capsys.readouterr().out)
+    assert outcome.kind == OutcomeKind.NEEDS_HELP
+    assert "max fix attempts" in outcome.summary

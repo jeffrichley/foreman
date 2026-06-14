@@ -1046,6 +1046,24 @@ def run_fixer_cli(*, project: str, issue_number: int, target: str) -> int:
         result = _run_fixer_for_v4(
             project=project, issue_number=issue_number, target=target
         )
+    except _FixerPreflightRefusal as exc:
+        # Cap-hit escalation IS the resumable case. Route to NEEDS_HELP
+        # so the v4 state machine moves to NeedsHelpState
+        # (operator-resumable via ``foreman resume``), NOT FailedState
+        # (no-recovery terminal). See the legacy ``run_fixer`` comment
+        # at the cap-hit raise: "the max-attempts gate IS the
+        # escalation surface, not a runaway-burn signal." This catch
+        # must precede the broad ``except Exception`` arm because
+        # ``_FixerPreflightRefusal`` subclasses ``RuntimeError`` and
+        # would otherwise be swallowed into ERROR → FailedState.
+        emit_outcome(
+            Outcome(
+                kind=OutcomeKind.NEEDS_HELP,
+                confidence=OutcomeConfidence.HIGH,
+                summary=str(exc)[:500],
+            )
+        )
+        return 0
     except Exception as exc:
         emit_outcome(
             Outcome(
