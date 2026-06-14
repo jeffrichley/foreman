@@ -290,6 +290,7 @@ class SqliteTicketRepository:
     # --- Dependency tracking ---
 
     def set_ticket_dependencies(self, ticket_id: int, *, deps: list[int]) -> None:
+        self.get_ticket(ticket_id)  # raise TicketNotFoundError if missing
         self._conn.execute(
             "UPDATE tickets SET depends_on = ? WHERE id = ?",
             (json.dumps(list(deps)), ticket_id),
@@ -313,4 +314,8 @@ class SqliteTicketRepository:
             f"SELECT id, current_state FROM tickets WHERE id IN ({placeholders})",
             deps,
         ).fetchall()
+        found_ids = {r["id"] for r in rows}
+        missing = [d for d in deps if d not in found_ids]
+        if missing:
+            raise TicketNotFoundError(str(missing[0]))
         return [r["id"] for r in rows if r["current_state"] != "Done"]

@@ -28,6 +28,10 @@ class TicketAlreadyExistsError(ValueError):
     """A ticket with this (project, issue_number) is already tracked."""
 
 
+class MissingPRNumberError(LookupError):
+    """No state outcome on this ticket recorded a pr_number."""
+
+
 class TicketRepository(Protocol):
     """Persistence contract for tickets and state-instances."""
 

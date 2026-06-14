@@ -257,3 +257,13 @@ class RepositoryContract:
         repo.set_ticket_dependencies(b.id, deps=[a.id])
         repo.set_ticket_state(a.id, "Failed", now=_now())
         assert repo.list_unmet_dependencies(b.id) == [a.id]
+
+    def test_set_ticket_dependencies_raises_for_missing_ticket(self, repo: TicketRepository):
+        with pytest.raises(TicketNotFoundError):
+            repo.set_ticket_dependencies(9999, deps=[1, 2])
+
+    def test_list_unmet_dependencies_raises_for_ghost_dependency(self, repo: TicketRepository):
+        t = repo.create_ticket(project="p", issue_number=1, now=_now())
+        repo.set_ticket_dependencies(t.id, deps=[9999])
+        with pytest.raises(TicketNotFoundError):
+            repo.list_unmet_dependencies(t.id)

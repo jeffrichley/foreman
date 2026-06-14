@@ -17,6 +17,7 @@ from foreman.v4.outcome import (
     OutcomeConfidence,
     OutcomeKind,
 )
+from foreman.v4.repository import MissingPRNumberError
 from foreman.v4.state import StateContext, TicketState
 
 
@@ -26,7 +27,7 @@ class MergingState(TicketState):
     def _pr_number_for(self, ctx: StateContext) -> int:
         pr = ctx.repo.latest_pr_number_for_ticket(ctx.ticket.id)
         if pr is None:
-            raise RuntimeError(
+            raise MissingPRNumberError(
                 f"MergingState for ticket {ctx.ticket.id} has no PR number "
                 "in any prior state outcome"
             )
