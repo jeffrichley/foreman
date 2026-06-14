@@ -31,6 +31,9 @@ class MergeVerdict(StrEnum):
 
 
 class GitProvider(Protocol):
+    def list_open_issues_with_label(
+        self, *, project: str, label: str,
+    ) -> list[int]: ...
     def get_pr_state(self, *, project: str, pr_number: int) -> PRState: ...
     def merge_spec_pr(self, *, project: str, pr_number: int) -> None: ...
     def enqueue_merge_queue(self, *, project: str, pr_number: int) -> None: ...
@@ -44,6 +47,17 @@ class FakeGitProvider:
         self._prs: dict[tuple[str, int], PRState] = {}
         self.merge_queue: set[tuple[str, int]] = set()
         self._verdicts: dict[tuple[str, int], MergeVerdict] = {}
+        self._labeled_issues: dict[tuple[str, str], set[int]] = {}
+
+    def set_open_issues_with_label(
+        self, *, project: str, label: str, issue_numbers: set[int],
+    ) -> None:
+        self._labeled_issues[(project, label)] = set(issue_numbers)
+
+    def list_open_issues_with_label(
+        self, *, project: str, label: str,
+    ) -> list[int]:
+        return sorted(self._labeled_issues.get((project, label), set()))
 
     def set_pr_state(self, *, project: str, pr_number: int, state: PRState) -> None:
         self._prs[(project, pr_number)] = state
