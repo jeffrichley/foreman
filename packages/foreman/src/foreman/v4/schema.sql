@@ -14,11 +14,12 @@ CREATE TABLE IF NOT EXISTS tickets (
     project         TEXT    NOT NULL,
     issue_number    INTEGER NOT NULL,
     current_state   TEXT    NOT NULL,
-    created_at      TEXT    NOT NULL,
-    updated_at      TEXT    NOT NULL,
     held_by         TEXT,
     held_at         TEXT,
     held_reason     TEXT,
+    depends_on      TEXT    NOT NULL DEFAULT '[]',
+    created_at      TEXT    NOT NULL,
+    updated_at      TEXT    NOT NULL,
     UNIQUE(project, issue_number)
 );
 

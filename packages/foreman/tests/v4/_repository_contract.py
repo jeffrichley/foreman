@@ -216,3 +216,44 @@ class RepositoryContract:
         )
         repo.close_state_instance(i2.id, now=_now())
         assert repo.latest_pr_number_for_ticket(t.id) == 7
+
+    def test_count_state_instances_for_ticket(self, repo: TicketRepository):
+        t = repo.create_ticket(project="p", issue_number=1, now=_now())
+        assert repo.count_state_instances_for_ticket(t.id) == 0
+        repo.open_state_instance(
+            ticket_id=t.id, state_name="Queued", sequence=1, now=_now(),
+        )
+        assert repo.count_state_instances_for_ticket(t.id) == 1
+
+    def test_set_and_get_dependencies(self, repo: TicketRepository):
+        a = repo.create_ticket(project="p", issue_number=1, now=_now())
+        b = repo.create_ticket(project="p", issue_number=2, now=_now())
+        c = repo.create_ticket(project="p", issue_number=3, now=_now())
+        repo.set_ticket_dependencies(c.id, deps=[a.id, b.id])
+        assert repo.get_ticket_dependencies(c.id) == [a.id, b.id]
+
+    def test_dependencies_default_empty(self, repo: TicketRepository):
+        t = repo.create_ticket(project="p", issue_number=1, now=_now())
+        assert repo.get_ticket_dependencies(t.id) == []
+
+    def test_list_unmet_dependencies_excludes_done_tickets(self, repo: TicketRepository):
+        a = repo.create_ticket(project="p", issue_number=1, now=_now())
+        b = repo.create_ticket(project="p", issue_number=2, now=_now())
+        c = repo.create_ticket(project="p", issue_number=3, now=_now())
+        repo.set_ticket_dependencies(c.id, deps=[a.id, b.id])
+        # Both deps still in flight → both unmet
+        assert sorted(repo.list_unmet_dependencies(c.id)) == sorted([a.id, b.id])
+        # Move A to Done → only B unmet
+        repo.set_ticket_state(a.id, "Done", now=_now())
+        assert repo.list_unmet_dependencies(c.id) == [b.id]
+        # Move B to Done → all met
+        repo.set_ticket_state(b.id, "Done", now=_now())
+        assert repo.list_unmet_dependencies(c.id) == []
+
+    def test_list_unmet_does_not_count_failed_or_needs_help(self, repo: TicketRepository):
+        """Only Done satisfies a dep — Failed/NeedsHelp stays blocked."""
+        a = repo.create_ticket(project="p", issue_number=1, now=_now())
+        b = repo.create_ticket(project="p", issue_number=2, now=_now())
+        repo.set_ticket_dependencies(b.id, deps=[a.id])
+        repo.set_ticket_state(a.id, "Failed", now=_now())
+        assert repo.list_unmet_dependencies(b.id) == [a.id]

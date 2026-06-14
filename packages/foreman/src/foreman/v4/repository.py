@@ -68,9 +68,16 @@ class TicketRepository(Protocol):
     ) -> None: ...
     def list_in_flight_state_instances(self) -> list[StateInstanceRecord]: ...
 
-    # --- Helpers used by states ---
+    # --- Helpers used by states / WorkerPool / QueueManager ---
 
     def latest_pr_number_for_ticket(self, ticket_id: int) -> int | None: ...
+    def count_state_instances_for_ticket(self, ticket_id: int) -> int: ...
+
+    # --- Dependency tracking ---
+
+    def set_ticket_dependencies(self, ticket_id: int, *, deps: list[int]) -> None: ...
+    def get_ticket_dependencies(self, ticket_id: int) -> list[int]: ...
+    def list_unmet_dependencies(self, ticket_id: int) -> list[int]: ...
 
 
 _TERMINAL_STATES = frozenset({"Done", "Failed"})
@@ -230,7 +237,7 @@ class InMemoryTicketRepository:
     def list_in_flight_state_instances(self) -> list[StateInstanceRecord]:
         return [i for i in self._instances.values() if i.is_in_flight]
 
-    # --- Helpers used by states ---
+    # --- Helpers used by states / WorkerPool / QueueManager ---
 
     def latest_pr_number_for_ticket(self, ticket_id: int) -> int | None:
         candidates = [
@@ -244,3 +251,19 @@ class InMemoryTicketRepository:
             if pr_number is not None:
                 return int(pr_number)
         return None
+
+    def count_state_instances_for_ticket(self, ticket_id: int) -> int:
+        return sum(1 for i in self._instances.values() if i.ticket_id == ticket_id)
+
+    # --- Dependency tracking ---
+
+    def set_ticket_dependencies(self, ticket_id: int, *, deps: list[int]) -> None:
+        existing = self.get_ticket(ticket_id)
+        self._tickets[ticket_id] = dataclasses.replace(existing, depends_on=list(deps))
+
+    def get_ticket_dependencies(self, ticket_id: int) -> list[int]:
+        return list(self.get_ticket(ticket_id).depends_on)
+
+    def list_unmet_dependencies(self, ticket_id: int) -> list[int]:
+        deps = self.get_ticket_dependencies(ticket_id)
+        return [d for d in deps if self.get_ticket(d).current_state != "Done"]

@@ -48,6 +48,7 @@ def _ticket_row_to_record(row: sqlite3.Row) -> TicketRecord:
         held_by=row["held_by"],
         held_at=_from_iso(row["held_at"]),
         held_reason=row["held_reason"],
+        depends_on=list(json.loads(row["depends_on"])),
     )
 
 
@@ -87,6 +88,13 @@ class SqliteTicketRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         conn.row_factory = sqlite3.Row
         conn.executescript(_SCHEMA.read_text(encoding="utf-8"))
+        conn.commit()
+        # WAL mode is required for the ThreadPoolExecutor-based WorkerPool
+        # (Phase 4 Task 4.4) — rollback-journal mode would deadlock on
+        # concurrent writes from N worker threads. synchronous=NORMAL is the
+        # recommended pairing — safe against power loss, faster than FULL.
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
         conn.commit()
         self._conn = conn
 
@@ -256,7 +264,7 @@ class SqliteTicketRepository:
         ).fetchall()
         return [_instance_row_to_record(r) for r in rows]
 
-    # --- Helpers used by states ---
+    # --- Helpers used by states / WorkerPool / QueueManager ---
 
     def latest_pr_number_for_ticket(self, ticket_id: int) -> int | None:
         rows = self._conn.execute(
@@ -271,3 +279,38 @@ class SqliteTicketRepository:
             if pr_number is not None:
                 return int(pr_number)
         return None
+
+    def count_state_instances_for_ticket(self, ticket_id: int) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM state_instances WHERE ticket_id = ?",
+            (ticket_id,),
+        ).fetchone()
+        return int(row["n"])
+
+    # --- Dependency tracking ---
+
+    def set_ticket_dependencies(self, ticket_id: int, *, deps: list[int]) -> None:
+        self._conn.execute(
+            "UPDATE tickets SET depends_on = ? WHERE id = ?",
+            (json.dumps(list(deps)), ticket_id),
+        )
+        self._conn.commit()
+
+    def get_ticket_dependencies(self, ticket_id: int) -> list[int]:
+        row = self._conn.execute(
+            "SELECT depends_on FROM tickets WHERE id = ?", (ticket_id,),
+        ).fetchone()
+        if row is None:
+            raise TicketNotFoundError(str(ticket_id))
+        return list(json.loads(row["depends_on"]))
+
+    def list_unmet_dependencies(self, ticket_id: int) -> list[int]:
+        deps = self.get_ticket_dependencies(ticket_id)
+        if not deps:
+            return []
+        placeholders = ",".join(["?"] * len(deps))
+        rows = self._conn.execute(
+            f"SELECT id, current_state FROM tickets WHERE id IN ({placeholders})",
+            deps,
+        ).fetchall()
+        return [r["id"] for r in rows if r["current_state"] != "Done"]

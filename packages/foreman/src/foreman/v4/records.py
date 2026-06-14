@@ -9,7 +9,7 @@ intent.
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from foreman.v4.outcome import OutcomeKind
@@ -26,6 +26,7 @@ class TicketRecord:
     held_by: str | None
     held_at: dt.datetime | None
     held_reason: str | None
+    depends_on: list[int] = field(default_factory=list)
 
     @property
     def is_held(self) -> bool:
