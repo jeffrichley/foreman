@@ -13,16 +13,46 @@
 
 The substrate is correct; nothing real yet drives it. Phase 5 makes two changes:
 
-1. **Each of the four role CLIs emits `FOREMAN_OUTCOME:` JSON on stdout as its terminal line.** Replaces the existing label-writing exit path outright — nothing is running v3 to preserve, so the cutover is mechanical, not flag-gated. Role prompts + role bodies stay unchanged; only the CLI tail changes.
-2. **`SubprocessRoleDispatcher`** — the production `RoleDispatcher` impl that shells out to `foreman <role>` with the appropriate per-role identity (PAT / App token) and returns stdout.
+1. **Each of the four role CLIs gains a NEW `--issue-number`-based variant that emits `FOREMAN_OUTCOME:` JSON on stdout.** The existing positional-`<issue_url>` commands + their label-writing tails stay intact and untouched — they're the v3 fallback path during Phases 5-7 and the existing 8,500+ lines of role tests keep covering them. Phase 8 deletes the old path atomically as part of the v3 kill-set cutover.
+2. **`SubprocessRoleDispatcher`** — the production `RoleDispatcher` impl that shells out to `foreman <role>-v4` with the appropriate per-role identity (PAT / App token) and returns stdout.
 
-Roles affected (all in the **survival set** — they pre-date v4 and the bodies stay):
-- `foreman/roles/planner.py` + `foreman/cli.py:cmd_plan`
-- `foreman/roles/reviewer.py` + `foreman/cli.py:cmd_review` (target-aware)
-- `foreman/roles/fixer.py` + `foreman/cli.py:cmd_fix` (target-aware)
-- `foreman/roles/worker.py` + `foreman/cli.py:cmd_implement`
+Roles affected (all in the **survival set** — they pre-date v4 and the bodies stay through Phase 7):
+- `foreman/roles/planner.py` — gains `run_planner_cli`; existing functions untouched
+- `foreman/cli.py` — gains `plan-v4` command alongside existing `plan`
+- Same shape for reviewer/fixer/worker
 
-Each role's label-writing tail is **deleted** in the same task that adds the emit call. The label-write imports + helper calls in `cli.py` go too; whatever's left in `foreman.labels` after Phase 5 is dead code and disappears in Phase 8.
+### Why additive, not replace
+
+Naïve cutover deletes the label-writing tails in Phase 5 and breaks ~8,500 lines of `test_roles_*.py` mid-phase. Google-style "head stays green" says: keep the suite green at every commit. Two-phase migration pattern:
+
+- **Phase 5 (additive):** add v4 emit-based commands alongside v3 label-writing commands. Tag the obsolete code with `# v4-PHASE-8-KILL: <reason>` breadcrumbs so Phase 8 can grep-and-delete.
+- **Phase 8 (atomic deletion):** grep for `v4-PHASE-8-KILL`, delete every tagged block + the legacy CLI commands + the obsolete role test files in one shot. Phase 8's existing v3 kill set extends to cover these.
+
+Cost: v3 code paths remain runnable through Phase 7. Cheap, and matches the spec's existing "Phase 8 = deletion" structure.
+
+### Breadcrumb convention (READ BEFORE EDITING ANY SURVIVAL-SET FILE)
+
+When adding the v4 emit path alongside existing v3 code:
+
+1. **Tag every block of code that Phase 8 should delete** with a line-or-block comment containing the literal string `v4-PHASE-8-KILL`. Format:
+   ```python
+   # v4-PHASE-8-KILL: <short reason — what replaced it and where the replacement lives>
+   def _legacy_helper(...): ...
+   ```
+   For multi-line blocks (a whole function or CLI command body):
+   ```python
+   # v4-PHASE-8-KILL-BEGIN: legacy positional-arg planner CLI; replaced by `plan-v4` command using run_planner_cli
+   @cli.command()
+   @click.argument("issue_url", type=str)
+   def plan(issue_url, ...):
+       ...
+   # v4-PHASE-8-KILL-END
+   ```
+2. **Do NOT delete or modify the tagged code in Phase 5.** Just add the new code nearby.
+3. **Each new v4-side function or test that REPLACES tagged code MUST cross-reference the breadcrumb.** Example: above `run_planner_cli`, write `"""...Replaces label-writing tail in roles/planner.py (tagged v4-PHASE-8-KILL)."""`.
+4. **Phase 8 verifies via grep.** `git grep 'v4-PHASE-8-KILL' packages/foreman/` enumerates every site to delete. The Phase 8 cutover task includes "after `git rm` block, run the grep — any surviving matches are bugs in the cutover task."
+
+If a v3 helper has no v4 replacement (e.g., it just goes away), still tag it — the breadcrumb is what makes Phase 8 mechanical.
 
 ### Task 5.1: Outcome emitter utility
 
@@ -140,19 +170,22 @@ git add packages/foreman/src/foreman/v4/emit.py packages/foreman/tests/v4/test_e
 git commit -m "feat(v4): add emit_outcome — role-side counterpart of parser"
 ```
 
-### Task 5.2: Planner emits Outcome
+### Task 5.2: Planner — additive v4 emit path
 
 **Files:**
-- Modify: `packages/foreman/src/foreman/roles/planner.py` (rewrite CLI exit path)
-- Modify: `packages/foreman/src/foreman/cli.py` (`cmd_plan` calls the new exit)
-- Test: `packages/foreman/tests/v4/roles/test_planner_outcome.py`
+- Modify: `packages/foreman/src/foreman/roles/planner.py` — ADD `run_planner_cli` function; mark existing entry-point with `# v4-PHASE-8-KILL` breadcrumb; existing body untouched
+- Modify: `packages/foreman/src/foreman/cli.py` — ADD `@cli.command("plan-v4")` decorated function; mark existing `plan` command with `# v4-PHASE-8-KILL-BEGIN`/`-END` breadcrumbs; existing body untouched
+- Create: `packages/foreman/tests/v4/roles/test_planner_outcome.py` (purely new — tests v4 path only)
+- DO NOT TOUCH: `packages/foreman/tests/test_roles_planner.py` (covers the v3 path, still running)
 
-The Planner already returns a result internally — opens a spec PR, or returns NEEDS_HELP if the ticket is under-specified. The change is the exit shape: `emit_outcome(...)` replaces the label-writing tail outright. Nothing is running the old behavior, so the cutover is mechanical.
+**Pre-flight survey (5 min):** Read `roles/planner.py` to identify the existing main entry-point function (NOT named `build_planner` — there's no such factory in the current code; the actual entry is whatever the `@cli.command()` decorator at `cli.py:90` wraps, which calls into planner internals). The `run_planner_cli` you're adding is a NEW thin wrapper that constructs the same internals and invokes them.
 
 Mapping to Outcome kinds:
 - Planner opened a spec PR successfully → `CLEAN` with `artifacts.pr_number` + `artifacts.pr_url`
-- Planner ran but produced `confidence: low` → `NEEDS_HELP` (escalate)
-- Planner raised an exception → `ERROR` (the CLI's outer try/except catches and emits)
+- Planner ran but produced `confidence: low` → `NEEDS_HELP`
+- Planner raised an exception → `ERROR`
+
+The new `run_planner_cli` calls the same internal planner logic the existing `plan` command does — but instead of writing labels at exit, it emits `FOREMAN_OUTCOME:` and exits zero (or 1 on raise).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -234,13 +267,13 @@ def test_planner_exception_emits_error(capsys):
 Run: `uv run pytest packages/foreman/tests/v4/roles/test_planner_outcome.py -v`
 Expected: FAIL with `ImportError: cannot import name 'run_planner_cli'`
 
-- [ ] **Step 3: Replace the planner's CLI exit path**
+- [ ] **Step 3: Add `run_planner_cli` to `planner.py` (additive)**
 
-Delete the existing label-writing tail in `planner.py` (whatever helper writes `foreman:plan-approved` / sets `needs-help`) along with its imports from `foreman.labels`. Add the emit-based entry point:
+Append to `packages/foreman/src/foreman/roles/planner.py` — do NOT delete or modify the existing entry-point function:
 
 ```python
-# packages/foreman/src/foreman/roles/planner.py — replace the existing CLI exit tail
-
+# v4 emit path — additive alongside the legacy label-writing entry-point.
+# Phase 8 removes this comment after the legacy entry-point is deleted.
 from foreman.v4.emit import emit_outcome
 from foreman.v4.outcome import (
     Outcome,
@@ -253,13 +286,20 @@ from foreman.v4.outcome import (
 def run_planner_cli(*, project: str, issue_number: int) -> int:
     """Run the planner; emit FOREMAN_OUTCOME JSON; return exit code.
 
-    This is the entry point the SubprocessRoleDispatcher (Task 5.6)
-    forks. The label-writing tail is gone; nothing reads labels in v4.
+    Entry point the SubprocessRoleDispatcher (Task 5.6) forks via the
+    `plan-v4` CLI command. The legacy `plan` command + label-writing
+    tail in this module are tagged ``v4-PHASE-8-KILL`` and removed
+    together in Phase 8.
     """
     try:
-        planner = build_planner(project=project, issue_number=issue_number)
-        result = planner.run()
-    except Exception as exc:  # noqa: BLE001 — top-level role boundary
+        # Construct the same internals the legacy entry-point uses.
+        # Implementer: identify the right factory shape — the existing
+        # `plan` command (cli.py:~90) calls into planner internals
+        # passing (issue_url, project). Synthesize an equivalent issue
+        # URL or refactor the internal call into a shared helper. The
+        # legacy code path stays running; this just adds a parallel one.
+        result = _run_planner_internal(project=project, issue_number=issue_number)
+    except Exception as exc:  # broad: role boundary
         emit_outcome(Outcome(
             kind=OutcomeKind.ERROR,
             confidence=OutcomeConfidence.HIGH,
@@ -287,43 +327,74 @@ def run_planner_cli(*, project: str, issue_number: int) -> int:
     return 0
 ```
 
-If `build_planner` doesn't exist by that name in the current module, identify the existing factory (e.g., the function that constructs the Planner with config + identity + provider) and adapt the import. The test's `patch` target matches the function name actually used.
+About `_run_planner_internal`: the implementer's call here. If the existing `plan` command body can be cleanly extracted into a helper that both the legacy command AND `run_planner_cli` call into, do that — extract once, two callers, both still passing tests. If extraction would touch too much (>50 lines of refactor), keep the legacy body untouched and duplicate the internal-call sequence inside `run_planner_cli`. Note: code duplication here is FINE; both copies go away in Phase 8.
 
-- [ ] **Step 4: Rewrite `cmd_plan` in `cli.py`**
-
-Replace the existing `cmd_plan` body. No flag — every `foreman plan` invocation now emits Outcome:
+Above the legacy entry-point function in `planner.py`, add the breadcrumb:
 
 ```python
-# packages/foreman/src/foreman/cli.py
+# v4-PHASE-8-KILL: legacy planner entry-point with label-writing tail; replaced by run_planner_cli (this file) + plan-v4 CLI command. Remove this function and its imports from foreman.labels in Phase 8.
+def <existing_function_name>(...):  # whatever it's actually called
+    ...  # existing body untouched
+```
 
-@cli.command("plan")
+If `foreman.labels` import lines are scoped only to the legacy function, you can leave them — Phase 8 deletes them alongside the function. If they're shared with `run_planner_cli` code (they shouldn't be), refactor.
+
+- [ ] **Step 4: Add `plan-v4` CLI command in `cli.py` (additive)**
+
+Append to `packages/foreman/src/foreman/cli.py` — do NOT modify the existing `plan` command:
+
+```python
+# v4: additive CLI command using --issue-number; SubprocessRoleDispatcher invokes this.
+# Legacy `plan` command (above, tagged v4-PHASE-8-KILL) stays running through Phase 7.
+@cli.command("plan-v4")
 @click.option("--project", required=True)
 @click.option("--issue-number", "issue_number", type=int, required=True)
-def cmd_plan(project: str, issue_number: int) -> None:
+def plan_v4(project: str, issue_number: int) -> None:
     from foreman.roles.planner import run_planner_cli
     sys.exit(run_planner_cli(project=project, issue_number=issue_number))
 ```
 
-The previous body (whatever wrote labels via `foreman.labels`) is deleted in this same commit. Any imports from `foreman.labels` that became orphaned go with it.
+And above the existing `plan` command (around line 90), add the block breadcrumb:
+
+```python
+# v4-PHASE-8-KILL-BEGIN: legacy positional-arg planner CLI; replaced by `plan-v4` (below). Remove this command + decorator stack + label-write imports in Phase 8.
+@cli.command()
+@click.argument("issue_url", type=str)
+@click.option("--project", required=True, ...)
+...
+def plan(issue_url: str, project: str, ...) -> None:
+    ...  # existing body untouched
+# v4-PHASE-8-KILL-END
+```
+
+In Phase 8, `plan-v4` is renamed to `plan` after the legacy command is deleted.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run pytest packages/foreman/tests/v4/roles/test_planner_outcome.py -v`
 Expected: 3 passed
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Verify legacy tests still pass**
+
+Run: `uv run pytest packages/foreman/tests/test_roles_planner.py -q`
+Expected: legacy suite stays green — we didn't touch its code paths.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add packages/foreman/src/foreman/roles/planner.py packages/foreman/src/foreman/cli.py packages/foreman/tests/v4/roles/__init__.py packages/foreman/tests/v4/roles/test_planner_outcome.py
-git commit -m "feat(v4): planner emits FOREMAN_OUTCOME (replaces label-writing exit)"
+git commit -m "feat(v4): planner adds emit-based plan-v4 CLI (legacy plan untouched)"
 ```
 
-### Task 5.3: Reviewer emits Outcome (target-aware)
+### Task 5.3: Reviewer — additive v4 emit path (target-aware)
 
 **Files:**
-- Modify: `packages/foreman/src/foreman/roles/reviewer.py`
-- Modify: `packages/foreman/src/foreman/cli.py` (`cmd_review` rewritten)
-- Test: `packages/foreman/tests/v4/roles/test_reviewer_outcome.py`
+- Modify: `packages/foreman/src/foreman/roles/reviewer.py` — ADD `run_reviewer_cli`; mark existing entry-point with breadcrumb
+- Modify: `packages/foreman/src/foreman/cli.py` — ADD `review-v4` command; mark existing `review` command with breadcrumbs
+- Create: `packages/foreman/tests/v4/roles/test_reviewer_outcome.py` (purely new)
+- DO NOT TOUCH: `packages/foreman/tests/test_roles_reviewer.py` (covers the v3 path, still running)
+
+**Follow the Task 5.2 additive template.** Same shape: append `run_reviewer_cli(*, project, issue_number, target)` and tag the legacy entry-point with `# v4-PHASE-8-KILL`. Add a new `@cli.command("review-v4")` alongside the existing `review` command (which gets the BEGIN/END breadcrumb block).
 
 The Reviewer is target-aware: `reviewer-spec` reviews the spec PR; `reviewer-impl` reviews the impl PR. The internal logic already branches on target; v4's contribution is the exit-emission.
 
@@ -413,10 +484,12 @@ def test_reviewer_exception_emits_error(capsys):
 Run: `uv run pytest packages/foreman/tests/v4/roles/test_reviewer_outcome.py -v`
 Expected: FAIL with `ImportError`
 
-- [ ] **Step 3: Add the v4 exit path to `reviewer.py`**
+- [ ] **Step 3: Add the v4 exit path to `reviewer.py` (additive — see Task 5.2 template)**
+
+Append the following alongside the existing `reviewer.py` code. Tag the legacy entry-point function with `# v4-PHASE-8-KILL` before the function header.
 
 ```python
-# Append to packages/foreman/src/foreman/roles/reviewer.py
+# Append to packages/foreman/src/foreman/roles/reviewer.py — additive
 
 from foreman.v4.emit import emit_outcome
 from foreman.v4.outcome import (
@@ -466,28 +539,34 @@ def run_reviewer_cli(
     return 0
 ```
 
-- [ ] **Step 4: Rewrite `cmd_review` in `cli.py`** — same shape as `cmd_plan`, preserving the existing `--target` flag, body becomes a one-liner that calls `run_reviewer_cli(...)` and exits with its return code. Delete the prior label-writing tail.
+- [ ] **Step 4: ADD `review-v4` CLI command in `cli.py`** — alongside the existing `review` command (which gets the `v4-PHASE-8-KILL-BEGIN`/`-END` breadcrumb block). The new command takes `--project`, `--issue-number`, `--target`. One-liner body that calls `run_reviewer_cli(...)` and exits with its return code.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run pytest packages/foreman/tests/v4/roles/test_reviewer_outcome.py -v`
 Expected: 5 passed (2 parametrized × 2 + 1 standalone = 5)
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Verify legacy tests still pass**
+
+Run: `uv run pytest packages/foreman/tests/test_roles_reviewer.py -q`
+Expected: legacy suite green.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add packages/foreman/src/foreman/roles/reviewer.py packages/foreman/src/foreman/cli.py packages/foreman/tests/v4/roles/test_reviewer_outcome.py
-git commit -m "feat(v4): reviewer emits FOREMAN_OUTCOME (target-aware)"
+git commit -m "feat(v4): reviewer adds emit-based review-v4 CLI (target-aware; legacy untouched)"
 ```
 
 ### Task 5.4: Fixer emits Outcome (target-aware)
 
 **Files:**
-- Modify: `packages/foreman/src/foreman/roles/fixer.py`
-- Modify: `packages/foreman/src/foreman/cli.py` (`cmd_fix`)
-- Test: `packages/foreman/tests/v4/roles/test_fixer_outcome.py`
+- Modify: `packages/foreman/src/foreman/roles/fixer.py` — ADD `run_fixer_cli`; breadcrumb legacy entry-point
+- Modify: `packages/foreman/src/foreman/cli.py` — ADD `fix-v4` command; breadcrumb legacy `fix`
+- Create: `packages/foreman/tests/v4/roles/test_fixer_outcome.py` (purely new)
+- DO NOT TOUCH: `packages/foreman/tests/test_roles_fixer.py` (covers v3 path, still running)
 
-Same shape as Reviewer: target-aware (`fixer-spec`, `fixer-impl`), three outcome paths.
+**Follow the Task 5.2 additive template.** Same shape as Reviewer (5.3): target-aware (`fixer-spec`, `fixer-impl`), three outcome paths. Additive — do NOT delete or modify the existing entry-point or `fix` command.
 
 | Internal result | Outcome kind |
 | --- | --- |
@@ -568,10 +647,10 @@ def test_fixer_exception_emits_error(capsys):
 Run: `uv run pytest packages/foreman/tests/v4/roles/test_fixer_outcome.py -v`
 Expected: FAIL with `ImportError`
 
-- [ ] **Step 3: Add the v4 exit path to `fixer.py`** (same pattern as Reviewer; `pushed → CLEAN`, `escalated → NEEDS_HELP`, exception → `ERROR`).
+- [ ] **Step 3: Add the v4 exit path to `fixer.py` (additive — see Task 5.2 template)** — same pattern as Reviewer; `pushed → CLEAN`, `escalated → NEEDS_HELP`, exception → `ERROR`. Tag the legacy entry-point with `# v4-PHASE-8-KILL`.
 
 ```python
-# Append to packages/foreman/src/foreman/roles/fixer.py
+# Append to packages/foreman/src/foreman/roles/fixer.py — additive
 from foreman.v4.emit import emit_outcome
 from foreman.v4.outcome import (
     Outcome, OutcomeArtifacts, OutcomeConfidence, OutcomeKind,
@@ -608,28 +687,34 @@ def run_fixer_cli(
     return 0
 ```
 
-- [ ] **Step 4: Rewrite `cmd_fix` in `cli.py`** — one-liner calling `run_fixer_cli(...)` with `--target` preserved; delete the prior label-writing tail.
+- [ ] **Step 4: ADD `fix-v4` CLI command in `cli.py`** — alongside the existing `fix` command (which gets the `v4-PHASE-8-KILL-BEGIN`/`-END` breadcrumb block). Takes `--project`, `--issue-number`, `--target`. One-liner calling `run_fixer_cli(...)`.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run pytest packages/foreman/tests/v4/roles/test_fixer_outcome.py -v`
 Expected: 5 passed
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Verify legacy tests still pass**
+
+Run: `uv run pytest packages/foreman/tests/test_roles_fixer.py -q`
+Expected: legacy suite green.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add packages/foreman/src/foreman/roles/fixer.py packages/foreman/src/foreman/cli.py packages/foreman/tests/v4/roles/test_fixer_outcome.py
-git commit -m "feat(v4): fixer emits FOREMAN_OUTCOME (target-aware)"
+git commit -m "feat(v4): fixer adds emit-based fix-v4 CLI (target-aware; legacy untouched)"
 ```
 
 ### Task 5.5: Worker emits Outcome (CLEAN | BLOCKED | NEEDS_HELP | ERROR)
 
 **Files:**
-- Modify: `packages/foreman/src/foreman/roles/worker.py`
-- Modify: `packages/foreman/src/foreman/cli.py` (`cmd_implement`)
-- Test: `packages/foreman/tests/v4/roles/test_worker_outcome.py`
+- Modify: `packages/foreman/src/foreman/roles/worker.py` — ADD `run_worker_cli`; breadcrumb legacy entry-point
+- Modify: `packages/foreman/src/foreman/cli.py` — ADD `implement-v4` command; breadcrumb legacy `implement`
+- Create: `packages/foreman/tests/v4/roles/test_worker_outcome.py` (purely new)
+- DO NOT TOUCH: `packages/foreman/tests/test_roles_worker.py` (covers v3 path, still running)
 
-The Worker is the only role that produces `BLOCKED` (the impl PR was opened but CI is still in flight). The state machine handles BLOCKED by re-polling (ImplementingState `next_state` returns a fresh `ImplementingState()`).
+**Follow the Task 5.2 additive template.** The Worker is the only role that produces `BLOCKED` (the impl PR was opened but CI is still in flight). The state machine handles BLOCKED by re-polling (ImplementingState `next_state` returns a fresh `ImplementingState()`).
 
 | Internal result | Outcome kind |
 | --- | --- |
@@ -699,10 +784,12 @@ def test_worker_exception_emits_error(capsys):
 Run: `uv run pytest packages/foreman/tests/v4/roles/test_worker_outcome.py -v`
 Expected: FAIL with `ImportError`
 
-- [ ] **Step 3: Add the v4 exit path to `worker.py`**
+- [ ] **Step 3: Add the v4 exit path to `worker.py` (additive — see Task 5.2 template)**
+
+Tag the legacy entry-point with `# v4-PHASE-8-KILL` before its `def`. Append:
 
 ```python
-# Append to packages/foreman/src/foreman/roles/worker.py
+# Append to packages/foreman/src/foreman/roles/worker.py — additive
 from foreman.v4.emit import emit_outcome
 from foreman.v4.outcome import (
     Outcome, OutcomeArtifacts, OutcomeConfidence, OutcomeKind,
@@ -749,18 +836,23 @@ def run_worker_cli(*, project: str, issue_number: int) -> int:
     return 0
 ```
 
-- [ ] **Step 4: Rewrite `cmd_implement` in `cli.py`** — one-liner calling `run_worker_cli(...)`; delete the prior label-writing tail.
+- [ ] **Step 4: ADD `implement-v4` CLI command in `cli.py`** — alongside the existing `implement` command (which gets the `v4-PHASE-8-KILL-BEGIN`/`-END` breadcrumb block). Takes `--project`, `--issue-number`. One-liner calling `run_worker_cli(...)`.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run pytest packages/foreman/tests/v4/roles/test_worker_outcome.py -v`
 Expected: 4 passed
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Verify legacy tests still pass**
+
+Run: `uv run pytest packages/foreman/tests/test_roles_worker.py -q`
+Expected: legacy suite green.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add packages/foreman/src/foreman/roles/worker.py packages/foreman/src/foreman/cli.py packages/foreman/tests/v4/roles/test_worker_outcome.py
-git commit -m "feat(v4): worker emits FOREMAN_OUTCOME (CLEAN/BLOCKED/NEEDS_HELP/ERROR)"
+git commit -m "feat(v4): worker adds emit-based implement-v4 CLI (legacy untouched)"
 ```
 
 ### Task 5.6: SubprocessRoleDispatcher — production impl
@@ -775,12 +867,14 @@ Per-role identity wiring lives in `foreman.identity` (survival set). For each ro
 
 | `role` value | invokes | identity |
 | --- | --- | --- |
-| `planner` | `foreman plan` | planner App |
-| `reviewer-spec` | `foreman review --target spec` | reviewer App |
-| `reviewer-impl` | `foreman review --target impl` | reviewer App |
-| `fixer-spec` | `foreman fix --target spec` | fixer App |
-| `fixer-impl` | `foreman fix --target impl` | fixer App |
-| `worker` | `foreman implement` | worker App |
+| `planner` | `foreman plan-v4` | planner App |
+| `reviewer-spec` | `foreman review-v4 --target spec` | reviewer App |
+| `reviewer-impl` | `foreman review-v4 --target impl` | reviewer App |
+| `fixer-spec` | `foreman fix-v4 --target spec` | fixer App |
+| `fixer-impl` | `foreman fix-v4 --target impl` | fixer App |
+| `worker` | `foreman implement-v4` | worker App |
+
+The `-v4` suffix on subcommands matches the additive CLI commands added in Tasks 5.2-5.5. Phase 8 renames the `-v4` variants to their unsuffixed names after the legacy commands are deleted; at that point this dispatcher's `_ROLE_TO_INVOCATION` table is updated in lockstep.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -941,13 +1035,17 @@ class _Invocation:
     target: str | None
 
 
+# v4-PHASE-8-RENAME: subcommand strings carry "-v4" suffix to coexist with
+# legacy v3 commands during Phases 5-7. Phase 8 strips the suffix after
+# the legacy commands are deleted. This is the ONLY change required here
+# during cutover.
 _ROLE_TO_INVOCATION: dict[str, _Invocation] = {
-    "planner":       _Invocation(subcommand="plan",      target=None),
-    "reviewer-spec": _Invocation(subcommand="review",    target="spec"),
-    "reviewer-impl": _Invocation(subcommand="review",    target="impl"),
-    "fixer-spec":    _Invocation(subcommand="fix",       target="spec"),
-    "fixer-impl":    _Invocation(subcommand="fix",       target="impl"),
-    "worker":        _Invocation(subcommand="implement", target=None),
+    "planner":       _Invocation(subcommand="plan-v4",      target=None),
+    "reviewer-spec": _Invocation(subcommand="review-v4",    target="spec"),
+    "reviewer-impl": _Invocation(subcommand="review-v4",    target="impl"),
+    "fixer-spec":    _Invocation(subcommand="fix-v4",       target="spec"),
+    "fixer-impl":    _Invocation(subcommand="fix-v4",       target="impl"),
+    "worker":        _Invocation(subcommand="implement-v4", target=None),
 }
 
 

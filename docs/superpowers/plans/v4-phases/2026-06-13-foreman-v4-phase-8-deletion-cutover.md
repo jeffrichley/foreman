@@ -30,17 +30,50 @@ The v4 substrate is complete; v3 still occupies space in the repo. Phase 8 delet
 
 The deletion is mechanical because the **v4 isolation principle** (set up at Phase 1) made it so: `foreman.v4.*` never imports from the kill set, the Task 1.10 isolation guard enforces that on every commit, and Phase 5 already deleted the role files' last reaches into `foreman.labels`. What's left is `git rm` plus survival-set cleanup.
 
+### Breadcrumb-driven deletion (READ FIRST)
+
+Phase 5 (Tasks 5.2-5.5) took an additive approach: v4 emit paths landed alongside v3 label-writing paths, with the obsolete code tagged using a greppable sentinel. Phase 8 uses that sentinel to mechanically enumerate everything to delete.
+
+**Sentinel:** `v4-PHASE-8-KILL` (in comments). Two forms:
+
+```python
+# v4-PHASE-8-KILL: <reason>
+def legacy_function(...): ...
+```
+
+```python
+# v4-PHASE-8-KILL-BEGIN: <reason>
+@cli.command()
+def legacy_command(...): ...
+# v4-PHASE-8-KILL-END
+```
+
+**Mandatory grep-and-act step before completing Task 8.1:**
+
+```bash
+git grep -n 'v4-PHASE-8-KILL' packages/foreman/
+```
+
+Every match enumerates a code block that must be deleted. After the explicit `git rm` block below (which handles whole-file deletion), this grep enumerates the IN-FILE deletions (within survival-set files like `cli.py` and `roles/*.py`). Delete each tagged block and its sentinel comments.
+
+After all deletions, the verifying grep must return zero matches:
+
+```bash
+git grep -n 'v4-PHASE-8-KILL' packages/foreman/ && echo "STILL PRESENT" || echo "all clear"
+```
+
 ### Task 8.1: Delete the v3 kill set
 
 **Files:**
-- Delete (16 files + 2 dirs): everything in the **kill set** named in the plan header
+- Delete: whole files listed in the kill set
+- Delete: role test files covering v3 label-writing paths
+- In-place deletion: `v4-PHASE-8-KILL` tagged blocks in survival-set files
 
-The exact `git rm` block from the isolation principle section, executed verbatim:
-
-- [ ] **Step 1: Run the deletion block**
+- [ ] **Step 1: Run the whole-file deletion block**
 
 ```bash
 cd packages/foreman
+# v3 substrate
 git rm -r src/foreman/reconciler/
 git rm src/foreman/daemon.py
 git rm src/foreman/daemon_runners.py
@@ -58,11 +91,82 @@ git rm src/foreman/ps.py
 git rm src/foreman/labels.py
 git rm src/foreman/branches.py
 git rm src/foreman/v3_bus_endpoint.py
+# v3 substrate tests
 git rm -r tests/reconciler tests/daemon tests/dispatcher 2>/dev/null || true
+# v3 role tests (Phase 5 left these covering legacy label-writing paths)
+git rm tests/test_roles_planner.py
+git rm tests/test_roles_reviewer.py
+git rm tests/test_roles_fixer.py
+git rm tests/test_roles_worker.py
+git rm tests/test_roles_exception_handler.py
+# Top-level v3 helper tests
+git rm tests/test_labels.py 2>/dev/null || true
+git rm tests/test_dispatcher.py 2>/dev/null || true
+git rm tests/test_role_dispatch.py 2>/dev/null || true
+git rm tests/test_daemon_e2e.py 2>/dev/null || true
+git rm tests/test_daemon_host.py 2>/dev/null || true
+git rm tests/test_daemon_runners.py 2>/dev/null || true
+git rm tests/test_poller.py 2>/dev/null || true
+git rm tests/test_queue.py 2>/dev/null || true
+git rm tests/test_storage.py 2>/dev/null || true
+git rm tests/test_worker.py 2>/dev/null || true
 cd ../..
 ```
 
-(The `|| true` on the test dirs covers the case where some weren't created yet — non-fatal.)
+(The `|| true` covers files that may have moved or already vanished — non-fatal. The test files for non-deletion-targeted survival-set modules — e.g., `test_auth.py`, `test_branches.py`, `test_config.py`, provider tests — STAY.)
+
+- [ ] **Step 1b: In-place deletion of breadcrumbed blocks**
+
+```bash
+# Enumerate every breadcrumbed block:
+git grep -n 'v4-PHASE-8-KILL' packages/foreman/src/
+```
+
+For each match, open the file and delete:
+- The `# v4-PHASE-8-KILL: <reason>` line + the immediately following function/block (single-form)
+- Everything from `# v4-PHASE-8-KILL-BEGIN: <reason>` through `# v4-PHASE-8-KILL-END` inclusive (block-form)
+
+Expected sites (based on Phase 5 plan):
+- `packages/foreman/src/foreman/roles/planner.py` — legacy entry-point + its `foreman.labels` imports
+- `packages/foreman/src/foreman/roles/reviewer.py` — same shape
+- `packages/foreman/src/foreman/roles/fixer.py` — same shape
+- `packages/foreman/src/foreman/roles/worker.py` — same shape
+- `packages/foreman/src/foreman/cli.py` — legacy `plan`/`review`/`fix`/`implement` command bodies + decorator stacks
+
+- [ ] **Step 1c: Rename `-v4` CLI commands to unsuffixed names**
+
+After legacy commands are deleted, the `-v4`-suffixed commands can take their natural names:
+
+```bash
+# In packages/foreman/src/foreman/cli.py:
+sed -i 's/@cli.command("plan-v4")/@cli.command("plan")/' packages/foreman/src/foreman/cli.py
+sed -i 's/@cli.command("review-v4")/@cli.command("review")/' packages/foreman/src/foreman/cli.py
+sed -i 's/@cli.command("fix-v4")/@cli.command("fix")/' packages/foreman/src/foreman/cli.py
+sed -i 's/@cli.command("implement-v4")/@cli.command("implement")/' packages/foreman/src/foreman/cli.py
+```
+
+And in `packages/foreman/src/foreman/v4/subprocess_dispatcher.py`, update the `_ROLE_TO_INVOCATION` table:
+
+```python
+_ROLE_TO_INVOCATION: dict[str, _Invocation] = {
+    "planner":       _Invocation(subcommand="plan",      target=None),
+    "reviewer-spec": _Invocation(subcommand="review",    target="spec"),
+    "reviewer-impl": _Invocation(subcommand="review",    target="impl"),
+    "fixer-spec":    _Invocation(subcommand="fix",       target="spec"),
+    "fixer-impl":    _Invocation(subcommand="fix",       target="impl"),
+    "worker":        _Invocation(subcommand="implement", target=None),
+}
+```
+
+Remove the `# v4-PHASE-8-RENAME` comment from that file too. Tests in `tests/v4/test_subprocess_dispatcher.py` need their parametrize entries updated (`"plan"` instead of `"plan-v4"`, etc.).
+
+- [ ] **Step 1d: Verify zero remaining sentinels**
+
+```bash
+git grep -n 'v4-PHASE-8-KILL\|v4-PHASE-8-RENAME' packages/foreman/ && echo "STILL PRESENT — FIX BEFORE COMMIT" || echo "all clear"
+```
+
+If anything matches, find and delete it before committing.
 
 - [ ] **Step 2: Run the test gate to see what broke**
 
@@ -74,8 +178,9 @@ If `just check` is GREEN immediately, the isolation discipline held perfectly �
 - [ ] **Step 3: Commit the deletion**
 
 ```bash
-git add -u  # stages the deletions
-git commit -m "feat(v4): delete v3 substrate (reconciler/, label-driven daemon, label catalog)"
+git add -u  # stages the deletions + in-place edits
+git add packages/foreman/src/foreman/cli.py packages/foreman/src/foreman/v4/subprocess_dispatcher.py
+git commit -m "feat(v4): delete v3 substrate (reconciler/, daemon, role legacy CLIs + tests)"
 ```
 
 ### Task 8.2: Repair any survival-set files that referenced the kill set
