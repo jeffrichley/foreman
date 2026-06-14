@@ -150,6 +150,7 @@ def plan_v4(project: str, issue_number: int) -> None:
     sys.exit(run_planner_cli(project=project, issue_number=issue_number))
 
 
+# v4-PHASE-8-KILL-BEGIN: legacy positional-arg reviewer CLI; replaced by `review-v4` (below). Remove this command + decorator stack + label-write imports in Phase 8.
 @cli.command()
 @click.argument("pr_url", type=str)
 @click.option("--project", required=True, help="Project name as defined in config.toml")
@@ -207,6 +208,24 @@ def review(
     )
     llm = result.llm_output
     click.echo(f"{llm.outcome}: {len(llm.findings)} findings, confidence={llm.confidence}")
+# v4-PHASE-8-KILL-END
+
+
+# v4: additive CLI using --issue-number + --target; SubprocessRoleDispatcher invokes this.
+@cli.command("review-v4")
+@click.option("--project", required=True)
+@click.option("--issue-number", "issue_number", type=int, required=True)
+@click.option("--target", type=click.Choice(["spec", "impl"]), required=True)
+def review_v4(project: str, issue_number: int, target: str) -> None:
+    """Run the v4 Reviewer: emit FOREMAN_OUTCOME on stdout; exit-code carries success/failure."""
+    # Local import keeps cli.py's module-level import graph unchanged so
+    # `tests/test_cli.py`'s command-discovery assertions don't see a new
+    # side-effect import at collection time.
+    from foreman.roles.reviewer import run_reviewer_cli
+
+    sys.exit(
+        run_reviewer_cli(project=project, issue_number=issue_number, target=target)
+    )
 
 
 @cli.command()

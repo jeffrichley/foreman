@@ -371,6 +371,7 @@ def _read_spec_doc(worktree_path: Path, issue_number: int) -> str | None:
         return None
 
 
+# v4-PHASE-8-KILL: legacy reviewer entry-point used by the `review` CLI command (cli.py); emits via label-writing tail. Replaced by run_reviewer_cli (below) + review-v4 CLI command. Remove this function and the legacy label-writing tail in Phase 8.
 async def run_reviewer(
     *,
     pr_url: str,
@@ -738,3 +739,218 @@ async def run_reviewer(
         # non-provider failures (worktree ops, host I/O, GitHub 5xx).
         _on_failure(exc)
         raise
+
+
+# ============================================================
+# v4 emit path — additive alongside the legacy label-writing entry-point.
+# The legacy code path (above) stays running through Phase 7. Phase 8
+# deletes the legacy entry-point + everything tagged with v4-PHASE-8-KILL
+# and removes this banner.
+# ============================================================
+import asyncio  # noqa: E402  (kept here so legacy import block above stays untouched)
+
+from foreman.config import load_config  # noqa: E402
+from foreman.providers import make_provider  # noqa: E402
+from foreman.v4.emit import emit_outcome  # noqa: E402
+from foreman.v4.outcome import Finding as V4Finding  # noqa: E402
+from foreman.v4.outcome import (  # noqa: E402
+    Outcome,
+    OutcomeArtifacts,
+    OutcomeConfidence,
+    OutcomeKind,
+)
+
+# v4 RoleDispatcher uses "spec" / "impl"; the legacy Reviewer internals
+# (branch parsing, label triples, prompt loader) speak "spec_pr" /
+# "impl_pr". Translation lives only at the v4 boundary so legacy paths
+# keep their existing vocabulary verbatim.
+_V4_TARGET_TO_LEGACY: dict[str, Literal["spec_pr", "impl_pr"]] = {
+    "spec": "spec_pr",
+    "impl": "impl_pr",
+}
+
+# Head-branch shape per target — used to locate the open PR the v4
+# Reviewer is about to review.
+_V4_TARGET_TO_BRANCH_PREFIX: dict[str, str] = {
+    "spec": "foreman/issue-",
+    "impl": "foreman/impl-",
+}
+
+
+class _V4ReviewerResult:
+    """Flat-shape result for the v4 emit path.
+
+    The legacy ``ReviewerRunResult`` nests outcome under
+    ``llm_output.outcome`` ("clean" / "needs_fix") with findings whose
+    fields are ``severity`` / ``target`` / ``issue`` / ``needed``. The
+    v4 emit path consumes the boolean ``approved`` + a flat
+    ``findings`` list whose entries already carry v4-Finding fields
+    (``severity`` / ``location`` / ``description``) so
+    ``run_reviewer_cli`` can build :class:`OutcomeArtifacts` /
+    :class:`Finding` without re-interpreting legacy shape. Both this
+    class and the helper that builds instances disappear in Phase 8.
+    """
+
+    def __init__(
+        self,
+        *,
+        approved: bool,
+        pr_number: int | None,
+        summary: str,
+        findings: list[V4Finding],
+    ) -> None:
+        self.approved = approved
+        self.pr_number = pr_number
+        self.summary = summary
+        self.findings = findings
+
+
+def _run_reviewer_for_v4(
+    *, project: str, issue_number: int, target: str
+) -> _V4ReviewerResult:
+    """Run the reviewer the same way the legacy ``review`` command does,
+    but without label-writing on top.
+
+    Option B per the Phase 5.2 plan: duplicate the reviewer-invocation
+    sequence rather than refactor the legacy ``run_reviewer`` body.
+    The legacy ``run_reviewer`` is re-used here — it already contains
+    the full worktree → diff → LLM → review-post sequence, and v3's
+    label-writing behavior is benign for v4 callers (the v4 state
+    machine drives off the FOREMAN_OUTCOME emitted below, not off
+    GitHub labels). The label-writing tail goes away in Phase 8.
+
+    ``target`` arrives in v4 vocabulary ("spec" / "impl"); the legacy
+    ``run_reviewer`` infers spec vs impl from the PR's head branch on
+    its own, so we only need ``target`` here to locate the right open
+    PR before handing off. Translation to legacy "spec_pr" / "impl_pr"
+    is consumed inside ``run_reviewer`` itself — no kwarg is plumbed
+    through from v4.
+    """
+    cfg_path = os.environ.get("FOREMAN_CONFIG_PATH") or os.environ.get("FOREMAN_CONFIG")
+    if cfg_path is None:
+        cfg_path = str(Path("~/.foreman/config.toml").expanduser())
+    cfg = load_config(cfg_path)
+    project_cfg = cfg.projects[project]
+
+    # Locate the open PR for this issue. The Reviewer's legacy entry-
+    # point takes a PR URL — v4's SubprocessRoleDispatcher only knows
+    # the issue number + target. Resolve via the reviewer App's client
+    # (read-only get_pulls is in scope for the reviewer identity).
+    registry = IdentityRegistry(project_cfg)
+    reviewer_client: Github = registry.get_reviewer_client()
+    repo: Repository = reviewer_client.get_repo(project_cfg.repo)
+    owner = project_cfg.repo.split("/", 1)[0]
+    branch_prefix = _V4_TARGET_TO_BRANCH_PREFIX[target]
+    branch = f"{branch_prefix}{issue_number}"
+    head_qualifier = f"{owner}:{branch}"
+    pulls = list(repo.get_pulls(state="open", head=head_qualifier))
+    if not pulls:
+        raise RuntimeError(
+            f"No open PR found for branch {branch!r} in {project_cfg.repo!r}. "
+            f"The v4 Reviewer expects the {target}-side PR to be open for "
+            f"issue #{issue_number}."
+        )
+    pr = pulls[0]
+    pr_url = pr.html_url
+
+    worktrees_root = Path(
+        os.environ.get(
+            "FOREMAN_WORKTREES_ROOT",
+            str(Path.home() / ".foreman" / "worktrees"),
+        )
+    )
+    provider = make_provider()
+    legacy_result = asyncio.run(
+        run_reviewer(
+            pr_url=pr_url,
+            config=cfg,
+            project_name=project,
+            worktrees_root=worktrees_root,
+            provider=provider,
+            identity_registry=registry,
+        )
+    )
+
+    # Flatten legacy → v4 shape. The legacy ``Finding`` records
+    # ``severity`` (kept verbatim — same severity literals as v4),
+    # ``target`` + ``issue`` + ``needed``; v4's ``Finding`` wants
+    # ``severity`` + ``location`` + ``description``. Map
+    # ``target`` → ``location`` (both name "where in the artifact")
+    # and join ``issue`` + ``needed`` into ``description`` so the
+    # Fixer downstream still has both halves of the prose.
+    llm = legacy_result.llm_output
+    v4_findings: list[V4Finding] = [
+        V4Finding(
+            severity=f.severity,
+            location=f.target or "general",
+            description=f"{f.issue} — needed: {f.needed}",
+        )
+        for f in llm.findings
+    ]
+    return _V4ReviewerResult(
+        approved=llm.outcome == "clean",
+        pr_number=pr.number,
+        summary=llm.review_comment[:500] if llm.review_comment else llm.outcome,
+        findings=v4_findings,
+    )
+
+
+def run_reviewer_cli(*, project: str, issue_number: int, target: str) -> int:
+    """v4 CLI entry-point. Emits FOREMAN_OUTCOME JSON; returns exit code.
+
+    ``target`` is the v4 vocab ("spec" / "impl"). The
+    SubprocessRoleDispatcher (Task 5.6) forks ``foreman review-v4
+    --target spec|impl`` which calls this. Legacy ``review`` command +
+    label-writing tail in this module are tagged ``v4-PHASE-8-KILL``
+    and deleted together in Phase 8.
+    """
+    try:
+        result = _run_reviewer_for_v4(
+            project=project, issue_number=issue_number, target=target
+        )
+    except Exception as exc:
+        emit_outcome(
+            Outcome(
+                kind=OutcomeKind.ERROR,
+                confidence=OutcomeConfidence.HIGH,
+                summary=f"reviewer raised: {exc}"[:500],
+            )
+        )
+        return 1
+
+    if getattr(result, "approved", False):
+        emit_outcome(
+            Outcome(
+                kind=OutcomeKind.CLEAN,
+                confidence=OutcomeConfidence.HIGH,
+                summary=getattr(result, "summary", None) or "approved",
+                artifacts=OutcomeArtifacts(
+                    pr_number=getattr(result, "pr_number", None)
+                ),
+            )
+        )
+        return 0
+
+    findings_raw = list(getattr(result, "findings", []) or [])
+    # Findings already arrive in v4 shape from ``_run_reviewer_for_v4``
+    # (or from a test double that builds them that way). Rebuild as
+    # ``V4Finding`` instances so a MagicMock-based test stub still
+    # round-trips through the Outcome model's validation.
+    findings = [
+        V4Finding(
+            severity=f.severity,
+            location=f.location,
+            description=f.description,
+        )
+        for f in findings_raw
+    ]
+    emit_outcome(
+        Outcome(
+            kind=OutcomeKind.NEEDS_FIX,
+            confidence=OutcomeConfidence.HIGH,
+            summary=getattr(result, "summary", None) or f"{len(findings)} issues",
+            artifacts=OutcomeArtifacts(pr_number=getattr(result, "pr_number", None)),
+            findings=findings,
+        )
+    )
+    return 0
