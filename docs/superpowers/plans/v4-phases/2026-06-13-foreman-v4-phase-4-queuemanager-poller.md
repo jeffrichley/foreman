@@ -718,7 +718,10 @@ def _priority_for(state_name: str) -> int:
 class QueueManager:
     def __init__(self, *, repo: TicketRepository, max_in_flight: int) -> None:
         self._repo = repo
-        self._max_in_flight = max_in_flight
+        # Public: WorkerPool reads this to size its ThreadPoolExecutor.
+        # The contract is "the single concurrency knob"; treat as read-only
+        # after construction.
+        self.max_in_flight = max_in_flight
         self._heap: list[tuple[int, int, WorkItem]] = []
         self._counter = itertools.count()  # tie-breaker = enqueue order
         self._queued: set[WorkItem] = set()
@@ -738,7 +741,7 @@ class QueueManager:
 
     def dequeue(self) -> WorkItem | None:
         with self._lock:
-            if len(self._in_flight_tickets) >= self._max_in_flight:
+            if len(self._in_flight_tickets) >= self.max_in_flight:
                 return None
             skipped: list[tuple[int, int, WorkItem]] = []
             try:
@@ -796,7 +799,7 @@ git commit -m "feat(v4): QueueManager — priority heap with per-ticket / held /
 - Create: `packages/foreman/src/foreman/v4/worker_pool.py`
 - Test: `packages/foreman/tests/v4/test_worker_pool.py`
 
-`concurrent.futures.ThreadPoolExecutor` of size `max_workers`. Tickets are I/O-bound (subprocess + GitHub), so threading is the right tool — Python's GIL is irrelevant during the subprocess/network waits. No asyncio rewrite needed.
+`concurrent.futures.ThreadPoolExecutor` sized at `qm.max_in_flight`. Tickets are I/O-bound (subprocess + GitHub), so threading is the right tool — Python's GIL is irrelevant during the subprocess/network waits. No asyncio rewrite needed.
 
 **API:**
 - `tick()` — pulls as many WorkItems as the QM gives + submits each to the executor. Returns the count submitted. Non-blocking; the daemon's outer loop calls this on a cadence.
@@ -804,7 +807,9 @@ git commit -m "feat(v4): QueueManager — priority heap with per-ticket / held /
 
 **Per-submission callback** marks the WorkItem done on the QM as soon as the transition future completes, freeing the per-ticket slot for the next dequeue cycle.
 
-**Defaults: serial.** `max_workers=1` and (in Phase 7's `V4Config`) `max_in_flight=1`. Concurrency is **opt-in via config** — operators dial it up after observing dogfood stability. The threading machinery is there from day one so the upgrade is config-only, but the out-of-the-box behavior is one ticket at a time. Tests that exercise concurrency explicitly override (`max_workers=3` in the 3-ticket cases).
+**Single concurrency knob.** The pool reads its size from `qm.max_in_flight` — there's only one number governing concurrency end-to-end. A separate `max_workers` parameter would let operators misconfigure: pool=4 + QM=2 wastes thread slots; pool=2 + QM=4 silently caps real throughput at 2 while pretending the QM cap matters. Collapsing them prevents the failure mode where stuck tickets occupy QM slots and a starved-thread pool can't drain anything else.
+
+**Default: serial.** `V4Config.max_in_flight=1` (Phase 7). Concurrency is **opt-in via config** — operators dial it up after observing dogfood stability. The threading machinery is there from day one so the upgrade is config-only, but the out-of-the-box behavior is one ticket at a time. Tests that exercise concurrency construct the QM with a larger cap (`max_in_flight=4` in the 3-ticket cases), and the pool inherits the same value.
 
 **Sequence assignment** uses `repo.count_state_instances_for_ticket(ticket_id) + 1` (helper added in Task 4.1). No more reaching into private impl details.
 
@@ -849,7 +854,6 @@ def test_tick_processes_one_workitem():
         repo=repo, qm=qm, dispatcher=dispatcher,
         git=None, bus=None,
         clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
-        max_workers=2,
     )
     try:
         repo.set_ticket_state(ticket.id, "Planning", now=dt.datetime(2026, 6, 13))
@@ -870,7 +874,6 @@ def test_tick_returns_zero_when_queue_empty():
         dispatcher=FakeRoleDispatcher(responses={}),
         git=None, bus=None,
         clock=lambda: dt.datetime(2026, 6, 13),
-        max_workers=2,
     )
     try:
         assert pool.tick() == 0
@@ -886,7 +889,8 @@ def test_three_tickets_dispatch_concurrently():
         t = repo.create_ticket(project="p", issue_number=i, now=dt.datetime(2026, 6, 13))
         repo.set_ticket_state(t.id, "Planning", now=dt.datetime(2026, 6, 13))
         tids.append(t.id)
-    qm = QueueManager(repo=repo, max_in_flight=4)
+    # max_in_flight=3 sizes BOTH the QM cap and the thread pool — one knob.
+    qm = QueueManager(repo=repo, max_in_flight=3)
     dispatcher = FakeRoleDispatcher(responses={
         ("planner", "p", 1): _canned("clean"),
         ("planner", "p", 2): _canned("clean"),
@@ -896,7 +900,6 @@ def test_three_tickets_dispatch_concurrently():
         repo=repo, qm=qm, dispatcher=dispatcher,
         git=None, bus=None,
         clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
-        max_workers=3,
     )
     try:
         for tid in tids:
@@ -923,7 +926,6 @@ def test_same_ticket_serialized_across_concurrent_submissions():
         repo=repo, qm=qm, dispatcher=dispatcher,
         git=None, bus=None,
         clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
-        max_workers=4,
     )
     try:
         # Enqueue Planning AND SpecReview for the same ticket. QM should only
@@ -990,7 +992,6 @@ class WorkerPool:
         git: GitProvider | None,
         bus: EventBus | None,
         clock: Callable[[], dt.datetime],
-        max_workers: int = 1,
     ) -> None:
         self._repo = repo
         self._qm = qm
@@ -998,8 +999,11 @@ class WorkerPool:
         self._git = git
         self._bus = bus
         self._clock = clock
+        # Single concurrency knob: the pool size = the QM's in-flight cap.
+        # Splitting them would let pool < QM silently throttle, or pool > QM
+        # waste OS threads. Operators dial ONE number in V4Config.
         self._executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=max_workers, thread_name_prefix="foreman-worker",
+            max_workers=qm.max_in_flight, thread_name_prefix="foreman-worker",
         )
 
     def tick(self) -> int:
@@ -1612,6 +1616,7 @@ def test_three_concurrent_tickets_with_one_dep_blocked():
             dispatcher_responses[(role, "p", issue)] = _canned("clean", pr_number=pr)
     dispatcher = FakeRoleDispatcher(responses=dispatcher_responses)
 
+    # max_in_flight=4 sizes both the QM cap and the WorkerPool thread pool.
     qm = QueueManager(repo=repo, max_in_flight=4)
     poller = Poller(
         repo=repo, qm=qm, git=git,
@@ -1621,7 +1626,6 @@ def test_three_concurrent_tickets_with_one_dep_blocked():
     pool = WorkerPool(
         repo=repo, qm=qm, dispatcher=dispatcher, git=git, bus=None,
         clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
-        max_workers=3,
     )
     try:
         # First tick adopts the 3 tickets. Set ticket 3's dep AFTER adoption.
