@@ -22,7 +22,6 @@ from __future__ import annotations
 
 from github import Auth, Github  # type: ignore[import-not-found]
 
-
 # Use a dummy token; this test does not hit the network — we only inspect
 # the in-memory object surface.
 _DUMMY_AUTH = Auth.Token("ghp_DUMMY_TOKEN_FOR_COMPAT_TEST")
