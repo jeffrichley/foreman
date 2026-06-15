@@ -196,12 +196,47 @@ class PyGithubGitProvider:
         issues = self._repo.get_issues(state="open", labels=[label])
         return [issue.number for issue in issues if issue.pull_request is None]
 
-    def write_labels(
+    def add_labels(
         self, *, project: str, issue_number: int, labels: set[str],
     ) -> None:
-        # PyGithub's set_labels takes label names as positional args and
-        # replaces the existing label set on the issue. Sort for
-        # deterministic call shape — useful for log assertions and
-        # snapshot tests.
+        """Add the given labels to the issue without touching others.
+
+        PyGithub's ``add_to_labels`` takes label names as positional
+        args. The underlying REST endpoint is additive — it does NOT
+        replace the existing label set, so the trigger label and any
+        operator-applied labels survive. Sort for deterministic call
+        shape (useful for log assertions and snapshot tests).
+        """
+        if not labels:
+            # PyGithub's add_to_labels raises with no args; skip the
+            # call entirely on an empty set to make the impl
+            # robust for callers that may pass {} as a no-op.
+            return
         issue = self._repo.get_issue(issue_number)
-        issue.set_labels(*sorted(labels))
+        issue.add_to_labels(*sorted(labels))
+
+    def remove_labels(
+        self, *, project: str, issue_number: int, labels: set[str],
+    ) -> None:
+        """Remove the given labels from the issue, swallowing 404s.
+
+        PyGithub exposes ``remove_from_labels`` per-label (the REST API
+        has no bulk-remove endpoint). When the label isn't on the
+        issue, the DELETE returns 404 and PyGithub raises
+        :class:`UnknownObjectException`. The Protocol contract is
+        idempotent on missing labels, so we swallow that exception and
+        continue with the rest. Sort for deterministic call ordering.
+        """
+        if not labels:
+            return
+        # Local import to avoid widening the module-level import surface
+        # — UnknownObjectException is only needed in this one path.
+        from github import UnknownObjectException
+
+        issue = self._repo.get_issue(issue_number)
+        for label_name in sorted(labels):
+            try:
+                issue.remove_from_labels(label_name)
+            except UnknownObjectException:
+                # Label not on the issue — idempotent no-op.
+                continue

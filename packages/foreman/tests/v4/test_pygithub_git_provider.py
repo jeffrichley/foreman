@@ -11,7 +11,7 @@ the bottom exercise the factory + clock seam directly.
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 
@@ -101,20 +101,92 @@ def test_enqueue_merge_queue_looks_up_pr(mock_github, mock_repo):
     mock_repo.get_pull.assert_called_with(11)
 
 
-def test_write_labels_calls_set_labels_with_sorted_names(mock_github, mock_repo):
-    """``write_labels`` replaces the issue's labels via PyGithub's
-    ``set_labels``. Sorting the names makes the call deterministic for
-    snapshot/log assertions."""
+def test_add_labels_calls_add_to_labels_with_sorted_names(mock_github, mock_repo):
+    """``add_labels`` adds without touching other labels via PyGithub's
+    ``add_to_labels`` (REST endpoint is additive, not replace). Sorted
+    arg order makes the call deterministic for snapshot/log assertions."""
     mock_issue = MagicMock()
     mock_repo.get_issue.return_value = mock_issue
     provider = PyGithubGitProvider(
         github_factory=lambda: mock_github, repo_full_name="owner/p",
     )
-    provider.write_labels(
+    provider.add_labels(
         project="p", issue_number=42, labels={"b", "a", "c"},
     )
     mock_repo.get_issue.assert_called_once_with(42)
-    mock_issue.set_labels.assert_called_once_with("a", "b", "c")
+    mock_issue.add_to_labels.assert_called_once_with("a", "b", "c")
+    # Never falls back to set_labels (the destructive replace shape).
+    mock_issue.set_labels.assert_not_called()
+
+
+def test_add_labels_empty_set_is_no_op(mock_github, mock_repo):
+    """PyGithub's ``add_to_labels`` raises with no args; the provider
+    short-circuits on an empty set so callers can pass {} safely."""
+    mock_issue = MagicMock()
+    mock_repo.get_issue.return_value = mock_issue
+    provider = PyGithubGitProvider(
+        github_factory=lambda: mock_github, repo_full_name="owner/p",
+    )
+    provider.add_labels(project="p", issue_number=42, labels=set())
+    mock_repo.get_issue.assert_not_called()
+    mock_issue.add_to_labels.assert_not_called()
+
+
+def test_remove_labels_calls_remove_from_labels_per_label(mock_github, mock_repo):
+    """REST API has no bulk-remove endpoint, so PyGithub's
+    ``remove_from_labels`` takes one label at a time. The provider
+    calls it once per label in sorted order."""
+    mock_issue = MagicMock()
+    mock_repo.get_issue.return_value = mock_issue
+    provider = PyGithubGitProvider(
+        github_factory=lambda: mock_github, repo_full_name="owner/p",
+    )
+    provider.remove_labels(
+        project="p", issue_number=42, labels={"b", "a"},
+    )
+    mock_repo.get_issue.assert_called_once_with(42)
+    # One call per label, sorted ascending.
+    assert mock_issue.remove_from_labels.call_args_list == [
+        call("a"),
+        call("b"),
+    ]
+
+
+def test_remove_labels_swallows_unknown_object_exception(mock_github, mock_repo):
+    """Removing a label not on the issue triggers a DELETE → 404 →
+    PyGithub's UnknownObjectException. The Protocol contract is
+    idempotent on missing labels, so we swallow and continue with the
+    next label."""
+    from github import UnknownObjectException  # type: ignore[import-not-found]
+
+    mock_issue = MagicMock()
+    mock_repo.get_issue.return_value = mock_issue
+    # First call raises (label not on issue), second call succeeds.
+    mock_issue.remove_from_labels.side_effect = [
+        UnknownObjectException(status=404, data={}, headers={}),
+        None,
+    ]
+    provider = PyGithubGitProvider(
+        github_factory=lambda: mock_github, repo_full_name="owner/p",
+    )
+    # Must not raise — even though the first label triggers 404.
+    provider.remove_labels(
+        project="p", issue_number=42, labels={"missing", "present"},
+    )
+    # Both labels were attempted; the 404 didn't short-circuit the loop.
+    assert mock_issue.remove_from_labels.call_count == 2
+
+
+def test_remove_labels_empty_set_is_no_op(mock_github, mock_repo):
+    """Empty set short-circuits before the get_issue API call."""
+    mock_issue = MagicMock()
+    mock_repo.get_issue.return_value = mock_issue
+    provider = PyGithubGitProvider(
+        github_factory=lambda: mock_github, repo_full_name="owner/p",
+    )
+    provider.remove_labels(project="p", issue_number=42, labels=set())
+    mock_repo.get_issue.assert_not_called()
+    mock_issue.remove_from_labels.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -67,22 +67,76 @@ def test_merge_spec_pr_marks_merged():
     assert git.get_pr_state(project="p", pr_number=1).merged is True
 
 
-def test_write_labels_records_call_and_is_queryable():
-    """A single write_labels call's labels are queryable via get_issue_labels."""
+def test_add_labels_records_call_and_is_queryable():
+    """A single add_labels call's labels are queryable via get_issue_labels."""
     git = FakeGitProvider()
-    git.write_labels(project="p", issue_number=42, labels={"foreman:state-planning"})
+    git.add_labels(project="p", issue_number=42, labels={"foreman:state-planning"})
     assert git.get_issue_labels(project="p", issue_number=42) == {
         "foreman:state-planning",
     }
 
 
-def test_write_labels_overwrites_prior_set_on_repeated_call():
+def test_add_labels_preserves_existing_labels():
+    """The defining preservation case: adding a state label MUST NOT
+    drop the trigger label or operator-applied labels. This is the
+    Phase 8c.4 fix — the morning dogfood wedged for ~40min because
+    write_labels REPLACED the entire set, stripping foreman:plan."""
     git = FakeGitProvider()
-    git.write_labels(project="p", issue_number=42, labels={"a"})
-    git.write_labels(project="p", issue_number=42, labels={"b", "c"})
-    assert git.get_issue_labels(project="p", issue_number=42) == {"b", "c"}
+    git.seed_issue_labels(
+        project="p", issue_number=42, labels={"foreman:plan", "custom"},
+    )
+    git.add_labels(
+        project="p", issue_number=42, labels={"foreman:state-planning"},
+    )
+    assert git.get_issue_labels(project="p", issue_number=42) == {
+        "foreman:plan", "custom", "foreman:state-planning",
+    }
 
 
-def test_write_labels_unseen_issue_defaults_to_empty_set():
+def test_remove_labels_only_touches_specified():
+    """Symmetric to add: removing a state label leaves trigger +
+    operator labels intact."""
+    git = FakeGitProvider()
+    git.seed_issue_labels(
+        project="p", issue_number=42,
+        labels={"foreman:plan", "custom", "foreman:state-planning"},
+    )
+    git.remove_labels(
+        project="p", issue_number=42, labels={"foreman:state-planning"},
+    )
+    assert git.get_issue_labels(project="p", issue_number=42) == {
+        "foreman:plan", "custom",
+    }
+
+
+def test_remove_labels_idempotent_on_missing():
+    """Removing a label that isn't on the issue is a silent no-op —
+    matches the Protocol contract and the PyGithub impl's 404
+    swallowing. Other labels unchanged."""
+    git = FakeGitProvider()
+    git.seed_issue_labels(
+        project="p", issue_number=42, labels={"foreman:plan"},
+    )
+    # remove_labels with a never-applied label — must not raise.
+    git.remove_labels(
+        project="p", issue_number=42, labels={"foreman:state-nonexistent"},
+    )
+    assert git.get_issue_labels(project="p", issue_number=42) == {
+        "foreman:plan",
+    }
+
+
+def test_remove_labels_on_unseen_issue_is_no_op():
+    """Even when the FakeGitProvider has no entry for this issue
+    (i.e., seed_issue_labels was never called), remove_labels must
+    not raise."""
+    git = FakeGitProvider()
+    git.remove_labels(
+        project="p", issue_number=999, labels={"foreman:state-planning"},
+    )
+    assert git.get_issue_labels(project="p", issue_number=999) == set()
+
+
+def test_get_issue_labels_unseen_defaults_to_empty_set():
     git = FakeGitProvider()
     assert git.get_issue_labels(project="p", issue_number=999) == set()
