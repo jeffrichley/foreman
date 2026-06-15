@@ -26,6 +26,18 @@ These are real-world behaviors that the v4 mocked test suite cannot exercise. Th
 
 5. **`SubprocessRoleDispatcher` UTF-8 decode brittleness.** `subprocess.run(..., text=True)` decodes stdout/stderr as UTF-8. If a role's stdout contains non-UTF-8 bytes (binary stack trace from a crashed subprocess, weird-locale traceback, embedded ANSI escapes that confuse the decoder), the dispatcher raises `UnicodeDecodeError` BEFORE returning — the marker line is never read even if it was written cleanly. **Trigger to promote:** any `UnicodeDecodeError` from `SubprocessRoleDispatcher.dispatch` in production logs. **Fix when triggered:** switch to `text=False` + manual `result.stdout.decode("utf-8", errors="replace")`, OR pass `errors="replace"` via `subprocess.run` (Python 3.10+). The marker scan is ASCII-only, so error-replacement is safe for the parse path.
 
+### Bootstrap consolidation (from Phase 7 reviews)
+
+These items reduce private-attr reach-ins and make the bootstrap-as-built able to actually run in production. Address as part of the Phase 8 cutover work, not as deferred polish:
+
+6. **`bootstrap_cli_context()` should own the `EventBus` + subscribe the four standard observers** (`StructuredLogObserver`, `EventArchiveObserver`, `LabelObservabilityObserver`, `MetricsObserver`) and thread the bus into `Daemon` at construction. Phase 7.6 e2e currently has to reach into `ctx.daemon._bus` + `ctx.daemon._pool._bus` post-construction to wire observers — that's a sign the bootstrap is incomplete.
+
+7. **`Daemon.shutdown()` public method** that drains the WorkerPool. Phase 7.6 e2e reaches into `_pool` directly. After this lands, `cmd_daemon_stop` and the test teardown both call the public shape.
+
+8. **`main()` identity wiring** in `foreman/v4/cli/__init__.py`. Currently has 2 `# type: ignore` because `foreman.identity` doesn't expose top-level `get_role_token` — only `IdentityRegistry` does. V4Config lacks per-project apps config + orchestrator config needed to instantiate an `IdentityRegistry`. Extend `V4Config` with `[apps]` section (per-role app id/private-key path) + `[orchestrator]` PAT location; construct `IdentityRegistry` in `main()` from config + pass to `bootstrap_cli_context`. Phase 7.6 e2e patches around this with `MagicMock`; production won't run until this is fixed.
+
+9. **`reset_logging()` semantics for daemon reload.** Phase 7.6 calls it in a `finally` clause to clean up `JsonLinesHandler` (which is process-global). `cmd_daemon_reload` should call the same teardown so handlers don't double-stack on config reload. Easy: have reload call `reset_logging() + configure_logging(...)`.
+
 ### Goal
 
 The v4 substrate is complete; v3 still occupies space in the repo. Phase 8 deletes it in one shot, fixes any survival-set files that broke, writes the operator-facing RUNBOOK additions, runs the standing adversarial-review pass, and opens the v4 PR.
