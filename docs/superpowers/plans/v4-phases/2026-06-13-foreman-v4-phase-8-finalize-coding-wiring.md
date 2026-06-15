@@ -182,11 +182,13 @@ Acceptance criteria (write down what you saw):
 
 If the test repo + ticket flow isn't yet possible (e.g., apps aren't set up for the test repo), document what was tried + what blocked. Phase 9 cannot proceed until this task reports actual ticket-to-terminal behavior.
 
+If 8.7 surfaces production-runnability gaps (as the 2026-06-15 algokit run did — role CLIs hard-imported v3 config; no `foreman init`; Windows OSError on daemon-status), file Phase 8b at [phase-8b-role-cli-rewire.md](./2026-06-15-foreman-v4-phase-8b-role-cli-rewire.md), land its tasks, then re-run the dogfood there.
+
 ### Phase 8 gate
 
 - [ ] `just check` green
 - [ ] Task 8.7 manual dogfood reports successful end-to-end transition
 
-Phase 8 completion criterion: **v4 actually works against real GitHub + real Claude end-to-end.** Phase 9 (deletion + RUNBOOK + PR) is now safe to execute.
+Phase 8 completion criterion: **v4 actually works against real GitHub + real Claude end-to-end.** Phase 9 (deletion + RUNBOOK + PR) is safe to execute once Phase 8 + (if needed) Phase 8b both report success.
 
 ---
