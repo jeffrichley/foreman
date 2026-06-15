@@ -277,17 +277,46 @@ The default config path moves too — v4 uses `~/.foreman/v4/config.toml`, v3 us
 
 ---
 
-### Task 8d.10: Manual dogfood — drive algokit#21 to terminal Done
+### Task 8d.10: `foreman enqueue` CLI — direct ticket ingest bypassing Poller
+
+**Files:**
+- Create or modify: `packages/foreman/src/foreman/v4/cli/enqueue.py` (new command module — match the shape of `hold.py` / `resume.py` etc. if those are separate files; otherwise add to the appropriate existing module)
+- Modify: `packages/foreman/src/foreman/v4/cli/__init__.py` — register the new typer command
+- Modify or create: `packages/foreman/tests/v4/cli/test_enqueue.py` — TDD tests
+
+Today the only way to get a ticket into SQLite is "apply `foreman:plan` on GitHub, wait ≤30s for Poller to scan." Useful for production but annoying for dogfood + recovery. Add `foreman enqueue --project <name> --issue-number <N>` which inserts a ticket directly at state `Queued`, no GitHub round-trip.
+
+**Validation:**
+- `--project <name>` must match a `ProjectConfig.name` in the loaded `V4Config`; else error with the project list.
+- `--issue-number <N>` must be a positive int.
+- Idempotency: if a ticket already exists for this `(project, issue_number)`, error with the existing ticket's `id` + `state`. Don't silently create a duplicate.
+
+**Behavior:**
+- Insert a `Ticket` row with `project=<name>`, `issue_number=<N>`, `state=Queued`, `held_by=None`, no dependencies.
+- Print the new ticket's `id` so the operator can chain follow-up commands.
+- No GitHub API calls. Pure SQLite write. The LabelObservabilityObserver will catch up the next time the worker pool processes this ticket.
+
+- [ ] **Step 1:** Write failing test `test_enqueue_creates_queued_ticket_in_sqlite` — invoke `foreman enqueue --project algokit --issue-number 99`, assert row appears in `tickets` table with `state="Queued"`, no GitHub calls (use the existing fake GitProvider — should remain untouched)
+- [ ] **Step 2:** Write failing test `test_enqueue_rejects_duplicate` — call enqueue twice with same project+issue, assert second call errors with a clear message
+- [ ] **Step 3:** Write failing test `test_enqueue_rejects_unknown_project` — call enqueue with a project name not in V4Config, assert error names the configured projects
+- [ ] **Step 4:** Implement the enqueue command using the existing typer pattern from the other mutation commands (hold/resume/etc.)
+- [ ] **Step 5:** Run the 3 new tests, confirm PASS
+- [ ] **Step 6:** `just check` green
+- [ ] **Step 7:** Commit — `feat(v4/cli): foreman enqueue — direct ticket ingest bypassing Poller`
+
+---
+
+### Task 8d.11: Manual dogfood — drive algokit#21 to terminal Done
 
 **This is a manual task.**
 
-After 8d.0-8d.9 land:
+After 8d.0-8d.10 land:
 
 1. Inspect ticket #1 state: `FOREMAN_V4_CONFIG=~/.foreman/v4/config.toml uv run foreman show 1`
-2. Reset failure history if needed (delete SpecReview state_instances rows + reset `current_state='SpecReview'` — same procedure as today's dogfood reset)
-3. Resume the held ticket: `uv run foreman resume 1`
+2. Reset failure history if needed (delete SpecReview state_instances rows + reset `current_state='SpecReview'` — same procedure as today's dogfood reset), OR use `foreman enqueue --project algokit --issue-number 21` to start a fresh ticket if the existing one is too polluted.
+3. Resume the held ticket (if applicable): `uv run foreman resume <id>`
 4. Start daemon (background): `uv run foreman daemon start &`
-5. Watch `~/.foreman/v4/logs/transitions.jsonl` + `foreman ps` + `foreman show 1`
+5. Watch `~/.foreman/v4/logs/transitions.jsonl` + `foreman ps` + `foreman show <id>`
 6. Watch the algokit GitHub side: spec PR #22 review → merge → impl branch open → impl PR open → impl review → impl PR merge → issue #21 close
 
 **Acceptance criteria (one must hold):**
@@ -302,7 +331,7 @@ After 8d.0-8d.9 land:
 ## Phase 8d gate
 
 - [ ] `just check` green after every commit
-- [ ] Task 8d.10 reports the algokit#21 dogfood reached `Done` (or, per acceptance criteria above, a v4-working real-role-decision terminal)
-- [ ] Daemon survived >60min during 8d.10
+- [ ] Task 8d.11 reports the algokit#21 dogfood reached `Done` (or, per acceptance criteria above, a v4-working real-role-decision terminal)
+- [ ] Daemon survived >60min during 8d.11
 
-Phase 8d completion criterion: **v4's role CLIs are v4-native (no v3 label code, no v3 config/identity imports) AND v4 runs autonomously end-to-end on a real ticket.** Phase 9 (kill-set deletion + RUNBOOK + adversarial review + PR) is safe when 8d.10 succeeds.
+Phase 8d completion criterion: **v4's role CLIs are v4-native (no v3 label code, no v3 config/identity imports) AND v4 runs autonomously end-to-end on a real ticket.** Phase 9 (kill-set deletion + RUNBOOK + adversarial review + PR) is safe when 8d.11 succeeds.
