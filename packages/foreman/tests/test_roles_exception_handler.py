@@ -4,23 +4,20 @@ handler in every role runner.
 When an exception escapes the role's body (in particular, an unhandled
 provider exception that slipped past the typed
 :class:`StructuredOutputRetryError` / :class:`StructuredOutputMissingError`
-catches), the in-flight ticket label used to stay on the role's entry
-label (e.g. ``foreman:planning`` for the Planner). The dispatcher's
-next poll then re-dispatched the SAME role on the SAME ticket — the
-runaway burn (foreman#227 = 171 dispatches in 2h52m).
+catches), the role used to keep the ticket on its entry label and the
+dispatcher's next poll re-dispatched the SAME role on the SAME ticket
+— the runaway burn (foreman#227 = 171 dispatches in 2h52m).
 
-The fix: each role's outer ``except Exception:`` now ALSO
+Under v4 (Phase 8d.7), the role-side ``foreman:needs-help`` label
+write was dropped. The v4 state machine transitions to ``NeedsHelp``
+when the role subprocess reports failure, and
+:class:`LabelObservabilityObserver` writes the v4-namespaced
+``foreman:state-needs-help`` label. The role-side helper now only
 1. Posts a ticket comment carrying the exception type, message, and
    truncated traceback so the operator can diagnose without reading
    daemon logs.
-2. Transitions the ticket to ``foreman:needs-help`` (the terminal
-   blocking label) so the dispatcher stops re-dispatching until a
-   human removes the label.
-3. Writes a ``outcome="exception"`` row to the per-role JSONL stats
-   file for cost-attribution. The role's existing ``*_failed`` row is
-   NOT written when ``outcome="exception"`` is used — the new
-   defensive handler replaces, not augments, the pre-existing
-   exception-path stats write.
+2. Writes a ``outcome="exception"`` row to the per-role JSONL stats
+   file for cost-attribution.
 
 The tests below mirror the existing role-runner test fixtures (fake
 PyGithub surface for reviewer/worker/fixer, fake
@@ -41,7 +38,6 @@ import pytest
 
 from foreman.git_host import GitHostProvider, IssueRef, PRRef
 from foreman.roles import (
-    TERMINAL_BLOCKING_LABEL,
     build_exception_comment,
     handle_unhandled_role_exception,
 )
@@ -93,16 +89,6 @@ def _route_build_role_resources_through_fake_registry(
 # ----------------------------------------------------------------------
 
 
-def test_terminal_blocking_label_is_needs_help() -> None:
-    """Pin the literal value the helper transitions tickets to. If a
-    future refactor renames this constant without updating the four
-    role runners in lockstep, the daemon's GraphQL observer filter (which
-    also names ``foreman:needs-help`` explicitly) will silently drop
-    tickets and the runaway-burn regression resurrects.
-    """
-    assert TERMINAL_BLOCKING_LABEL == "foreman:needs-help"
-
-
 def test_build_exception_comment_names_role_type_and_traceback() -> None:
     """The posted comment body must carry: the role name, the exception
     type, the exception message, and a fenced traceback. Operators
@@ -118,9 +104,6 @@ def test_build_exception_comment_names_role_type_and_traceback() -> None:
     assert "simulated SDK failure" in body
     # Traceback fenced inside a code block so GitHub renders it readably.
     assert "```" in body
-    # And the runaway-burn rationale + remediation instruction is in the
-    # prose so the operator knows what to do.
-    assert TERMINAL_BLOCKING_LABEL in body
 
 
 def test_build_exception_comment_truncates_long_traceback() -> None:
@@ -145,18 +128,17 @@ def test_build_exception_comment_truncates_long_traceback() -> None:
     assert "(truncated)" in body
 
 
-def test_handle_unhandled_role_exception_calls_both_callbacks() -> None:
-    """The helper must post the comment AND transition the label — both
-    side effects fire even on the happy path. The original exception is
-    NOT raised by the helper itself; the caller does the bare ``raise``."""
+def test_handle_unhandled_role_exception_posts_comment() -> None:
+    """The helper must post the diagnostic comment. The original
+    exception is NOT raised by the helper itself; the caller does the
+    bare ``raise``. Phase 8d.7 dropped the role-side label transition
+    callback — v4's :class:`LabelObservabilityObserver` writes
+    ``foreman:state-needs-help`` after the state machine transitions
+    to ``NeedsHelp``."""
     post_comment_calls: list[str] = []
-    set_label_calls: list[int] = []
 
     def _post(body: str) -> None:
         post_comment_calls.append(body)
-
-    def _set_label() -> None:
-        set_label_calls.append(1)
 
     try:
         raise RuntimeError("simulated SDK failure")
@@ -166,43 +148,32 @@ def test_handle_unhandled_role_exception_calls_both_callbacks() -> None:
             issue_number=42,
             exc=exc,
             post_comment=_post,
-            set_needs_help_label=_set_label,
         )
 
     assert len(post_comment_calls) == 1
     assert "simulated SDK failure" in post_comment_calls[0]
-    assert len(set_label_calls) == 1
 
 
-def test_handle_unhandled_role_exception_label_transition_runs_even_when_post_fails() -> None:
-    """foreman#229: a GitHub 5xx during the comment post MUST NOT block
-    the label transition. The label transition is the load-bearing
-    defense; the comment is diagnostic. Both attempts are independent."""
-    set_label_calls: list[int] = []
+def test_handle_unhandled_role_exception_swallows_post_comment_failure() -> None:
+    """A GitHub 5xx during the comment post must not propagate out of
+    the helper — the caller's ``raise`` still surfaces the original
+    exception to the dispatcher, which is what drives v4's NeedsHelp
+    transition. The comment is diagnostic; losing it doesn't lose the
+    defense."""
 
     def _post_boom(body: str) -> None:
         raise RuntimeError("github API exploded")
 
-    def _set_label() -> None:
-        set_label_calls.append(1)
-
     try:
         raise RuntimeError("simulated SDK failure")
     except RuntimeError as exc:
-        # No exception escapes the helper — it logs the comment-post
-        # failure and proceeds to the label transition.
+        # No exception escapes the helper.
         handle_unhandled_role_exception(
             role="planner",
             issue_number=42,
             exc=exc,
             post_comment=_post_boom,
-            set_needs_help_label=_set_label,
         )
-
-    assert len(set_label_calls) == 1, (
-        "label transition must run even when comment post raised — the "
-        "label is the runaway-burn defense; the comment is diagnostic"
-    )
 
 
 # ----------------------------------------------------------------------
@@ -369,13 +340,14 @@ async def test_planner_unhandled_exception_posts_comment_transitions_label_and_l
     exception inside the Planner, ``run_planner`` must:
 
     1. Re-raise the original exception (so the daemon dispatcher still
-       sees a non-zero exit).
+       sees a non-zero exit; under v4 the role subprocess dies and the
+       :class:`SubprocessRoleDispatcher` reports failure, which drives
+       the state machine to ``NeedsHelp`` — that's the runaway-burn
+       defense now, not a role-side label write).
     2. Post a comment on the originating issue carrying the exception
        type / message / traceback (so an operator can diagnose without
        reading daemon logs).
-    3. Transition the issue to ``foreman:needs-help`` (so the dispatcher
-       stops re-dispatching at every poll — the runaway-burn defense).
-    4. Append a ``planner.jsonl`` row with ``outcome="exception"`` so
+    3. Append a ``planner.jsonl`` row with ``outcome="exception"`` so
        cost-attribution still captures the failed dispatch.
     """
     stats_root = tmp_path / "stats"
@@ -406,15 +378,12 @@ async def test_planner_unhandled_exception_posts_comment_transitions_label_and_l
             identity_registry=fake_registry,
         )
 
-    # The host saw a label transition adding foreman:needs-help.
-    assert fake_host.label_calls, (
-        "Planner exception handler must transition the issue to "
-        "foreman:needs-help so the dispatcher stops re-dispatching"
+    # The host saw the diagnostic comment posted on the originating issue.
+    assert fake_host.posted_comments, (
+        "Planner exception handler must post a diagnostic comment on "
+        "the originating issue so an operator can read the traceback "
+        "without spelunking daemon logs"
     )
-    added_labels: set[str] = set()
-    for _slug, _num, add, _remove in fake_host.label_calls:
-        added_labels.update(add)
-    assert "foreman:needs-help" in added_labels
 
     # JSONL row written with outcome="exception".
     jsonl = stats_root / "jeffrichley__voice" / "planner.jsonl"
@@ -448,9 +417,11 @@ async def test_reviewer_unhandled_exception_posts_comment_transitions_label_and_
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """foreman#229: when ``provider.run_agent`` raises an unhandled
-    exception inside the Reviewer, ``run_reviewer`` must transition the
-    originating ISSUE to ``foreman:needs-help`` and log
-    ``outcome="exception"`` to ``reviewer.jsonl``."""
+    exception inside the Reviewer, ``run_reviewer`` must re-raise (the
+    subprocess dies; v4 routes to ``NeedsHelp``) and log
+    ``outcome="exception"`` to ``reviewer.jsonl``. Phase 8d.7 dropped
+    the role-side ``foreman:needs-help`` write — the observer owns the
+    v4-namespaced label now."""
     from tests.test_roles_reviewer import (
         _FakeReviewerClient,
         _make_fake_repo,
@@ -486,14 +457,6 @@ async def test_reviewer_unhandled_exception_posts_comment_transitions_label_and_
             identity_registry=registry,
         )
 
-    # The Reviewer transitions the issue (not the PR) to needs-help.
-    issue.update()  # invalidate the cached labels (matches production discipline)
-    final_labels = {lbl.name for lbl in issue.labels}
-    assert "foreman:needs-help" in final_labels, (
-        f"Reviewer exception handler must transition the issue to "
-        f"foreman:needs-help; got labels={sorted(final_labels)!r}"
-    )
-
     # JSONL row written with outcome="exception".
     jsonl = stats_root / "jeffrichley__voice" / "reviewer.jsonl"
     assert jsonl.exists()
@@ -523,15 +486,13 @@ async def test_worker_unhandled_exception_posts_comment_transitions_label_and_lo
     is synthesized to ``outcome=incomplete`` and is NOT a runaway-burn
     case), ``run_worker`` must:
 
-    1. Re-raise the original exception.
-    2. Transition the issue to ``foreman:needs-help``.
-    3. Append a ``worker.jsonl`` row with ``outcome="exception"``.
+    1. Re-raise the original exception (under v4 the subprocess dies
+       and the state machine transitions to ``NeedsHelp``).
+    2. Append a ``worker.jsonl`` row with ``outcome="exception"``.
 
-    The Worker's existing ``finally:`` block reverts the entry-label
-    transition back to ``foreman:plan-approved`` — that revert is the
-    runaway burn it was supposed to fix. The new defensive handler
-    short-circuits the revert so the issue ends up at ``foreman:needs-help``
-    (the terminal blocking label), not back at the entry label.
+    Phase 8d.7 dropped the role-side ``foreman:needs-help`` label
+    write; :class:`LabelObservabilityObserver` writes
+    ``foreman:state-needs-help`` after the NeedsHelp transition.
     """
     from tests.test_roles_worker import (
         _FakeWorkerClient,
@@ -592,14 +553,6 @@ async def test_worker_unhandled_exception_posts_comment_transitions_label_and_lo
             identity_registry=registry,
         )
 
-    # Issue transitioned to needs-help.
-    issue.update()
-    final_labels = {lbl.name for lbl in issue.labels}
-    assert "foreman:needs-help" in final_labels, (
-        f"Worker exception handler must transition the issue to "
-        f"foreman:needs-help; got labels={sorted(final_labels)!r}"
-    )
-
     # JSONL row written with outcome="exception".
     jsonl = stats_root / "jeffrichley__voice" / "worker.jsonl"
     assert jsonl.exists()
@@ -625,9 +578,11 @@ async def test_fixer_unhandled_exception_posts_comment_transitions_label_and_log
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """foreman#229: when ``provider.run_agent`` raises an unhandled
-    exception inside the Fixer, ``run_fixer`` must transition the issue
-    to ``foreman:needs-help`` and log ``outcome="exception"`` to
-    ``fixer.jsonl``."""
+    exception inside the Fixer, ``run_fixer`` must re-raise (the
+    subprocess dies; v4 routes to ``NeedsHelp``) and log
+    ``outcome="exception"`` to ``fixer.jsonl``. Phase 8d.7 dropped the
+    role-side ``foreman:needs-help`` write — the observer owns the
+    v4-namespaced label now."""
     from tests.test_roles_fixer import (
         _FakeFixerClient,
         _make_fake_repo,
@@ -662,14 +617,6 @@ async def test_fixer_unhandled_exception_posts_comment_transitions_label_and_log
             provider=fake_provider,
             identity_registry=registry,
         )
-
-    # Issue transitioned to needs-help.
-    issue.update()
-    final_labels = {lbl.name for lbl in issue.labels}
-    assert "foreman:needs-help" in final_labels, (
-        f"Fixer exception handler must transition the issue to "
-        f"foreman:needs-help; got labels={sorted(final_labels)!r}"
-    )
 
     # JSONL row written with outcome="exception".
     jsonl = stats_root / "jeffrichley__voice" / "fixer.jsonl"

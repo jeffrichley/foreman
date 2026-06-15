@@ -44,7 +44,6 @@ from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
 from foreman.providers import ProviderError
 from foreman.roles import (
-    TERMINAL_BLOCKING_LABEL,
     build_role_resources,
     handle_unhandled_role_exception,
 )
@@ -284,9 +283,13 @@ async def run_planner(
                 duration_seconds=duration_seconds,
             )
         # foreman#229: runaway-burn defense. Post the traceback as a
-        # comment on the originating issue and transition it to
-        # ``foreman:needs-help`` so the dispatcher's poll loop stops
-        # re-dispatching the same role on the same ticket.
+        # comment on the originating issue so the operator sees the
+        # crash without spelunking daemon logs. Under v4 the
+        # NeedsHelp-state transition (and its
+        # ``foreman:state-needs-help`` label) is owned by the state
+        # machine + :class:`LabelObservabilityObserver`; the role no
+        # longer writes the v3-namespaced ``foreman:needs-help`` itself
+        # (Phase 8d.7).
         if host is not None and actual_repo_slug is not None and issue_number is not None:
             bound_host = host
             bound_repo_slug = actual_repo_slug
@@ -297,12 +300,6 @@ async def run_planner(
                 exc=exc,
                 post_comment=lambda body: bound_host.post_issue_comment(
                     bound_repo_slug, bound_issue_number, body
-                ),
-                set_needs_help_label=lambda: bound_host.update_issue_labels(
-                    bound_repo_slug,
-                    bound_issue_number,
-                    add=[TERMINAL_BLOCKING_LABEL],
-                    remove=[],
                 ),
             )
 

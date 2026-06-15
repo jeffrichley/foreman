@@ -44,7 +44,6 @@ from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
 from foreman.providers import ProviderError
 from foreman.roles import (
-    TERMINAL_BLOCKING_LABEL,
     build_role_resources,
     handle_unhandled_role_exception,
 )
@@ -459,9 +458,12 @@ async def run_reviewer(
                 role_data={"target": target},
                 duration_seconds=duration_seconds,
             )
-        # foreman#229: runaway-burn defense. Phase 8d.7 will drop the
-        # role-side ``foreman:needs-help`` write (the observer takes over);
-        # for now the existing handler stays in place.
+        # foreman#229: runaway-burn defense. Phase 8d.7 dropped the
+        # role-side ``foreman:needs-help`` write — the v4 state machine
+        # transitions to ``NeedsHelp`` when the role subprocess reports
+        # failure, and :class:`LabelObservabilityObserver` writes
+        # ``foreman:state-needs-help``. The role-side helper only posts
+        # the diagnostic comment now.
         if issue is not None and issue_number is not None:
             bound_issue = issue
             handle_unhandled_role_exception(
@@ -469,7 +471,6 @@ async def run_reviewer(
                 issue_number=issue_number,
                 exc=exc,
                 post_comment=lambda body: bound_issue.create_comment(body),
-                set_needs_help_label=lambda: bound_issue.add_to_labels(TERMINAL_BLOCKING_LABEL),
             )
 
     try:
