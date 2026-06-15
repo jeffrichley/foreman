@@ -15,10 +15,9 @@ host-platform operations through the
   6. Parse the ``PlannerOutput``
   7. Commit the spec doc (``host.commit_files_to_worktree``)
   8. Push the branch (``host.push_branch``)
-  9. Open the spec PR (``host.open_pull_request``). The issue stays at
-      ``foreman:planning`` so v3's reconciler (``dispatch_reviewer_spec``)
-      fires on ``foreman:planning`` + the open spec PR — no label mutation
-      needed here.
+  9. Open the spec PR (``host.open_pull_request``). The Planner makes
+      no label mutations — under v4, ``LabelObservabilityObserver`` owns
+      every ``foreman:*`` label write off state transitions.
   10. Return :class:`~foreman.schemas.planner.PlannerRunResult`
 
 Decoupling rationale (Foreman issue #8 — the "Looper pattern"):
@@ -400,27 +399,10 @@ async def run_planner(
         # row still reports the PR number — non-zero signal that the
         # PR opened before whatever broke.
         pr_number = pr.number
-        # v3 label vocabulary: Planner writes ZERO labels. The issue stays
-        # at ``foreman:planning`` (the entry label) after the spec PR opens;
-        # v3's reconciler ``dispatch_reviewer_spec`` rule then fires on
-        # ``foreman:planning`` + an open spec PR. No host label mutation
-        # happens here.
-        #
-        # Historical note: a prior revision attempted a best-effort cleanup
-        # of the legacy ``foreman:plan`` entry label on v2-era tickets. That
-        # cleanup raised PyGithub ``GithubException(404)`` on every fresh v3
-        # ticket (which never carries ``foreman:plan``) because
-        # ``issue.remove_from_labels`` 404s when the label is absent. Since
-        # ``foreman init`` no longer creates ``foreman:plan`` (PR #111), the
-        # cleanup is a back-compat tail that's no longer worth its crash
-        # surface. v2-era tickets that still carry the label must be
-        # cleaned up manually.
-
-        # foreman#91: compute final_labels deterministically from the
-        # pre-mutation set (``issue.labels`` is the snapshot taken by
-        # ``host.get_issue`` above) + the role's known transitions.
-        # v3: the Planner makes no label changes, so the final set is just
-        # the pre-mutation set (sorted for stability).
+        # The Planner does not mutate labels. Under v4,
+        # ``LabelObservabilityObserver`` owns every ``foreman:*`` write off
+        # state transitions; ``final_labels`` here is just the pre-call
+        # snapshot returned for the daemon's audit trail.
         final_labels = sorted(set(issue.labels))
 
         duration_seconds = time.monotonic() - start_time
