@@ -68,12 +68,10 @@ def test_merge_spec_pr_marks_merged():
 
 
 def test_write_labels_records_call_and_is_queryable():
-    """write_labels accumulates per-call sets (one per call). set_issue_labels
-    returns the most recently written set. That shape lets observer tests
-    assert both the latest label state AND the call sequence."""
+    """A single write_labels call's labels are queryable via get_issue_labels."""
     git = FakeGitProvider()
     git.write_labels(project="p", issue_number=42, labels={"foreman:state-planning"})
-    assert git.set_issue_labels(project="p", issue_number=42) == {
+    assert git.get_issue_labels(project="p", issue_number=42) == {
         "foreman:state-planning",
     }
 
@@ -82,9 +80,9 @@ def test_write_labels_overwrites_prior_set_on_repeated_call():
     git = FakeGitProvider()
     git.write_labels(project="p", issue_number=42, labels={"a"})
     git.write_labels(project="p", issue_number=42, labels={"b", "c"})
-    assert git.set_issue_labels(project="p", issue_number=42) == {"b", "c"}
+    assert git.get_issue_labels(project="p", issue_number=42) == {"b", "c"}
 
 
 def test_write_labels_unseen_issue_defaults_to_empty_set():
     git = FakeGitProvider()
-    assert git.set_issue_labels(project="p", issue_number=999) == set()
+    assert git.get_issue_labels(project="p", issue_number=999) == set()

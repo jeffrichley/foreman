@@ -113,9 +113,8 @@ class FakeGitProvider:
         """Replace-semantics matches PyGithub's ``issue.set_labels``."""
         self._issue_labels[(project, issue_number)] = set(labels)
 
-    def set_issue_labels(
+    def get_issue_labels(
         self, *, project: str, issue_number: int,
     ) -> set[str]:
-        """Inspect-only: the most recently written label set, or an
-        empty set if nothing has been written for this issue."""
-        return set(self._issue_labels.get((project, issue_number), set()))
+        """Return the labels last recorded by ``write_labels`` for this issue."""
+        return self._issue_labels.get((project, issue_number), set())
