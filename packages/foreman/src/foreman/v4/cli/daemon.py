@@ -43,6 +43,37 @@ _PID_PATH = Path.home() / ".foreman" / "v4" / "daemon.pid"
 _SIGHUP: int | None = getattr(signal, "SIGHUP", None)
 
 
+def _is_pid_alive(pid: int) -> bool:
+    """Probe whether ``pid`` corresponds to a live process.
+
+    POSIX: ``os.kill(pid, 0)`` raises ``ProcessLookupError`` for a dead
+    PID; any other OSError indicates the PID is alive but inaccessible
+    (typically EPERM).
+
+    Windows: ``os.kill(pid, 0)`` raises bare ``OSError`` with
+    ``winerror == 87`` (``ERROR_INVALID_PARAMETER``) when the PID is
+    not a live process. Other winerror values — most commonly
+    ``5`` (``ERROR_ACCESS_DENIED``) — indicate the PID is alive but
+    inaccessible. Treat those as alive so ``cmd_daemon_status`` does
+    not falsely report a running daemon as stale.
+
+    ``getattr(exc, "winerror", None)`` is the cross-platform read:
+    ``winerror`` only exists on OSError instances raised on Windows,
+    so the default-None pattern keeps the helper clean on POSIX.
+    """
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError as exc:
+        # Windows-specific narrowing: winerror 87 = PID isn't a live
+        # process. Anything else means alive-but-can't-query.
+        if getattr(exc, "winerror", None) == 87:
+            return False
+        return True
+
+
 def _build_sighup_handler(config: V4Config) -> Callable[..., None]:
     """Build the SIGHUP handler closure used by ``cmd_daemon_start``.
 
@@ -104,17 +135,25 @@ def cmd_daemon_stop(ctx: typer.Context) -> None:
         typer.echo("no daemon PID file", err=True)
         raise typer.Exit(code=1)
     pid = int(_PID_PATH.read_text().strip())
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except (ProcessLookupError, OSError):
-        # POSIX raises ProcessLookupError for a dead PID; Windows
-        # raises a bare OSError ([WinError 87]) from os.kill when
-        # the PID isn't a live process. Both names listed for
-        # documentation — ProcessLookupError is already an OSError
-        # subclass, so the tuple is functionally one catch.
+    if not _is_pid_alive(pid):
         typer.echo(f"PID {pid} not running; cleaning stale file")
         _PID_PATH.unlink()
         return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, OSError) as exc:
+        # Race: process died between the liveness check and the
+        # SIGTERM. Same outcome as the up-front stale path. We
+        # re-raise any other OSError so e.g. a Windows access-denied
+        # (winerror 5) surfaces instead of being silently swallowed.
+        if (
+            isinstance(exc, ProcessLookupError)
+            or getattr(exc, "winerror", None) == 87
+        ):
+            typer.echo(f"PID {pid} not running; cleaning stale file")
+            _PID_PATH.unlink()
+            return
+        raise
     typer.echo(f"sent SIGTERM to {pid}")
 
 
@@ -123,13 +162,9 @@ def cmd_daemon_status(ctx: typer.Context) -> None:
         typer.echo("daemon: not running")
         return
     pid = int(_PID_PATH.read_text().strip())
-    try:
-        os.kill(pid, 0)
+    if _is_pid_alive(pid):
         typer.echo(f"daemon: running (pid {pid})")
-    except (ProcessLookupError, OSError):
-        # Same cross-OS asymmetry as cmd_daemon_stop — POSIX raises
-        # ProcessLookupError; Windows raises bare OSError from a
-        # probe-kill against a dead PID. Treat both as 'stale'.
+    else:
         typer.echo(f"daemon: stale PID file (pid {pid} not alive)")
 
 
