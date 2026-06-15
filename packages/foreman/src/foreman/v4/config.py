@@ -44,11 +44,17 @@ Schema:
   right failure mode.
 
   [orchestrator]
-    pat_env_var - Name of the env var holding the orchestrator PAT.
-                  Default "FOREMAN_ORCHESTRATOR_PAT". Block itself is
-                  optional; an absent [orchestrator] block uses the
-                  default. The loader does NOT read the env var; that
-                  happens in main() at IdentityRegistry construction.
+    app_id           - GitHub App numeric ID for the orchestrator-level
+                       (non-role) bot.
+    private_key_path - PEM file path on disk for the orchestrator App.
+                       The loader does NOT read it; main() converts the
+                       string + reads the PEM at IdentityRegistry
+                       construction time.
+
+  Note: the [orchestrator] block is REQUIRED. Task 8.4 pivoted away
+  from a long-lived env-var PAT to short-lived App-installation
+  tokens — the Google-style default — so the daemon literally needs an
+  app_id + private_key_path to mint orchestrator-level tokens.
 
   [[projects]]
     name              - project slug
@@ -104,15 +110,24 @@ class AppsConfig(BaseModel):
 
 
 class OrchestratorConfig(BaseModel):
-    """Orchestrator-level (non-role) PAT configuration.
+    """Orchestrator-level (non-role) GitHub App identity.
 
-    Indirection through an env var name (rather than the PAT itself)
-    keeps the secret out of the on-disk config file. main() reads the
-    env var at startup; the loader only validates the var name.
+    Task 8.4 pivoted away from long-lived env-var PATs to short-lived,
+    auto-refreshing App installation tokens — the same shape as the
+    per-role :class:`AppCredentials`. The orchestrator still gets its
+    own App (separate identity for non-role operations like reading
+    open issues during polling); the token-minting flow goes through
+    :func:`foreman.auth.mint_installation_token` at runtime.
+
+    ``private_key_path`` is a string, not a ``Path``: the loader does
+    not read the PEM file. main() (Task 8.4) hands it to
+    :class:`~foreman.v4.identity.V4IdentityRegistry`, which reads the
+    PEM at token-mint time.
     """
 
     model_config = ConfigDict(extra="forbid")
-    pat_env_var: str = "FOREMAN_ORCHESTRATOR_PAT"
+    app_id: int
+    private_key_path: str
 
 
 class V4Config(BaseModel):
@@ -125,7 +140,11 @@ class V4Config(BaseModel):
     role_timeout_seconds: int = 600
     merge_mechanism: Literal["queue", "merge", "squash", "rebase"] = "queue"
     apps: AppsConfig
-    orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
+    # Task 8.4: orchestrator is REQUIRED (no default). Google-style App
+    # installation credentials are the only supported path — there is no
+    # PAT-env-var fallback. A missing [orchestrator] block raises
+    # ValidationError at load time, same as the per-role [apps.*] blocks.
+    orchestrator: OrchestratorConfig
     projects: list[ProjectConfig] = Field(default_factory=list)
 
 
@@ -139,18 +158,18 @@ def load_config(path: Path) -> V4Config:
     raw = tomllib.loads(path.read_text(encoding="utf-8"))
     daemon = raw.get("daemon", {})
     projects = raw.get("projects", [])
-    orchestrator = raw.get("orchestrator", {})
-    # ``apps`` is required — when [apps] is absent we hand a dict
-    # without that key to Pydantic, which raises a clear
-    # "Field required" error on ``apps``. Going through model_validate
-    # (rather than V4Config(apps=raw.get("apps"))) keeps the loader
-    # mypy-clean — passing ``Any | None`` to a non-optional ``AppsConfig``
-    # parameter would otherwise reject at typecheck.
+    # ``apps`` and ``orchestrator`` are both required (Task 8.4).
+    # When the block is absent we leave the key out of the payload so
+    # Pydantic surfaces a clean ``Field required`` error naming the
+    # missing field, instead of validating an empty dict against the
+    # required-field schema (which would still fail but with messier
+    # output mentioning every missing subfield).
     payload: dict[str, object] = {
         **daemon,
-        "orchestrator": orchestrator,
         "projects": projects,
     }
     if "apps" in raw:
         payload["apps"] = raw["apps"]
+    if "orchestrator" in raw:
+        payload["orchestrator"] = raw["orchestrator"]
     return V4Config.model_validate(payload)

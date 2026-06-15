@@ -8,13 +8,13 @@ from pydantic import ValidationError
 
 from foreman.v4.config import ProjectConfig, load_config
 
-# Shared `[apps.*]` block used by every existing test. As of Task 8.3
-# `apps` is REQUIRED on V4Config — leaving it out raises ValidationError
-# at load time, which is the intended production behavior (the daemon
-# refuses to start without per-role identity wiring). Concatenating this
-# helper into each test's TOML keeps the existing assertions focused on
-# what they're actually testing (merge_mechanism, projects, etc.) instead
-# of rewriting every TOML string inline.
+# Shared `[apps.*]` + `[orchestrator]` blocks used by every existing
+# test. As of Task 8.3 `apps` is REQUIRED on V4Config; Task 8.4 makes
+# `orchestrator` REQUIRED too (pivoted from env-var PAT to App
+# installation credentials — same shape as the per-role apps).
+# Concatenating this helper into each test's TOML keeps the existing
+# assertions focused on what they're actually testing (merge_mechanism,
+# projects, etc.) instead of rewriting every TOML string inline.
 _APPS_TOML = (
     '[apps.planner]\n'
     'app_id = 12345\n'
@@ -28,6 +28,9 @@ _APPS_TOML = (
     '[apps.worker]\n'
     'app_id = 12348\n'
     'private_key_path = "/tmp/fake-worker.pem"\n'
+    '[orchestrator]\n'
+    'app_id = 12349\n'
+    'private_key_path = "/tmp/fake-orchestrator.pem"\n'
 )
 
 
@@ -220,10 +223,10 @@ def test_missing_role_app_raises(tmp_path: Path):
 
 
 def test_apps_orchestrator_round_trip(tmp_path: Path):
-    """Task 8.3: full valid config round-trips through Pydantic. Each
+    """Task 8.4: full valid config round-trips through Pydantic. Each
     role's ``app_id`` + ``private_key_path`` is reachable from the
-    loaded V4Config, and an explicit ``[orchestrator]`` block overrides
-    the default env-var name."""
+    loaded V4Config, and the ``[orchestrator]`` block carries its own
+    App installation credentials (no env-var PAT)."""
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         '[daemon]\n'
@@ -242,7 +245,8 @@ def test_apps_orchestrator_round_trip(tmp_path: Path):
         'app_id = 12348\n'
         'private_key_path = "/tmp/fake-worker.pem"\n'
         '[orchestrator]\n'
-        'pat_env_var = "MY_CUSTOM_PAT_ENV"\n'
+        'app_id = 99999\n'
+        'private_key_path = "/tmp/fake-orchestrator.pem"\n'
         '[[projects]]\n'
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
@@ -257,22 +261,39 @@ def test_apps_orchestrator_round_trip(tmp_path: Path):
     assert config.apps.fixer.private_key_path == "/tmp/fake-fixer.pem"
     assert config.apps.worker.app_id == 12348
     assert config.apps.worker.private_key_path == "/tmp/fake-worker.pem"
-    assert config.orchestrator.pat_env_var == "MY_CUSTOM_PAT_ENV"
+    assert config.orchestrator.app_id == 99999
+    assert config.orchestrator.private_key_path == "/tmp/fake-orchestrator.pem"
 
 
-def test_orchestrator_default_when_omitted(tmp_path: Path):
-    """Task 8.3: ``[orchestrator]`` is optional. Absent block means the
-    default env-var name (``FOREMAN_ORCHESTRATOR_PAT``) applies."""
+def test_missing_orchestrator_raises(tmp_path: Path):
+    """Task 8.4: ``[orchestrator]`` is REQUIRED. The pivot from env-var
+    PAT to App installation tokens means the daemon literally needs an
+    ``app_id`` + ``private_key_path`` to mint orchestrator-level
+    tokens — no default makes sense. A missing block raises
+    ValidationError at load time, same as the per-role [apps.*] blocks."""
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         '[daemon]\n'
         'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n'
-        + _APPS_TOML +
+        '[apps.planner]\n'
+        'app_id = 12345\n'
+        'private_key_path = "/tmp/fake-planner.pem"\n'
+        '[apps.reviewer]\n'
+        'app_id = 12346\n'
+        'private_key_path = "/tmp/fake-reviewer.pem"\n'
+        '[apps.fixer]\n'
+        'app_id = 12347\n'
+        'private_key_path = "/tmp/fake-fixer.pem"\n'
+        '[apps.worker]\n'
+        'app_id = 12348\n'
+        'private_key_path = "/tmp/fake-worker.pem"\n'
+        # No [orchestrator] block.
         '[[projects]]\n'
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
     )
-    config = load_config(config_path)
-    assert config.orchestrator.pat_env_var == "FOREMAN_ORCHESTRATOR_PAT"
+    with pytest.raises(ValidationError) as exc_info:
+        load_config(config_path)
+    assert "orchestrator" in str(exc_info.value)
