@@ -139,6 +139,18 @@ def main() -> None:
     """Console-script entry point. Loads config, bootstraps the object
     graph, then invokes the typer app with the prepared context.
     """
+    if os.environ.get("FOREMAN_DRY_RUN") == "1":
+        # Real-fork integration-test path (Task 8.6). Skip bootstrap
+        # entirely — no config load, no identity, no PyGithub. The role
+        # CLIs (run_planner_cli / run_reviewer_cli / run_fixer_cli /
+        # run_worker_cli) check the same flag and short-circuit to a
+        # canned outcome. Query / daemon / mutation commands are out of
+        # scope for dry-run; the only commands exercised under
+        # FOREMAN_DRY_RUN are the four role subcommands, which don't
+        # touch the typer context.
+        app()
+        return
+
     # Local imports keep the typer app importable for tests without
     # requiring PyGithub or any App credentials to be configured.
     from github import Github

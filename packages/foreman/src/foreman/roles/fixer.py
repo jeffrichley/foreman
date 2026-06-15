@@ -1042,6 +1042,20 @@ def run_fixer_cli(*, project: str, issue_number: int, target: str) -> int:
     label-writing tail in this module are tagged ``v4-PHASE-8-KILL``
     and deleted together in Phase 8.
     """
+    if os.environ.get("FOREMAN_DRY_RUN") == "1":
+        # Short-circuit for the Task 8.6 real-fork integration test. Emits
+        # a canned CLEAN outcome without any provider / GitHub / worktree
+        # work. The chain being exercised here is typer → role entry →
+        # emit_outcome → parser → exit code — the role's actual work is
+        # out of scope for this test path.
+        emit_outcome(
+            Outcome(
+                kind=OutcomeKind.CLEAN,
+                confidence=OutcomeConfidence.HIGH,
+                summary="dry-run",
+            )
+        )
+        return 0
     try:
         result = _run_fixer_for_v4(
             project=project, issue_number=issue_number, target=target
