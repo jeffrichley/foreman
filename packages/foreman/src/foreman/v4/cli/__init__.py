@@ -140,26 +140,45 @@ def main() -> None:
     graph, then invokes the typer app with the prepared context.
     """
     # Local imports keep the typer app importable for tests without
-    # requiring the identity module or PyGithub to be configured.
+    # requiring PyGithub or any App credentials to be configured.
     from github import Github
 
-    from foreman import identity
     from foreman.v4.bootstrap import bootstrap_cli_context
     from foreman.v4.config import load_config
+    from foreman.v4.identity import V4IdentityRegistry
     from foreman.v4.pygithub_git_provider import PyGithubGitProvider
 
     config_path = Path(os.environ.get("FOREMAN_V4_CONFIG", _DEFAULT_CONFIG))
     config = load_config(config_path)
 
+    # Single-installation-per-role-bot assumption (see
+    # ``foreman.v4.identity`` module docstring): the orchestrator's App
+    # installation-id lookup needs *some* repo the App is installed in.
+    # v4 assumes every v4-managed repo shares the same per-role App
+    # installation, so any project's repo works; we pick the first
+    # project's repo deterministically. A zero-project config can't
+    # mint orchestrator tokens, so refuse to start with a clear message.
+    if not config.projects:
+        raise RuntimeError(
+            "V4Config has no projects — daemon cannot identify which "
+            "repo to use for App installation lookup. Add at least one "
+            "[[projects]] block.",
+        )
+    identity = V4IdentityRegistry(
+        apps=config.apps,
+        orchestrator=config.orchestrator,
+        installation_repo=config.projects[0].repo,
+    )
+
     def _git_factory(repo: str) -> PyGithubGitProvider:
         # Reuse the identity layer's "orchestrator" token for read paths;
         # role-specific tokens flow through SubprocessRoleDispatcher.
-        token = identity.get_role_token("orchestrator")  # type: ignore[attr-defined]
+        token = identity.get_role_token("orchestrator")
         return PyGithubGitProvider(github=Github(token), repo_full_name=repo)
 
     ctx = bootstrap_cli_context(
         config=config,
-        identity=identity,  # type: ignore[arg-type]
+        identity=identity,
         git_provider_factory=_git_factory,
     )
     app(obj=ctx)

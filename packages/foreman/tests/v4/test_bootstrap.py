@@ -8,7 +8,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from foreman.v4.bootstrap import bootstrap_cli_context
-from foreman.v4.config import AppCredentials, AppsConfig, ProjectConfig, V4Config
+from foreman.v4.config import (
+    AppCredentials,
+    AppsConfig,
+    OrchestratorConfig,
+    ProjectConfig,
+    V4Config,
+)
 from foreman.v4.git_provider import FakeGitProvider
 from foreman.v4.logging_config import reset_logging
 from foreman.v4.observers.event_archive import EventArchiveObserver
@@ -54,11 +60,21 @@ def _apps_config() -> AppsConfig:
     return AppsConfig(planner=creds, reviewer=creds, fixer=creds, worker=creds)
 
 
+def _orchestrator_config() -> OrchestratorConfig:
+    """Task 8.4: V4Config now requires ``orchestrator`` too — the
+    Google-style App installation pivot dropped the env-var PAT
+    fallback. Same compact-fakes pattern as :func:`_apps_config`."""
+    return OrchestratorConfig(
+        app_id=99999, private_key_path="/tmp/fake-orchestrator.pem",
+    )
+
+
 def test_bootstrap_returns_clicontext_with_all_fields(tmp_path: Path):
     config = V4Config(
         db_path=str(tmp_path / "foreman.db"),
         log_dir=str(tmp_path / "logs"),
         apps=_apps_config(),
+        orchestrator=_orchestrator_config(),
         projects=[
             ProjectConfig(
                 name="voice", repo="owner/voice",
@@ -83,6 +99,7 @@ def test_db_file_created_at_configured_path(tmp_path: Path):
         db_path=str(db_path),
         log_dir=str(tmp_path / "logs"),
         apps=_apps_config(),
+        orchestrator=_orchestrator_config(),
         projects=[
             ProjectConfig(
                 name="voice", repo="owner/voice",
@@ -105,6 +122,7 @@ def test_bootstrap_builds_one_poller_per_project(tmp_path: Path):
         db_path=str(tmp_path / "v4.db"),
         log_dir=str(tmp_path / "logs"),
         apps=_apps_config(),
+        orchestrator=_orchestrator_config(),
         projects=[
             ProjectConfig(name="a", repo="o/a", local_clone_path=str(tmp_path / "a")),
             ProjectConfig(name="b", repo="o/b", local_clone_path=str(tmp_path / "b")),
@@ -132,6 +150,7 @@ def test_bootstrap_wires_event_bus_with_standard_observers(tmp_path: Path):
         db_path=str(tmp_path / "v4.db"),
         log_dir=str(tmp_path / "logs"),
         apps=_apps_config(),
+        orchestrator=_orchestrator_config(),
         projects=[
             ProjectConfig(
                 name="voice", repo="owner/voice",
@@ -171,6 +190,7 @@ def test_bootstrap_skips_label_observer_when_no_projects(tmp_path: Path):
         db_path=str(tmp_path / "v4.db"),
         log_dir=str(tmp_path / "logs"),
         apps=_apps_config(),
+        orchestrator=_orchestrator_config(),
         projects=[],
     )
     ctx = bootstrap_cli_context(

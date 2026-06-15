@@ -61,6 +61,13 @@ def test_full_boot_from_toml_to_done(tmp_path: Path, monkeypatch):
         f"[apps.worker]\n"
         f'app_id = 12348\n'
         f'private_key_path = "/tmp/fake-worker.pem"\n'
+        # Task 8.4: [orchestrator] is now required too — App
+        # installation creds, not env-var PAT. Same fake-on-disk-path
+        # treatment as the per-role apps; identity is a MagicMock below
+        # so no PEM read ever fires.
+        f"[orchestrator]\n"
+        f'app_id = 99999\n'
+        f'private_key_path = "/tmp/fake-orchestrator.pem"\n'
         f"[[projects]]\n"
         f'name = "p"\n'
         f'repo = "owner/p"\n'
