@@ -64,6 +64,9 @@ def _root(
         typer.echo(ctx.get_help())
 
 
+# Project bootstrap.
+app.command("init")(cmd_init)
+
 # Query + log + mutation commands wired. Daemon lifecycle commands land in
 # the daemon_app sub-typer below.
 app.command("ps")(cmd_ps)
@@ -76,7 +79,6 @@ app.command("retry")(cmd_retry)
 app.command("skip")(cmd_skip)
 app.command("drop")(cmd_drop)
 app.command("set-state")(cmd_set_state)
-app.command("init")(cmd_init)
 
 
 daemon_app = typer.Typer(name="daemon", help="Daemon lifecycle")

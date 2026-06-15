@@ -10,6 +10,7 @@ own coverage in ``tests/test_init.py``).
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from typer.testing import CliRunner
 
@@ -81,7 +82,7 @@ private_key_path = "/tmp/fake-orch.pem"
     return cfg_path
 
 
-def _stub_helpers(monkeypatch, *, calls: dict[str, object]) -> None:
+def _stub_helpers(monkeypatch, *, calls: dict[str, Any]) -> None:
     """Monkeypatch all v3 helpers cmd_init calls into recording stubs.
 
     ``calls`` is a shared dict the stubs populate so the test can
@@ -111,7 +112,7 @@ def _stub_helpers(monkeypatch, *, calls: dict[str, object]) -> None:
         return (["foreman:plan"], ["foreman:done"])
 
     def fake_verify_bot(*, role, apps, repo_slug):
-        calls.setdefault("verify_bot_roles", []).append(role)  # type: ignore[union-attr]
+        calls.setdefault("verify_bot_roles", []).append(role)
         calls.setdefault("verify_bot_repo", repo_slug)
         return BotVerification(role=role, ok=True, detail="OK")
 
@@ -200,7 +201,7 @@ def test_init_calls_helpers_in_order(tmp_path: Path, monkeypatch):
     cfg_path = _v4_config_toml(tmp_path, projects=[project_cfg])
     monkeypatch.setenv("FOREMAN_V4_CONFIG", str(cfg_path))
 
-    calls: dict[str, object] = {}
+    calls: dict[str, Any] = {}
     _stub_helpers(monkeypatch, calls=calls)
 
     result = CliRunner().invoke(app, ["init", "algokit"])
