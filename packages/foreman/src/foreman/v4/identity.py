@@ -51,8 +51,6 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
-from pathlib import Path
 
 from foreman.auth import InstallationToken, mint_installation_token
 from foreman.v4.config import AppCredentials, AppsConfig, OrchestratorConfig
@@ -63,17 +61,6 @@ from foreman.v4.config import AppCredentials, AppsConfig, OrchestratorConfig
 _REFRESH_SAFETY_SECONDS = 300
 
 _KNOWN_ROLES = ("planner", "reviewer", "fixer", "worker", "orchestrator")
-
-
-@dataclass
-class _CachedToken:
-    """Internal cache cell: a minted token + the inputs it was minted for.
-
-    The (role, repo_slug) key in the cache dict is enough to identify
-    the entry; the token's ``expires_at`` drives refresh decisions.
-    """
-
-    token: InstallationToken
 
 
 class V4IdentityRegistry:
@@ -118,7 +105,7 @@ class V4IdentityRegistry:
         self._apps = apps
         self._orchestrator = orchestrator
         self._installation_repo = installation_repo
-        self._cache: dict[tuple[str, str], _CachedToken] = {}
+        self._cache: dict[tuple[str, str], InstallationToken] = {}
         self._clock = clock
 
     def get_role_token(self, role: str) -> str:
@@ -135,13 +122,13 @@ class V4IdentityRegistry:
         key = (role, repo_slug)
         cached = self._cache.get(key)
         now = int(self._clock())
-        if cached is not None and cached.token.expires_at - now > _REFRESH_SAFETY_SECONDS:
-            return cached.token.token
+        if cached is not None and cached.expires_at - now > _REFRESH_SAFETY_SECONDS:
+            return cached.token
         # Mint (or refresh) — token is missing or near expiry.
         token = mint_installation_token(
-            creds.app_id, Path(creds.private_key_path), repo_slug,
+            creds.app_id, creds.private_key_path, repo_slug,
         )
-        self._cache[key] = _CachedToken(token=token)
+        self._cache[key] = token
         return token.token
 
     def _resolve(self, role: str) -> tuple[AppCredentials, str]:
