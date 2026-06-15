@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import typer
 
+from foreman.v4.cli.log import cmd_log
 from foreman.v4.cli.ps import cmd_ps
 from foreman.v4.cli.queue import cmd_queue
 from foreman.v4.cli.show import cmd_show
@@ -37,16 +38,12 @@ def _root(
         typer.echo(ctx.get_help())
 
 
-# Real query commands land via Task 6.2; mutation + log commands still
-# stub-only until their respective tasks (6.3, 6.4) replace them.
+# Real query + log commands wired; mutation commands still stub-only until
+# Task 6.4 replaces them.
 app.command("ps")(cmd_ps)
 app.command("show")(cmd_show)
 app.command("queue")(cmd_queue)
-
-
-@app.command("log")
-def _log_stub() -> None:
-    typer.echo("log — replaced in Task 6.3")
+app.command("log")(cmd_log)
 
 
 @app.command("hold")
