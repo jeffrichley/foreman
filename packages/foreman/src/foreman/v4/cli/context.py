@@ -14,18 +14,14 @@ the type checker flags every site that hasn't migrated.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from foreman.v4.daemon import Daemon
     from foreman.v4.git_provider import GitProvider
     from foreman.v4.queue_manager import QueueManager
     from foreman.v4.repository import TicketRepository
     from foreman.v4.role_dispatcher import RoleDispatcher
-
-    # Phase 6.5 introduces foreman.v4.daemon.Daemon. Until then, keep the
-    # field type-erased (Any) so the dataclass shape exists without
-    # forward-referencing a module that hasn't landed yet.
-    Daemon = Any
 
 
 @dataclass(frozen=True, slots=True)
