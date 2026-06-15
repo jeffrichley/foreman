@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 
 from foreman.v4.cli import app
 from foreman.v4.cli.context import build_cli_context
-from foreman.v4.cli.daemon import _build_sighup_handler, _is_pid_alive
+from foreman.v4.cli.daemon import _build_sighup_handler
 from foreman.v4.config import (
     AppCredentials,
     AppsConfig,
@@ -88,42 +88,6 @@ def test_status_when_pid_stale(tmp_path: Path, monkeypatch):
     assert "stale" in result.output
 
 
-def _winerror_87_oserror() -> OSError:
-    """Build an OSError that mimics Windows' dead-PID os.kill response.
-
-    Phase 8c.5 narrowed the helper from "any OSError = dead" to
-    "winerror == 87 (ERROR_INVALID_PARAMETER) = dead". We construct
-    the exception by attribute assignment so the test wires up the
-    same ``winerror`` attribute the helper reads on both Windows and
-    POSIX (POSIX OSError instances normally have no ``winerror``;
-    attribute assignment is the cross-platform-safe shape).
-    """
-    exc = OSError(0, "Windows dead-PID simulation")
-    exc.winerror = 87  # type: ignore[attr-defined]
-    return exc
-
-
-def test_status_when_pid_stale_windows_oserror(tmp_path: Path, monkeypatch):
-    """Windows raises bare OSError ([WinError 87]) from os.kill on a
-    dead PID, not ProcessLookupError. The status command must treat
-    that the same way — report 'stale' cleanly, no traceback.
-
-    Phase 8c.5 narrowed the catch from any-OSError to winerror==87
-    specifically; this test now wires that winerror through so it
-    exercises the narrow path, not the wide fallback.
-    """
-    pid_path = tmp_path / "daemon.pid"
-    pid_path.write_text("99999")
-    monkeypatch.setattr("foreman.v4.cli.daemon._PID_PATH", pid_path)
-    with patch("os.kill", side_effect=_winerror_87_oserror()):
-        result = CliRunner().invoke(
-            app, ["daemon", "status"],
-            obj=build_cli_context(repo=SqliteTicketRepository.in_memory()),
-        )
-    assert result.exit_code == 0
-    assert "stale" in result.output.lower()
-
-
 def test_stop_when_pid_stale_posix(tmp_path: Path, monkeypatch):
     """A stale PID file under POSIX (ProcessLookupError from os.kill)
     must report cleanly AND unlink the stale PID file.
@@ -139,63 +103,6 @@ def test_stop_when_pid_stale_posix(tmp_path: Path, monkeypatch):
     assert result.exit_code == 0
     assert "not running" in result.output
     assert not pid_path.exists(), "stale PID file should be unlinked"
-
-
-def test_stop_when_pid_stale_windows_oserror(tmp_path: Path, monkeypatch):
-    """Windows raises bare OSError from os.kill on a dead PID. The
-    stop command must treat that the same as ProcessLookupError —
-    report 'not running' and unlink the stale PID file, no traceback.
-
-    Phase 8c.5: the up-front ``_is_pid_alive`` check now sees the
-    winerror=87 exception, returns False, and the stop command takes
-    the stale-cleanup path before reaching SIGTERM.
-    """
-    pid_path = tmp_path / "daemon.pid"
-    pid_path.write_text("99999")
-    monkeypatch.setattr("foreman.v4.cli.daemon._PID_PATH", pid_path)
-    with patch("os.kill", side_effect=_winerror_87_oserror()):
-        result = CliRunner().invoke(
-            app, ["daemon", "stop"],
-            obj=build_cli_context(repo=SqliteTicketRepository.in_memory()),
-        )
-    assert result.exit_code == 0
-    assert "not running" in result.output
-    assert not pid_path.exists(), "stale PID file should be unlinked"
-
-
-# --- Task 8c.5: _is_pid_alive helper narrows OSError handling ---------
-
-def test_pid_alive_helper_treats_winerror_87_as_dead():
-    """``winerror == 87`` (``ERROR_INVALID_PARAMETER``) is Windows'
-    canonical "PID is not a live process" response; the helper must
-    return False so callers report stale.
-    """
-    with patch("os.kill", side_effect=_winerror_87_oserror()):
-        assert _is_pid_alive(99999) is False
-
-
-def test_pid_alive_helper_treats_winerror_5_as_alive():
-    """``winerror == 5`` (``ERROR_ACCESS_DENIED``) means the PID IS a
-    live process, just one we can't probe (e.g., owned by a different
-    user / elevated process). Treat as alive so we don't false-stale
-    a running daemon — this is the bug Phase 8c.5 fixes.
-    """
-    exc = OSError(13, "Access denied")
-    exc.winerror = 5  # type: ignore[attr-defined]
-    with patch("os.kill", side_effect=exc):
-        assert _is_pid_alive(33420) is True
-
-
-def test_pid_alive_helper_treats_posix_eperm_as_alive():
-    """POSIX ``EPERM`` (no ``winerror`` attribute, bare OSError) means
-    the PID is alive but we lack permission to signal it. Treat as
-    alive — same reasoning as winerror 5.
-    """
-    with patch(
-        "os.kill",
-        side_effect=OSError(1, "Operation not permitted"),
-    ):
-        assert _is_pid_alive(33420) is True
 
 
 # --- Task 8.5: SIGHUP handler reset+reconfigure logging ----------------
