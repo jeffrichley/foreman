@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
-foreman = "foreman.cli:main"
+foreman = "foreman.v4.cli:main"
 
 [build-system]
 requires = ["hatchling", "uv-dynamic-versioning"]

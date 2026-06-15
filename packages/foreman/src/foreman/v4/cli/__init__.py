@@ -10,6 +10,14 @@ from __future__ import annotations
 
 import typer
 
+# Role-command delegates — framework-agnostic run_<role>_cli functions
+# in foreman.roles.* (survival set, allowed to import from foreman.v4.*).
+# Bound at module level so tests can patch
+# `foreman.v4.cli.run_<role>_cli` cleanly.
+from foreman.roles.fixer import run_fixer_cli
+from foreman.roles.planner import run_planner_cli
+from foreman.roles.reviewer import run_reviewer_cli
+from foreman.roles.worker import run_worker_cli
 from foreman.v4.cli.daemon import (
     cmd_daemon_reload,
     cmd_daemon_start,
@@ -73,6 +81,52 @@ daemon_app.command("start")(cmd_daemon_start)
 daemon_app.command("stop")(cmd_daemon_stop)
 daemon_app.command("reload")(cmd_daemon_reload)
 daemon_app.command("status")(cmd_daemon_status)
+
+
+# Role commands — delegate to the run_<role>_cli imports at the top of
+# the file; bound there so tests can patch the module-level name.
+@app.command("plan")
+def cmd_plan(
+    project: str = typer.Option(..., "--project"),
+    issue_number: int = typer.Option(..., "--issue-number"),
+) -> None:
+    """Run the v4 Planner: emit FOREMAN_OUTCOME; exit code carries success/failure."""
+    raise typer.Exit(code=run_planner_cli(project=project, issue_number=issue_number))
+
+
+@app.command("review")
+def cmd_review(
+    project: str = typer.Option(..., "--project"),
+    issue_number: int = typer.Option(..., "--issue-number"),
+    target: str = typer.Option(..., "--target", help="spec|impl"),
+) -> None:
+    """Run the v4 Reviewer (target-aware): emit FOREMAN_OUTCOME; exit code carries verdict."""
+    raise typer.Exit(code=run_reviewer_cli(
+        project=project, issue_number=issue_number, target=target,
+    ))
+
+
+@app.command("fix")
+def cmd_fix(
+    project: str = typer.Option(..., "--project"),
+    issue_number: int = typer.Option(..., "--issue-number"),
+    target: str = typer.Option(..., "--target", help="spec|impl"),
+) -> None:
+    """Run the v4 Fixer (target-aware): emit FOREMAN_OUTCOME; exit code carries verdict."""
+    raise typer.Exit(code=run_fixer_cli(
+        project=project, issue_number=issue_number, target=target,
+    ))
+
+
+@app.command("implement")
+def cmd_implement(
+    project: str = typer.Option(..., "--project"),
+    issue_number: int = typer.Option(..., "--issue-number"),
+) -> None:
+    """Run the v4 Worker: emit FOREMAN_OUTCOME; exit code carries verdict."""
+    raise typer.Exit(code=run_worker_cli(
+        project=project, issue_number=issue_number,
+    ))
 
 
 def main() -> None:
