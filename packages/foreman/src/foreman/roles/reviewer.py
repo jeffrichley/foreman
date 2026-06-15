@@ -43,7 +43,6 @@ from typing import Literal
 from github.Issue import Issue
 from github.Repository import Repository
 
-from foreman.config import Config
 from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
@@ -51,11 +50,11 @@ from foreman.providers import ProviderError
 from foreman.roles import (
     TERMINAL_BLOCKING_LABEL,
     build_role_resources,
-    build_v4_registry_from_v3_project,
     handle_unhandled_role_exception,
 )
 from foreman.schemas.reviewer import Finding, ReviewerOutput, ReviewerRunResult
 from foreman.stats import log_reviewer_run
+from foreman.v4.config import V4Config
 from foreman.v4.identity import V4IdentityRegistry
 from foreman.worktree import WorktreeManager
 
@@ -379,11 +378,11 @@ def _read_spec_doc(worktree_path: Path, issue_number: int) -> str | None:
 async def run_reviewer(
     *,
     pr_url: str,
-    config: Config,
+    config: V4Config,
     project_name: str,
     worktrees_root: Path,
     provider: ProviderFacade,
-    identity_registry: V4IdentityRegistry | None = None,
+    identity_registry: V4IdentityRegistry,
     dispatch_recorder: DispatchRecorder | None = None,
     dispatch_trace_id: int | None = None,
 ) -> ReviewerRunResult:
@@ -392,16 +391,15 @@ async def run_reviewer(
     Args:
         pr_url: Full GitHub PR URL
             (``https://github.com/owner/repo/pull/N``).
-        config: Loaded foreman config.
-        project_name: Key into ``config.projects``.
+        config: Loaded foreman v4 config.
+        project_name: Selects which ``V4Config.projects`` entry to use.
         worktrees_root: Root directory under which per-ticket worktrees live.
         provider: Agent provider facade (e.g., AnthropicSDKProvider).
-        identity_registry: Optional pre-built v4 registry; defaults to a fresh
-            :class:`~foreman.v4.identity.V4IdentityRegistry` built from the
-            project's v3 ``ProjectConfig.apps`` block. Tests may inject a
-            ``MagicMock`` exposing ``build_role_resources_for_test(role)``
-            (or the bare ``get_role_token(role)``) — see
-            :func:`foreman.roles.build_role_resources` for the test seam.
+        identity_registry: Pre-built v4 registry. Tests may inject a
+            ``MagicMock`` exposing the production
+            ``get_role_token(role)`` shape — see
+            :func:`foreman.roles.build_role_resources` for the test
+            seam.
 
     Returns:
         A :class:`~foreman.schemas.reviewer.ReviewerRunResult` bundling
@@ -520,7 +518,15 @@ async def run_reviewer(
 
     try:
         owner, repo_name, pr_number = parse_pr_url(pr_url)
-        project = config.projects[project_name]
+        project = next(
+            (p for p in config.projects if p.name == project_name), None
+        )
+        if project is None:
+            known = [p.name for p in config.projects]
+            raise ValueError(
+                f"project {project_name!r} not found in V4Config. "
+                f"Known projects: {known}"
+            )
         expected_repo_slug = project.repo
         actual_repo_slug = f"{owner}/{repo_name}"
         if expected_repo_slug != actual_repo_slug:
@@ -529,13 +535,11 @@ async def run_reviewer(
                 f"{project_name!r} configured repo {expected_repo_slug!r}"
             )
 
-        registry = (
-            identity_registry
-            if identity_registry is not None
-            else build_v4_registry_from_v3_project(project)
-        )
         _host, reviewer_token, reviewer_client = build_role_resources(
-            registry=registry, project=project, role="reviewer",
+            registry=identity_registry,
+            role="reviewer",
+            app_id=config.apps.reviewer.app_id,
+            private_key_path=config.apps.reviewer.private_key_path,
         )
 
         repo: Repository = reviewer_client.get_repo(actual_repo_slug)
@@ -762,7 +766,7 @@ async def run_reviewer(
 import asyncio  # noqa: E402  (kept here so legacy import block above stays untouched)
 
 from foreman.providers import make_provider  # noqa: E402
-from foreman.v4._v3_config_adapter import load_v3_config_for_project  # noqa: E402
+from foreman.v4.config import load_config as load_v4_config  # noqa: E402
 from foreman.v4.emit import emit_outcome  # noqa: E402
 from foreman.v4.outcome import Finding as V4Finding  # noqa: E402
 from foreman.v4.outcome import (  # noqa: E402
@@ -771,6 +775,8 @@ from foreman.v4.outcome import (  # noqa: E402
     OutcomeConfidence,
     OutcomeKind,
 )
+
+_DEFAULT_V4_CONFIG = Path.home() / ".foreman" / "v4" / "config.toml"
 
 # v4 RoleDispatcher uses "spec" / "impl"; the legacy Reviewer internals
 # (branch parsing, label triples, prompt loader) speak "spec_pr" /
@@ -838,16 +844,30 @@ def _run_reviewer_for_v4(
     is consumed inside ``run_reviewer`` itself — no kwarg is plumbed
     through from v4.
     """
-    cfg = load_v3_config_for_project(project)
-    project_cfg = cfg.projects[project]
+    cfg_path = Path(os.environ.get("FOREMAN_V4_CONFIG", _DEFAULT_V4_CONFIG))
+    cfg = load_v4_config(cfg_path)
+    project_cfg = next((p for p in cfg.projects if p.name == project), None)
+    if project_cfg is None:
+        known = [p.name for p in cfg.projects]
+        raise ValueError(
+            f"project {project!r} not found in V4Config at {cfg_path}. "
+            f"Known projects: {known}"
+        )
 
     # Locate the open PR for this issue. The Reviewer's legacy entry-
     # point takes a PR URL — v4's SubprocessRoleDispatcher only knows
     # the issue number + target. Resolve via the reviewer App's client
     # (read-only get_pulls is in scope for the reviewer identity).
-    registry = build_v4_registry_from_v3_project(project_cfg)
+    registry = V4IdentityRegistry(
+        apps=cfg.apps,
+        orchestrator=cfg.orchestrator,
+        installation_repo=project_cfg.repo,
+    )
     _host, _token, reviewer_client = build_role_resources(
-        registry=registry, project=project_cfg, role="reviewer",
+        registry=registry,
+        role="reviewer",
+        app_id=cfg.apps.reviewer.app_id,
+        private_key_path=cfg.apps.reviewer.private_key_path,
     )
     repo: Repository = reviewer_client.get_repo(project_cfg.repo)
     owner = project_cfg.repo.split("/", 1)[0]

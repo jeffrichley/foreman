@@ -32,6 +32,23 @@ from foreman.schemas.worker import (
     WorkerRunResult,
 )
 
+# Phase 8d.2: the v3 CLI now adapts v3 Config → V4Config + V4IdentityRegistry
+# before dispatching to ``run_<role>``. That adapter resolves credentials for
+# all four role Apps, so the per-test config TOMLs need ALL FOUR populated
+# even when the test only exercises one role's command. Shared here so a
+# future schema change touches one place.
+_FULL_APPS_TOML_BLOCK = """\
+[projects.voice.apps]
+planner_app_id = 123456
+planner_private_key_path = "/tmp/planner.pem"
+reviewer_app_id = 654321
+reviewer_private_key_path = "/tmp/reviewer.pem"
+fixer_app_id = 777777
+fixer_private_key_path = "/tmp/fixer.pem"
+worker_app_id = 444444
+worker_private_key_path = "/tmp/worker.pem"
+"""
+
 
 def test_cli_plan_invokes_run_planner(tmp_path: Path) -> None:
     config_file = tmp_path / "config.toml"
@@ -41,11 +58,7 @@ def test_cli_plan_invokes_run_planner(tmp_path: Path) -> None:
 repo = "jeffrichley/voice"
 local_clone_path = "/tmp/voice"
 
-[projects.voice.apps]
-planner_app_id_env = "FOREMAN_PLANNER_APP_ID"
-planner_app_id = 123456
-planner_private_key_path = "/tmp/planner.pem"
-"""
+""" + _FULL_APPS_TOML_BLOCK
     )
 
     fake_result = PlannerRunResult(
@@ -111,14 +124,7 @@ def test_cli_review_invokes_run_reviewer(tmp_path: Path) -> None:
 repo = "jeffrichley/voice"
 local_clone_path = "/tmp/voice"
 
-[projects.voice.apps]
-planner_app_id_env = "FOREMAN_PLANNER_APP_ID"
-planner_app_id = 123456
-planner_private_key_path = "/tmp/planner.pem"
-reviewer_app_id_env = "FOREMAN_REVIEWER_APP_ID"
-reviewer_app_id = 654321
-reviewer_private_key_path = "/tmp/reviewer.pem"
-"""
+""" + _FULL_APPS_TOML_BLOCK
     )
 
     fake_result = ReviewerRunResult(
@@ -171,11 +177,7 @@ def test_cli_review_target_flag_optional(tmp_path: Path) -> None:
 repo = "jeffrichley/voice"
 local_clone_path = "/tmp/voice"
 
-[projects.voice.apps]
-planner_app_id_env = "FOREMAN_PLANNER_APP_ID"
-planner_app_id = 123456
-planner_private_key_path = "/tmp/planner.pem"
-"""
+""" + _FULL_APPS_TOML_BLOCK
     )
 
     fake_result = ReviewerRunResult(
@@ -219,14 +221,7 @@ def test_cli_fix_invokes_run_fixer(tmp_path: Path) -> None:
 repo = "jeffrichley/voice"
 local_clone_path = "/tmp/voice"
 
-[projects.voice.apps]
-planner_app_id_env = "FOREMAN_PLANNER_APP_ID"
-planner_app_id = 123456
-planner_private_key_path = "/tmp/planner.pem"
-fixer_app_id_env = "FOREMAN_FIXER_APP_ID"
-fixer_app_id = 777777
-fixer_private_key_path = "/tmp/fixer.pem"
-"""
+""" + _FULL_APPS_TOML_BLOCK
     )
 
     fake_result = FixerRunResult(
@@ -288,14 +283,7 @@ def test_cli_fix_with_target_impl_pr_plumbs_through(tmp_path: Path) -> None:
 repo = "jeffrichley/voice"
 local_clone_path = "/tmp/voice"
 
-[projects.voice.apps]
-planner_app_id_env = "FOREMAN_PLANNER_APP_ID"
-planner_app_id = 123456
-planner_private_key_path = "/tmp/planner.pem"
-fixer_app_id_env = "FOREMAN_FIXER_APP_ID"
-fixer_app_id = 777777
-fixer_private_key_path = "/tmp/fixer.pem"
-"""
+""" + _FULL_APPS_TOML_BLOCK
     )
 
     fake_result = FixerRunResult(
@@ -351,14 +339,7 @@ def test_cli_implement_invokes_run_worker(tmp_path: Path) -> None:
 repo = "jeffrichley/voice"
 local_clone_path = "/tmp/voice"
 
-[projects.voice.apps]
-planner_app_id_env = "FOREMAN_PLANNER_APP_ID"
-planner_app_id = 123456
-planner_private_key_path = "/tmp/planner.pem"
-worker_app_id_env = "FOREMAN_WORKER_APP_ID"
-worker_app_id = 444444
-worker_private_key_path = "/tmp/worker.pem"
-"""
+""" + _FULL_APPS_TOML_BLOCK
     )
 
     fake_result = WorkerRunResult(

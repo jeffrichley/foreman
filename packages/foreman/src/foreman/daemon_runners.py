@@ -36,6 +36,82 @@ from foreman.roles import fixer as _fixer_module
 from foreman.roles import planner as _planner_module
 from foreman.roles import reviewer as _reviewer_module
 from foreman.roles import worker as _worker_module
+from foreman.v4.config import (
+    AppCredentials,
+    V4Config,
+)
+from foreman.v4.config import (
+    AppsConfig as V4AppsConfig,
+)
+from foreman.v4.config import (
+    OrchestratorConfig as V4OrchestratorConfig,
+)
+from foreman.v4.config import (
+    ProjectConfig as V4ProjectConfig,
+)
+from foreman.v4.identity import V4IdentityRegistry
+
+
+def _v3_config_to_v4(config: Config, project_name: str) -> tuple[V4Config, V4IdentityRegistry]:
+    """Adapt a v3 ``Config`` into a v4 ``V4Config`` + ``V4IdentityRegistry``.
+
+    Phase 8d.2 ports the role bodies to V4 config + a required v4 registry;
+    this v3 daemon-runners shim survives only until Phase 9 deletes the
+    legacy daemon path. The conversion reads per-role App credentials from
+    the v3 ``ProjectConfig.apps`` resolvers (which fall back through env
+    vars to config-file values) so existing v3 deployments don't have to
+    add a separate v4 config file.
+    """
+    project = config.projects[project_name]
+    apps = project.apps
+    v4_apps = V4AppsConfig(
+        planner=AppCredentials(
+            app_id=apps.resolve_planner_app_id(),
+            private_key_path=str(apps.resolve_planner_private_key_path()),
+        ),
+        reviewer=AppCredentials(
+            app_id=apps.resolve_reviewer_app_id(),
+            private_key_path=str(apps.resolve_reviewer_private_key_path()),
+        ),
+        fixer=AppCredentials(
+            app_id=apps.resolve_fixer_app_id(),
+            private_key_path=str(apps.resolve_fixer_private_key_path()),
+        ),
+        worker=AppCredentials(
+            app_id=apps.resolve_worker_app_id(),
+            private_key_path=str(apps.resolve_worker_private_key_path()),
+        ),
+    )
+    # Sentinel orchestrator: v3 callers never resolve the orchestrator
+    # role through this registry (the v3 daemon owns its own auth path);
+    # reuse the planner's credentials so the V4IdentityRegistry's Pydantic
+    # constructor accepts the build.
+    sentinel_orch = V4OrchestratorConfig(
+        app_id=v4_apps.planner.app_id,
+        private_key_path=v4_apps.planner.private_key_path,
+    )
+    v4_project = V4ProjectConfig(
+        name=project_name,
+        repo=project.repo,
+        local_clone_path=str(project.local_clone_path),
+        check_command=project.check_command,
+        dev_base_branch=project.dev_base_branch,
+        max_fix_attempts=project.max_fix_attempts,
+        max_impl_attempts=project.max_impl_attempts,
+    )
+    v4_cfg = V4Config(
+        db_path="/tmp/v3-shim.db",
+        log_dir="/tmp/v3-shim-logs",
+        apps=v4_apps,
+        orchestrator=sentinel_orch,
+        projects=[v4_project],
+    )
+    registry = V4IdentityRegistry(
+        apps=v4_apps,
+        orchestrator=sentinel_orch,
+        installation_repo=project.repo,
+    )
+    return v4_cfg, registry
 
 
 @dataclass(frozen=True)
@@ -111,12 +187,14 @@ class DaemonRunners:
 
     async def run_planner(self, *, ticket: Ticket, config: Config) -> RoleRunResult:
         project = self._project(ticket, config)
+        v4_cfg, v4_registry = _v3_config_to_v4(config, ticket.project_name)
         result = await self._planner_fn(
             issue_url=_issue_url(project.repo, ticket.issue_number),
-            config=config,
+            config=v4_cfg,
             project_name=ticket.project_name,
             worktrees_root=self._worktrees_root,
             provider=self._provider,
+            identity_registry=v4_registry,
         )
         # foreman#91: the role-returned ``final_labels`` is the
         # authoritative post-run label set, computed in-process by
@@ -141,12 +219,14 @@ class DaemonRunners:
         pr_number = self._host.find_pr_for_branch(project.repo, branch)
         if pr_number is None:
             raise RuntimeError(f"No open PR found for branch {branch} on {project.repo}")
+        v4_cfg, v4_registry = _v3_config_to_v4(config, ticket.project_name)
         result = await self._reviewer_fn(
             pr_url=_pr_url(project.repo, pr_number),
-            config=config,
+            config=v4_cfg,
             project_name=ticket.project_name,
             worktrees_root=self._worktrees_root,
             provider=self._provider,
+            identity_registry=v4_registry,
         )
         return RoleRunResult(
             new_labels=frozenset(result.final_labels),
@@ -155,12 +235,14 @@ class DaemonRunners:
 
     async def run_fixer(self, *, ticket: Ticket, config: Config, target: str) -> RoleRunResult:
         project = self._project(ticket, config)
+        v4_cfg, v4_registry = _v3_config_to_v4(config, ticket.project_name)
         result = await self._fixer_fn(
             issue_url=_issue_url(project.repo, ticket.issue_number),
-            config=config,
+            config=v4_cfg,
             project_name=ticket.project_name,
             worktrees_root=self._worktrees_root,
             provider=self._provider,
+            identity_registry=v4_registry,
             target=target,
         )
         return RoleRunResult(
@@ -170,12 +252,14 @@ class DaemonRunners:
 
     async def run_worker(self, *, ticket: Ticket, config: Config) -> RoleRunResult:
         project = self._project(ticket, config)
+        v4_cfg, v4_registry = _v3_config_to_v4(config, ticket.project_name)
         result = await self._worker_fn(
             issue_url=_issue_url(project.repo, ticket.issue_number),
-            config=config,
+            config=v4_cfg,
             project_name=ticket.project_name,
             worktrees_root=self._worktrees_root,
             provider=self._provider,
+            identity_registry=v4_registry,
         )
         return RoleRunResult(
             new_labels=frozenset(result.final_labels),

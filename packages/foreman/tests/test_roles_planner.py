@@ -17,7 +17,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from foreman.config import AppsConfig, Config, ProjectConfig
 from foreman.git_host import GitHostProvider, IssueRef, PRRef
 from foreman.prompts import load_role_prompt
 from foreman.provider import UsageInfo
@@ -29,6 +28,13 @@ from foreman.roles.planner import (
     run_planner,
 )
 from foreman.schemas.planner import PlannerOutput
+from foreman.v4.config import (
+    AppCredentials,
+    AppsConfig,
+    OrchestratorConfig,
+    ProjectConfig,
+    V4Config,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -52,7 +58,13 @@ def _route_build_role_resources_through_fake_registry(
     monkeypatch is harmless when the helper isn't called.
     """
 
-    def _fake_build(*, registry: Any, project: Any, role: str) -> tuple[Any, str, Any]:
+    def _fake_build(
+        *,
+        registry: Any,
+        role: str,
+        app_id: int,
+        private_key_path: str,
+    ) -> tuple[Any, str, Any]:
         client = getattr(registry, f"get_{role}_client")()
         token = getattr(registry, f"get_{role}_token")()
         host = registry.get_host_provider(role)
@@ -293,18 +305,26 @@ def _seed_clone(clone: Path, *, origin_path: Path | None = None) -> None:
         )
 
 
-def _make_config(clone: Path) -> Config:
-    return Config(
-        projects={
-            "voice": ProjectConfig(
+def _make_config(clone: Path) -> V4Config:
+    return V4Config(
+        db_path="/tmp/v4.db",
+        log_dir="/tmp/v4-logs",
+        apps=AppsConfig(
+            planner=AppCredentials(app_id=123456, private_key_path="/tmp/planner.pem"),
+            reviewer=AppCredentials(app_id=123457, private_key_path="/tmp/reviewer.pem"),
+            fixer=AppCredentials(app_id=123458, private_key_path="/tmp/fixer.pem"),
+            worker=AppCredentials(app_id=123459, private_key_path="/tmp/worker.pem"),
+        ),
+        orchestrator=OrchestratorConfig(
+            app_id=99999, private_key_path="/tmp/orch.pem",
+        ),
+        projects=[
+            ProjectConfig(
+                name="voice",
                 repo="jeffrichley/voice",
                 local_clone_path=str(clone),
-                apps=AppsConfig(
-                    planner_app_id_env="FOREMAN_PLANNER_APP_ID",
-                    planner_private_key_path="/tmp/planner.pem",
-                ),
             )
-        }
+        ],
     )
 
 
@@ -718,18 +738,26 @@ async def test_run_planner_threads_dev_base_branch_when_set(
     _seed_clone(clone, origin_path=tmp_path / "origin.git")
     monkeypatch.setenv("FOREMAN_PLANNER_APP_ID", "123456")
 
-    cfg = Config(
-        projects={
-            "voice": ProjectConfig(
+    cfg = V4Config(
+        db_path="/tmp/v4.db",
+        log_dir="/tmp/v4-logs",
+        apps=AppsConfig(
+            planner=AppCredentials(app_id=123456, private_key_path="/tmp/planner.pem"),
+            reviewer=AppCredentials(app_id=123457, private_key_path="/tmp/reviewer.pem"),
+            fixer=AppCredentials(app_id=123458, private_key_path="/tmp/fixer.pem"),
+            worker=AppCredentials(app_id=123459, private_key_path="/tmp/worker.pem"),
+        ),
+        orchestrator=OrchestratorConfig(
+            app_id=99999, private_key_path="/tmp/orch.pem",
+        ),
+        projects=[
+            ProjectConfig(
+                name="voice",
                 repo="jeffrichley/voice",
                 local_clone_path=str(clone),
                 dev_base_branch="feat/walking-skeleton",
-                apps=AppsConfig(
-                    planner_app_id_env="FOREMAN_PLANNER_APP_ID",
-                    planner_private_key_path="/tmp/planner.pem",
-                ),
             )
-        }
+        ],
     )
 
     fake_host = _FakeHostProvider()
@@ -784,7 +812,7 @@ async def test_run_planner_passes_none_when_dev_base_branch_unset(
     monkeypatch.setenv("FOREMAN_PLANNER_APP_ID", "123456")
 
     cfg = _make_config(clone)  # _make_config omits dev_base_branch → None
-    assert cfg.projects["voice"].dev_base_branch is None, (
+    assert cfg.projects[0].dev_base_branch is None, (
         "test fixture assumption: _make_config produces dev_base_branch=None"
     )
 

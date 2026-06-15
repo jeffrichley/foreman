@@ -80,7 +80,6 @@ from github.PullRequest import PullRequest
 from github.Repository import Repository
 
 from foreman.branches import impl_branch, spec_branch
-from foreman.config import Config
 from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
 from foreman.git_host import GitHostProvider
 from foreman.instructions import load_project_instructions
@@ -89,11 +88,11 @@ from foreman.providers import ProviderError
 from foreman.roles import (
     TERMINAL_BLOCKING_LABEL,
     build_role_resources,
-    build_v4_registry_from_v3_project,
     handle_unhandled_role_exception,
 )
 from foreman.schemas.worker import WorkerOutput, WorkerRunResult
 from foreman.stats import log_worker_run
+from foreman.v4.config import V4Config
 from foreman.v4.identity import V4IdentityRegistry
 from foreman.worktree import WorktreeManager
 
@@ -587,11 +586,11 @@ def _label_names(issue_labels: set[str], extra: str | None = None) -> set[str]:
 async def run_worker(
     *,
     issue_url: str,
-    config: Config,
+    config: V4Config,
     project_name: str,
     worktrees_root: Path,
     provider: ProviderFacade,
-    identity_registry: V4IdentityRegistry | None = None,
+    identity_registry: V4IdentityRegistry,
     dispatch_recorder: DispatchRecorder | None = None,
     dispatch_trace_id: int | None = None,
 ) -> WorkerRunResult:
@@ -603,19 +602,17 @@ async def run_worker(
             PR URL. The Worker is triggered by the
             ``foreman:plan-approved`` label on the issue and derives the
             spec PR from the issue's ``foreman/issue-<N>`` branch.
-        config: Loaded foreman config.
-        project_name: Key into ``config.projects``.
+        config: Loaded foreman v4 config.
+        project_name: Selects which ``V4Config.projects`` entry to use.
         worktrees_root: Root directory under which per-ticket worktrees
             live. The Worker uses a sibling ``impl-<N>/`` worktree
             distinct from the spec-side ``issue-<N>/``.
         provider: Agent provider facade (e.g., AnthropicSDKProvider).
-        identity_registry: Optional pre-built v4 registry; defaults to a
-            fresh :class:`~foreman.v4.identity.V4IdentityRegistry` built
-            from the project's v3 ``ProjectConfig.apps`` block. Tests
-            may inject a ``MagicMock`` exposing
-            ``build_role_resources_for_test(role)`` (or the bare
-            ``get_role_token(role)``) — see
-            :func:`foreman.roles.build_role_resources` for the test seam.
+        identity_registry: Pre-built v4 registry. Tests may inject a
+            ``MagicMock`` exposing the production
+            ``get_role_token(role)`` shape — see
+            :func:`foreman.roles.build_role_resources` for the test
+            seam.
 
     Returns:
         A :class:`~foreman.schemas.worker.WorkerRunResult` bundling the
@@ -644,7 +641,15 @@ async def run_worker(
     try:
         owner, repo_name, issue_number = parse_issue_url(issue_url)
         _setup_issue_number = issue_number
-        project = config.projects[project_name]
+        project = next(
+            (p for p in config.projects if p.name == project_name), None
+        )
+        if project is None:
+            known = [p.name for p in config.projects]
+            raise ValueError(
+                f"project {project_name!r} not found in V4Config. "
+                f"Known projects: {known}"
+            )
         expected_repo_slug = project.repo
         actual_repo_slug = f"{owner}/{repo_name}"
         _setup_repo_slug = actual_repo_slug
@@ -654,17 +659,15 @@ async def run_worker(
                 f"{project_name!r} configured repo {expected_repo_slug!r}"
             )
 
-        registry = (
-            identity_registry
-            if identity_registry is not None
-            else build_v4_registry_from_v3_project(project)
-        )
         # foreman#222: acquire the authenticated GitHostProvider so we can
         # push from Python via the tokenized-URL path that Planner already
         # uses. The container has no git credential helper, so shell-out
         # ``git push`` + Claude's Bash both fail auth.
         host, worker_token, worker_client = build_role_resources(
-            registry=registry, project=project, role="worker",
+            registry=identity_registry,
+            role="worker",
+            app_id=config.apps.worker.app_id,
+            private_key_path=config.apps.worker.private_key_path,
         )
 
         repo: Repository = worker_client.get_repo(actual_repo_slug)
@@ -1363,7 +1366,7 @@ async def run_worker(
 import asyncio  # noqa: E402  (kept here so legacy import block above stays untouched)
 
 from foreman.providers import make_provider  # noqa: E402
-from foreman.v4._v3_config_adapter import load_v3_config_for_project  # noqa: E402
+from foreman.v4.config import load_config as load_v4_config  # noqa: E402
 from foreman.v4.emit import emit_outcome  # noqa: E402
 from foreman.v4.outcome import (  # noqa: E402
     Outcome,
@@ -1371,6 +1374,8 @@ from foreman.v4.outcome import (  # noqa: E402
     OutcomeConfidence,
     OutcomeKind,
 )
+
+_DEFAULT_V4_CONFIG = Path.home() / ".foreman" / "v4" / "config.toml"
 
 
 class _V4WorkerResult:
@@ -1444,8 +1449,15 @@ def _run_worker_for_v4(*, project: str, issue_number: int) -> _V4WorkerResult:
     surface). That exception bubbles out here and ``run_worker_cli``
     maps it to ``NEEDS_HELP``.
     """
-    cfg = load_v3_config_for_project(project)
-    project_cfg = cfg.projects[project]
+    cfg_path = Path(os.environ.get("FOREMAN_V4_CONFIG", _DEFAULT_V4_CONFIG))
+    cfg = load_v4_config(cfg_path)
+    project_cfg = next((p for p in cfg.projects if p.name == project), None)
+    if project_cfg is None:
+        known = [p.name for p in cfg.projects]
+        raise ValueError(
+            f"project {project!r} not found in V4Config at {cfg_path}. "
+            f"Known projects: {known}"
+        )
 
     # The legacy ``run_worker`` takes an issue URL — v4's
     # SubprocessRoleDispatcher only knows the issue number. Construct
@@ -1459,6 +1471,11 @@ def _run_worker_for_v4(*, project: str, issue_number: int) -> _V4WorkerResult:
         )
     )
     provider = make_provider()
+    registry = V4IdentityRegistry(
+        apps=cfg.apps,
+        orchestrator=cfg.orchestrator,
+        installation_repo=project_cfg.repo,
+    )
     legacy_result = asyncio.run(
         run_worker(
             issue_url=issue_url,
@@ -1466,6 +1483,7 @@ def _run_worker_for_v4(*, project: str, issue_number: int) -> _V4WorkerResult:
             project_name=project,
             worktrees_root=worktrees_root,
             provider=provider,
+            identity_registry=registry,
         )
     )
 

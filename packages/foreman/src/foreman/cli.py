@@ -30,6 +30,23 @@ from foreman.roles.planner import run_planner
 from foreman.roles.reviewer import run_reviewer
 from foreman.roles.worker import run_worker
 from foreman.storage import Storage
+from foreman.v4.config import V4Config
+from foreman.v4.identity import V4IdentityRegistry
+
+
+def _v3_to_v4(config: Config, project_name: str) -> tuple[V4Config, V4IdentityRegistry]:
+    """Adapt a v3 ``Config`` into v4 ``V4Config`` + ``V4IdentityRegistry``.
+
+    Phase 8d.2 ported the role bodies to V4 config + a required v4
+    registry; this v3 CLI shim survives only until Phase 9 deletes the
+    legacy ``plan`` / ``review`` / ``fix`` / ``implement`` commands. The
+    conversion delegates to the same shape :mod:`foreman.daemon_runners`
+    uses; we re-import here rather than re-export to keep the dead-on-
+    Phase-9 surface narrow.
+    """
+    from foreman.daemon_runners import _v3_config_to_v4
+
+    return _v3_config_to_v4(config, project_name)
 
 
 def _default_config_path() -> Path:
@@ -112,13 +129,15 @@ def plan(issue_url: str, project: str, config_path: Path | None) -> None:
     # ``run_planner`` falls back to the existing log_planner_run-only
     # path. Back-compat without a new code path.
     recorder, trace_id = _build_dispatch_recorder(cfg)
+    v4_cfg, v4_registry = _v3_to_v4(cfg, project)
     result = asyncio.run(
         run_planner(
             issue_url=issue_url,
-            config=cfg,
+            config=v4_cfg,
             project_name=project,
             worktrees_root=_default_worktrees_root(),
             provider=provider,
+            identity_registry=v4_registry,
             dispatch_recorder=recorder,
             dispatch_trace_id=trace_id,
         )
@@ -181,13 +200,15 @@ def review(
     # signature change — out of scope for the Stage-2 action split.
     _ = target
     recorder, trace_id = _build_dispatch_recorder(cfg)
+    v4_cfg, v4_registry = _v3_to_v4(cfg, project)
     result = asyncio.run(
         run_reviewer(
             pr_url=pr_url,
-            config=cfg,
+            config=v4_cfg,
             project_name=project,
             worktrees_root=_default_worktrees_root(),
             provider=provider,
+            identity_registry=v4_registry,
             dispatch_recorder=recorder,
             dispatch_trace_id=trace_id,
         )
@@ -267,13 +288,15 @@ def fix(
     # an unused arg.
     _ = pr_url
     recorder, trace_id = _build_dispatch_recorder(cfg)
+    v4_cfg, v4_registry = _v3_to_v4(cfg, project)
     result = asyncio.run(
         run_fixer(
             issue_url=issue_url,
-            config=cfg,
+            config=v4_cfg,
             project_name=project,
             worktrees_root=_default_worktrees_root(),
             provider=provider,
+            identity_registry=v4_registry,
             target=target,
             dispatch_recorder=recorder,
             dispatch_trace_id=trace_id,
@@ -314,13 +337,15 @@ def implement(issue_url: str, project: str, config_path: Path | None) -> None:
     cfg = load_config(cfg_path)
     provider = make_provider()
     recorder, trace_id = _build_dispatch_recorder(cfg)
+    v4_cfg, v4_registry = _v3_to_v4(cfg, project)
     result = asyncio.run(
         run_worker(
             issue_url=issue_url,
-            config=cfg,
+            config=v4_cfg,
             project_name=project,
             worktrees_root=_default_worktrees_root(),
             provider=provider,
+            identity_registry=v4_registry,
             dispatch_recorder=recorder,
             dispatch_trace_id=trace_id,
         )

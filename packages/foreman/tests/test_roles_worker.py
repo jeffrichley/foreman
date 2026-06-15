@@ -25,7 +25,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from github.GithubException import GithubException
 
-from foreman.config import AppsConfig, Config, ProjectConfig
 from foreman.provider import UsageInfo
 from foreman.roles import worker as _worker_mod
 from foreman.roles.worker import (
@@ -43,6 +42,13 @@ from foreman.schemas.worker import (
     SkippedSubRequest,
     WorkerOutput,
 )
+from foreman.v4.config import (
+    AppCredentials,
+    AppsConfig,
+    OrchestratorConfig,
+    ProjectConfig,
+    V4Config,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -57,7 +63,13 @@ def _route_build_role_resources_through_fake_registry(
     rationale (Phase 8d.1 — port to V4IdentityRegistry).
     """
 
-    def _fake_build(*, registry: Any, project: Any, role: str) -> tuple[Any, str, Any]:
+    def _fake_build(
+        *,
+        registry: Any,
+        role: str,
+        app_id: int,
+        private_key_path: str,
+    ) -> tuple[Any, str, Any]:
         client = getattr(registry, f"get_{role}_client")()
         token = getattr(registry, f"get_{role}_token")()
         host = registry.get_host_provider(role)
@@ -840,25 +852,27 @@ def _seed_clone_with_spec_branch(clone: Path, issue_number: int) -> str:
     return head_sha
 
 
-def _make_config(clone: Path, *, check_command: str | None = None) -> Config:
-    return Config(
-        projects={
-            "voice": ProjectConfig(
+def _make_config(clone: Path, *, check_command: str | None = None) -> V4Config:
+    return V4Config(
+        db_path="/tmp/v4.db",
+        log_dir="/tmp/v4-logs",
+        apps=AppsConfig(
+            planner=AppCredentials(app_id=123456, private_key_path="/tmp/planner.pem"),
+            reviewer=AppCredentials(app_id=123457, private_key_path="/tmp/reviewer.pem"),
+            fixer=AppCredentials(app_id=123458, private_key_path="/tmp/fixer.pem"),
+            worker=AppCredentials(app_id=123459, private_key_path="/tmp/worker.pem"),
+        ),
+        orchestrator=OrchestratorConfig(
+            app_id=99999, private_key_path="/tmp/orch.pem",
+        ),
+        projects=[
+            ProjectConfig(
+                name="voice",
                 repo="jeffrichley/voice",
                 local_clone_path=str(clone),
-                apps=AppsConfig(
-                    planner_app_id_env="FOREMAN_PLANNER_APP_ID",
-                    planner_private_key_path="/tmp/planner.pem",
-                    reviewer_app_id_env="FOREMAN_REVIEWER_APP_ID",
-                    reviewer_private_key_path="/tmp/reviewer.pem",
-                    fixer_app_id_env="FOREMAN_FIXER_APP_ID",
-                    fixer_private_key_path="/tmp/fixer.pem",
-                    worker_app_id_env="FOREMAN_WORKER_APP_ID",
-                    worker_private_key_path="/tmp/worker.pem",
-                ),
                 check_command=check_command,
             )
-        }
+        ],
     )
 
 
@@ -1612,9 +1626,7 @@ async def test_run_worker_honors_project_max_impl_attempts_override(
     monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
 
     cfg = _make_config(clone)
-    cfg.projects["voice"] = cfg.projects["voice"].model_copy(
-        update={"max_impl_attempts": 1}
-    )
+    cfg.projects[0] = cfg.projects[0].model_copy(update={"max_impl_attempts": 1})
     repo, _spec_pr, issue = _make_fake_repo(
         issue_number=42,
         head_sha=head_sha,

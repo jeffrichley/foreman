@@ -17,11 +17,11 @@ Caveats:
   fork into v4 just to rename them. The private (`_`-prefixed) names
   are imported intentionally; a future Phase 8b polish task could
   promote them on the v3 side, but that's out of scope for 8b.1.
-* This module duplicates the small "v4 AppsConfig → v3 AppsConfig"
-  shim that Phase 8b.3's role-CLI rewire will also need. We
-  deliberately leave the duplication inline here for now; 8b.3 will
-  introduce ``foreman.v4._v3_config_adapter`` as the shared home and
-  this module can switch to it then.
+* This module contains a small "v4 AppsConfig → v3 AppsConfig"
+  shim used only by ``_verify_bot_installation`` (the v3 helper that
+  resolves per-role App credentials via its env-var fallback shape).
+  Phase 8d.9 ports the rest of ``foreman init`` to V4Config and
+  retires this shim alongside the v3 ``Config`` write.
 """
 from __future__ import annotations
 

@@ -23,6 +23,12 @@ def _ticket(issue: int = 42, labels: set[str] | None = None) -> Ticket:
 
 
 def _config(tmp_path: Path) -> Config:
+    # Phase 8d.2: the v3 daemon-runners path now adapts v3 Config →
+    # V4Config + V4IdentityRegistry on every dispatch. The adapter calls
+    # ``apps.resolve_<role>_app_id()`` for all four roles, which raises
+    # ``RuntimeError`` when both the env var and config value are unset.
+    # Populate per-role credentials with stub values so the conversion
+    # succeeds in tests that never actually mint tokens.
     return Config(
         admin=AdminConfig(),
         daemon=DaemonConfig(sqlite_path=str(tmp_path / "f.sqlite")),
@@ -30,7 +36,16 @@ def _config(tmp_path: Path) -> Config:
             "voice": ProjectConfig(
                 repo="jeffrichley/voice",
                 local_clone_path=str(tmp_path / "voice"),
-                apps=AppsConfig(),
+                apps=AppsConfig(
+                    planner_app_id=1001,
+                    planner_private_key_path="/tmp/planner.pem",
+                    reviewer_app_id=1002,
+                    reviewer_private_key_path="/tmp/reviewer.pem",
+                    fixer_app_id=1003,
+                    fixer_private_key_path="/tmp/fixer.pem",
+                    worker_app_id=1004,
+                    worker_private_key_path="/tmp/worker.pem",
+                ),
             )
         },
     )

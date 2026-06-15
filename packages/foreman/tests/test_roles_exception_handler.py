@@ -39,7 +39,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from foreman.config import AppsConfig, Config, ProjectConfig
 from foreman.git_host import GitHostProvider, IssueRef, PRRef
 from foreman.roles import (
     TERMINAL_BLOCKING_LABEL,
@@ -54,6 +53,13 @@ from foreman.roles.fixer import run_fixer
 from foreman.roles.planner import run_planner
 from foreman.roles.reviewer import run_reviewer
 from foreman.roles.worker import run_worker
+from foreman.v4.config import (
+    AppCredentials,
+    AppsConfig,
+    OrchestratorConfig,
+    ProjectConfig,
+    V4Config,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -67,7 +73,13 @@ def _route_build_role_resources_through_fake_registry(
     rationale (Phase 8d.1 — port to V4IdentityRegistry).
     """
 
-    def _fake_build(*, registry: Any, project: Any, role: str) -> tuple[Any, str, Any]:
+    def _fake_build(
+        *,
+        registry: Any,
+        role: str,
+        app_id: int,
+        private_key_path: str,
+    ) -> tuple[Any, str, Any]:
         client = getattr(registry, f"get_{role}_client")()
         token = getattr(registry, f"get_{role}_token")()
         host = registry.get_host_provider(role)
@@ -315,19 +327,38 @@ def _seed_clone(clone: Path, *, origin_path: Path | None = None) -> None:
         )
 
 
-def _make_planner_config(clone: Path) -> Config:
-    return Config(
-        projects={
-            "voice": ProjectConfig(
+def _make_v4_config(clone: Path) -> V4Config:
+    """Shared V4Config fixture for the role exception-handler tests.
+
+    All four roles read the same shape (apps + projects). Phase 8d.2
+    collapsed the per-role variants of this builder into one since the
+    v4 schema requires all four App credential slots — no per-role
+    omission is valid.
+    """
+    return V4Config(
+        db_path="/tmp/v4.db",
+        log_dir="/tmp/v4-logs",
+        apps=AppsConfig(
+            planner=AppCredentials(app_id=123456, private_key_path="/tmp/planner.pem"),
+            reviewer=AppCredentials(app_id=123457, private_key_path="/tmp/reviewer.pem"),
+            fixer=AppCredentials(app_id=123458, private_key_path="/tmp/fixer.pem"),
+            worker=AppCredentials(app_id=123459, private_key_path="/tmp/worker.pem"),
+        ),
+        orchestrator=OrchestratorConfig(
+            app_id=99999, private_key_path="/tmp/orch.pem",
+        ),
+        projects=[
+            ProjectConfig(
+                name="voice",
                 repo="jeffrichley/voice",
                 local_clone_path=str(clone),
-                apps=AppsConfig(
-                    planner_app_id_env="FOREMAN_PLANNER_APP_ID",
-                    planner_private_key_path="/tmp/planner.pem",
-                ),
             )
-        }
+        ],
     )
+
+
+def _make_planner_config(clone: Path) -> V4Config:
+    return _make_v4_config(clone)
 
 
 @pytest.mark.asyncio
@@ -408,21 +439,8 @@ async def test_planner_unhandled_exception_posts_comment_transitions_label_and_l
 # foreman#229 behavior on top of the existing scaffolding.
 
 
-def _make_reviewer_config(clone: Path) -> Config:
-    return Config(
-        projects={
-            "voice": ProjectConfig(
-                repo="jeffrichley/voice",
-                local_clone_path=str(clone),
-                apps=AppsConfig(
-                    planner_app_id_env="FOREMAN_PLANNER_APP_ID",
-                    planner_private_key_path="/tmp/planner.pem",
-                    reviewer_app_id_env="FOREMAN_REVIEWER_APP_ID",
-                    reviewer_private_key_path="/tmp/reviewer.pem",
-                ),
-            )
-        }
-    )
+def _make_reviewer_config(clone: Path) -> V4Config:
+    return _make_v4_config(clone)
 
 
 @pytest.mark.asyncio
@@ -492,21 +510,8 @@ async def test_reviewer_unhandled_exception_posts_comment_transitions_label_and_
 # ----------------------------------------------------------------------
 
 
-def _make_worker_config(clone: Path) -> Config:
-    return Config(
-        projects={
-            "voice": ProjectConfig(
-                repo="jeffrichley/voice",
-                local_clone_path=str(clone),
-                apps=AppsConfig(
-                    planner_app_id_env="FOREMAN_PLANNER_APP_ID",
-                    planner_private_key_path="/tmp/planner.pem",
-                    worker_app_id_env="FOREMAN_WORKER_APP_ID",
-                    worker_private_key_path="/tmp/worker.pem",
-                ),
-            )
-        }
-    )
+def _make_worker_config(clone: Path) -> V4Config:
+    return _make_v4_config(clone)
 
 
 @pytest.mark.asyncio
@@ -611,23 +616,8 @@ async def test_worker_unhandled_exception_posts_comment_transitions_label_and_lo
 # ----------------------------------------------------------------------
 
 
-def _make_fixer_config(clone: Path) -> Config:
-    return Config(
-        projects={
-            "voice": ProjectConfig(
-                repo="jeffrichley/voice",
-                local_clone_path=str(clone),
-                apps=AppsConfig(
-                    planner_app_id_env="FOREMAN_PLANNER_APP_ID",
-                    planner_private_key_path="/tmp/planner.pem",
-                    reviewer_app_id_env="FOREMAN_REVIEWER_APP_ID",
-                    reviewer_private_key_path="/tmp/reviewer.pem",
-                    fixer_app_id_env="FOREMAN_FIXER_APP_ID",
-                    fixer_private_key_path="/tmp/fixer.pem",
-                ),
-            )
-        }
-    )
+def _make_fixer_config(clone: Path) -> V4Config:
+    return _make_v4_config(clone)
 
 
 @pytest.mark.asyncio

@@ -39,7 +39,6 @@ import time
 from pathlib import Path
 
 from foreman.branches import spec_branch
-from foreman.config import Config
 from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
 from foreman.git_host import GitHostProvider, IssueRef
 from foreman.instructions import load_project_instructions
@@ -48,11 +47,11 @@ from foreman.providers import ProviderError
 from foreman.roles import (
     TERMINAL_BLOCKING_LABEL,
     build_role_resources,
-    build_v4_registry_from_v3_project,
     handle_unhandled_role_exception,
 )
 from foreman.schemas.planner import PlannerOutput, PlannerRunResult
 from foreman.stats import log_planner_run
+from foreman.v4.config import V4Config
 from foreman.v4.identity import V4IdentityRegistry
 from foreman.worktree import WorktreeManager
 
@@ -150,11 +149,11 @@ def _strip_auto_close_keywords(body: str) -> str:
 async def run_planner(
     *,
     issue_url: str,
-    config: Config,
+    config: V4Config,
     project_name: str,
     worktrees_root: Path,
     provider: ProviderFacade,
-    identity_registry: V4IdentityRegistry | None = None,
+    identity_registry: V4IdentityRegistry,
     dispatch_recorder: DispatchRecorder | None = None,
     dispatch_trace_id: int | None = None,
 ) -> PlannerRunResult:
@@ -162,16 +161,15 @@ async def run_planner(
 
     Args:
         issue_url: Full GitHub issue URL (``https://github.com/owner/repo/issues/N``).
-        config: Loaded foreman config.
-        project_name: Key into ``config.projects``.
+        config: Loaded foreman v4 config.
+        project_name: Selects which ``V4Config.projects`` entry to use.
         worktrees_root: Root directory under which per-ticket worktrees live.
         provider: Agent provider facade (e.g., AnthropicSDKProvider).
-        identity_registry: Optional pre-built v4 registry; defaults to a fresh
-            :class:`~foreman.v4.identity.V4IdentityRegistry` built from the
-            project's v3 ``ProjectConfig.apps`` block. Tests may inject a
-            ``MagicMock`` exposing ``build_role_resources_for_test(role)``
-            (or the bare ``get_role_token(role)``) — see
-            :func:`foreman.roles.build_role_resources` for the test seam.
+        identity_registry: Pre-built v4 registry. Tests may inject a
+            ``MagicMock`` exposing the production
+            ``get_role_token(role)`` shape — see
+            :func:`foreman.roles.build_role_resources` for the test
+            seam.
 
     Returns:
         :class:`~foreman.schemas.planner.PlannerRunResult` carrying both the
@@ -311,7 +309,15 @@ async def run_planner(
 
     try:
         owner, repo_name, issue_number = parse_issue_url(issue_url)
-        project = config.projects[project_name]
+        project = next(
+            (p for p in config.projects if p.name == project_name), None
+        )
+        if project is None:
+            known = [p.name for p in config.projects]
+            raise ValueError(
+                f"project {project_name!r} not found in V4Config. "
+                f"Known projects: {known}"
+            )
         expected_repo_slug = project.repo  # e.g. "jeffrichley/voice"
         actual_repo_slug = f"{owner}/{repo_name}"
         if expected_repo_slug != actual_repo_slug:
@@ -320,13 +326,11 @@ async def run_planner(
                 f"{project_name!r} configured repo {expected_repo_slug!r}"
             )
 
-        registry = (
-            identity_registry
-            if identity_registry is not None
-            else build_v4_registry_from_v3_project(project)
-        )
         host, planner_token, _planner_client = build_role_resources(
-            registry=registry, project=project, role="planner",
+            registry=identity_registry,
+            role="planner",
+            app_id=config.apps.planner.app_id,
+            private_key_path=config.apps.planner.private_key_path,
         )
 
         issue = host.get_issue(actual_repo_slug, issue_number)
@@ -494,7 +498,7 @@ import asyncio  # noqa: E402  (kept here so legacy import block above stays unto
 import os  # noqa: E402
 
 from foreman.providers import make_provider  # noqa: E402
-from foreman.v4._v3_config_adapter import load_v3_config_for_project  # noqa: E402
+from foreman.v4.config import load_config as load_v4_config  # noqa: E402
 from foreman.v4.emit import emit_outcome  # noqa: E402
 from foreman.v4.outcome import (  # noqa: E402
     Outcome,
@@ -502,6 +506,8 @@ from foreman.v4.outcome import (  # noqa: E402
     OutcomeConfidence,
     OutcomeKind,
 )
+
+_DEFAULT_V4_CONFIG = Path.home() / ".foreman" / "v4" / "config.toml"
 
 
 class _V4PlannerResult:
@@ -545,8 +551,15 @@ def _run_planner_for_v4(*, project: str, issue_number: int) -> _V4PlannerResult:
     configured repo so the v4 CLI stays positional-arg-free without
     requiring upstream callers to know about GitHub URL shape.
     """
-    cfg = load_v3_config_for_project(project)
-    project_cfg = cfg.projects[project]
+    cfg_path = Path(os.environ.get("FOREMAN_V4_CONFIG", _DEFAULT_V4_CONFIG))
+    cfg = load_v4_config(cfg_path)
+    project_cfg = next((p for p in cfg.projects if p.name == project), None)
+    if project_cfg is None:
+        known = [p.name for p in cfg.projects]
+        raise ValueError(
+            f"project {project!r} not found in V4Config at {cfg_path}. "
+            f"Known projects: {known}"
+        )
     issue_url = f"https://github.com/{project_cfg.repo}/issues/{issue_number}"
 
     worktrees_root = Path(
@@ -556,6 +569,11 @@ def _run_planner_for_v4(*, project: str, issue_number: int) -> _V4PlannerResult:
         )
     )
     provider = make_provider()
+    registry = V4IdentityRegistry(
+        apps=cfg.apps,
+        orchestrator=cfg.orchestrator,
+        installation_repo=project_cfg.repo,
+    )
     legacy_result = asyncio.run(
         run_planner(
             issue_url=issue_url,
@@ -563,6 +581,7 @@ def _run_planner_for_v4(*, project: str, issue_number: int) -> _V4PlannerResult:
             project_name=project,
             worktrees_root=worktrees_root,
             provider=provider,
+            identity_registry=registry,
         )
     )
     return _V4PlannerResult(
