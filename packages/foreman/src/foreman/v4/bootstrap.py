@@ -15,8 +15,13 @@ from typing import Protocol
 from foreman.v4.cli.context import CliContext, build_cli_context
 from foreman.v4.config import V4Config
 from foreman.v4.daemon import Daemon, DaemonConfig
+from foreman.v4.event_bus import EventBus
 from foreman.v4.git_provider import GitProvider
 from foreman.v4.logging_config import configure_logging
+from foreman.v4.observers.event_archive import EventArchiveObserver
+from foreman.v4.observers.label_observability import LabelObservabilityObserver
+from foreman.v4.observers.metrics import MetricsObserver
+from foreman.v4.observers.structured_log import StructuredLogObserver
 from foreman.v4.poller import Poller
 from foreman.v4.sqlite_repository import SqliteTicketRepository
 from foreman.v4.subprocess_dispatcher import SubprocessRoleDispatcher
@@ -62,6 +67,25 @@ def bootstrap_cli_context(
             clock=dt.datetime.now,
         ))
 
+    # EventBus + standard observer set. Wiring lives here (not in
+    # Daemon) so the bus + observers are constructed exactly once at
+    # boot, and the same EventBus instance is threaded into Daemon +
+    # WorkerPool at construction. The four observers are the v4
+    # production baseline; project-specific observers can be added
+    # later by subscribing additional callables to ``bus`` before the
+    # Daemon ticks.
+    bus = EventBus()
+    bus.subscribe(StructuredLogObserver())
+    bus.subscribe(EventArchiveObserver(conn=repo.connection))
+    if git_for_pollers is not None:
+        # No projects ⇒ no GitProvider ⇒ nothing to write labels with.
+        # The bus still gets the other three observers so the rest of
+        # the surface is testable in zero-project configs.
+        bus.subscribe(LabelObservabilityObserver(
+            writer=git_for_pollers, repo=repo,
+        ))
+    bus.subscribe(MetricsObserver())
+
     daemon = Daemon(
         repo=repo,
         git=git_for_pollers,  # type: ignore[arg-type]
@@ -72,6 +96,7 @@ def bootstrap_cli_context(
             max_in_flight=config.max_in_flight,
         ),
         clock=dt.datetime.now,
+        bus=bus,
     )
 
     return build_cli_context(

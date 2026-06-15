@@ -9,7 +9,12 @@ import pytest
 
 from foreman.v4.bootstrap import bootstrap_cli_context
 from foreman.v4.config import ProjectConfig, V4Config
+from foreman.v4.git_provider import FakeGitProvider
 from foreman.v4.logging_config import reset_logging
+from foreman.v4.observers.event_archive import EventArchiveObserver
+from foreman.v4.observers.label_observability import LabelObservabilityObserver
+from foreman.v4.observers.metrics import MetricsObserver
+from foreman.v4.observers.structured_log import StructuredLogObserver
 
 _V4_LOGGER_NAMES = (
     "foreman.v4",
@@ -101,3 +106,70 @@ def test_bootstrap_builds_one_poller_per_project(tmp_path: Path):
         git_provider_factory=lambda repo: _stub_git_factory(),
     )
     assert len(ctx.daemon._pollers) == 3  # type: ignore[attr-defined]
+
+
+def test_bootstrap_wires_event_bus_with_standard_observers(tmp_path: Path):
+    """Task 8.1: bootstrap constructs the EventBus + subscribes the four
+    standard observers + threads the bus into Daemon at construction.
+
+    Asserts:
+      - ``ctx.daemon._bus`` is not None (bus instance is reachable).
+      - exactly four observers are subscribed.
+      - one of each of the standard observer types is present.
+    """
+    config = V4Config(
+        db_path=str(tmp_path / "v4.db"),
+        log_dir=str(tmp_path / "logs"),
+        projects=[
+            ProjectConfig(
+                name="voice", repo="owner/voice",
+                local_clone_path=str(tmp_path / "voice"),
+            ),
+        ],
+    )
+    ctx = bootstrap_cli_context(
+        config=config,
+        identity=_stub_identity(),
+        # Real FakeGitProvider — satisfies the LabelWriter Protocol that
+        # LabelObservabilityObserver needs at construction time.
+        git_provider_factory=lambda repo: FakeGitProvider(),
+    )
+    assert ctx.daemon is not None
+    bus = ctx.daemon._bus  # type: ignore[attr-defined]
+    assert bus is not None, "bootstrap should have constructed an EventBus"
+
+    subscribers = bus._subscribers  # type: ignore[attr-defined]
+    assert len(subscribers) == 4, (
+        f"expected 4 observers (structured-log, event-archive, "
+        f"label-observability, metrics), got {len(subscribers)}"
+    )
+
+    observer_types = {type(s) for s in subscribers}
+    assert StructuredLogObserver in observer_types
+    assert EventArchiveObserver in observer_types
+    assert LabelObservabilityObserver in observer_types
+    assert MetricsObserver in observer_types
+
+
+def test_bootstrap_skips_label_observer_when_no_projects(tmp_path: Path):
+    """Zero-project configs have no GitProvider to construct a
+    LabelObservabilityObserver from. The other three observers still
+    land on the bus so the surface remains observable."""
+    config = V4Config(
+        db_path=str(tmp_path / "v4.db"),
+        log_dir=str(tmp_path / "logs"),
+        projects=[],
+    )
+    ctx = bootstrap_cli_context(
+        config=config,
+        identity=_stub_identity(),
+        git_provider_factory=lambda repo: FakeGitProvider(),
+    )
+    assert ctx.daemon is not None
+    bus = ctx.daemon._bus  # type: ignore[attr-defined]
+    assert bus is not None
+    observer_types = {type(s) for s in bus._subscribers}  # type: ignore[attr-defined]
+    assert LabelObservabilityObserver not in observer_types
+    assert StructuredLogObserver in observer_types
+    assert EventArchiveObserver in observer_types
+    assert MetricsObserver in observer_types

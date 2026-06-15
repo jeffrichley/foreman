@@ -21,11 +21,8 @@ from unittest.mock import MagicMock
 
 from foreman.v4.bootstrap import bootstrap_cli_context
 from foreman.v4.config import load_config
-from foreman.v4.event_bus import EventBus
 from foreman.v4.git_provider import FakeGitProvider, MergeVerdict, PRState
 from foreman.v4.logging_config import reset_logging
-from foreman.v4.observers.event_archive import EventArchiveObserver
-from foreman.v4.observers.structured_log import StructuredLogObserver
 from foreman.v4.role_dispatcher import FakeRoleDispatcher
 
 
@@ -90,21 +87,11 @@ def test_full_boot_from_toml_to_done(tmp_path: Path, monkeypatch):
             config=config, identity=identity,
             git_provider_factory=lambda repo: git,
         )
-
-        # bootstrap doesn't yet auto-subscribe observers to a shared
-        # bus; for this smoke we manually wire StructuredLogObserver +
-        # EventArchiveObserver to a fresh bus and inject it into the
-        # already-built Daemon + WorkerPool. The transition path reads
-        # self._bus lazily inside _run_transition, so post-construction
-        # injection works. (Phase 8 ticket: have bootstrap own the bus
-        # + standard-observer set so this reach-in disappears.)
-        bus = EventBus()
-        bus.subscribe(StructuredLogObserver())
         assert ctx.repo is not None
-        bus.subscribe(EventArchiveObserver(conn=ctx.repo._conn))  # type: ignore[attr-defined]
         assert ctx.daemon is not None
-        ctx.daemon._bus = bus                # type: ignore[attr-defined]
-        ctx.daemon._pool._bus = bus          # type: ignore[attr-defined]
+
+        # Bootstrap owns the EventBus + 4 standard observers as of
+        # Task 8.1; this test no longer needs to wire them by hand.
 
         # Drive the loop. tick_seconds=0 + serial pool means one tick =
         # one transition; Queued -> Planning -> SpecReview -> Implementing
