@@ -749,8 +749,9 @@ async def run_reviewer(
 # ============================================================
 import asyncio  # noqa: E402  (kept here so legacy import block above stays untouched)
 
-from foreman.config import load_config  # noqa: E402
 from foreman.providers import make_provider  # noqa: E402
+from foreman.v4._v3_config_adapter import v3_config_from_v4  # noqa: E402
+from foreman.v4.config import load_config as v4_load_config  # noqa: E402
 from foreman.v4.emit import emit_outcome  # noqa: E402
 from foreman.v4.outcome import Finding as V4Finding  # noqa: E402
 from foreman.v4.outcome import (  # noqa: E402
@@ -826,10 +827,20 @@ def _run_reviewer_for_v4(
     is consumed inside ``run_reviewer`` itself — no kwarg is plumbed
     through from v4.
     """
-    cfg_path = os.environ.get("FOREMAN_CONFIG_PATH") or os.environ.get("FOREMAN_CONFIG")
-    if cfg_path is None:
-        cfg_path = str(Path("~/.foreman/config.toml").expanduser())
-    cfg = load_config(cfg_path)
+    v4_cfg_path = os.environ.get("FOREMAN_V4_CONFIG") or str(
+        Path("~/.foreman/v4/config.toml").expanduser()
+    )
+    v4_cfg = v4_load_config(Path(v4_cfg_path))
+    v4_project = next(
+        (p for p in v4_cfg.projects if p.name == project),
+        None,
+    )
+    if v4_project is None:
+        raise ValueError(
+            f"project {project!r} not found in V4Config at {v4_cfg_path}. "
+            f"Known projects: {[p.name for p in v4_cfg.projects]}"
+        )
+    cfg = v3_config_from_v4(v4_cfg, v4_project)
     project_cfg = cfg.projects[project]
 
     # Locate the open PR for this issue. The Reviewer's legacy entry-
