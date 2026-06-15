@@ -88,6 +88,61 @@ def test_status_when_pid_stale(tmp_path: Path, monkeypatch):
     assert "stale" in result.output
 
 
+def test_status_when_pid_stale_windows_oserror(tmp_path: Path, monkeypatch):
+    """Windows raises bare OSError ([WinError 87]) from os.kill on a
+    dead PID, not ProcessLookupError. The status command must treat
+    that the same way — report 'stale' cleanly, no traceback.
+    """
+    pid_path = tmp_path / "daemon.pid"
+    pid_path.write_text("99999")
+    monkeypatch.setattr("foreman.v4.cli.daemon._PID_PATH", pid_path)
+    # Bare OSError mirrors the Windows kernel response; the simulated
+    # winerror=87 is illustrative only — the except clause widens to
+    # OSError so the specific code doesn't matter.
+    with patch("os.kill", side_effect=OSError(22, "Invalid argument")):
+        result = CliRunner().invoke(
+            app, ["daemon", "status"],
+            obj=build_cli_context(repo=SqliteTicketRepository.in_memory()),
+        )
+    assert result.exit_code == 0
+    assert "stale" in result.output.lower()
+
+
+def test_stop_when_pid_stale_posix(tmp_path: Path, monkeypatch):
+    """A stale PID file under POSIX (ProcessLookupError from os.kill)
+    must report cleanly AND unlink the stale PID file.
+    """
+    pid_path = tmp_path / "daemon.pid"
+    pid_path.write_text("99999")
+    monkeypatch.setattr("foreman.v4.cli.daemon._PID_PATH", pid_path)
+    with patch("os.kill", side_effect=ProcessLookupError):
+        result = CliRunner().invoke(
+            app, ["daemon", "stop"],
+            obj=build_cli_context(repo=SqliteTicketRepository.in_memory()),
+        )
+    assert result.exit_code == 0
+    assert "not running" in result.output
+    assert not pid_path.exists(), "stale PID file should be unlinked"
+
+
+def test_stop_when_pid_stale_windows_oserror(tmp_path: Path, monkeypatch):
+    """Windows raises bare OSError from os.kill on a dead PID. The
+    stop command must treat that the same as ProcessLookupError —
+    report 'not running' and unlink the stale PID file, no traceback.
+    """
+    pid_path = tmp_path / "daemon.pid"
+    pid_path.write_text("99999")
+    monkeypatch.setattr("foreman.v4.cli.daemon._PID_PATH", pid_path)
+    with patch("os.kill", side_effect=OSError(22, "Invalid argument")):
+        result = CliRunner().invoke(
+            app, ["daemon", "stop"],
+            obj=build_cli_context(repo=SqliteTicketRepository.in_memory()),
+        )
+    assert result.exit_code == 0
+    assert "not running" in result.output
+    assert not pid_path.exists(), "stale PID file should be unlinked"
+
+
 # --- Task 8.5: SIGHUP handler reset+reconfigure logging ----------------
 
 def _minimal_v4_config(tmp_path: Path) -> V4Config:

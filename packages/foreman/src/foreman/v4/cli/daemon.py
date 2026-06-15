@@ -106,7 +106,12 @@ def cmd_daemon_stop(ctx: typer.Context) -> None:
     pid = int(_PID_PATH.read_text().strip())
     try:
         os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
+    except (ProcessLookupError, OSError):
+        # POSIX raises ProcessLookupError for a dead PID; Windows
+        # raises a bare OSError ([WinError 87]) from os.kill when
+        # the PID isn't a live process. Both names listed for
+        # documentation — ProcessLookupError is already an OSError
+        # subclass, so the tuple is functionally one catch.
         typer.echo(f"PID {pid} not running; cleaning stale file")
         _PID_PATH.unlink()
         return
@@ -121,7 +126,10 @@ def cmd_daemon_status(ctx: typer.Context) -> None:
     try:
         os.kill(pid, 0)
         typer.echo(f"daemon: running (pid {pid})")
-    except ProcessLookupError:
+    except (ProcessLookupError, OSError):
+        # Same cross-OS asymmetry as cmd_daemon_stop — POSIX raises
+        # ProcessLookupError; Windows raises bare OSError from a
+        # probe-kill against a dead PID. Treat both as 'stale'.
         typer.echo(f"daemon: stale PID file (pid {pid} not alive)")
 
 
