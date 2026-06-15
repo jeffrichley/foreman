@@ -171,3 +171,4 @@ def test_daemon_shutdown_is_idempotent():
     )
     daemon.shutdown(wait=True)
     daemon.shutdown(wait=True)  # must not raise
+    assert daemon.qm.in_flight_count() == 0
