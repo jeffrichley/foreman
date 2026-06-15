@@ -62,6 +62,34 @@ _REFRESH_SAFETY_SECONDS = 300
 
 _KNOWN_ROLES = ("planner", "reviewer", "fixer", "worker", "orchestrator")
 
+# Role names the SubprocessRoleDispatcher passes to get_role_token().
+# Target-aware roles (reviewer/fixer) come in with -spec or -impl
+# suffixes; the App identity is the same regardless of target, so
+# strip the suffix before resolving credentials.
+_TARGET_SUFFIXES = ("-spec", "-impl")
+_TARGET_AWARE_BASE_ROLES = ("reviewer", "fixer")
+
+
+def _normalize_role(role: str) -> str:
+    """Strip a target suffix if the role is one of the target-aware roles.
+
+    ``reviewer-spec`` / ``reviewer-impl`` -> ``reviewer``
+    ``fixer-spec`` / ``fixer-impl``       -> ``fixer``
+    Base roles (planner / worker / orchestrator / reviewer / fixer) pass through.
+    Unknown roles or invalid suffixes (e.g. ``planner-spec``) pass through
+    unchanged so ``_resolve`` raises a clear error with the original name.
+    """
+    for suffix in _TARGET_SUFFIXES:
+        if role.endswith(suffix):
+            base = role.removesuffix(suffix)
+            if base in _TARGET_AWARE_BASE_ROLES:
+                return base
+            # Suffix on a non-target-aware role (e.g. "planner-spec") —
+            # leave as-is; _resolve will reject with the full original
+            # name in the error message.
+            return role
+    return role
+
 
 class V4IdentityRegistry:
     """V4-native registry of per-role GitHub App installation tokens.
@@ -112,14 +140,23 @@ class V4IdentityRegistry:
         """Return the current installation token for ``role``.
 
         Supported roles: ``planner``, ``reviewer``, ``fixer``,
-        ``worker``, ``orchestrator``. Anything else raises ``ValueError``.
+        ``worker``, ``orchestrator``, plus the target-aware variants
+        ``reviewer-spec``, ``reviewer-impl``, ``fixer-spec``, and
+        ``fixer-impl`` — which alias to their base App identity (the
+        target distinction is carried via subprocess CLI flags, not
+        identity). Anything else raises ``ValueError``.
 
         Cached tokens are reused until they're within
         ``_REFRESH_SAFETY_SECONDS`` of expiry; past that threshold the
-        next call mints a fresh one.
+        next call mints a fresh one. Target-aware variants share a
+        single cache entry with the base role.
         """
         creds, repo_slug = self._resolve(role)
-        key = (role, repo_slug)
+        # Cache key uses the BASE role name so reviewer-spec and
+        # reviewer-impl share one cached InstallationToken (same App
+        # identity). Without this, target-aware variants would mint
+        # independently and double GitHub API rate-limit consumption.
+        key = (_normalize_role(role), repo_slug)
         cached = self._cache.get(key)
         now = int(self._clock())
         if cached is not None and cached.expires_at - now > _REFRESH_SAFETY_SECONDS:
@@ -134,22 +171,32 @@ class V4IdentityRegistry:
     def _resolve(self, role: str) -> tuple[AppCredentials, str]:
         """Map ``role`` to its (credentials, repo_slug) tuple.
 
+        Target-aware variants (``reviewer-spec``, ``reviewer-impl``,
+        ``fixer-spec``, ``fixer-impl``) resolve to the same App
+        credentials as their base role — the target is carried via the
+        subprocess CLI's ``--target`` flag, not via identity.
+
         Per the module-level single-installation assumption, every role
         resolves to ``self._installation_repo``. The orchestrator's
         :class:`OrchestratorConfig` carries the same ``{app_id,
         private_key_path}`` shape as :class:`AppCredentials`; we
         construct a transient :class:`AppCredentials` from it so the
         caller path stays uniform.
+
+        The error message keeps the ORIGINAL ``role`` (not the
+        normalized form) so operators debugging see exactly what the
+        state machine passed in.
         """
-        if role == "planner":
+        normalized = _normalize_role(role)
+        if normalized == "planner":
             return self._apps.planner, self._installation_repo
-        if role == "reviewer":
+        if normalized == "reviewer":
             return self._apps.reviewer, self._installation_repo
-        if role == "fixer":
+        if normalized == "fixer":
             return self._apps.fixer, self._installation_repo
-        if role == "worker":
+        if normalized == "worker":
             return self._apps.worker, self._installation_repo
-        if role == "orchestrator":
+        if normalized == "orchestrator":
             return (
                 AppCredentials(
                     app_id=self._orchestrator.app_id,

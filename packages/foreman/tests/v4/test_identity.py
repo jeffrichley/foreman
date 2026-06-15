@@ -140,6 +140,134 @@ def test_unknown_role_raises():
         registry.get_role_token("not-a-role")
 
 
+def test_role_aliases_reviewer_spec_and_impl_to_reviewer_app():
+    """``reviewer-spec`` and ``reviewer-impl`` both resolve to the
+    reviewer App's credentials — the target distinction is carried via
+    the subprocess CLI ``--target`` flag, not via identity."""
+    clock = _MutableClock()
+    registry = V4IdentityRegistry(
+        apps=_apps(),
+        orchestrator=_orchestrator(),
+        installation_repo="owner/project",
+        clock=clock,
+    )
+
+    captured: list[int] = []
+
+    def fake_mint(app_id, private_key_path, repo_slug):
+        captured.append(app_id)
+        return InstallationToken(
+            token=f"token-app-{app_id}",
+            expires_at=int(clock.now) + 3600,
+        )
+
+    with patch(
+        "foreman.v4.identity.mint_installation_token", side_effect=fake_mint,
+    ):
+        # Use a fresh registry instance per call by clearing the cache
+        # would suppress the test's value — instead bump time past the
+        # refresh window between calls so each call hits mint.
+        spec_token = registry.get_role_token("reviewer-spec")
+        # Force a refresh so the second variant also mints (otherwise the
+        # cache-share is what we measure — which IS what the next test
+        # measures). For THIS test, advance past the refresh threshold.
+        clock.now += 3400
+        impl_token = registry.get_role_token("reviewer-impl")
+
+    # Both calls minted with reviewer's app_id (2), not planner (1) or
+    # fixer (3) or anything else.
+    assert captured == [2, 2]
+    assert spec_token == "token-app-2"
+    assert impl_token == "token-app-2"
+
+
+def test_role_aliases_fixer_spec_and_impl_to_fixer_app():
+    """``fixer-spec`` and ``fixer-impl`` both resolve to the fixer App's
+    credentials. Symmetric to the reviewer aliasing test."""
+    clock = _MutableClock()
+    registry = V4IdentityRegistry(
+        apps=_apps(),
+        orchestrator=_orchestrator(),
+        installation_repo="owner/project",
+        clock=clock,
+    )
+
+    captured: list[int] = []
+
+    def fake_mint(app_id, private_key_path, repo_slug):
+        captured.append(app_id)
+        return InstallationToken(
+            token=f"token-app-{app_id}",
+            expires_at=int(clock.now) + 3600,
+        )
+
+    with patch(
+        "foreman.v4.identity.mint_installation_token", side_effect=fake_mint,
+    ):
+        spec_token = registry.get_role_token("fixer-spec")
+        clock.now += 3400  # Force refresh so the second variant also mints.
+        impl_token = registry.get_role_token("fixer-impl")
+
+    # Both calls minted with fixer's app_id (3), not reviewer (2) or
+    # anything else.
+    assert captured == [3, 3]
+    assert spec_token == "token-app-3"
+    assert impl_token == "token-app-3"
+
+
+def test_alias_cache_is_shared_across_target_suffixes():
+    """``reviewer-spec`` mints once; the subsequent ``reviewer-impl``
+    call within the refresh window hits the SAME cache entry (keyed on
+    the normalized base role ``reviewer``) and does NOT mint again.
+
+    Without this normalized cache key, target-aware variants would
+    double GitHub API rate-limit consumption — see ``get_role_token``
+    for the load-bearing comment.
+    """
+    clock = _MutableClock()
+    registry = V4IdentityRegistry(
+        apps=_apps(),
+        orchestrator=_orchestrator(),
+        installation_repo="owner/project",
+        clock=clock,
+    )
+
+    counter = {"n": 0}
+
+    def fake_mint(app_id, private_key_path, repo_slug):
+        counter["n"] += 1
+        return InstallationToken(
+            token=f"token-mint-{counter['n']}",
+            expires_at=int(clock.now) + 3600,
+        )
+
+    with patch(
+        "foreman.v4.identity.mint_installation_token", side_effect=fake_mint,
+    ) as mint:
+        spec_token = registry.get_role_token("reviewer-spec")
+        clock.now += 60  # 1 minute later — well inside the safety window.
+        impl_token = registry.get_role_token("reviewer-impl")
+
+    # Single mint, shared cached token returned to both target variants.
+    assert mint.call_count == 1
+    assert spec_token == impl_token == "token-mint-1"
+
+
+def test_planner_spec_still_raises_unknown_role():
+    """Suffix-stripping only happens for the target-aware base roles
+    (``reviewer``, ``fixer``). A suffix on any other role (e.g.
+    ``planner-spec``) is NOT a legitimate alias and must raise — and
+    the error message must surface the ORIGINAL unaliased role so the
+    operator sees what the state machine actually passed."""
+    registry = V4IdentityRegistry(
+        apps=_apps(),
+        orchestrator=_orchestrator(),
+        installation_repo="owner/project",
+    )
+    with pytest.raises(ValueError, match="planner-spec"):
+        registry.get_role_token("planner-spec")
+
+
 def test_orchestrator_uses_same_installation_repo():
     """The orchestrator's mint call passes ``installation_repo`` (the
     single-installation-per-role-bot assumption). Per-role bots use the
