@@ -11,6 +11,14 @@ from __future__ import annotations
 import typer
 
 from foreman.v4.cli.log import cmd_log
+from foreman.v4.cli.mutations import (
+    cmd_drop,
+    cmd_hold,
+    cmd_resume,
+    cmd_retry,
+    cmd_set_state,
+    cmd_skip,
+)
 from foreman.v4.cli.ps import cmd_ps
 from foreman.v4.cli.queue import cmd_queue
 from foreman.v4.cli.show import cmd_show
@@ -38,22 +46,18 @@ def _root(
         typer.echo(ctx.get_help())
 
 
-# Real query + log commands wired; mutation commands still stub-only until
-# Task 6.4 replaces them.
+# Query + log + mutation commands wired. Daemon group still stub-only until
+# Task 6.5 replaces it.
 app.command("ps")(cmd_ps)
 app.command("show")(cmd_show)
 app.command("queue")(cmd_queue)
 app.command("log")(cmd_log)
-
-
-@app.command("hold")
-def _hold_stub(ticket: int) -> None:
-    typer.echo(f"hold {ticket} — replaced in Task 6.4")
-
-
-@app.command("resume")
-def _resume_stub(ticket: int) -> None:
-    typer.echo(f"resume {ticket} — replaced in Task 6.4")
+app.command("hold")(cmd_hold)
+app.command("resume")(cmd_resume)
+app.command("retry")(cmd_retry)
+app.command("skip")(cmd_skip)
+app.command("drop")(cmd_drop)
+app.command("set-state")(cmd_set_state)
 
 
 daemon_app = typer.Typer(name="daemon", help="Daemon lifecycle")
