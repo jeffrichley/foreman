@@ -35,12 +35,16 @@ class Poller:
         self,
         *,
         repo: TicketRepository,
-        qm: QueueManager,
+        qm: QueueManager | None,
         git: GitProvider,
         project: str,
         trigger_label: str,
         clock: Callable[[], dt.datetime],
     ) -> None:
+        # qm may be None at construction time; Daemon's `_with_qm` helper
+        # injects the shared QueueManager when the Daemon is built. This
+        # lets callers construct Pollers per-project and let the Daemon
+        # wire one shared queue across all of them.
         self._repo = repo
         self._qm = qm
         self._git = git
@@ -49,10 +53,20 @@ class Poller:
         self._clock = clock
 
     def tick(self) -> None:
+        if self._qm is None:
+            # Constructed without a QM and never wired by a Daemon — tick()
+            # would have no queue to enqueue into. Fail loud so this isn't
+            # mistaken for "tick ran but found nothing."
+            raise RuntimeError(
+                "Poller.tick() called before a QueueManager was wired. "
+                "Either pass qm= at construction, or attach the Poller to "
+                "a Daemon (which injects its shared QM).",
+            )
         self._adopt_new_tickets()
         self._enqueue_open_tickets()
 
     def _adopt_new_tickets(self) -> None:
+        assert self._qm is not None  # narrowed by tick()
         issue_numbers = self._git.list_open_issues_with_label(
             project=self._project, label=self._trigger_label,
         )
@@ -68,6 +82,7 @@ class Poller:
             self._qm.enqueue(WorkItem(ticket_id=ticket.id, state_name="Queued"))
 
     def _enqueue_open_tickets(self) -> None:
+        assert self._qm is not None  # narrowed by tick()
         for ticket in self._repo.list_open_tickets():
             if ticket.current_state in _TERMINAL_STATES:
                 continue
