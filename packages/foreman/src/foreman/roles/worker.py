@@ -74,7 +74,6 @@ import subprocess
 import time
 from pathlib import Path
 
-from github import Github
 from github.GithubException import GithubException
 from github.Issue import Issue
 from github.PullRequest import PullRequest
@@ -84,13 +83,18 @@ from foreman.branches import impl_branch, spec_branch
 from foreman.config import Config
 from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
 from foreman.git_host import GitHostProvider
-from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
 from foreman.providers import ProviderError
-from foreman.roles import TERMINAL_BLOCKING_LABEL, handle_unhandled_role_exception
+from foreman.roles import (
+    TERMINAL_BLOCKING_LABEL,
+    build_role_resources,
+    build_v4_registry_from_v3_project,
+    handle_unhandled_role_exception,
+)
 from foreman.schemas.worker import WorkerOutput, WorkerRunResult
 from foreman.stats import log_worker_run
+from foreman.v4.identity import V4IdentityRegistry
 from foreman.worktree import WorktreeManager
 
 _log = logging.getLogger(__name__)
@@ -587,7 +591,7 @@ async def run_worker(
     project_name: str,
     worktrees_root: Path,
     provider: ProviderFacade,
-    identity_registry: IdentityRegistry | None = None,
+    identity_registry: V4IdentityRegistry | None = None,
     dispatch_recorder: DispatchRecorder | None = None,
     dispatch_trace_id: int | None = None,
 ) -> WorkerRunResult:
@@ -605,10 +609,13 @@ async def run_worker(
             live. The Worker uses a sibling ``impl-<N>/`` worktree
             distinct from the spec-side ``issue-<N>/``.
         provider: Agent provider facade (e.g., AnthropicSDKProvider).
-        identity_registry: Optional pre-built registry; defaults to a
-            fresh :class:`~foreman.identity.IdentityRegistry` for the
-            project. Tests inject a fake registry to bypass real App
-            auth.
+        identity_registry: Optional pre-built v4 registry; defaults to a
+            fresh :class:`~foreman.v4.identity.V4IdentityRegistry` built
+            from the project's v3 ``ProjectConfig.apps`` block. Tests
+            may inject a ``MagicMock`` exposing
+            ``build_role_resources_for_test(role)`` (or the bare
+            ``get_role_token(role)``) — see
+            :func:`foreman.roles.build_role_resources` for the test seam.
 
     Returns:
         A :class:`~foreman.schemas.worker.WorkerRunResult` bundling the
@@ -647,14 +654,18 @@ async def run_worker(
                 f"{project_name!r} configured repo {expected_repo_slug!r}"
             )
 
-        registry = identity_registry if identity_registry is not None else IdentityRegistry(project)
-        worker_client: Github = registry.get_worker_client()
-        worker_token: str = registry.get_worker_token()
+        registry = (
+            identity_registry
+            if identity_registry is not None
+            else build_v4_registry_from_v3_project(project)
+        )
         # foreman#222: acquire the authenticated GitHostProvider so we can
         # push from Python via the tokenized-URL path that Planner already
         # uses. The container has no git credential helper, so shell-out
         # ``git push`` + Claude's Bash both fail auth.
-        host: GitHostProvider = registry.get_host_provider("worker")
+        host, worker_token, worker_client = build_role_resources(
+            registry=registry, project=project, role="worker",
+        )
 
         repo: Repository = worker_client.get_repo(actual_repo_slug)
         issue = repo.get_issue(issue_number)

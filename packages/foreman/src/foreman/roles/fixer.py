@@ -51,7 +51,6 @@ import time
 from pathlib import Path
 from typing import Literal, cast
 
-from github import Github
 from github.Issue import Issue
 from github.PullRequest import PullRequest
 from github.Repository import Repository
@@ -60,15 +59,20 @@ from pydantic import ValidationError
 from foreman.branches import spec_branch
 from foreman.config import Config
 from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
-from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
 from foreman.providers import ProviderError
-from foreman.roles import TERMINAL_BLOCKING_LABEL, handle_unhandled_role_exception
+from foreman.roles import (
+    TERMINAL_BLOCKING_LABEL,
+    build_role_resources,
+    build_v4_registry_from_v3_project,
+    handle_unhandled_role_exception,
+)
 from foreman.roles.reviewer import FINDINGS_BEGIN_MARKER, FINDINGS_END_MARKER
 from foreman.schemas.fixer import FixerOutput, FixerRunResult
 from foreman.schemas.reviewer import Finding
 from foreman.stats import log_fixer_run
+from foreman.v4.identity import V4IdentityRegistry
 from foreman.worktree import WorktreeManager
 
 _log = logging.getLogger(__name__)
@@ -414,7 +418,7 @@ async def run_fixer(
     project_name: str,
     worktrees_root: Path,
     provider: ProviderFacade,
-    identity_registry: IdentityRegistry | None = None,
+    identity_registry: V4IdentityRegistry | None = None,
     target: str = "spec_pr",
     dispatch_recorder: DispatchRecorder | None = None,
     dispatch_trace_id: int | None = None,
@@ -432,10 +436,13 @@ async def run_fixer(
         worktrees_root: Root directory under which per-ticket worktrees
             live.
         provider: Agent provider facade (e.g., AnthropicSDKProvider).
-        identity_registry: Optional pre-built registry; defaults to a
-            fresh :class:`~foreman.identity.IdentityRegistry` for the
-            project. Tests inject a fake registry to bypass real App
-            auth.
+        identity_registry: Optional pre-built v4 registry; defaults to a
+            fresh :class:`~foreman.v4.identity.V4IdentityRegistry` built
+            from the project's v3 ``ProjectConfig.apps`` block. Tests
+            may inject a ``MagicMock`` exposing
+            ``build_role_resources_for_test(role)`` (or the bare
+            ``get_role_token(role)``) — see
+            :func:`foreman.roles.build_role_resources` for the test seam.
 
     Returns:
         A :class:`~foreman.schemas.fixer.FixerRunResult` bundling the
@@ -471,9 +478,14 @@ async def run_fixer(
                 f"{project_name!r} configured repo {expected_repo_slug!r}"
             )
 
-        registry = identity_registry if identity_registry is not None else IdentityRegistry(project)
-        fixer_client: Github = registry.get_fixer_client()
-        fixer_token: str = registry.get_fixer_token()
+        registry = (
+            identity_registry
+            if identity_registry is not None
+            else build_v4_registry_from_v3_project(project)
+        )
+        _host, fixer_token, fixer_client = build_role_resources(
+            registry=registry, project=project, role="fixer",
+        )
 
         repo: Repository = fixer_client.get_repo(actual_repo_slug)
         issue = repo.get_issue(issue_number)
@@ -970,8 +982,10 @@ def _run_fixer_for_v4(
     # point takes an issue URL — v4's SubprocessRoleDispatcher only
     # knows the issue number + target. Resolve via the fixer App's
     # client (read-only get_pulls is in scope for the fixer identity).
-    registry = IdentityRegistry(project_cfg)
-    fixer_client: Github = registry.get_fixer_client()
+    registry = build_v4_registry_from_v3_project(project_cfg)
+    _host, _token, fixer_client = build_role_resources(
+        registry=registry, project=project_cfg, role="fixer",
+    )
     repo: Repository = fixer_client.get_repo(project_cfg.repo)
     owner = project_cfg.repo.split("/", 1)[0]
     branch_prefix = _V4_TARGET_TO_BRANCH_PREFIX[target]

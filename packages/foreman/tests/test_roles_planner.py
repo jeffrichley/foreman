@@ -21,6 +21,7 @@ from foreman.config import AppsConfig, Config, ProjectConfig
 from foreman.git_host import GitHostProvider, IssueRef, PRRef
 from foreman.prompts import load_role_prompt
 from foreman.provider import UsageInfo
+from foreman.roles import planner as _planner_mod
 from foreman.roles.planner import (
     PLANNER_ALLOWED_TOOLS,
     _strip_auto_close_keywords,
@@ -28,6 +29,36 @@ from foreman.roles.planner import (
     run_planner,
 )
 from foreman.schemas.planner import PlannerOutput
+
+
+@pytest.fixture(autouse=True)
+def _route_build_role_resources_through_fake_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Route ``foreman.roles.planner.build_role_resources`` through the
+    fake registry's v3-shaped accessors instead of the v4 happy path
+    (App-metadata HTTP fetch + Github(token) client construction).
+
+    Phase 8d.1 (port to V4IdentityRegistry) replaced the role-side
+    ``IdentityRegistry(project)`` default with a v4 helper that calls
+    :func:`foreman.auth.fetch_app_metadata` — a real HTTP request the
+    unit tests have no business making. This fixture short-circuits the
+    helper for every test in this file: when the test injects a
+    ``MagicMock`` carrying ``get_host_provider`` /
+    ``get_planner_token`` ``return_value`` configurations, route through
+    those v3-shaped methods exactly like the legacy
+    ``IdentityRegistry`` did. Tests that don't go through ``run_planner``
+    (URL-parser table, prompt-content asserts) are unaffected — the
+    monkeypatch is harmless when the helper isn't called.
+    """
+
+    def _fake_build(*, registry: Any, project: Any, role: str) -> tuple[Any, str, Any]:
+        client = getattr(registry, f"get_{role}_client")()
+        token = getattr(registry, f"get_{role}_token")()
+        host = registry.get_host_provider(role)
+        return host, token, client
+
+    monkeypatch.setattr(_planner_mod, "build_role_resources", _fake_build)
 
 
 def _with_usage(output: Any) -> tuple[Any, UsageInfo]:

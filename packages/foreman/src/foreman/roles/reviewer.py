@@ -40,19 +40,23 @@ import time
 from pathlib import Path
 from typing import Literal
 
-from github import Github
 from github.Issue import Issue
 from github.Repository import Repository
 
 from foreman.config import Config
 from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
-from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
 from foreman.providers import ProviderError
-from foreman.roles import TERMINAL_BLOCKING_LABEL, handle_unhandled_role_exception
+from foreman.roles import (
+    TERMINAL_BLOCKING_LABEL,
+    build_role_resources,
+    build_v4_registry_from_v3_project,
+    handle_unhandled_role_exception,
+)
 from foreman.schemas.reviewer import Finding, ReviewerOutput, ReviewerRunResult
 from foreman.stats import log_reviewer_run
+from foreman.v4.identity import V4IdentityRegistry
 from foreman.worktree import WorktreeManager
 
 _LOG = logging.getLogger(__name__)
@@ -379,7 +383,7 @@ async def run_reviewer(
     project_name: str,
     worktrees_root: Path,
     provider: ProviderFacade,
-    identity_registry: IdentityRegistry | None = None,
+    identity_registry: V4IdentityRegistry | None = None,
     dispatch_recorder: DispatchRecorder | None = None,
     dispatch_trace_id: int | None = None,
 ) -> ReviewerRunResult:
@@ -392,9 +396,12 @@ async def run_reviewer(
         project_name: Key into ``config.projects``.
         worktrees_root: Root directory under which per-ticket worktrees live.
         provider: Agent provider facade (e.g., AnthropicSDKProvider).
-        identity_registry: Optional pre-built registry; defaults to a fresh
-            :class:`~foreman.identity.IdentityRegistry` for the project.
-            Tests inject a fake registry to bypass real App auth.
+        identity_registry: Optional pre-built v4 registry; defaults to a fresh
+            :class:`~foreman.v4.identity.V4IdentityRegistry` built from the
+            project's v3 ``ProjectConfig.apps`` block. Tests may inject a
+            ``MagicMock`` exposing ``build_role_resources_for_test(role)``
+            (or the bare ``get_role_token(role)``) — see
+            :func:`foreman.roles.build_role_resources` for the test seam.
 
     Returns:
         A :class:`~foreman.schemas.reviewer.ReviewerRunResult` bundling
@@ -522,9 +529,14 @@ async def run_reviewer(
                 f"{project_name!r} configured repo {expected_repo_slug!r}"
             )
 
-        registry = identity_registry if identity_registry is not None else IdentityRegistry(project)
-        reviewer_client: Github = registry.get_reviewer_client()
-        reviewer_token: str = registry.get_reviewer_token()
+        registry = (
+            identity_registry
+            if identity_registry is not None
+            else build_v4_registry_from_v3_project(project)
+        )
+        _host, reviewer_token, reviewer_client = build_role_resources(
+            registry=registry, project=project, role="reviewer",
+        )
 
         repo: Repository = reviewer_client.get_repo(actual_repo_slug)
         pr = repo.get_pull(pr_number)
@@ -833,8 +845,10 @@ def _run_reviewer_for_v4(
     # point takes a PR URL — v4's SubprocessRoleDispatcher only knows
     # the issue number + target. Resolve via the reviewer App's client
     # (read-only get_pulls is in scope for the reviewer identity).
-    registry = IdentityRegistry(project_cfg)
-    reviewer_client: Github = registry.get_reviewer_client()
+    registry = build_v4_registry_from_v3_project(project_cfg)
+    _host, _token, reviewer_client = build_role_resources(
+        registry=registry, project=project_cfg, role="reviewer",
+    )
     repo: Repository = reviewer_client.get_repo(project_cfg.repo)
     owner = project_cfg.repo.split("/", 1)[0]
     branch_prefix = _V4_TARGET_TO_BRANCH_PREFIX[target]

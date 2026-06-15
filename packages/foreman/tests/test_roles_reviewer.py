@@ -20,6 +20,7 @@ import pytest
 
 from foreman.config import AppsConfig, Config, ProjectConfig
 from foreman.provider import UsageInfo
+from foreman.roles import reviewer as _reviewer_mod
 from foreman.roles.reviewer import (
     FINDINGS_BEGIN_MARKER,
     FINDINGS_END_MARKER,
@@ -29,6 +30,27 @@ from foreman.roles.reviewer import (
     run_reviewer,
 )
 from foreman.schemas.reviewer import Finding, ReviewerOutput, ReviewerRunResult
+
+
+@pytest.fixture(autouse=True)
+def _route_build_role_resources_through_fake_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Route ``foreman.roles.reviewer.build_role_resources`` through the
+    fake registry's v3-shaped accessors instead of the v4 happy path
+    (App-metadata HTTP fetch + Github(token) client construction).
+
+    See ``test_roles_planner.py``'s identical fixture for the full
+    rationale (Phase 8d.1 — port to V4IdentityRegistry).
+    """
+
+    def _fake_build(*, registry: Any, project: Any, role: str) -> tuple[Any, str, Any]:
+        client = getattr(registry, f"get_{role}_client")()
+        token = getattr(registry, f"get_{role}_token")()
+        host = registry.get_host_provider(role)
+        return host, token, client
+
+    monkeypatch.setattr(_reviewer_mod, "build_role_resources", _fake_build)
 
 
 def _with_usage(output: Any) -> tuple[Any, UsageInfo]:

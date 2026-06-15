@@ -46,10 +46,35 @@ from foreman.roles import (
     build_exception_comment,
     handle_unhandled_role_exception,
 )
+from foreman.roles import fixer as _fixer_mod
+from foreman.roles import planner as _planner_mod
+from foreman.roles import reviewer as _reviewer_mod
+from foreman.roles import worker as _worker_mod
 from foreman.roles.fixer import run_fixer
 from foreman.roles.planner import run_planner
 from foreman.roles.reviewer import run_reviewer
 from foreman.roles.worker import run_worker
+
+
+@pytest.fixture(autouse=True)
+def _route_build_role_resources_through_fake_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Route ``build_role_resources`` through the fake registry's
+    v3-shaped accessors in all 4 role modules.
+
+    See ``test_roles_planner.py``'s identical fixture for the full
+    rationale (Phase 8d.1 — port to V4IdentityRegistry).
+    """
+
+    def _fake_build(*, registry: Any, project: Any, role: str) -> tuple[Any, str, Any]:
+        client = getattr(registry, f"get_{role}_client")()
+        token = getattr(registry, f"get_{role}_token")()
+        host = registry.get_host_provider(role)
+        return host, token, client
+
+    for mod in (_planner_mod, _reviewer_mod, _fixer_mod, _worker_mod):
+        monkeypatch.setattr(mod, "build_role_resources", _fake_build)
 
 # ----------------------------------------------------------------------
 # Unit tests for the shared helper

@@ -2,6 +2,17 @@
 
 This package also exposes the shared defensive-exception helper used by all
 four role runners — see :func:`handle_unhandled_role_exception`.
+
+It also exposes the v4 identity-resource helpers (:func:`build_v4_registry_from_v3_project`
+and :func:`build_role_resources`) that let the legacy ``run_<role>`` async
+bodies stay structurally identical while sourcing their token + host
+provider from :class:`foreman.v4.identity.V4IdentityRegistry` instead of
+v3's :class:`foreman.identity.IdentityRegistry`. Phase 8d.1 replaces the
+v3 import; the v3-registry-shaped surface (``get_<role>_client`` /
+``get_<role>_token`` / ``get_host_provider``) is built inline in this
+package from the v4 token + ``fetch_app_metadata`` for the bot's
+slug/user-id (still needed for v3-era commit attribution + push URL
+construction in :class:`foreman.git_hosts.github.GitHubProvider`).
 """
 
 from __future__ import annotations
@@ -10,6 +21,15 @@ import logging
 import traceback
 from collections.abc import Callable
 from typing import Any
+
+from github import Auth, Github
+
+from foreman.auth import fetch_app_metadata
+from foreman.config import ProjectConfig
+from foreman.git_host import BotIdentity, GitHostProvider
+from foreman.git_hosts.github import GitHubProvider
+from foreman.v4.config import AppCredentials, AppsConfig, OrchestratorConfig
+from foreman.v4.identity import V4IdentityRegistry
 
 _log = logging.getLogger(__name__)
 
@@ -161,3 +181,140 @@ def handle_unhandled_role_exception(
             role,
             issue_number,
         )
+
+
+# Sentinel orchestrator credentials used when constructing a
+# :class:`V4IdentityRegistry` for a single per-role bot's needs. The
+# role CLIs never resolve the ``"orchestrator"`` role through their
+# registry (that's daemon-side concern), so the orchestrator slot stays
+# unreachable. We point both fields at the planner's App so the
+# Pydantic validators accept the construction without forcing every
+# call site to thread a real orchestrator block down a code path that
+# does not use it.
+def build_v4_registry_from_v3_project(project: ProjectConfig) -> V4IdentityRegistry:
+    """Build a :class:`V4IdentityRegistry` from a v3 :class:`ProjectConfig`.
+
+    Used by the legacy ``run_<role>`` async functions as the default
+    fallback when no ``identity_registry`` is injected. The v3
+    ``ProjectConfig.apps`` block has resolvers per role (env-var or
+    direct) that produce the same ``(app_id, private_key_path)`` tuple
+    v4 :class:`AppCredentials` expects.
+
+    The orchestrator slot is filled with the planner's credentials as a
+    sentinel — role CLIs never resolve the ``orchestrator`` role through
+    this registry. Phase 9 will delete the legacy entry points that use
+    this helper alongside the v3 ``Config`` shape.
+    """
+    apps_block = project.apps
+    planner_creds = AppCredentials(
+        app_id=apps_block.resolve_planner_app_id(),
+        private_key_path=str(apps_block.resolve_planner_private_key_path()),
+    )
+    reviewer_creds = AppCredentials(
+        app_id=apps_block.resolve_reviewer_app_id(),
+        private_key_path=str(apps_block.resolve_reviewer_private_key_path()),
+    )
+    fixer_creds = AppCredentials(
+        app_id=apps_block.resolve_fixer_app_id(),
+        private_key_path=str(apps_block.resolve_fixer_private_key_path()),
+    )
+    worker_creds = AppCredentials(
+        app_id=apps_block.resolve_worker_app_id(),
+        private_key_path=str(apps_block.resolve_worker_private_key_path()),
+    )
+    v4_apps = AppsConfig(
+        planner=planner_creds,
+        reviewer=reviewer_creds,
+        fixer=fixer_creds,
+        worker=worker_creds,
+    )
+    # Sentinel orchestrator — role CLIs never resolve the orchestrator
+    # role, so reusing the planner's creds keeps the v4 registry's
+    # Pydantic constructor happy without dragging a real orchestrator
+    # block through the call site.
+    sentinel_orchestrator = OrchestratorConfig(
+        app_id=planner_creds.app_id,
+        private_key_path=planner_creds.private_key_path,
+    )
+    return V4IdentityRegistry(
+        apps=v4_apps,
+        orchestrator=sentinel_orchestrator,
+        installation_repo=project.repo,
+    )
+
+
+def build_role_resources(
+    *,
+    registry: Any,
+    project: ProjectConfig,
+    role: str,
+) -> tuple[GitHostProvider, str, Github]:
+    """Build the trio of role-side identity resources from a v4 registry.
+
+    Returns ``(host, token, client)``:
+
+    * ``host`` — v3-shape :class:`GitHostProvider` used by the role's
+      commit/push/PR/comment side effects. The :class:`BotIdentity`
+      carries the bot's slug + numeric id (still required for v3-era
+      commit attribution via ``GIT_AUTHOR_*`` env vars and for the
+      tokenized HTTPS push URL inside :class:`GitHubProvider`); these
+      come from :func:`fetch_app_metadata` against the v3
+      ``ProjectConfig.apps`` resolver block.
+    * ``token`` — the role's current installation-token string, used by
+      :class:`~foreman.worktree.WorktreeManager` for ``GH_TOKEN`` env
+      injection on its git subprocesses.
+    * ``client`` — a fresh :class:`Github` client authenticated with the
+      same token, used by the role for any direct PyGithub calls
+      outside the ``host`` surface.
+
+    ``registry`` is typed ``Any`` so tests can inject any duck-typed
+    object that satisfies the production contract. Real callers pass a
+    :class:`V4IdentityRegistry`.
+
+    Production contract: ``registry.get_role_token(role) -> str``. The
+    helper mints a fresh :class:`Github` client and uses
+    :func:`fetch_app_metadata` (HTTP fetch to GitHub) to build the
+    :class:`BotIdentity`.
+
+    Test-fake discipline (Wren's standing feedback on fakes mirroring
+    real APIs strictly): tests should
+    :func:`unittest.mock.patch.object` this helper or the per-role
+    re-export to return a pre-baked ``(host, token, client)`` trio,
+    rather than rely on ``MagicMock`` attribute auto-creation —
+    auto-created attributes return ``MagicMock`` instances which would
+    propagate into ``Github(token)`` where the real registry would
+    have given a string.
+    """
+    token = registry.get_role_token(role)
+    client = Github(auth=Auth.Token(token))
+    app_id, key_path = _resolve_role_app_credentials(project, role)
+    meta = fetch_app_metadata(app_id, key_path)
+    identity = BotIdentity(slug=meta.slug, user_id=meta.app_id, token=token)
+    host = GitHubProvider(identity=identity, client=client)
+    return host, token, client
+
+
+def _resolve_role_app_credentials(
+    project: ProjectConfig, role: str
+) -> tuple[int, Any]:
+    """Return ``(app_id, private_key_path)`` for the requested role.
+
+    Reads the v3 ``ProjectConfig.apps`` resolvers — the source of truth
+    for per-role App credentials in the legacy role code path. The
+    return type's second slot is :class:`pathlib.Path` at runtime; typed
+    ``Any`` here because :func:`fetch_app_metadata` accepts either a
+    ``Path`` or ``str``.
+    """
+    apps = project.apps
+    if role == "planner":
+        return apps.resolve_planner_app_id(), apps.resolve_planner_private_key_path()
+    if role == "reviewer":
+        return apps.resolve_reviewer_app_id(), apps.resolve_reviewer_private_key_path()
+    if role == "fixer":
+        return apps.resolve_fixer_app_id(), apps.resolve_fixer_private_key_path()
+    if role == "worker":
+        return apps.resolve_worker_app_id(), apps.resolve_worker_private_key_path()
+    raise ValueError(
+        f"Unknown role: {role!r}. build_role_resources supports "
+        "'planner', 'reviewer', 'fixer', 'worker'."
+    )

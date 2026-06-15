@@ -7,7 +7,8 @@ host-platform operations through the
 
   1. Parse the issue URL (owner / repo / number)
   2. Resolve the role's :class:`~foreman.git_host.GitHostProvider`
-     (via :class:`~foreman.identity.IdentityRegistry`)
+     (via :class:`~foreman.v4.identity.V4IdentityRegistry` +
+     :func:`foreman.roles.build_role_resources`)
   3. Fetch :class:`~foreman.git_host.IssueRef` via ``host.get_issue``
   4. Create the per-ticket worktree (:class:`~foreman.worktree.WorktreeManager`)
   5. Build LLM context and dispatch with READ-ONLY tools
@@ -41,13 +42,18 @@ from foreman.branches import spec_branch
 from foreman.config import Config
 from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
 from foreman.git_host import GitHostProvider, IssueRef
-from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
 from foreman.providers import ProviderError
-from foreman.roles import TERMINAL_BLOCKING_LABEL, handle_unhandled_role_exception
+from foreman.roles import (
+    TERMINAL_BLOCKING_LABEL,
+    build_role_resources,
+    build_v4_registry_from_v3_project,
+    handle_unhandled_role_exception,
+)
 from foreman.schemas.planner import PlannerOutput, PlannerRunResult
 from foreman.stats import log_planner_run
+from foreman.v4.identity import V4IdentityRegistry
 from foreman.worktree import WorktreeManager
 
 _ISSUE_URL_RE = re.compile(
@@ -148,7 +154,7 @@ async def run_planner(
     project_name: str,
     worktrees_root: Path,
     provider: ProviderFacade,
-    identity_registry: IdentityRegistry | None = None,
+    identity_registry: V4IdentityRegistry | None = None,
     dispatch_recorder: DispatchRecorder | None = None,
     dispatch_trace_id: int | None = None,
 ) -> PlannerRunResult:
@@ -160,9 +166,12 @@ async def run_planner(
         project_name: Key into ``config.projects``.
         worktrees_root: Root directory under which per-ticket worktrees live.
         provider: Agent provider facade (e.g., AnthropicSDKProvider).
-        identity_registry: Optional pre-built registry; defaults to a fresh
-            :class:`~foreman.identity.IdentityRegistry` for the project. Useful
-            for tests that want to inject a fake host provider.
+        identity_registry: Optional pre-built v4 registry; defaults to a fresh
+            :class:`~foreman.v4.identity.V4IdentityRegistry` built from the
+            project's v3 ``ProjectConfig.apps`` block. Tests may inject a
+            ``MagicMock`` exposing ``build_role_resources_for_test(role)``
+            (or the bare ``get_role_token(role)``) — see
+            :func:`foreman.roles.build_role_resources` for the test seam.
 
     Returns:
         :class:`~foreman.schemas.planner.PlannerRunResult` carrying both the
@@ -311,9 +320,14 @@ async def run_planner(
                 f"{project_name!r} configured repo {expected_repo_slug!r}"
             )
 
-        registry = identity_registry if identity_registry is not None else IdentityRegistry(project)
-        host = registry.get_host_provider("planner")
-        planner_token: str = registry.get_planner_token()
+        registry = (
+            identity_registry
+            if identity_registry is not None
+            else build_v4_registry_from_v3_project(project)
+        )
+        host, planner_token, _planner_client = build_role_resources(
+            registry=registry, project=project, role="planner",
+        )
 
         issue = host.get_issue(actual_repo_slug, issue_number)
         default_branch = host.get_default_branch(actual_repo_slug)
