@@ -1700,4 +1700,8 @@ git commit -m "test(v4): phase 6 e2e — hold/ps/resume/retry/queue operator cha
 
 Phase 6 completion criterion (from the outline): **full operator command set usable against an in-memory repository in tests**. Achieved at Task 6.7. The operator can list, inspect, mutate, and drive tickets entirely through typer commands. Phase 7 layers rich logging on top + sets MergeQueue as the default merge mechanism.
 
+### Deferred polish (from Phase 6 reviews)
+
+- **v4 CLI-wide migration to `Annotated[T, typer.Option(...)]` form.** Surfaced during Task 6.3 review. Modern typer's preferred shape is `log_path: Annotated[Path, typer.Option("--log-path")] = None` which preserves `Path` typing (better completion, type safety) while sidestepping ruff B008 (the default is a literal `None`, not a function call). Current v4 CLI files (ps.py, queue.py, log.py, mutations.py) use the legacy `param: Type = typer.Option(...)` shape; a one-off change would create inconsistency. Migrate all v4 CLI commands together in a single follow-up PR rather than per-file.
+
 ---
