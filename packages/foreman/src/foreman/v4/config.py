@@ -100,15 +100,17 @@ class ProjectConfig(BaseModel):
     walking-skeleton phase) rather than on main. The branch must exist
     on origin; Foreman will fetch it before branching."""
 
-    max_fix_attempts: int = 3
+    max_fix_attempts: int = Field(default=3, ge=1)
     """Maximum Fixer cycles before the role escalates to NeedsHelp.
-    Matches v3 ProjectConfig.max_fix_attempts default. Read at role
-    runtime by ``foreman.roles.fixer``."""
+    Matches v3 ProjectConfig.max_fix_attempts default + ge=1 validation
+    (a value of 0 would silently skip the cycle and dump to NeedsHelp
+    on first dispatch). Read at role runtime by ``foreman.roles.fixer``."""
 
-    max_impl_attempts: int = 3
+    max_impl_attempts: int = Field(default=3, ge=1)
     """Maximum Worker impl cycles before the role escalates to NeedsHelp.
-    Matches v3 ProjectConfig.max_impl_attempts default. Read at role
-    runtime by ``foreman.roles.worker``."""
+    Matches v3 ProjectConfig.max_impl_attempts default + ge=1 validation
+    (a value of 0 would silently skip the cycle and dump to NeedsHelp
+    on first dispatch). Read at role runtime by ``foreman.roles.worker``."""
 
     merge_mechanism: Literal["queue", "merge", "squash", "rebase"] | None = None
     """Per-project override for the merge mechanism. None inherits the

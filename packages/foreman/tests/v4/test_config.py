@@ -388,6 +388,31 @@ def test_project_max_impl_attempts_override(tmp_path: Path):
     assert config.projects[0].max_impl_attempts == 5
 
 
+def test_project_attempt_caps_reject_zero(tmp_path: Path):
+    """Phase 8b.2 ge=1 constraint: matches v3 ProjectConfig validation.
+
+    A value of 0 (or negative) would silently skip the role's retry
+    loop and dump every ticket to NeedsHelp on first dispatch — a
+    confusing config-corruption mode. Reject at load time so the
+    daemon refuses to start instead.
+    """
+    for field, bad in (("max_fix_attempts", 0), ("max_impl_attempts", 0)):
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            '[daemon]\n'
+            'db_path = "/tmp/foreman.db"\n'
+            'log_dir = "/tmp/foreman-logs"\n'
+            + _APPS_TOML
+            + '[[projects]]\n'
+            'name = "voice"\n'
+            'repo = "jeffrichley/voice"\n'
+            'local_clone_path = "/tmp/voice"\n'
+            f'{field} = {bad}\n'
+        )
+        with pytest.raises(ValidationError):
+            load_config(config_path)
+
+
 def test_project_merge_mechanism_override(tmp_path: Path):
     """Phase 8b.2: per-project ``merge_mechanism`` flows through.
 
