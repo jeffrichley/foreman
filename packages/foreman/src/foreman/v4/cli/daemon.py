@@ -9,15 +9,29 @@ mock around signal handlers.
 reload uses SIGHUP, which doesn't exist on Windows. The guard below
 keeps the module importable cross-platform and the CLI exits 1 cleanly
 when reload is asked on a host that can't deliver it.
+
+SIGHUP receiver (foreground-start case): the start command installs a
+handler that calls ``reset_logging()`` + ``configure_logging(...)``.
+This prevents file/Rich handlers from stacking on repeated reloads.
+The handler captures ``log_dir`` + ``log_level`` from the V4Config
+that was used at daemon start; it does NOT re-read config from disk
+(that's a separate concern; this task is handler-stacking prevention).
 """
 
 from __future__ import annotations
 
 import os
 import signal
+from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import typer
+
+from foreman.v4.logging_config import configure_logging, reset_logging
+
+if TYPE_CHECKING:
+    from foreman.v4.config import V4Config
 
 _PID_PATH = Path.home() / ".foreman" / "v4" / "daemon.pid"
 
@@ -29,12 +43,36 @@ _PID_PATH = Path.home() / ".foreman" / "v4" / "daemon.pid"
 _SIGHUP: int | None = getattr(signal, "SIGHUP", None)
 
 
+def _build_sighup_handler(config: V4Config) -> Callable[..., None]:
+    """Build the SIGHUP handler closure used by ``cmd_daemon_start``.
+
+    Extracted to module level so tests can exercise the reset +
+    reconfigure path directly without invoking ``cmd_daemon_start``
+    (which would call ``daemon.run_forever()`` and block).
+
+    The captured ``log_dir`` + ``log_level`` are the SAME shape the
+    daemon used at start — SIGHUP reloads logging, not config.
+    """
+    log_dir = Path(config.log_dir)
+    log_level = config.log_level
+
+    def _reload_logging(*_args: Any) -> None:
+        reset_logging()
+        configure_logging(log_dir=log_dir, level=log_level)
+
+    return _reload_logging
+
+
 def cmd_daemon_start(ctx: typer.Context) -> None:
     """Start the daemon in the foreground.
 
     Tests inject the prepared Daemon via build_cli_context(daemon=...).
     Production wiring (Phase 7) builds the Daemon from config and feeds
     it into build_cli_context the same way.
+
+    SIGTERM + SIGINT trigger graceful shutdown. SIGHUP (on platforms
+    that have it) resets + reconfigures logging so file handlers don't
+    stack on repeated reloads.
     """
     daemon = ctx.obj.daemon
     if daemon is None:
@@ -45,6 +83,16 @@ def cmd_daemon_start(ctx: typer.Context) -> None:
     try:
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda *_args: daemon.stop())
+
+        # SIGHUP (POSIX only) → reset + reconfigure logging. We use
+        # the V4Config threaded through ctx.obj so the handler reloads
+        # logging with the same log_dir + log_level that the daemon
+        # started with. Tests / minimal wiring that don't supply a
+        # config skip the install (no handler stacking to prevent
+        # because there's no real logging surface).
+        if _SIGHUP is not None and ctx.obj.config is not None:
+            signal.signal(_SIGHUP, _build_sighup_handler(ctx.obj.config))
+
         daemon.run_forever()
     finally:
         if _PID_PATH.exists():
