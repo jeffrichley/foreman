@@ -171,6 +171,13 @@ class SqliteTicketRepository:
             ).fetchall()
             return [_ticket_row_to_record(r) for r in rows]
 
+    def list_all_tickets(self) -> list[TicketRecord]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM tickets ORDER BY id"
+            ).fetchall()
+            return [_ticket_row_to_record(r) for r in rows]
+
     def set_ticket_state(
         self, ticket_id: int, new_state: str, *, now: dt.datetime
     ) -> None:
@@ -291,6 +298,16 @@ class SqliteTicketRepository:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM state_instances WHERE exited_at IS NULL ORDER BY ticket_id, sequence"
+            ).fetchall()
+            return [_instance_row_to_record(r) for r in rows]
+
+    def list_state_instances_for_ticket(
+        self, ticket_id: int,
+    ) -> list[StateInstanceRecord]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM state_instances WHERE ticket_id = ? ORDER BY sequence",
+                (ticket_id,),
             ).fetchall()
             return [_instance_row_to_record(r) for r in rows]
 

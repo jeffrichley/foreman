@@ -41,6 +41,7 @@ class TicketRepository(Protocol):
     def get_ticket(self, ticket_id: int) -> TicketRecord: ...
     def get_ticket_by_issue(self, *, project: str, issue_number: int) -> TicketRecord: ...
     def list_open_tickets(self) -> list[TicketRecord]: ...
+    def list_all_tickets(self) -> list[TicketRecord]: ...
     def set_ticket_state(self, ticket_id: int, new_state: str, *, now: dt.datetime) -> None: ...
     def hold_ticket(self, ticket_id: int, *, held_by: str, reason: str, now: dt.datetime) -> None: ...
     def resume_ticket(self, ticket_id: int, *, now: dt.datetime) -> None: ...
@@ -71,6 +72,9 @@ class TicketRepository(Protocol):
         failure_reason: str,
     ) -> None: ...
     def list_in_flight_state_instances(self) -> list[StateInstanceRecord]: ...
+    def list_state_instances_for_ticket(
+        self, ticket_id: int,
+    ) -> list[StateInstanceRecord]: ...
 
     # --- Helpers used by states / WorkerPool / QueueManager ---
 
@@ -139,6 +143,9 @@ class InMemoryTicketRepository:
 
     def list_open_tickets(self) -> list[TicketRecord]:
         return [t for t in self._tickets.values() if t.current_state not in _TERMINAL_STATES]
+
+    def list_all_tickets(self) -> list[TicketRecord]:
+        return list(self._tickets.values())
 
     def set_ticket_state(self, ticket_id: int, new_state: str, *, now: dt.datetime) -> None:
         existing = self.get_ticket(ticket_id)
@@ -240,6 +247,15 @@ class InMemoryTicketRepository:
 
     def list_in_flight_state_instances(self) -> list[StateInstanceRecord]:
         return [i for i in self._instances.values() if i.is_in_flight]
+
+    def list_state_instances_for_ticket(
+        self, ticket_id: int,
+    ) -> list[StateInstanceRecord]:
+        matches = [
+            i for i in self._instances.values() if i.ticket_id == ticket_id
+        ]
+        matches.sort(key=lambda i: i.sequence)
+        return matches
 
     # --- Helpers used by states / WorkerPool / QueueManager ---
 

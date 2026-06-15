@@ -10,6 +10,10 @@ from __future__ import annotations
 
 import typer
 
+from foreman.v4.cli.ps import cmd_ps
+from foreman.v4.cli.queue import cmd_queue
+from foreman.v4.cli.show import cmd_show
+
 __version__ = "0.4.0"
 
 app = typer.Typer(
@@ -33,26 +37,16 @@ def _root(
         typer.echo(ctx.get_help())
 
 
-# Stub subcommands so the help text exercise has something to list.
-# Real impls land in subsequent tasks; each one replaces its stub here.
-@app.command("ps")
-def _ps_stub() -> None:
-    typer.echo("ps — replaced in Task 6.2")
-
-
-@app.command("show")
-def _show_stub(ticket: int) -> None:
-    typer.echo(f"show {ticket} — replaced in Task 6.2")
+# Real query commands land via Task 6.2; mutation + log commands still
+# stub-only until their respective tasks (6.3, 6.4) replace them.
+app.command("ps")(cmd_ps)
+app.command("show")(cmd_show)
+app.command("queue")(cmd_queue)
 
 
 @app.command("log")
 def _log_stub() -> None:
     typer.echo("log — replaced in Task 6.3")
-
-
-@app.command("queue")
-def _queue_stub() -> None:
-    typer.echo("queue — replaced in Task 6.2")
 
 
 @app.command("hold")

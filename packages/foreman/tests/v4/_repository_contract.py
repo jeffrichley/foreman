@@ -267,3 +267,40 @@ class RepositoryContract:
         repo.set_ticket_dependencies(t.id, deps=[9999])
         with pytest.raises(TicketNotFoundError):
             repo.list_unmet_dependencies(t.id)
+
+    def test_list_all_tickets_includes_terminal(self, repo: TicketRepository):
+        now = _now()
+        open_t = repo.create_ticket(project="p", issue_number=1, now=now)
+        done_t = repo.create_ticket(project="p", issue_number=2, now=now)
+        repo.set_ticket_state(open_t.id, "Planning", now=now)
+        repo.set_ticket_state(done_t.id, "Done", now=now)
+        all_tickets = repo.list_all_tickets()
+        ids = {t.id for t in all_tickets}
+        assert open_t.id in ids
+        assert done_t.id in ids
+
+    def test_list_all_tickets_returns_empty_when_no_tickets(self, repo: TicketRepository):
+        assert repo.list_all_tickets() == []
+
+    def test_list_state_instances_for_ticket_returns_in_sequence_order(self, repo: TicketRepository):
+        now = _now()
+        t = repo.create_ticket(project="p", issue_number=1, now=now)
+        inst1 = repo.open_state_instance(
+            ticket_id=t.id, state_name="Queued", sequence=1, now=now,
+        )
+        repo.mark_execute_completed(
+            inst1.id, now=now, outcome_kind=OutcomeKind.CLEAN,
+            outcome_payload={"summary": "ok"}, next_state="Planning",
+        )
+        repo.close_state_instance(inst1.id, now=now)
+        inst2 = repo.open_state_instance(
+            ticket_id=t.id, state_name="Planning", sequence=2, now=now,
+        )
+        instances = repo.list_state_instances_for_ticket(t.id)
+        assert [i.sequence for i in instances] == [1, 2]
+        assert instances[0].id == inst1.id
+        assert instances[1].id == inst2.id
+
+    def test_list_state_instances_for_ticket_empty_for_no_journal(self, repo: TicketRepository):
+        t = repo.create_ticket(project="p", issue_number=1, now=_now())
+        assert repo.list_state_instances_for_ticket(t.id) == []
