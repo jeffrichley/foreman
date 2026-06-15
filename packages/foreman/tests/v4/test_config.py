@@ -167,6 +167,61 @@ def test_role_timeout_seconds_override(tmp_path: Path):
     assert config.role_timeout_seconds == 1200
 
 
+def test_max_state_attempts_default_3(tmp_path: Path):
+    """Phase 8c.2 retry cap defaults to 3 — matches max_fix_attempts /
+    max_impl_attempts shape and is the smallest cap that still allows
+    one retry after a transient failure."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[daemon]\n'
+        'db_path = "/tmp/foreman.db"\n'
+        'log_dir = "/tmp/foreman-logs"\n'
+        + _APPS_TOML +
+        '[[projects]]\n'
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+    )
+    config = load_config(config_path)
+    assert config.max_state_attempts == 3
+
+
+def test_max_state_attempts_override(tmp_path: Path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[daemon]\n'
+        'db_path = "/tmp/foreman.db"\n'
+        'log_dir = "/tmp/foreman-logs"\n'
+        'max_state_attempts = 5\n'
+        + _APPS_TOML +
+        '[[projects]]\n'
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+    )
+    config = load_config(config_path)
+    assert config.max_state_attempts == 5
+
+
+def test_max_state_attempts_zero_raises(tmp_path: Path):
+    """ge=1 — a value of 0 would dump every ticket to NeedsHelp on
+    first entry, which is never a valid configuration."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[daemon]\n'
+        'db_path = "/tmp/foreman.db"\n'
+        'log_dir = "/tmp/foreman-logs"\n'
+        'max_state_attempts = 0\n'
+        + _APPS_TOML +
+        '[[projects]]\n'
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+    )
+    with pytest.raises(ValidationError):
+        load_config(config_path)
+
+
 # ---------------------------------------------------------------------------
 # Task 8.3: [apps] + [orchestrator] sections
 # ---------------------------------------------------------------------------

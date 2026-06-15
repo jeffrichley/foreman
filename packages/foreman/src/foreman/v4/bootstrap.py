@@ -94,6 +94,7 @@ def bootstrap_cli_context(
         config=DaemonConfig(
             tick_seconds=config.tick_seconds,
             max_in_flight=config.max_in_flight,
+            max_state_attempts=config.max_state_attempts,
         ),
         clock=dt.datetime.now,
         bus=bus,

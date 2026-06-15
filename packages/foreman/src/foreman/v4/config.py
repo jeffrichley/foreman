@@ -21,6 +21,14 @@ Schema:
     role_timeout_seconds - Subprocess timeout per role invocation
                            (default 600 = 10 min). Phase 7.5 threads
                            this to SubprocessRoleDispatcher.
+    max_state_attempts   - Maximum consecutive same-state failures
+                           before the state machine forces a transition
+                           to NeedsHelp instead of running the role
+                           again. Default 3. Runaway defense — the
+                           dogfood loop went 86 attempts in 43 minutes
+                           before this existed. Matches the shape of
+                           max_fix_attempts / max_impl_attempts but
+                           applies at state-machine granularity.
     merge_mechanism      - "queue" (default) | "merge" | "squash" | "rebase"
 
   [apps.planner]
@@ -178,6 +186,15 @@ class V4Config(BaseModel):
     tick_seconds: float = 30.0
     max_in_flight: int = 1
     role_timeout_seconds: int = 600
+    max_state_attempts: int = Field(default=3, ge=1)
+    """Maximum consecutive same-state failures before the state machine
+    forces a transition to NeedsHelp instead of running the role again.
+    Default 3. Runaway defense — the 8b dogfood loop went 86 attempts
+    in 43 minutes before this existed. Matches the shape of
+    max_fix_attempts / max_impl_attempts but applies at state-machine
+    granularity (per state per ticket) rather than role-level. ge=1
+    because a value of 0 would dump every ticket to NeedsHelp on first
+    entry — never a valid configuration."""
     merge_mechanism: Literal["queue", "merge", "squash", "rebase"] = "queue"
     apps: AppsConfig
     # Task 8.4: orchestrator is REQUIRED (no default). Google-style App

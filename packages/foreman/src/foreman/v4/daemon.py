@@ -29,14 +29,21 @@ from foreman.v4.worker_pool import WorkerPool
 
 @dataclass(frozen=True, slots=True)
 class DaemonConfig:
-    """Just the two global knobs. Per-project fields would belong to a
+    """The handful of global knobs. Per-project fields would belong to a
     ProjectConfig, not here — keeping DaemonConfig small means the
     multi-project surface lives in the Pollers list, not in nested
     config.
+
+    ``max_state_attempts`` defaults to 3 to match V4Config's default
+    and to keep the existing test fixtures that construct DaemonConfig
+    without the new kwarg green. Phase 8c.2 added this as runaway
+    defense — the state machine refuses to re-enter the same state
+    more than ``max_state_attempts`` consecutive times.
     """
 
     tick_seconds: float
     max_in_flight: int
+    max_state_attempts: int = 3
 
 
 class Daemon:
@@ -69,6 +76,7 @@ class Daemon:
         self._pool = WorkerPool(
             repo=repo, qm=self._qm, dispatcher=dispatcher,
             git=git, bus=bus, clock=clock,
+            max_state_attempts=config.max_state_attempts,
         )
         self._stop = threading.Event()
 
