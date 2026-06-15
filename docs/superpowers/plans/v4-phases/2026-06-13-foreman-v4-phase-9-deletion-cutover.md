@@ -3,11 +3,13 @@
 > **Branch:** `feat/foreman-v4-substrate`.
 > **Gate at end:** `just check` green; then stop for human review before next phase.
 
-## Phase 8 — v3 deletion + cutover docs + PR
+## Phase 9 — v3 deletion + cutover docs + PR
+
+> **Precondition:** Phase 8 has landed and Task 8.7 (manual dogfood) reported a real ticket reaching a terminal state. Do NOT begin Phase 9 deletion before that — once v3 is gone, the rollback is "revert the PR."
 
 ### Dogfood watch-points (from Phase 4 code-quality reviews)
 
-These are real-world behaviors that the v4 mocked test suite cannot exercise. They were consciously deferred because no current test surfaces them; Phase 8 cutover is the first time real PyGithub + real GitHub talks to v4 code. If any trigger fires during dogfood, file a ticket and fix before declaring v4 stable.
+These are real-world behaviors that the v4 mocked test suite cannot exercise. They were consciously deferred because no current test surfaces them; Phase 8 dogfood is the first time real PyGithub + real GitHub talks to v4 code. If any trigger fires during dogfood OR Phase 9 cutover, file a ticket and fix before declaring v4 stable.
 
 1. **`SqliteTicketRepository.latest_pr_number_for_ticket` — N+1 JSON decode under RLock.** Reads every non-null `outcome_payload` for the ticket, JSON-decodes each row Python-side, walks until pr_number found. Lock held the whole time. For v4 dogfood scale (tickets with ≤30 state instances) this is sub-ms. **Trigger to promote:** any single ticket exceeds 50 state instances (pathological BLOCKED loop) OR `tick()` observed >10ms in production logs. **Fix when triggered:** push `artifacts.pr_number` filter into SQL with `json_extract`:
    ```sql
@@ -26,27 +28,17 @@ These are real-world behaviors that the v4 mocked test suite cannot exercise. Th
 
 5. **`SubprocessRoleDispatcher` UTF-8 decode brittleness.** `subprocess.run(..., text=True)` decodes stdout/stderr as UTF-8. If a role's stdout contains non-UTF-8 bytes (binary stack trace from a crashed subprocess, weird-locale traceback, embedded ANSI escapes that confuse the decoder), the dispatcher raises `UnicodeDecodeError` BEFORE returning — the marker line is never read even if it was written cleanly. **Trigger to promote:** any `UnicodeDecodeError` from `SubprocessRoleDispatcher.dispatch` in production logs. **Fix when triggered:** switch to `text=False` + manual `result.stdout.decode("utf-8", errors="replace")`, OR pass `errors="replace"` via `subprocess.run` (Python 3.10+). The marker scan is ASCII-only, so error-replacement is safe for the parse path.
 
-### Bootstrap consolidation (from Phase 7 reviews)
-
-These items reduce private-attr reach-ins and make the bootstrap-as-built able to actually run in production. Address as part of the Phase 8 cutover work, not as deferred polish:
-
-6. **`bootstrap_cli_context()` should own the `EventBus` + subscribe the four standard observers** (`StructuredLogObserver`, `EventArchiveObserver`, `LabelObservabilityObserver`, `MetricsObserver`) and thread the bus into `Daemon` at construction. Phase 7.6 e2e currently has to reach into `ctx.daemon._bus` + `ctx.daemon._pool._bus` post-construction to wire observers — that's a sign the bootstrap is incomplete.
-
-7. **`Daemon.shutdown()` public method** that drains the WorkerPool. Phase 7.6 e2e reaches into `_pool` directly. After this lands, `cmd_daemon_stop` and the test teardown both call the public shape.
-
-8. **`main()` identity wiring** in `foreman/v4/cli/__init__.py`. Currently has 2 `# type: ignore` because `foreman.identity` doesn't expose top-level `get_role_token` — only `IdentityRegistry` does. V4Config lacks per-project apps config + orchestrator config needed to instantiate an `IdentityRegistry`. Extend `V4Config` with `[apps]` section (per-role app id/private-key path) + `[orchestrator]` PAT location; construct `IdentityRegistry` in `main()` from config + pass to `bootstrap_cli_context`. Phase 7.6 e2e patches around this with `MagicMock`; production won't run until this is fixed.
-
-9. **`reset_logging()` semantics for daemon reload.** Phase 7.6 calls it in a `finally` clause to clean up `JsonLinesHandler` (which is process-global). `cmd_daemon_reload` should call the same teardown so handlers don't double-stack on config reload. Easy: have reload call `reset_logging() + configure_logging(...)`.
-
 ### Goal
 
-The v4 substrate is complete; v3 still occupies space in the repo. Phase 8 deletes it in one shot, fixes any survival-set files that broke, writes the operator-facing RUNBOOK additions, runs the standing adversarial-review pass, and opens the v4 PR.
+The v4 substrate is complete AND has been dogfooded against a real ticket (Phase 8.7); v3 still occupies space in the repo. Phase 9 deletes it in one shot, fixes any survival-set files that broke, writes the operator-facing RUNBOOK additions, runs the standing adversarial-review pass, and opens the v4 PR.
 
 The deletion is mechanical because the **v4 isolation principle** (set up at Phase 1) made it so: `foreman.v4.*` never imports from the kill set, the Task 1.10 isolation guard enforces that on every commit, and Phase 5 already deleted the role files' last reaches into `foreman.labels`. What's left is `git rm` plus survival-set cleanup.
 
 ### Breadcrumb-driven deletion (READ FIRST)
 
-Phase 5 (Tasks 5.2-5.5) took an additive approach: v4 emit paths landed alongside v3 label-writing paths, with the obsolete code tagged using a greppable sentinel. Phase 8 uses that sentinel to mechanically enumerate everything to delete.
+Phase 5 (Tasks 5.2-5.5) took an additive approach: v4 emit paths landed alongside v3 label-writing paths, with the obsolete code tagged using a greppable sentinel. Phase 9 uses that sentinel to mechanically enumerate everything to delete.
+
+> **Sentinel naming note:** The string literal `v4-PHASE-8-KILL` was set in Phase 5 before the Phase 8/9 split. It stays as that exact string — a historical grep key, not a phase reference. Do NOT rename the breadcrumbs to `v4-PHASE-9-KILL`; that would create a documentation/code drift with no benefit and force a re-audit of every site.
 
 **Sentinel:** `v4-PHASE-8-KILL` (in comments). Two forms:
 
@@ -506,19 +498,19 @@ mcp__agent-core__send(
     kind="TextMessage",
     payload={
         "kind": "TextMessage",
-        "text": "Foreman v4 substrate PR is open: <pr-url>. Eight phases land in one drop — state machine + polling + typer CLI + v3 deletion. Adversarial review pass complete; cutover procedure documented in RUNBOOK. Looping you in for awareness; no action requested. 🪶",
+        "text": "Foreman v4 substrate PR is open: <pr-url>. Nine phases land in one drop — state machine + polling + typer CLI + dogfood + v3 deletion. Adversarial review pass complete; cutover procedure documented in RUNBOOK. Looping you in for awareness; no action requested. 🪶",
     },
 )
 ```
 
-### Phase 8 — `just check` gate
+### Phase 9 — `just check` gate
 
 - [ ] **Run:** `just check`
 - [ ] **Expected:** green; PR ready for merge.
 
-Phase 8 completion criterion (from the outline): **grep for `_LABEL_TO_ACTION` returns zero; `just check` green; RUNBOOK explains MergeQueue per-repo enablement**.
+Phase 9 completion criterion (from the outline): **grep for `_LABEL_TO_ACTION` returns zero; `just check` green; RUNBOOK explains MergeQueue per-repo enablement**.
 
-Phase 8 verification:
+Phase 9 verification:
 ```bash
 grep -r _LABEL_TO_ACTION packages/foreman/src/  # expect: no matches
 just check                                       # expect: all green

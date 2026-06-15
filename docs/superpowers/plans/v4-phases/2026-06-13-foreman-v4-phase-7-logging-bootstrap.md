@@ -1057,6 +1057,6 @@ Phase 7 completion criterion (from the outline): **colored stdout + JSON file + 
 - Production startup composes the full graph from one TOML file (Task 7.5)
 - The Phase 7 e2e proves config-in → terminal-state-out (Task 7.6)
 
-Phase 8 is the v3 deletion sweep + per-repo MergeQueue setup docs.
+Phase 8 finalizes coding + wiring (bootstrap owns EventBus + observers, real `IdentityRegistry` in `main()`, public `Daemon.shutdown()`, real-fork integration test, manual dogfood). Phase 9 is the v3 deletion sweep + per-repo MergeQueue setup docs.
 
 ---

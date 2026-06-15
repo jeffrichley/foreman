@@ -119,15 +119,16 @@ Each phase lives in its own file under [`v4-phases/`](./v4-phases/). Execute one
 | 5 | **Role-side Outcome reporting** — `emit_outcome` helper, Planner / Reviewer / Fixer / Worker CLI rewrites (label-writing tails deleted), `SubprocessRoleDispatcher` (real impl), subprocess fork e2e (7 tasks) | [v4-phases/phase-5-role-outcome.md](./v4-phases/2026-06-13-foreman-v4-phase-5-role-outcome.md) | Roles produce stdout-parsable outcomes. |
 | 6 | **Typer CLI** — `CliContext` dataclass + `build_cli_context()` (single builder), output formatter Strategy, `ps`/`show`/`log`/`queue`, mutations (`hold/resume/retry/skip/drop/set-state`), `daemon start/stop/reload/status`, role commands migrated to typer, operator e2e (7 tasks) | [v4-phases/phase-6-typer-cli.md](./v4-phases/2026-06-13-foreman-v4-phase-6-typer-cli.md) | Full operator surface usable in tests. |
 | 7 | **Rich logging + MergeQueue default + bootstrap** — `JsonLinesHandler`, `configure_logging`, `V4Config` (pydantic, TOML), multi-project `Daemon` refactor, `bootstrap_cli_context`, config-to-Done e2e (6 tasks) | [v4-phases/phase-7-logging-bootstrap.md](./v4-phases/2026-06-13-foreman-v4-phase-7-logging-bootstrap.md) | Colored stdout + JSON file + queue is the merge default. |
-| 8 | **v3 deletion + cutover docs + PR** — execute `git rm` block, repair survival-set orphaned imports, RUNBOOK additions (MergeQueue setup + daemon config + cutover procedure), adversarial review pass, push branch, open PR (5 tasks) | [v4-phases/phase-8-deletion-cutover.md](./v4-phases/2026-06-13-foreman-v4-phase-8-deletion-cutover.md) | `_LABEL_TO_ACTION` returns zero matches; `just check` green; RUNBOOK explains MergeQueue per-repo enablement. |
+| 8 | **Finalize coding + wiring (dogfood-ready)** — `bootstrap_cli_context` owns `EventBus` + observers, public `Daemon.shutdown()`, `V4Config` `[apps]` + `[orchestrator]` sections, real `IdentityRegistry` in `main()` (drops the 2 `# type: ignore`), `reset_logging()` on daemon reload, real-fork integration test against installed `foreman` binary, manual dogfood (one real ticket end-to-end) (7 tasks) | [v4-phases/phase-8-finalize-coding-wiring.md](./v4-phases/2026-06-13-foreman-v4-phase-8-finalize-coding-wiring.md) | `just check` green + Task 8.7 reports a real ticket transitioning to a terminal state on a real test repo. |
+| 9 | **v3 deletion + cutover docs + PR** — execute `git rm` block, repair survival-set orphaned imports, RUNBOOK additions (MergeQueue setup + daemon config + cutover procedure), adversarial review pass, push branch, open PR (5 tasks) | [v4-phases/phase-9-deletion-cutover.md](./v4-phases/2026-06-13-foreman-v4-phase-9-deletion-cutover.md) | `_LABEL_TO_ACTION` returns zero matches; `just check` green; RUNBOOK explains MergeQueue per-repo enablement. |
 
-Phases 1–4 build the substrate in isolation (tests use in-memory fakes). Phases 5–6 wire real GitHub + the operator surface. Phases 7–8 round out logging + cutover.
+Phases 1–4 build the substrate in isolation (tests use in-memory fakes). Phases 5–6 wire real GitHub + the operator surface. Phase 7 rounds out logging + bootstrap. Phase 8 finalizes coding + wiring and proves v4 actually runs against real GitHub + Claude. Phase 9 is the (now truly mechanical) v3 cutover.
 
 ---
 
 ## Plan complete
 
-Eight phases, ~60 tasks, ~13k lines of plan content. Each task is bite-sized + TDD-shaped + commit-bounded. The substrate replacement runs from foundation → observers → states → orchestration → role rewrite → CLI → production wiring → cutover.
+Nine phases, ~67 tasks, ~13k lines of plan content. Each task is bite-sized + TDD-shaped + commit-bounded. The substrate replacement runs from foundation → observers → states → orchestration → role rewrite → CLI → logging+bootstrap → finalize coding+wiring (dogfood-ready) → cutover.
 
 After this plan executes:
 - `foreman.v4.*` is the only coordination substrate in the repo
