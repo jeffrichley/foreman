@@ -8,9 +8,8 @@ The Worker is the only role with FOUR outcome paths:
   (``ImplementingState.next_state``) handles BLOCKED by re-polling on
   the next tick. Worker is the ONLY role producing this kind.
 - ``NEEDS_HELP`` — Worker hit a give-up condition
-  (``status="give_up"``, e.g., 3 baseline-failure attempts), OR the
-  preflight refusal cap was hit. Routes to NeedsHelpState
-  (operator-resumable), NOT FailedState (no-recovery terminal).
+  (``status="give_up"``, e.g., 3 baseline-failure attempts). Routes to
+  NeedsHelpState (operator-resumable).
 - ``ERROR`` — top-level role boundary exception.
 
 Worker is NOT target-aware (impl PR is unambiguous from issue
@@ -96,28 +95,3 @@ def test_worker_exception_emits_error(capsys):
     outcome = parse_outcome_from_stdout(capsys.readouterr().out)
     assert outcome.kind == OutcomeKind.ERROR
     assert "worktree corrupted" in outcome.summary
-
-
-def test_preflight_refusal_emits_needs_help(capsys):
-    """Worker preflight refusal (missing entry label / max-attempts cap) → NEEDS_HELP.
-
-    ``_WorkerPreflightRefusal`` is the canonical resumable escalation
-    surface — operator resolves the underlying issue (re-add the
-    entry label or expand the attempt budget) and runs
-    ``foreman resume``. Routing to ERROR would land the ticket in
-    FailedState (no-recovery terminal). ``_WorkerPreflightRefusal``
-    subclasses ``RuntimeError``, so without a dedicated catch arm it
-    would slip through the broad ``except Exception`` and emit ERROR.
-    Mirror of the Fixer fix in 35cd4cd.
-    """
-    from foreman.roles.worker import _WorkerPreflightRefusal
-
-    with patch(
-        "foreman.roles.worker._run_worker_for_v4",
-        side_effect=_WorkerPreflightRefusal("max impl attempts reached"),
-    ):
-        exit_code = run_worker_cli(project="p", issue_number=1)
-    assert exit_code == 0  # zero exit — stdout carries the verdict
-    outcome = parse_outcome_from_stdout(capsys.readouterr().out)
-    assert outcome.kind == OutcomeKind.NEEDS_HELP
-    assert "max impl attempts" in outcome.summary

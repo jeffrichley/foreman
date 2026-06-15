@@ -1,13 +1,11 @@
 """Integration test for ``run_worker`` with a fake PyGithub client + fake
 ProviderFacade + monkey-patched ``_run_check_command``.
 
-Verifies orchestration wiring: issue URL parsing, entry-condition label
-pre-flight, max-3-attempts gate, attempt-counter increment, worktree
+Verifies orchestration wiring: issue URL parsing, worktree
 create_impl (not create or attach), baseline preflight runs, post-Worker
-verification runs, outcome-override-on-new-failures, label transitions
-per outcome (all 3 outcomes), impl PR creation iff implemented,
-spec_invalid posts to spec PR (not issue), stats JSONL emission, SDK
-errors surfacing as incomplete (not crashing).
+verification runs, outcome-override-on-new-failures, impl PR creation
+iff implemented, spec_invalid posts to spec PR (not issue), stats JSONL
+emission, SDK errors surfacing as incomplete (not crashing).
 
 A real-engine integration test (against actual Anthropic API + real
 GitHub) is gated behind ``real_engine`` and lives separately.
@@ -29,7 +27,6 @@ from foreman.provider import UsageInfo
 from foreman.roles import worker as _worker_mod
 from foreman.roles.worker import (
     WORKER_ALLOWED_TOOLS,
-    _count_impl_attempts,
     _create_pull_with_base_fallback,
     _is_invalid_base_422,
     _resolve_check_command,
@@ -123,27 +120,6 @@ def test_parse_issue_url_extracts_owner_repo_number() -> None:
 def test_parse_issue_url_rejects_pr_url() -> None:
     with pytest.raises(ValueError, match="Not a GitHub issue URL"):
         parse_issue_url("https://github.com/owner/repo/pull/42")
-
-
-# ----------------------------------------------------------------------
-# _count_impl_attempts
-# ----------------------------------------------------------------------
-
-
-def test_count_impl_attempts_zero_with_no_labels() -> None:
-    assert _count_impl_attempts(set()) == 0
-
-
-def test_count_impl_attempts_zero_with_only_unrelated_labels() -> None:
-    assert _count_impl_attempts({"foreman:plan-approved", "bug"}) == 0
-
-
-def test_count_impl_attempts_returns_max_existing() -> None:
-    assert _count_impl_attempts({"foreman:impl-attempt-1", "foreman:impl-attempt-2"}) == 2
-
-
-def test_count_impl_attempts_skips_partial_matches() -> None:
-    assert _count_impl_attempts({"foreman:impl-attempt-x", "foreman:impl-attempt"}) == 0
 
 
 # ----------------------------------------------------------------------
@@ -1055,7 +1031,7 @@ def _make_check_command_pair(
 
 
 @pytest.mark.asyncio
-async def test_run_worker_implemented_opens_impl_pr_and_advances_label(
+async def test_run_worker_implemented_opens_impl_pr(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clone = tmp_path / "clone"
@@ -1112,14 +1088,9 @@ async def test_run_worker_implemented_opens_impl_pr_and_advances_label(
     assert spec_pr is not None
     assert spec_pr.issue_comments_posted == []
 
-    # v3 label transitions: plan-approved cleared at dispatch, impl-review
-    # added on implemented; per-episode reset drops impl-attempt-1.
-    # v3 has no in-flight ``foreman:implementing`` label.
-    assert "foreman:impl-attempt-1" in issue.added
-    assert "foreman:implementing" not in issue.added
-    assert "foreman:impl-review" in issue.added
-    assert "foreman:plan-approved" in issue.removed  # cleared at dispatch
-    assert "foreman:impl-attempt-1" in issue.removed  # per-episode reset
+    # Worker no longer mutates labels — v4 LabelObservabilityObserver owns
+    # foreman:* writes off state-machine transitions.
+    assert issue.set_labels_calls == []
 
     # WorkerRunResult populated
     assert result.attempt == 1
@@ -1129,16 +1100,14 @@ async def test_run_worker_implemented_opens_impl_pr_and_advances_label(
 
 
 @pytest.mark.asyncio
-async def test_run_worker_uses_atomic_set_labels_for_dispatch_and_outcome(
+async def test_run_worker_does_not_mutate_labels(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Adversarial review MEDIUM #12: every Worker label transition (the
-    pre-LLM attempt-stamp + entry-clear, and the post-LLM outcome
-    transition) must land via a single ``issue.set_labels(...)`` call so
-    a subprocess crash mid-transition cannot leave the issue with no
-    ``foreman:*`` entry/outcome label — which would silently drop it
-    out of the v3 observer's GraphQL ``filterBy.labels`` filter.
-    """
+    """Phase 8d.6 contract: the Worker no longer mutates issue labels.
+    Under v4, ``LabelObservabilityObserver`` owns every ``foreman:*``
+    write off state-machine transitions. The Worker's role is to
+    implement, push, open the impl PR, and emit FOREMAN_OUTCOME —
+    nothing else."""
     clone = tmp_path / "clone"
     head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
     monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
@@ -1161,22 +1130,9 @@ async def test_run_worker_uses_atomic_set_labels_for_dispatch_and_outcome(
         identity_registry=registry,
     )
 
-    # Two atomic set_labels calls: one before LLM dispatch (attempt-stamp
-    # + entry-clear), one after LLM (outcome transition). Both must
-    # carry the FULL final label set — never a partial diff.
-    assert len(issue.set_labels_calls) == 2
-
-    # First call: ``foreman:plan-approved`` cleared, ``foreman:impl-attempt-1``
-    # stamped, atomically.
-    pre_dispatch = set(issue.set_labels_calls[0])
-    assert "foreman:plan-approved" not in pre_dispatch
-    assert "foreman:impl-attempt-1" in pre_dispatch
-
-    # Second call: outcome transition — ``foreman:impl-review`` added,
-    # per-episode reset drops ``foreman:impl-attempt-1``.
-    post_dispatch = set(issue.set_labels_calls[1])
-    assert "foreman:impl-review" in post_dispatch
-    assert "foreman:impl-attempt-1" not in post_dispatch
+    assert issue.set_labels_calls == []
+    assert issue.added == []
+    assert issue.removed == []
 
 
 # ----------------------------------------------------------------------
@@ -1185,7 +1141,7 @@ async def test_run_worker_uses_atomic_set_labels_for_dispatch_and_outcome(
 
 
 @pytest.mark.asyncio
-async def test_run_worker_incomplete_keeps_implementing_adds_needs_help(
+async def test_run_worker_incomplete_opens_no_impl_pr(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clone = tmp_path / "clone"
@@ -1194,7 +1150,7 @@ async def test_run_worker_incomplete_keeps_implementing_adds_needs_help(
     monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
 
     cfg = _make_config(clone)
-    repo, _spec_pr, issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    repo, _spec_pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client)
 
@@ -1220,63 +1176,10 @@ async def test_run_worker_incomplete_keeps_implementing_adds_needs_help(
     # NO impl PR opened
     assert repo.create_pull_calls == []
 
-    # Labels: needs-help added; failed NOT yet (only attempt 1)
-    assert "foreman:impl-attempt-1" in issue.added
-    assert "foreman:needs-help" in issue.added
-    assert "foreman:failed" not in issue.added
-
     assert result.attempt == 1
     assert result.llm_output.outcome == "incomplete"
     assert result.pr_url is None
     assert result.final_did_check_pass is False
-
-
-@pytest.mark.asyncio
-async def test_run_worker_incomplete_at_attempt_3_also_adds_failed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """At the third (last) attempt, an incomplete outcome escalates to
-    ``foreman:failed`` — same pattern the Fixer uses."""
-    clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
-    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
-    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
-
-    cfg = _make_config(clone)
-    repo, _spec_pr, issue = _make_fake_repo(
-        issue_number=42,
-        head_sha=head_sha,
-        labels=[
-            "foreman:plan-approved",
-            "foreman:impl-attempt-1",
-            "foreman:impl-attempt-2",
-        ],
-    )
-    client = _FakeWorkerClient(repo=repo)
-    registry = _make_registry(client)
-
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_incomplete_output()))
-    _make_check_command_pair(
-        monkeypatch,
-        baseline=set(),
-        post={"tests/test_y.py::test_y_returns_z"},
-        post_rc=1,
-    )
-
-    result = await run_worker(
-        issue_url="https://github.com/jeffrichley/voice/issues/42",
-        config=cfg,
-        project_name="voice",
-        worktrees_root=tmp_path / "worktrees",
-        provider=fake_provider,
-        identity_registry=registry,
-    )
-
-    assert "foreman:impl-attempt-3" in issue.added
-    assert "foreman:needs-help" in issue.added
-    assert "foreman:failed" in issue.added
-    assert result.attempt == 3
 
 
 # ----------------------------------------------------------------------
@@ -1321,14 +1224,10 @@ async def test_run_worker_spec_invalid_posts_comment_on_spec_pr_not_issue(
     assert len(spec_pr.issue_comments_posted) == 1
     assert "contradict" in spec_pr.issue_comments_posted[0]
 
-    # v3 labels: plan-approved removed at dispatch (and idempotently
-    # re-removed on spec_invalid); spec-fix + needs-help added. No
-    # in-flight ``implementing`` label in v3.
-    assert "foreman:plan-approved" in issue.removed
-    assert "foreman:spec-fix" in issue.added
-    assert "foreman:needs-help" in issue.added
-    assert "foreman:implementing" not in issue.added
-    assert "foreman:implementing" not in issue.removed
+    # Worker no longer mutates labels — observer owns foreman:* writes.
+    assert issue.set_labels_calls == []
+    assert issue.added == []
+    assert issue.removed == []
 
     assert result.llm_output.outcome == "spec_invalid"
     assert result.pr_url is None
@@ -1353,7 +1252,7 @@ async def test_run_worker_new_failures_override_implemented_to_incomplete(
     monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
 
     cfg = _make_config(clone)
-    repo, _spec_pr, issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    repo, _spec_pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
     client = _FakeWorkerClient(repo=repo)
     registry = _make_registry(client)
 
@@ -1392,10 +1291,6 @@ async def test_run_worker_new_failures_override_implemented_to_incomplete(
     # on the LLM's claim
     assert result.llm_output.outcome == "implemented"
     assert result.pr_url is None
-
-    # Labels follow the OVERRIDDEN outcome (incomplete branch)
-    assert "foreman:needs-help" in issue.added
-    assert "foreman:impl-review" not in issue.added
 
 
 @pytest.mark.asyncio
@@ -1442,215 +1337,8 @@ async def test_run_worker_implemented_with_only_baseline_failures_trusts_worker(
 
 
 # ----------------------------------------------------------------------
-# Attempt counter increments correctly
+# URL / project mismatch
 # ----------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_run_worker_attempt_counter_increments_with_existing_labels(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Two existing impl-attempt labels → new attempt is 3."""
-    clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
-    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
-    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
-
-    cfg = _make_config(clone)
-    repo, _spec_pr, issue = _make_fake_repo(
-        issue_number=42,
-        head_sha=head_sha,
-        labels=[
-            "foreman:plan-approved",
-            "foreman:impl-attempt-1",
-            "foreman:impl-attempt-2",
-        ],
-    )
-    client = _FakeWorkerClient(repo=repo)
-    registry = _make_registry(client)
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
-    _make_passing_check_command(monkeypatch)
-
-    result = await run_worker(
-        issue_url="https://github.com/jeffrichley/voice/issues/42",
-        config=cfg,
-        project_name="voice",
-        worktrees_root=tmp_path / "worktrees",
-        provider=fake_provider,
-        identity_registry=registry,
-    )
-
-    assert result.attempt == 3
-    assert "foreman:impl-attempt-3" in issue.added
-
-
-# ----------------------------------------------------------------------
-# Pre-flight gates
-# ----------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_run_worker_missing_plan_approved_label_raises(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
-    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
-    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
-
-    cfg = _make_config(clone)
-    repo, _spec_pr, issue = _make_fake_repo(
-        issue_number=42, head_sha=head_sha, labels=["random-label"]
-    )
-    client = _FakeWorkerClient(repo=repo)
-    registry = _make_registry(client)
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
-    _make_passing_check_command(monkeypatch)
-
-    with pytest.raises(RuntimeError, match=r"foreman:plan-approved"):
-        await run_worker(
-            issue_url="https://github.com/jeffrichley/voice/issues/42",
-            config=cfg,
-            project_name="voice",
-            worktrees_root=tmp_path / "worktrees",
-            provider=fake_provider,
-            identity_registry=registry,
-        )
-
-    # No LLM, no PR, no label mutation
-    fake_provider.run_agent.assert_not_called()
-    assert repo.create_pull_calls == []
-    assert issue.added == []
-    assert issue.removed == []
-
-
-@pytest.mark.asyncio
-async def test_run_worker_accepts_plan_approved_entry_label(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``foreman:plan-approved`` is the v3 post-Reviewer-signoff entry
-    label the reconciler sets to queue the Worker. The role MUST accept
-    it as the sole valid entry condition (v2's ``foreman:spec-ready`` /
-    ``foreman:implementing-ready`` labels were removed in v3)."""
-    clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
-    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
-    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
-
-    cfg = _make_config(clone)
-    repo, _spec_pr, issue = _make_fake_repo(
-        issue_number=42,
-        head_sha=head_sha,
-        labels=["foreman:plan-approved"],
-    )
-    client = _FakeWorkerClient(repo=repo)
-    registry = _make_registry(client)
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
-    _make_passing_check_command(monkeypatch)
-
-    await run_worker(
-        issue_url="https://github.com/jeffrichley/voice/issues/42",
-        config=cfg,
-        project_name="voice",
-        worktrees_root=tmp_path / "worktrees",
-        provider=fake_provider,
-        identity_registry=registry,
-    )
-
-    # LLM dispatched, attempt label stamped; entry label cleared at dispatch.
-    fake_provider.run_agent.assert_called_once()
-    assert "foreman:impl-attempt-1" in issue.added
-    # v3 has no in-flight ``implementing`` label.
-    assert "foreman:implementing" not in issue.added
-    assert "foreman:plan-approved" in issue.removed
-
-
-@pytest.mark.asyncio
-async def test_run_worker_max_attempts_gate_raises_before_llm(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """3 impl-attempt-* labels already present → attempt 4 would be next →
-    refuse with clear RuntimeError BEFORE LLM dispatch."""
-    clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
-    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
-    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
-
-    cfg = _make_config(clone)
-    repo, _spec_pr, issue = _make_fake_repo(
-        issue_number=42,
-        head_sha=head_sha,
-        labels=[
-            "foreman:plan-approved",
-            "foreman:impl-attempt-1",
-            "foreman:impl-attempt-2",
-            "foreman:impl-attempt-3",
-        ],
-    )
-    client = _FakeWorkerClient(repo=repo)
-    registry = _make_registry(client)
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
-    _make_passing_check_command(monkeypatch)
-
-    with pytest.raises(RuntimeError, match="max 3 impl-attempts"):
-        await run_worker(
-            issue_url="https://github.com/jeffrichley/voice/issues/42",
-            config=cfg,
-            project_name="voice",
-            worktrees_root=tmp_path / "worktrees",
-            provider=fake_provider,
-            identity_registry=registry,
-        )
-
-    fake_provider.run_agent.assert_not_called()
-    assert "foreman:impl-attempt-4" not in issue.added
-    assert repo.create_pull_calls == []
-
-
-@pytest.mark.asyncio
-async def test_run_worker_honors_project_max_impl_attempts_override(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """When ``ProjectConfig.max_impl_attempts`` overrides the default, the
-    gate fires at the overridden value, not at the historical 3. Pinning
-    this empirically because otherwise the configurable feature could
-    silently regress to ``hardcoded 3`` and the default-only tests would
-    never notice."""
-    clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
-    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
-    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
-
-    cfg = _make_config(clone)
-    cfg.projects[0] = cfg.projects[0].model_copy(update={"max_impl_attempts": 1})
-    repo, _spec_pr, issue = _make_fake_repo(
-        issue_number=42,
-        head_sha=head_sha,
-        labels=["foreman:plan-approved", "foreman:impl-attempt-1"],
-    )
-    client = _FakeWorkerClient(repo=repo)
-    registry = _make_registry(client)
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
-    _make_passing_check_command(monkeypatch)
-
-    with pytest.raises(RuntimeError, match="max 1 impl-attempts"):
-        await run_worker(
-            issue_url="https://github.com/jeffrichley/voice/issues/42",
-            config=cfg,
-            project_name="voice",
-            worktrees_root=tmp_path / "worktrees",
-            provider=fake_provider,
-            identity_registry=registry,
-        )
-
-    fake_provider.run_agent.assert_not_called()
-    assert "foreman:impl-attempt-2" not in issue.added
-    assert repo.create_pull_calls == []
 
 
 @pytest.mark.asyncio
@@ -2236,9 +1924,9 @@ async def test_run_worker_sdk_error_surfaces_as_incomplete_not_crash(
     assert result.llm_output.outcome == "incomplete"
     assert "TimeoutError" in result.llm_output.work_comment
     assert "provider transport timed out" in result.llm_output.work_comment
-    # Incomplete branch: needs-help added, no impl PR opened
-    assert "foreman:needs-help" in issue.added
+    # No impl PR opened on incomplete; no label mutation either.
     assert repo.create_pull_calls == []
+    assert issue.set_labels_calls == []
 
 
 # ----------------------------------------------------------------------
@@ -2312,293 +2000,6 @@ async def test_worker_opens_impl_pr_with_base_from_create_impl_result(
         f"(here: 'main' from the fallback path); got base={create_call['base']!r}"
     )
     assert create_call["head"] == "foreman/impl-42"
-
-
-# ----------------------------------------------------------------------
-# foreman#91 — final_labels is the authoritative post-transition set
-# ----------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("output_factory", "starting_labels", "expected_final", "check_setup"),
-    [
-        # implemented: plan-approved cleared at dispatch, impl-review added,
-        # impl-attempt-1 dropped (per-episode reset), needs-help dropped.
-        # v3: no in-flight ``implementing`` label.
-        ("implemented", ["foreman:plan-approved"], ["foreman:impl-review"], "pass"),
-        # incomplete: plan-approved cleared at dispatch; impl-attempt-1
-        # + needs-help added. v3: no ``implementing`` label.
-        (
-            "incomplete",
-            ["foreman:plan-approved"],
-            sorted(
-                [
-                    "foreman:impl-attempt-1",
-                    "foreman:needs-help",
-                ]
-            ),
-            "fail",
-        ),
-        # spec_invalid: plan-approved cleared, spec-fix + needs-help added,
-        # impl-attempt-1 retained (no per-episode reset on invalid).
-        (
-            "spec_invalid",
-            ["foreman:plan-approved"],
-            sorted(
-                [
-                    "foreman:impl-attempt-1",
-                    "foreman:spec-fix",
-                    "foreman:needs-help",
-                ]
-            ),
-            "pass",
-        ),
-    ],
-)
-async def test_run_worker_returns_authoritative_final_labels(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    output_factory: str,
-    starting_labels: list[str],
-    expected_final: list[str],
-    check_setup: str,
-) -> None:
-    """foreman#91: ``WorkerRunResult.final_labels`` is the deterministic
-    post-transition set, computed in-process from the role's known
-    mutations. Not a host re-read."""
-    clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
-    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
-    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
-
-    cfg = _make_config(clone)
-    repo, _spec_pr, _issue = _make_fake_repo(
-        issue_number=42, head_sha=head_sha, labels=starting_labels
-    )
-    client = _FakeWorkerClient(repo=repo)
-    registry = _make_registry(client)
-
-    output_map = {
-        "implemented": _implemented_output,
-        "incomplete": _incomplete_output,
-        "spec_invalid": _spec_invalid_output,
-    }
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_with_usage(output_map[output_factory]()))
-
-    if check_setup == "pass":
-        _make_passing_check_command(monkeypatch)
-    else:
-        _make_check_command_pair(
-            monkeypatch,
-            baseline=set(),
-            post={"tests/test_y.py::test_y_returns_z"},
-            post_rc=1,
-        )
-
-    result = await run_worker(
-        issue_url="https://github.com/jeffrichley/voice/issues/42",
-        config=cfg,
-        project_name="voice",
-        worktrees_root=tmp_path / "worktrees",
-        provider=fake_provider,
-        identity_registry=registry,
-    )
-
-    assert result.final_labels == expected_final
-
-
-@pytest.mark.asyncio
-async def test_run_worker_preserves_non_foreman_labels_added_during_window(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Pass 2 HIGH: operator-added labels (``priority:high``,
-    ``needs:design``) added DURING the LLM call must survive BOTH the
-    pre-LLM dispatch transition AND the post-LLM outcome transition.
-    ``set_labels`` REPLACES the full label set on GitHub — any label
-    not present in the call's argument list is dropped.
-
-    The Worker has TWO set_labels sites (pre-LLM attempt-stamp +
-    entry-clear, and post-LLM outcome transition); both must re-read
-    labels at the WRITE site to minimize the race window.
-
-    Simulates the race by mutating the fake issue's labels via a
-    side_effect on ``run_agent`` (the LLM call) — labels added during
-    the LLM call must appear in the FINAL (post-LLM) set_labels call.
-    Also asserts that a foreman label NOT under the Worker's control
-    (``foreman:hold``) survives.
-    """
-    clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
-    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
-    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
-
-    cfg = _make_config(clone)
-    repo, _spec_pr, issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
-    client = _FakeWorkerClient(repo=repo)
-    registry = _make_registry(client)
-
-    async def _mutate_then_return(*args: Any, **kwargs: Any) -> tuple[WorkerOutput, UsageInfo]:
-        # Operator adds two non-foreman labels + one foreman label NOT
-        # under the Worker's control during the LLM call. All three
-        # must be preserved by the post-LLM outcome transition.
-        # Mutate ``_remote_labels`` (simulated GitHub state) — NOT the
-        # cached ``labels`` property — so the role's ``issue.update()``
-        # at the WRITE site re-reads the operator changes from "GitHub",
-        # matching PyGithub's real caching shape.
-        issue._remote_labels.append("priority:high")
-        issue._remote_labels.append("team:backend")
-        issue._remote_labels.append("foreman:hold")
-        return _with_usage(_implemented_output())
-
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(side_effect=_mutate_then_return)
-    _make_check_command_pair(monkeypatch, baseline=set(), post=set(), post_rc=0)
-
-    await run_worker(
-        issue_url="https://github.com/jeffrichley/voice/issues/42",
-        config=cfg,
-        project_name="voice",
-        worktrees_root=tmp_path / "worktrees",
-        provider=fake_provider,
-        identity_registry=registry,
-    )
-
-    # Two set_labels calls: pre-LLM dispatch + post-LLM outcome.
-    assert len(issue.set_labels_calls) == 2
-
-    # Post-LLM outcome call carries the FINAL set after the operator's
-    # window — this is the call that must preserve operator labels.
-    final = set(issue.set_labels_calls[-1])
-    # Worker's verdict: impl-review added, attempt counter cleared.
-    assert "foreman:impl-review" in final
-    assert "foreman:impl-attempt-1" not in final
-    # Operator-added labels preserved (the bug this test guards).
-    assert "priority:high" in final
-    assert "team:backend" in final
-    # Foreman label NOT under the role's control also preserved.
-    assert "foreman:hold" in final
-
-
-@pytest.mark.asyncio
-async def test_run_worker_implemented_clears_stale_foreman_failed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Pass 2 MEDIUM: if an operator re-triggers a previously-failed ticket
-    (e.g., by re-adding ``foreman:plan-approved`` to an issue that still
-    carries ``foreman:failed`` from a prior exhausted-attempts episode) and
-    the Worker succeeds this time, the stale ``foreman:failed`` label MUST
-    be dropped by the per-episode reset — otherwise the dashboard keeps
-    showing the issue as terminal-failed despite a clean implementation."""
-    clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
-    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
-    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
-
-    cfg = _make_config(clone)
-    # Issue carries the operator re-trigger label (plan-approved) AND the
-    # stale failed marker from the prior episode. No prior impl-attempt
-    # labels — the operator cleared them along with re-queueing.
-    repo, _spec_pr, issue = _make_fake_repo(
-        issue_number=42,
-        head_sha=head_sha,
-        labels=["foreman:plan-approved", "foreman:failed"],
-    )
-    client = _FakeWorkerClient(repo=repo)
-    registry = _make_registry(client)
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
-    _make_check_command_pair(monkeypatch, baseline=set(), post=set(), post_rc=0)
-
-    result = await run_worker(
-        issue_url="https://github.com/jeffrichley/voice/issues/42",
-        config=cfg,
-        project_name="voice",
-        worktrees_root=tmp_path / "worktrees",
-        provider=fake_provider,
-        identity_registry=registry,
-    )
-
-    # Final post-LLM set_labels call must not include the stale failed
-    # marker — the per-episode reset on implemented drops it.
-    final = set(issue.set_labels_calls[-1])
-    assert "foreman:failed" not in final
-    assert "foreman:impl-review" in final
-    # And the returned final_labels matches the cleaned set.
-    assert "foreman:failed" not in result.final_labels
-
-
-@pytest.mark.asyncio
-async def test_run_worker_calls_update_before_post_llm_write_site_label_read(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Pass 3 CRITICAL: Stage 4's "re-read labels at WRITE site" is
-    illusory without ``issue.update()`` because PyGithub's
-    ``Issue.labels`` is a cached property — the first access materializes
-    the list, subsequent accesses return the same snapshot. Operator
-    labels added during the minute-long LLM call would be silently
-    dropped without an explicit cache refresh.
-
-    The Worker has TWO write sites (pre-LLM attempt-stamp and post-LLM
-    outcome). This test focuses on the post-LLM site (the high-stakes
-    one — minutes of LLM time between the pre-flight read and the
-    write). The operator's label arrives during the LLM call and must
-    survive the outcome transition.
-    """
-    clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
-    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
-    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
-
-    cfg = _make_config(clone)
-    repo, _spec_pr, issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
-    client = _FakeWorkerClient(repo=repo)
-    registry = _make_registry(client)
-
-    # Inject operator's label DURING the LLM call so it's in
-    # ``_remote_labels`` by the time the role refreshes at the WRITE
-    # site. If the role doesn't call ``issue.update()``, the cached
-    # snapshot from the top of ``run_worker`` (which carried only
-    # ``foreman:plan-approved``) is reused and the operator label is
-    # silently dropped.
-    async def _operator_adds_label_during_llm(
-        *args: Any, **kwargs: Any
-    ) -> tuple[WorkerOutput, UsageInfo]:
-        issue._remote_labels.append("priority:high")
-        return _with_usage(_implemented_output())
-
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(side_effect=_operator_adds_label_during_llm)
-    _make_check_command_pair(monkeypatch, baseline=set(), post=set(), post_rc=0)
-
-    await run_worker(
-        issue_url="https://github.com/jeffrichley/voice/issues/42",
-        config=cfg,
-        project_name="voice",
-        worktrees_root=tmp_path / "worktrees",
-        provider=fake_provider,
-        identity_registry=registry,
-    )
-
-    # Assertion 1: ``update()`` was called at least twice — once before
-    # each WRITE-site label read (pre-LLM dispatch + post-LLM outcome).
-    # Without these calls, the cached snapshot would be reused and the
-    # operator label would be silently dropped.
-    assert issue.update_calls >= 2, (
-        "Worker must call issue.update() before BOTH WRITE-site label reads "
-        f"(pre-LLM dispatch + post-LLM outcome); observed {issue.update_calls}"
-    )
-
-    # Assertion 2: the operator's label survived the post-LLM
-    # transition. Without ``issue.update()``, the cache would still hold
-    # the pre-LLM snapshot and ``priority:high`` would be missing.
-    assert len(issue.set_labels_calls) == 2
-    final = set(issue.set_labels_calls[-1])
-    assert "priority:high" in final
-    # And the role's verdict still landed.
-    assert "foreman:impl-review" in final
-    assert "foreman:impl-attempt-1" not in final
 
 
 # ----------------------------------------------------------------------
@@ -2681,110 +2082,16 @@ async def test_run_worker_passes_repo_url_to_create_impl(
 
 
 # ----------------------------------------------------------------------
-# Entry-label revert on Worker crash before outcome
-# ----------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_run_worker_reverts_entry_labels_when_create_impl_crashes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """When the Worker crashes after the entry-label transition has been
-    written (``plan-approved`` cleared, ``impl-attempt-N`` added) but
-    before the final outcome ``set_labels`` runs, the entry transition
-    must be reverted so the v3 reconciler can re-dispatch via the
-    normal ``_plan_approved_no_impl_pr`` rule.
-
-    Without this, the issue is left with ``foreman:impl-attempt-N`` but
-    without ``foreman:plan-approved`` — and no rule in the v3 catalog
-    matches that state, so the ticket becomes a stuck zombie even though
-    the execution log's ``count_completed`` is well below the safety
-    cap.
-
-    Symmetric verification: the original exception must still propagate
-    so the parent v3_host can write the termination row via
-    ``_track_subprocess_completion``.
-    """
-    clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
-    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
-    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
-
-    def crashing_create_impl(
-        self: Any,
-        *,
-        clone_path: Path,
-        repo_slug: str,
-        ticket_id: int,
-        repo_url: str | None = None,
-    ) -> Any:
-        raise FileNotFoundError(
-            "[Errno 2] No such file or directory: "
-            f"PosixPath('{clone_path}')"
-        )
-
-    monkeypatch.setattr(
-        "foreman.roles.worker.WorktreeManager.create_impl", crashing_create_impl
-    )
-
-    cfg = _make_config(clone)
-    repo, _spec_pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
-    client = _FakeWorkerClient(repo=repo)
-    registry = _make_registry(client)
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
-    _make_passing_check_command(monkeypatch)
-
-    issue = repo.get_issue(42)
-
-    # Run and expect the original FileNotFoundError to propagate.
-    with pytest.raises(FileNotFoundError):
-        await run_worker(
-            issue_url="https://github.com/jeffrichley/voice/issues/42",
-            config=cfg,
-            project_name="voice",
-            worktrees_root=tmp_path / "worktrees",
-            provider=fake_provider,
-            identity_registry=registry,
-        )
-
-    # Assertion 1: exactly two set_labels calls — entry transition, then
-    # revert. The outcome set_labels at the end of run_worker never ran
-    # (we crashed in create_impl before it).
-    assert len(issue.set_labels_calls) == 2, (
-        "Expected entry transition + revert (2 set_labels calls); got "
-        f"{len(issue.set_labels_calls)}: {issue.set_labels_calls}"
-    )
-
-    # Assertion 2: entry transition removed plan-approved + added impl-attempt-1.
-    entry_labels = set(issue.set_labels_calls[0])
-    assert "foreman:impl-attempt-1" in entry_labels
-    assert "foreman:plan-approved" not in entry_labels
-
-    # Assertion 3: revert call restored plan-approved + dropped impl-attempt-1,
-    # leaving the ticket in the exact state the reconciler can re-dispatch from.
-    revert_labels = set(issue.set_labels_calls[1])
-    assert "foreman:plan-approved" in revert_labels, (
-        "Revert must restore foreman:plan-approved so the v3 reconciler's "
-        f"_plan_approved_no_impl_pr rule can re-dispatch; got {revert_labels!r}"
-    )
-    assert "foreman:impl-attempt-1" not in revert_labels, (
-        "Revert must drop the foreman:impl-attempt-N that the entry "
-        f"transition just added; got {revert_labels!r}"
-    )
-
-
-# ----------------------------------------------------------------------
 # foreman#238 — failure-path stats logging
 #
 # Before #238, ``log_worker_run`` was only called on the happy path. If
 # anything after the body wrap raised (WorktreeManager.create_impl,
-# host.push_branch, _create_pull_with_base_fallback, issue.set_labels,
-# etc.) the exception propagated up to the daemon dispatcher and NO
-# JSONL row was written for the failed run. Cost telemetry for failed
-# Worker runs vanished. #238 wraps the body in a try/except so the
-# failure path also writes a row — with whatever partial ``usage`` state
-# was captured before the failure.
+# host.push_branch, _create_pull_with_base_fallback, etc.) the
+# exception propagated up to the daemon dispatcher and NO JSONL row
+# was written for the failed run. Cost telemetry for failed Worker
+# runs vanished. #238 wraps the body in a try/except so the failure
+# path also writes a row — with whatever partial ``usage`` state was
+# captured before the failure.
 #
 # Note: ``provider.run_agent`` raising is already handled by the D5
 # in-band recovery above (synthesized as ``outcome=incomplete``) and is
