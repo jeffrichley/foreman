@@ -20,6 +20,9 @@ Imports allowed:
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from foreman.config import AdminConfig, ReconcilerConfig
 from foreman.config import AppsConfig as V3AppsConfig
 from foreman.config import Config as V3Config
@@ -27,6 +30,35 @@ from foreman.config import OrchestratorConfig as V3OrchestratorConfig
 from foreman.config import ProjectConfig as V3ProjectConfig
 from foreman.v4.config import ProjectConfig as V4ProjectConfig
 from foreman.v4.config import V4Config
+from foreman.v4.config import load_config as v4_load_config
+
+_DEFAULT_V4_CONFIG = Path.home() / ".foreman" / "v4" / "config.toml"
+
+
+def load_v3_config_for_project(project_name: str) -> V3Config:
+    """Load v4 config from ``FOREMAN_V4_CONFIG``, look up ``project_name``,
+    and return a v3 ``Config`` adapted for the legacy ``run_<role>`` async
+    functions.
+
+    Single helper shared by all 4 role CLIs (planner/reviewer/fixer/worker)
+    — the per-role v4-emit blocks each collapse to one call. Raises
+    ``ValueError`` with the list of known project names when the requested
+    project is missing, so the role's outer exception handler can surface
+    a meaningful FOREMAN_OUTCOME instead of a bare KeyError.
+    """
+    v4_cfg_path = Path(os.environ.get("FOREMAN_V4_CONFIG", _DEFAULT_V4_CONFIG))
+    v4_cfg = v4_load_config(v4_cfg_path)
+    v4_project = next(
+        (p for p in v4_cfg.projects if p.name == project_name),
+        None,
+    )
+    if v4_project is None:
+        known = [p.name for p in v4_cfg.projects]
+        raise ValueError(
+            f"project {project_name!r} not found in V4Config at "
+            f"{v4_cfg_path}. Known projects: {known}"
+        )
+    return v3_config_from_v4(v4_cfg, v4_project)
 
 
 def v3_config_from_v4(v4_cfg: V4Config, project: V4ProjectConfig) -> V3Config:

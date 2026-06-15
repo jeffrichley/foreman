@@ -8,6 +8,8 @@ schema change shows up as a test failure pointing at the missed seam.
 """
 from __future__ import annotations
 
+from typing import Literal
+
 from foreman.v4._v3_config_adapter import v3_config_from_v4
 from foreman.v4.config import (
     AppCredentials,
@@ -21,7 +23,7 @@ from foreman.v4.config import (
 def _make_v4_config(
     *,
     projects: list[ProjectConfig],
-    merge_mechanism: str = "queue",
+    merge_mechanism: Literal["queue", "merge", "squash", "rebase"] = "queue",
 ) -> V4Config:
     """Build a minimal V4Config for adapter exercise.
 
@@ -31,7 +33,7 @@ def _make_v4_config(
     return V4Config(
         db_path="/tmp/v4.db",
         log_dir="/tmp/v4-logs",
-        merge_mechanism=merge_mechanism,  # type: ignore[arg-type]
+        merge_mechanism=merge_mechanism,
         apps=AppsConfig(
             planner=AppCredentials(app_id=1001, private_key_path="/tmp/planner.pem"),
             reviewer=AppCredentials(app_id=1002, private_key_path="/tmp/reviewer.pem"),
