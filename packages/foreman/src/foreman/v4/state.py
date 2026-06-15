@@ -39,7 +39,18 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class StateContext:
-    """The per-transition handle passed to every lifecycle hook."""
+    """The per-transition handle passed to every lifecycle hook.
+
+    ``max_state_attempts`` is the runaway-defense cap surfaced by
+    Phase 8c.2: if the ticket has already failed ``max_state_attempts``
+    consecutive times on this state, ``transition()`` short-circuits
+    to NeedsHelp instead of running ``execute()`` again. Defaults to 3
+    so headless tests + legacy callers that construct StateContext
+    without the kwarg keep their previous (effectively unbounded) loop
+    semantics intact — three consecutive failures is the same default
+    as ``max_fix_attempts`` and ``max_impl_attempts`` (V4Config) and
+    DaemonConfig.
+    """
 
     ticket: TicketRecord
     instance: StateInstanceRecord
@@ -48,6 +59,7 @@ class StateContext:
     bus: EventBus | None = None
     role_dispatcher: RoleDispatcher | None = None
     git: GitProvider | None = None
+    max_state_attempts: int = 3
 
 
 def _publish(ctx: StateContext, event_type: type, **kwargs: Any) -> None:
@@ -129,6 +141,39 @@ class TicketState(ABC):
             )
             _publish(ctx, StateFailedEvent, failure_phase="can_run", failure_reason="held")
             return None
+
+        # Runaway defense (Phase 8c.2). The current row was just opened
+        # by the WorkerPool, so the consecutive-count includes this
+        # attempt: hitting the cap means we've already burned
+        # ``max_state_attempts`` cycles on this state without breaking
+        # out. We refuse to re-enter — emit a synthetic state_failed
+        # event for observability, record the cap-trip on the
+        # state_instances row, force the ticket onto NeedsHelp, and
+        # close the instance. The lifecycle hooks (enter/execute/
+        # verify/exit) never run — this attempt IS the failure event.
+        consecutive = ctx.repo.count_consecutive_same_state(
+            ticket_id=ctx.ticket.id, state=self.state_name,
+        )
+        if consecutive >= ctx.max_state_attempts:
+            reason = (
+                f"state {self.state_name!r} failed {consecutive} consecutive "
+                f"times (cap={ctx.max_state_attempts}); escalating to NeedsHelp"
+            )
+            ctx.repo.record_failure(
+                ctx.instance.id, now=ctx.clock(),
+                failure_phase="retry_cap", failure_reason=reason,
+            )
+            _publish(
+                ctx, StateFailedEvent,
+                failure_phase="retry_cap", failure_reason=reason,
+            )
+            from foreman.v4.states.terminal import NeedsHelpState
+            needs_help = NeedsHelpState()
+            ctx.repo.set_ticket_state(
+                ctx.ticket.id, needs_help.state_name, now=ctx.clock(),
+            )
+            ctx.repo.close_state_instance(ctx.instance.id, now=ctx.clock())
+            return needs_help
 
         try:
             self.enter(ctx)

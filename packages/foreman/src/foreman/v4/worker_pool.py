@@ -46,6 +46,7 @@ class WorkerPool:
         git: GitProvider | None,
         bus: EventBus | None,
         clock: Callable[[], dt.datetime],
+        max_state_attempts: int = 3,
     ) -> None:
         self._repo = repo
         self._qm = qm
@@ -53,6 +54,10 @@ class WorkerPool:
         self._git = git
         self._bus = bus
         self._clock = clock
+        # Threaded into every StateContext built by _run_transition so
+        # the state machine can enforce the runaway-defense cap (Phase
+        # 8c.2). Daemon plumbs DaemonConfig.max_state_attempts here.
+        self._max_state_attempts = max_state_attempts
         # Single concurrency knob: the pool size = the QM's in-flight cap.
         # Splitting them would let pool < QM silently throttle, or pool > QM
         # waste OS threads. Operators dial ONE number in V4Config.
@@ -121,6 +126,7 @@ class WorkerPool:
             bus=self._bus,
             role_dispatcher=self._dispatcher,
             git=self._git,
+            max_state_attempts=self._max_state_attempts,
         )
         state.transition(ctx)
 
