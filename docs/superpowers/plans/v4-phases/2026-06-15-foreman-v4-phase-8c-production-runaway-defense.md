@@ -130,26 +130,33 @@ Tests:
 - [ ] **Step 5: `just check` green**
 - [ ] **Step 6: Commit** — `fix(v4): PyGithubGitProvider rebuilds client every ~50min so installation tokens refresh`
 
-### Task 8c.4: ~~Granular label writes~~ — DROPPED, design-decision-no-action
+### Task 8c.4: Granular label writes — SHIPPED with reframed justification
 
-**Resolution:** Re-examined 2026-06-15 after Jeff's pushback. The framing of bug #5 was wrong.
+**Resolution history (2026-06-15):**
 
-The v4 design is explicit:
-- **SQLite is the gospel.** Once a ticket is in SQLite, the state machine drives it from SQLite; labels on the GitHub issue are not re-read.
-- **Labels are write-only observability.** Their purpose is for humans viewing the issue page to see *current state*. Accumulating prior state labels would be noise.
-- **`foreman:plan` is a one-shot adoption signal.** The Poller uses it ONLY to discover NEW tickets not yet in SQLite. After adoption, it can disappear without harm — the state machine continues from SQLite.
+1. **Original framing (this commit's first version):** The morning's 40-minute dogfood "wedge" was caused by `set_labels` replacing `foreman:plan` with `foreman:state-planning`, leaving the Poller unable to re-find the ticket.
 
-The morning's 40-minute "wedge" was an operator artifact, not a production bug: I had deleted `~/.foreman/v4/state.db` (cleaning SQLite) without realizing the prior run had already replaced `foreman:plan` with `foreman:state-planning` on GitHub. The new daemon's Poller found no `foreman:plan`-labeled issues and (correctly) did nothing. In production, where SQLite isn't manually wiped, this scenario never occurs.
+2. **Jeff's pushback (mid-execution):** Per the v4 spec, **SQLite is the gospel**. The Poller only needs `foreman:plan` for FIRST-time adoption of new tickets. Once a ticket is in SQLite, the daemon drives off SQLite — labels are write-only observability. The 40-min "wedge" was an operator artifact (I had deleted `state.db` without also resetting GitHub labels), not a production bug.
 
-**Keep PyGithub `set_labels(*sorted(labels))` REPLACE semantics.** A single `foreman:state-X` label on the issue at a time IS the right shape for observability. No code change.
+3. **Drop attempt (5002620):** I documented the task as "no-op, set_labels REPLACE is correct."
 
-If multi-project operators ever need recovery from SQLite loss (genuine production hazard), that's a separate Phase 8d concern: a `foreman reconcile-from-labels` admin command, OR documented "to restart from scratch you must also strip foreman: labels from open tickets". Not in scope here.
+4. **Reality check after re-examining the actually-landed code:** The 8c.4 implementer had already shipped commits `ab19558` + `f2d6918` before my drop-commit, and the work was architecturally better than the original `set_labels` shape for a *different* reason I missed:
 
-**This task is intentionally a no-op.** Renumbering 8c.5 / 8c.6 deferred to keep cross-references stable.
+   **Granular `add_labels` / `remove_labels` preserves operator-applied custom labels.** If a human applies `priority:high` or `triage:blocked` to an issue, `set_labels(*sorted(labels))` silently strips it on the next state transition. The morning's wedge bug was a false trail; the operator-label-preservation property is the real benefit.
+
+5. **Decision (this revision):** Keep the 8c.4 work. The trigger-label-preservation test (`test_observer_does_not_touch_trigger_label`) IS a regression test for the operator-label-preservation invariant in disguise — the same logic that protects `foreman:plan` protects any custom label.
+
+**Files actually shipped (commits `ab19558` + `f2d6918`):**
+- Added `add_labels` + `remove_labels` to `GitProvider` Protocol; dropped `write_labels`.
+- PyGithubGitProvider uses `issue.add_to_labels(...)` + `issue.remove_from_labels(...)` with `UnknownObjectException` caught for idempotent missing-label removes.
+- `LabelObservabilityObserver` listens to `StateExitedEvent` (remove the exited state's label) AND `StateEnteredEvent` (add the entered state's label). Stateless observer — no per-ticket cache.
+- Tests verify: granular adds preserve existing labels, removes are idempotent on missing, observer never touches `foreman:plan`.
+
+**Net effect on a GitHub issue across a state transition:** still a single visible `foreman:state-X` label at a time (same observability outcome as REPLACE) BUT operator-applied custom labels survive.
 
 ---
 
-#### Original task spec (preserved for archival reference)
+#### Original task spec (preserved for archival reference; matches the shipped implementation)
 
 **Files:**
 - Modify: `packages/foreman/src/foreman/v4/git_provider.py` (GitProvider Protocol — `write_labels` semantics)
