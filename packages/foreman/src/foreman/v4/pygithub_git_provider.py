@@ -112,6 +112,11 @@ class PyGithubGitProvider:
             # requester; invalidate so the next ``_repo`` access
             # re-fetches via the freshly-built client.
             self._cached_repo = None
+        # mypy can't track the in-lockstep assignment invariant above;
+        # _cached_github is non-None after the if-branch runs OR if we
+        # fell through (cache hit). assert keeps the type narrowed and
+        # documents the invariant for readers.
+        assert self._cached_github is not None
         return self._cached_github
 
     @property
