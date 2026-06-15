@@ -45,6 +45,22 @@ def test_full_boot_from_toml_to_done(tmp_path: Path, monkeypatch):
         f'log_dir = "{log_dir.as_posix()}"\n'
         f"tick_seconds = 0\n"
         f"max_in_flight = 1\n"
+        # Task 8.3: [apps.*] is now required. Real PEM read happens in
+        # main() at IdentityRegistry construction; the loader only
+        # validates the string shape, so fake on-disk paths are fine
+        # for this e2e (identity is a MagicMock below).
+        f"[apps.planner]\n"
+        f'app_id = 12345\n'
+        f'private_key_path = "/tmp/fake-planner.pem"\n'
+        f"[apps.reviewer]\n"
+        f'app_id = 12346\n'
+        f'private_key_path = "/tmp/fake-reviewer.pem"\n'
+        f"[apps.fixer]\n"
+        f'app_id = 12347\n'
+        f'private_key_path = "/tmp/fake-fixer.pem"\n'
+        f"[apps.worker]\n"
+        f'app_id = 12348\n'
+        f'private_key_path = "/tmp/fake-worker.pem"\n'
         f"[[projects]]\n"
         f'name = "p"\n'
         f'repo = "owner/p"\n'
