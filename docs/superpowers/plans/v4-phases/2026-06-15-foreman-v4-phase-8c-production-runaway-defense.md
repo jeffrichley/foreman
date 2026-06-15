@@ -130,7 +130,26 @@ Tests:
 - [ ] **Step 5: `just check` green**
 - [ ] **Step 6: Commit** — `fix(v4): PyGithubGitProvider rebuilds client every ~50min so installation tokens refresh`
 
-### Task 8c.4: Granular label writes — don't trample trigger label
+### Task 8c.4: ~~Granular label writes~~ — DROPPED, design-decision-no-action
+
+**Resolution:** Re-examined 2026-06-15 after Jeff's pushback. The framing of bug #5 was wrong.
+
+The v4 design is explicit:
+- **SQLite is the gospel.** Once a ticket is in SQLite, the state machine drives it from SQLite; labels on the GitHub issue are not re-read.
+- **Labels are write-only observability.** Their purpose is for humans viewing the issue page to see *current state*. Accumulating prior state labels would be noise.
+- **`foreman:plan` is a one-shot adoption signal.** The Poller uses it ONLY to discover NEW tickets not yet in SQLite. After adoption, it can disappear without harm — the state machine continues from SQLite.
+
+The morning's 40-minute "wedge" was an operator artifact, not a production bug: I had deleted `~/.foreman/v4/state.db` (cleaning SQLite) without realizing the prior run had already replaced `foreman:plan` with `foreman:state-planning` on GitHub. The new daemon's Poller found no `foreman:plan`-labeled issues and (correctly) did nothing. In production, where SQLite isn't manually wiped, this scenario never occurs.
+
+**Keep PyGithub `set_labels(*sorted(labels))` REPLACE semantics.** A single `foreman:state-X` label on the issue at a time IS the right shape for observability. No code change.
+
+If multi-project operators ever need recovery from SQLite loss (genuine production hazard), that's a separate Phase 8d concern: a `foreman reconcile-from-labels` admin command, OR documented "to restart from scratch you must also strip foreman: labels from open tickets". Not in scope here.
+
+**This task is intentionally a no-op.** Renumbering 8c.5 / 8c.6 deferred to keep cross-references stable.
+
+---
+
+#### Original task spec (preserved for archival reference)
 
 **Files:**
 - Modify: `packages/foreman/src/foreman/v4/git_provider.py` (GitProvider Protocol — `write_labels` semantics)
