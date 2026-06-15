@@ -265,6 +265,169 @@ def test_apps_orchestrator_round_trip(tmp_path: Path):
     assert config.orchestrator.private_key_path == "/tmp/fake-orchestrator.pem"
 
 
+# ---------------------------------------------------------------------------
+# Task 8b.2: ProjectConfig grows per-project fields the role CLIs need
+# ---------------------------------------------------------------------------
+
+
+def test_project_minimal_still_parses(tmp_path: Path):
+    """Phase 8b.2: ProjectConfig keeps minimal-required shape.
+
+    A TOML with only the historically-required fields (name/repo/
+    local_clone_path) still loads, and all 4 new per-project fields take
+    their sensible defaults. This proves existing v4 configs continue
+    to work unchanged — operators do not have to touch their config to
+    pick up the role-CLI rewire.
+    """
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[daemon]\n'
+        'db_path = "/tmp/foreman.db"\n'
+        'log_dir = "/tmp/foreman-logs"\n'
+        + _APPS_TOML +
+        '[[projects]]\n'
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+    )
+    config = load_config(config_path)
+    proj = config.projects[0]
+    assert proj.check_command is None
+    assert proj.dev_base_branch is None
+    assert proj.max_fix_attempts == 3
+    assert proj.max_impl_attempts == 3
+    assert proj.merge_mechanism is None
+
+
+def test_project_check_command_override(tmp_path: Path):
+    """Phase 8b.2: per-project ``check_command`` flows through.
+
+    Worker uses this verification command before claiming done;
+    projects that don't run ``just check`` set it here.
+    """
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[daemon]\n'
+        'db_path = "/tmp/foreman.db"\n'
+        'log_dir = "/tmp/foreman-logs"\n'
+        + _APPS_TOML +
+        '[[projects]]\n'
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+        'check_command = "pytest"\n'
+    )
+    config = load_config(config_path)
+    assert config.projects[0].check_command == "pytest"
+
+
+def test_project_dev_base_branch_override(tmp_path: Path):
+    """Phase 8b.2: per-project ``dev_base_branch`` flows through.
+
+    Used for walking-skeleton phases where the active dev line lives
+    on a feature branch rather than ``main``.
+    """
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[daemon]\n'
+        'db_path = "/tmp/foreman.db"\n'
+        'log_dir = "/tmp/foreman-logs"\n'
+        + _APPS_TOML +
+        '[[projects]]\n'
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+        'dev_base_branch = "develop"\n'
+    )
+    config = load_config(config_path)
+    assert config.projects[0].dev_base_branch == "develop"
+
+
+def test_project_max_fix_attempts_override(tmp_path: Path):
+    """Phase 8b.2: per-project ``max_fix_attempts`` flows through.
+
+    Fixer's preflight cap before NeedsHelp escalation.
+    """
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[daemon]\n'
+        'db_path = "/tmp/foreman.db"\n'
+        'log_dir = "/tmp/foreman-logs"\n'
+        + _APPS_TOML +
+        '[[projects]]\n'
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+        'max_fix_attempts = 5\n'
+    )
+    config = load_config(config_path)
+    assert config.projects[0].max_fix_attempts == 5
+
+
+def test_project_max_impl_attempts_override(tmp_path: Path):
+    """Phase 8b.2: per-project ``max_impl_attempts`` flows through.
+
+    Worker's preflight cap before NeedsHelp escalation. Audit during
+    8b.2 implementation found Worker reads this field on v3
+    ProjectConfig (worker.py:702), so v4 must grow it too even though
+    the plan's starting field list omitted it.
+    """
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[daemon]\n'
+        'db_path = "/tmp/foreman.db"\n'
+        'log_dir = "/tmp/foreman-logs"\n'
+        + _APPS_TOML +
+        '[[projects]]\n'
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+        'max_impl_attempts = 5\n'
+    )
+    config = load_config(config_path)
+    assert config.projects[0].max_impl_attempts == 5
+
+
+def test_project_merge_mechanism_override(tmp_path: Path):
+    """Phase 8b.2: per-project ``merge_mechanism`` flows through.
+
+    Default None inherits daemon-level config.merge_mechanism. Valid
+    overrides are the same 4-value Literal as V4Config.merge_mechanism;
+    an invalid value raises ValidationError at load time.
+    """
+    # Valid override.
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[daemon]\n'
+        'db_path = "/tmp/foreman.db"\n'
+        'log_dir = "/tmp/foreman-logs"\n'
+        + _APPS_TOML +
+        '[[projects]]\n'
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+        'merge_mechanism = "rebase"\n'
+    )
+    config = load_config(config_path)
+    assert config.projects[0].merge_mechanism == "rebase"
+
+    # Invalid value raises.
+    bad_path = tmp_path / "bad.toml"
+    bad_path.write_text(
+        '[daemon]\n'
+        'db_path = "/tmp/foreman.db"\n'
+        'log_dir = "/tmp/foreman-logs"\n'
+        + _APPS_TOML +
+        '[[projects]]\n'
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+        'merge_mechanism = "bogus"\n'
+    )
+    with pytest.raises(ValidationError):
+        load_config(bad_path)
+
+
 def test_missing_orchestrator_raises(tmp_path: Path):
     """Task 8.4: ``[orchestrator]`` is REQUIRED. The pivot from env-var
     PAT to App installation tokens means the daemon literally needs an

@@ -61,6 +61,11 @@ Schema:
     repo              - "owner/name"
     local_clone_path  - filesystem path
     trigger_label     - GH label (default "foreman:plan")
+    check_command     - verification command for Worker (None → "just check")
+    dev_base_branch   - alternate base branch for spec worktrees (None → origin/default)
+    max_fix_attempts  - max fix cycles before NeedsHelp escalation (default 3)
+    max_impl_attempts - max impl cycles before NeedsHelp escalation (default 3)
+    merge_mechanism   - per-project override (None inherits daemon.merge_mechanism)
 """
 
 from __future__ import annotations
@@ -78,6 +83,39 @@ class ProjectConfig(BaseModel):
     repo: str
     local_clone_path: str
     trigger_label: str = "foreman:plan"
+
+    # Phase 8b.2: per-project fields the legacy run_<role> async function
+    # bodies read off v3 ProjectConfig. v4 grows these so the role CLIs
+    # (Phase 8b.3) can switch from v3 config to v4 config without
+    # changing the legacy run_<role> signatures.
+    check_command: str | None = None
+    """Project's verification command. Worker runs this before claiming
+    done. Resolves to ``"just check"`` when None. Matches v3
+    ProjectConfig.check_command semantics."""
+
+    dev_base_branch: str | None = None
+    """Optional alternate branch to use as the base when creating spec
+    worktrees, instead of origin/<default_branch>. Set when the project's
+    active development line lives on a feature branch (e.g., during a
+    walking-skeleton phase) rather than on main. The branch must exist
+    on origin; Foreman will fetch it before branching."""
+
+    max_fix_attempts: int = 3
+    """Maximum Fixer cycles before the role escalates to NeedsHelp.
+    Matches v3 ProjectConfig.max_fix_attempts default. Read at role
+    runtime by ``foreman.roles.fixer``."""
+
+    max_impl_attempts: int = 3
+    """Maximum Worker impl cycles before the role escalates to NeedsHelp.
+    Matches v3 ProjectConfig.max_impl_attempts default. Read at role
+    runtime by ``foreman.roles.worker``."""
+
+    merge_mechanism: Literal["queue", "merge", "squash", "rebase"] | None = None
+    """Per-project override for the merge mechanism. None inherits the
+    daemon-level ``V4Config.merge_mechanism``. Per-project granularity
+    matters because MergeQueue is enabled at the GitHub repo level —
+    different projects may have it set up at different times. See
+    foreman#158."""
 
 
 class AppCredentials(BaseModel):
