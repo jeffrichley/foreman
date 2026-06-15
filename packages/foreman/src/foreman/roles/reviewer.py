@@ -1,32 +1,28 @@
 """Reviewer role dispatcher.
 
-The Reviewer LLM reads an already-open spec PR (the Planner's output) and
-returns a :class:`~foreman.schemas.reviewer.ReviewerOutput`. Foreman core
-then:
+The Reviewer LLM reads an already-open spec or impl PR and returns a
+:class:`~foreman.schemas.reviewer.ReviewerOutput`. Foreman core then:
 
   1. Posts the ``review_comment`` as a PR review (``event="COMMENT"``)
-  2. Advances the **issue's** label deterministically:
-     - ``clean``     → ``foreman:planning`` → ``foreman:plan-approved``
-     - ``needs_fix`` → ``foreman:planning`` → ``foreman:spec-fix``
+  2. Emits FOREMAN_OUTCOME so the v4 state machine can advance the ticket
   3. Returns :class:`~foreman.schemas.reviewer.ReviewerOutput` to the caller
      for display / persistence
 
-The label transition is on the originating ISSUE, not the PR — same
-pattern the Planner uses. The Reviewer derives the issue number and
-the review target (spec PR vs impl PR) from the PR's head branch:
-- ``foreman/issue-<N>`` → spec PR (label ``foreman:planning``)
-- ``foreman/impl-<N>``  → impl PR (label ``foreman:impl-review``)
+The Reviewer derives the issue number and the review target (spec PR vs
+impl PR) from the PR's head branch:
+- ``foreman/issue-<N>`` → spec PR review
+- ``foreman/impl-<N>``  → impl PR review
 
-Pre-flight guard: if the source issue does not carry the
-target-appropriate review label, the orchestrator raises before
-doing any work — we will not silently advance a PR whose source
-issue was not queued for review.
+Under v4, ``LabelObservabilityObserver`` owns every ``foreman:*`` label
+write off state-machine transitions; the Reviewer itself no longer reads
+or writes labels. SQLite is the source of truth — labels are write-only
+observability.
 
 The Reviewer LLM is read-only on the filesystem (Read / Glob / Grep) plus
 Bash for shell-level recon (e.g., ``gh pr view`` if it needs more context).
-All host mutations (review post, label advance) happen in core via the
-PyGithub client. This mirrors the Planner's "LLM is host-agnostic; core is
-deterministic" split.
+All host mutations (review post) happen in core via the PyGithub client.
+This mirrors the Planner's "LLM is host-agnostic; core is deterministic"
+split.
 """
 
 from __future__ import annotations
@@ -67,50 +63,18 @@ _BRANCH_ISSUE_RE = re.compile(r"^foreman/issue-(?P<number>\d+)$")
 _BRANCH_IMPL_RE = re.compile(r"^foreman/impl-(?P<number>\d+)$")
 
 
-class _ReviewerPreflightRefusal(RuntimeError):
-    """Reviewer refused to proceed because the source issue lacks the
-    expected entry label (``foreman:planning`` for spec PRs,
-    ``foreman:impl-review`` for impl PRs).
-
-    Subclass of :class:`RuntimeError` so existing callers' ``except
-    RuntimeError`` clauses and ``pytest.raises(RuntimeError, match=...)``
-    test patterns continue to work unchanged. The distinguishing
-    purpose is to tell the runaway-burn defense (#229 helper invocation)
-    to SKIP firing: a label-mismatch is operator intent (the label was
-    removed deliberately or never set), not a "broken system" runaway
-    signal. Firing the helper would override the operator's removal by
-    re-adding ``foreman:needs-help``.
-    """
-
-
 # Tool capabilities matrix for the Reviewer. Read-only on the filesystem;
 # Bash is allowed for read-only recon (e.g., ``gh pr view``, ``git log``).
 # Pinning this here prevents accidental ``Edit`` / ``Write`` reintroduction.
 REVIEWER_ALLOWED_TOOLS = ["Read", "Grep", "Glob", "Bash"]
 
-# Labels the Reviewer touches on the originating issue. The spec-PR labels
-# and impl-PR labels form parallel triples; ``run_reviewer`` picks one
-# triple based on the PR's head-branch shape.
-_LABEL_SPEC_REVIEW = "foreman:planning"
-_LABEL_SPEC_READY = "foreman:plan-approved"
-_LABEL_SPEC_FIX = "foreman:spec-fix"
-_LABEL_IMPL_REVIEW = "foreman:impl-review"
-_LABEL_READY_FOR_MERGE = "foreman:impl-approved"
-_LABEL_IMPL_FIX = "foreman:impl-fix"
-
-# foreman#78: per-target routing for the Reviewer. The role accepts
-# a ``target`` kwarg (added by foreman#41) that distinguishes spec
-# PRs (``foreman/issue-<N>``) from impl PRs (``foreman/impl-<N>``).
-# Each target gets its own entry-label precondition and its own
-# prompt composition. The mappings are intentionally explicit
-# rather than computed — adding a new target later (``docs_pr``,
-# ``release_pr``) requires updating the mappings deliberately, not
-# silently falling back to spec behavior.
-_REVIEWER_ENTRY_LABEL_BY_TARGET: dict[str, str] = {
-    "spec_pr": _LABEL_SPEC_REVIEW,
-    "impl_pr": _LABEL_IMPL_REVIEW,
-}
-
+# foreman#78: per-target prompt-composition routing for the Reviewer.
+# The role accepts a ``target`` kwarg that distinguishes spec PRs
+# (``foreman/issue-<N>``) from impl PRs (``foreman/impl-<N>``). Each
+# target gets its own prompt composition. The mapping is intentionally
+# explicit rather than computed — adding a new target later
+# (``docs_pr``, ``release_pr``) requires updating the mapping
+# deliberately, not silently falling back to spec behavior.
 _REVIEWER_SUPERPOWERS_BY_TARGET: dict[str, list[str]] = {
     # Spec-side: today's discipline — empirical code review.
     "spec_pr": ["requesting-code-review"],
@@ -386,7 +350,7 @@ async def run_reviewer(
     dispatch_recorder: DispatchRecorder | None = None,
     dispatch_trace_id: int | None = None,
 ) -> ReviewerRunResult:
-    """Run the Reviewer role end-to-end on one spec PR.
+    """Run the Reviewer role end-to-end on one spec or impl PR.
 
     Args:
         pr_url: Full GitHub PR URL
@@ -404,39 +368,34 @@ async def run_reviewer(
     Returns:
         A :class:`~foreman.schemas.reviewer.ReviewerRunResult` bundling
         the LLM's :class:`~foreman.schemas.reviewer.ReviewerOutput` and
-        the deterministic post-transition label set
-        (``final_labels``). The CLI surfaces ``outcome`` / ``findings``
-        / ``confidence`` for human inspection by reading
-        ``result.llm_output``.
+        the pre-call label snapshot for the daemon's audit trail
+        (``final_labels``). Under v4 the Reviewer no longer mutates
+        labels — ``LabelObservabilityObserver`` owns ``foreman:*``
+        writes off state-machine transitions. The CLI surfaces
+        ``outcome`` / ``findings`` / ``confidence`` for human inspection
+        by reading ``result.llm_output``.
 
     Raises:
         ValueError: PR URL malformed, repo mismatch, or PR head branch is
             not a Foreman review branch (``foreman/issue-<N>`` or
             ``foreman/impl-<N>``).
-        RuntimeError: Source issue is missing the target-appropriate
-            review label (``foreman:planning`` for spec PRs,
-            ``foreman:impl-review`` for impl PRs) — we refuse to advance
-            PRs whose source issue was not queued for review.
     """
     # foreman#237: stamp ``start_time`` BEFORE the body wrap and
     # initialize ``usage`` to ``None`` so the except branch below can
     # log partial state regardless of where in the pipeline a failure
     # surfaces. ``WorktreeManager.attach`` / ``attach_impl``,
-    # ``_get_pr_diff``, ``provider.run_agent``, ``pr.create_review``,
-    # ``issue.update`` / ``set_labels`` are all inside the wrap; pre-#237
-    # any of those raising silently dropped the run's cost telemetry
-    # because the success-path ``log_reviewer_run`` call below never
-    # executed (same shape as the Planner bug fixed in foreman#235 /
-    # PR #236).
+    # ``_get_pr_diff``, ``provider.run_agent``, ``pr.create_review`` are
+    # all inside the wrap; pre-#237 any of those raising silently dropped
+    # the run's cost telemetry because the success-path
+    # ``log_reviewer_run`` call below never executed (same shape as the
+    # Planner bug fixed in foreman#235 / PR #236).
     #
     # Post-adversarial-review: extend the wrap to ALSO cover URL parse,
-    # project lookup, identity setup, ``repo.get_pull`` /
-    # ``repo.get_issue``, and the in-review-label refusal check. Any of
-    # those raising used to crash the role subprocess WITHOUT
-    # transitioning the in-flight label; the dispatcher then
-    # re-dispatched until #228's rate-limit caught the loop at N=3.
-    # Now the FIRST such failure fires the helper (assuming the issue
-    # was resolvable — see the None guards in the except branch).
+    # project lookup, identity setup, and ``repo.get_pull`` /
+    # ``repo.get_issue``. Any of those raising used to crash the role
+    # subprocess; under v4 the runaway-burn defense fires the helper on
+    # the FIRST such failure (assuming the issue was resolvable — see
+    # the None guards in the except branch).
     start_time = time.monotonic()
     usage: UsageInfo | None = None
     actual_repo_slug: str | None = None
@@ -500,13 +459,10 @@ async def run_reviewer(
                 role_data={"target": target},
                 duration_seconds=duration_seconds,
             )
-        # foreman#229: runaway-burn defense. Skip for
-        # ``_ReviewerPreflightRefusal`` — that's intentional.
-        if (
-            not isinstance(exc, _ReviewerPreflightRefusal)
-            and issue is not None
-            and issue_number is not None
-        ):
+        # foreman#229: runaway-burn defense. Phase 8d.7 will drop the
+        # role-side ``foreman:needs-help`` write (the observer takes over);
+        # for now the existing handler stays in place.
+        if issue is not None and issue_number is not None:
             bound_issue = issue
             handle_unhandled_role_exception(
                 role="reviewer",
@@ -550,29 +506,7 @@ async def run_reviewer(
         base_branch = pr.base.ref
         issue_number, target = _parse_review_branch(head_branch)
 
-        in_review_label = _REVIEWER_ENTRY_LABEL_BY_TARGET[target]
-        if target == "impl_pr":
-            clean_label = _LABEL_READY_FOR_MERGE
-            fix_label = _LABEL_IMPL_FIX
-        else:
-            clean_label = _LABEL_SPEC_READY
-            fix_label = _LABEL_SPEC_FIX
-
         issue = repo.get_issue(issue_number)
-        issue_labels = {label.name for label in issue.labels}
-        if in_review_label not in issue_labels:
-            # Graceful refusal, NOT a runaway-burn signal. The operator
-            # may have removed the label deliberately (to abort an
-            # in-flight review, or because the ticket was retargeted).
-            # Use the marker subclass so the except branch below skips
-            # the helper and lets the original intent survive.
-            raise _ReviewerPreflightRefusal(
-                f"Issue #{issue_number} (source of PR #{pr_number}) does not carry "
-                f"the {in_review_label!r} label (labels: "
-                + ", ".join(sorted(issue_labels) or ["<none>"])
-                + "). The Reviewer only acts on issues queued via the Planner."
-            )
-
         issue_title = issue.title or ""
         issue_body = issue.body or ""
 
@@ -625,9 +559,8 @@ async def run_reviewer(
             env={**os.environ, "GH_TOKEN": reviewer_token},
         )
         # foreman#237: hoist ``usage`` to the outer scope IMMEDIATELY
-        # so a failure in any later step (review post, label
-        # transition) still records the per-call token cost in the
-        # review_failed row.
+        # so a failure in any later step (review post) still records the
+        # per-call token cost in the review_failed row.
         usage = run_usage
 
         # Post the review comment as the reviewer bot. ``event="COMMENT"``
@@ -646,49 +579,11 @@ async def run_reviewer(
         enriched_body = f"{llm_output.review_comment}\n\n{findings_block}"
         pr.create_review(body=enriched_body, event="COMMENT")
 
-        # Advance the originating ISSUE's label (not the PR's) — same pattern
-        # the Planner uses.
-        if llm_output.outcome == "clean":
-            add_label = clean_label
-        else:
-            add_label = fix_label
-
-        # Atomic label transition (foreman#? — adversarial review MEDIUM #12):
-        # use ``issue.set_labels(...)`` (single PUT /issues/{N}/labels) instead
-        # of sequential ``remove_from_labels`` + ``add_to_labels``. A subprocess
-        # crash between the two PyGithub calls leaves the issue with neither
-        # the entry label nor the outcome label — it then falls out of the v3
-        # observer's GraphQL ``filterBy.labels`` filter and the reconciler
-        # never sees it again (silent stall). ``set_labels`` replaces the full
-        # label set in one API call, so the transition is either fully applied
-        # or not applied at all.
-        #
-        # Namespace-scoped merge (Pass 2 HIGH): ``set_labels`` REPLACES the
-        # full label set on GitHub, so we must preserve every label the role
-        # is not actively touching. Re-read labels NOW (not from the pre-LLM
-        # snapshot) to minimize the race window for operator-added labels —
-        # the LLM call took minutes, but the re-read → API call window is
-        # only the round-trip (~hundreds of ms). The role declares the
-        # foreman labels it is removing (``removed_foreman``) and adding
-        # (``added_foreman``); everything else — non-foreman labels like
-        # ``priority:high`` AND foreman labels the role isn't touching like
-        # ``foreman:hold`` — passes through.
-        #
-        # Pass 3 CRITICAL: PyGithub's ``Issue.labels`` is a cached property
-        # — ``_completeIfNotSet(self._labels)`` only fetches on FIRST access
-        # (see ``.venv/Lib/site-packages/github/Issue.py:266`` +
-        # ``GithubObject.py:618``). Subsequent reads return the same snapshot
-        # taken at the top of ``run_reviewer`` — operator-added labels during
-        # the LLM call would be silently dropped. ``issue.update()`` issues a
-        # conditional GET and re-stores the attributes (see
-        # ``GithubObject.py:638``), invalidating the cache so the next
-        # ``issue.labels`` access reflects the real remote state.
-        removed_foreman = {in_review_label}
-        added_foreman = {add_label}
-        issue.update()
-        current_label_names = {label.name for label in issue.labels}
-        final_labels = sorted((current_label_names - removed_foreman) | added_foreman)
-        issue.set_labels(*final_labels)
+        # The Reviewer does not mutate labels. Under v4,
+        # ``LabelObservabilityObserver`` owns every ``foreman:*`` write off
+        # state transitions; ``final_labels`` here is just the pre-call
+        # snapshot returned for the daemon's audit trail.
+        final_labels = sorted({label.name for label in issue.labels})
 
         duration_seconds = time.monotonic() - start_time
 
@@ -737,11 +632,10 @@ async def run_reviewer(
             duration_seconds=duration_seconds,
         )
 
-        # foreman#91: ``final_labels`` is the authoritative post-transition
-        # set, computed in-process from the pre-mutation snapshot + the role's
-        # known transitions — not via a post-mutation host re-read (which
-        # raced its own write and produced stale-snapshot dispatches at the
-        # next worker iteration).
+        # The Reviewer does not mutate labels under v4; ``final_labels``
+        # is the pre-call snapshot returned for the daemon's audit
+        # trail. ``LabelObservabilityObserver`` owns ``foreman:*`` writes
+        # off state-machine transitions.
         return ReviewerRunResult(llm_output=llm_output, final_labels=final_labels)
     except ProviderError as exc:
         # foreman#266: typed catch for the documented provider-boundary

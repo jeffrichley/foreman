@@ -473,7 +473,7 @@ def _make_registry(client: _FakeReviewerClient, token: str = "ghs_reviewer_token
 
 
 @pytest.mark.asyncio
-async def test_run_reviewer_clean_outcome_advances_to_plan_approved(
+async def test_run_reviewer_clean_outcome_posts_review_and_returns_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clone = tmp_path / "clone"
@@ -526,13 +526,12 @@ async def test_run_reviewer_clean_outcome_advances_to_plan_approved(
     assert FINDINGS_BEGIN_MARKER in body
     assert FINDINGS_END_MARKER in body
 
-    # Issue label advanced: planning → plan-approved
-    assert issue.removed == ["foreman:planning"]
-    assert issue.added == ["foreman:plan-approved"]
-
-    # PR's labels NOT touched (label transition is on the issue)
-    # (The fake PR's `add_to_labels` / `remove_from_labels` don't exist;
-    # this passes implicitly — leaving an assertion-by-omission note.)
+    # Under v4 the Reviewer does NOT mutate labels —
+    # ``LabelObservabilityObserver`` owns ``foreman:*`` writes off state
+    # transitions.
+    assert issue.removed == []
+    assert issue.added == []
+    assert issue.set_labels_calls == []
 
     # ReviewerRunResult returned (foreman#91 wrapper); the LLM output is
     # accessed through ``.llm_output``.
@@ -540,52 +539,6 @@ async def test_run_reviewer_clean_outcome_advances_to_plan_approved(
     assert isinstance(result.llm_output, ReviewerOutput)
     assert result.llm_output.outcome == "clean"
     assert result.llm_output.confidence == "high"
-    # foreman#91: final_labels is the authoritative post-transition set,
-    # computed in-process by the role.
-    assert result.final_labels == ["foreman:plan-approved"]
-
-
-@pytest.mark.asyncio
-async def test_run_reviewer_uses_atomic_set_labels_for_transition(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Adversarial review MEDIUM #12: the Reviewer must apply the label
-    transition (entry → outcome) via a single ``issue.set_labels(...)``
-    call (atomic PUT /issues/{N}/labels), NOT sequential
-    ``remove_from_labels`` + ``add_to_labels``. The two-step pattern leaves
-    a crash window where the issue carries neither the entry label nor
-    the outcome label — it then falls out of the v3 observer's GraphQL
-    ``filterBy.labels`` filter and silently stalls.
-    """
-    clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
-    monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
-
-    cfg = _make_config(clone)
-    # Pre-existing unrelated label on the issue — it must survive the
-    # transition. The set_labels call needs the FULL final label set,
-    # not just the delta.
-    repo, _pr, issue = _make_fake_repo(
-        issue_number=42, head_sha=head_sha, labels=["foreman:planning", "area/infra"]
-    )
-    client = _FakeReviewerClient(repo=repo)
-    registry = _make_registry(client)
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_clean_output()))
-
-    await run_reviewer(
-        pr_url="https://github.com/jeffrichley/voice/pull/77",
-        config=cfg,
-        project_name="voice",
-        worktrees_root=tmp_path / "worktrees",
-        provider=fake_provider,
-        identity_registry=registry,
-    )
-
-    # Exactly one atomic set_labels call carrying the FULL final set —
-    # entry label dropped, outcome label added, unrelated label preserved.
-    assert len(issue.set_labels_calls) == 1
-    assert issue.set_labels_calls[0] == ("area/infra", "foreman:plan-approved")
 
 
 @pytest.mark.asyncio
@@ -681,7 +634,7 @@ async def test_run_reviewer_embeds_empty_findings_list_when_clean(
 
 
 @pytest.mark.asyncio
-async def test_run_reviewer_needs_fix_outcome_advances_to_spec_fix(
+async def test_run_reviewer_needs_fix_outcome_posts_review_with_findings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clone = tmp_path / "clone"
@@ -711,13 +664,13 @@ async def test_run_reviewer_needs_fix_outcome_advances_to_spec_fix(
     assert "needs_fix" in body
     assert event == "COMMENT"
 
-    # Issue label advanced: planning → spec-fix
-    assert issue.removed == ["foreman:planning"]
-    assert issue.added == ["foreman:spec-fix"]
+    # Under v4 the Reviewer does NOT mutate labels.
+    assert issue.removed == []
+    assert issue.added == []
+    assert issue.set_labels_calls == []
 
     assert result.llm_output.outcome == "needs_fix"
     assert len(result.llm_output.findings) == 1
-    assert result.final_labels == ["foreman:spec-fix"]
 
 
 @pytest.mark.asyncio
@@ -771,42 +724,6 @@ async def test_run_reviewer_reuses_existing_branch_does_not_create_new(
         text=True,
     ).stdout.strip()
     assert rev == head_sha
-
-
-@pytest.mark.asyncio
-async def test_run_reviewer_missing_planning_label_raises(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Pre-flight guard: source issue without ``foreman:planning`` is
-    not advanced — we refuse to act on issues not queued by the Planner."""
-    clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
-    monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
-
-    cfg = _make_config(clone)
-    # Issue has a random unrelated label, NOT foreman:planning
-    repo, pr, issue = _make_fake_repo(issue_number=42, head_sha=head_sha, labels=["random-label"])
-    client = _FakeReviewerClient(repo=repo)
-    registry = _make_registry(client)
-
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_clean_output()))
-
-    with pytest.raises(RuntimeError, match="foreman:planning"):
-        await run_reviewer(
-            pr_url="https://github.com/jeffrichley/voice/pull/77",
-            config=cfg,
-            project_name="voice",
-            worktrees_root=tmp_path / "worktrees",
-            provider=fake_provider,
-            identity_registry=registry,
-        )
-
-    # No LLM dispatch, no review post, no label mutation
-    fake_provider.run_agent.assert_not_called()
-    assert pr.reviews_posted == []
-    assert issue.removed == []
-    assert issue.added == []
 
 
 @pytest.mark.asyncio
@@ -1043,7 +960,7 @@ async def test_run_reviewer_git_subprocess_uses_reviewer_token_not_parent(
 
 
 @pytest.mark.asyncio
-async def test_run_reviewer_impl_clean_outcome_advances_to_impl_approved(
+async def test_run_reviewer_impl_clean_outcome_posts_review_and_returns_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clone = tmp_path / "clone"
@@ -1085,18 +1002,18 @@ async def test_run_reviewer_impl_clean_outcome_advances_to_impl_approved(
     assert event == "COMMENT"
     assert body.startswith("Clean — traced ACs 1-4 against the spec.")
 
-    # Issue label advanced: impl-review → impl-approved
-    assert issue.removed == ["foreman:impl-review"]
-    assert issue.added == ["foreman:impl-approved"]
+    # Under v4 the Reviewer does NOT mutate labels.
+    assert issue.removed == []
+    assert issue.added == []
+    assert issue.set_labels_calls == []
 
     assert isinstance(result, ReviewerRunResult)
     assert isinstance(result.llm_output, ReviewerOutput)
     assert result.llm_output.outcome == "clean"
-    assert result.final_labels == ["foreman:impl-approved"]
 
 
 @pytest.mark.asyncio
-async def test_run_reviewer_impl_needs_fix_outcome_advances_to_impl_fix(
+async def test_run_reviewer_impl_needs_fix_outcome_posts_review_with_findings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clone = tmp_path / "clone"
@@ -1125,51 +1042,12 @@ async def test_run_reviewer_impl_needs_fix_outcome_advances_to_impl_fix(
     assert "needs_fix" in body
     assert event == "COMMENT"
 
-    # Issue label advanced: impl-review → impl-fix
-    assert issue.removed == ["foreman:impl-review"]
-    assert issue.added == ["foreman:impl-fix"]
-
-    assert result.llm_output.outcome == "needs_fix"
-    assert result.final_labels == ["foreman:impl-fix"]
-
-
-@pytest.mark.asyncio
-async def test_run_reviewer_missing_impl_review_label_raises(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Pre-flight guard for impl-PR path: source issue without
-    ``foreman:impl-review`` is not advanced — same defense-in-depth as the
-    spec-PR path."""
-    clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_impl_branch(clone, issue_number=42)
-    monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
-
-    cfg = _make_config(clone)
-    # Issue has a random unrelated label, NOT foreman:impl-review
-    repo, pr, issue = _make_fake_impl_repo(
-        issue_number=42, head_sha=head_sha, labels=["random-label"]
-    )
-    client = _FakeReviewerClient(repo=repo)
-    registry = _make_registry(client)
-
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_clean_output()))
-
-    with pytest.raises(RuntimeError, match="foreman:impl-review"):
-        await run_reviewer(
-            pr_url="https://github.com/jeffrichley/voice/pull/99",
-            config=cfg,
-            project_name="voice",
-            worktrees_root=tmp_path / "worktrees",
-            provider=fake_provider,
-            identity_registry=registry,
-        )
-
-    # No LLM dispatch, no review post, no label mutation
-    fake_provider.run_agent.assert_not_called()
-    assert pr.reviews_posted == []
+    # Under v4 the Reviewer does NOT mutate labels.
     assert issue.removed == []
     assert issue.added == []
+    assert issue.set_labels_calls == []
+
+    assert result.llm_output.outcome == "needs_fix"
 
 
 # ----------------------------------------------------------------------
@@ -1181,19 +1059,6 @@ async def test_run_reviewer_missing_impl_review_label_raises(
 # silently kept the spec prompt — so impl PRs got reviewed as if
 # they were spec PRs. These tests pin both halves of the routing.
 # ----------------------------------------------------------------------
-
-
-def test_reviewer_entry_label_by_target_mapping_is_complete() -> None:
-    """The mapping covers the two valid targets and nothing else.
-    A future target string (e.g. ``"docs_pr"``) must require an
-    explicit addition to the mapping — not silently fall back to
-    spec behavior."""
-    from foreman.roles.reviewer import _REVIEWER_ENTRY_LABEL_BY_TARGET
-
-    assert _REVIEWER_ENTRY_LABEL_BY_TARGET == {
-        "spec_pr": "foreman:planning",
-        "impl_pr": "foreman:impl-review",
-    }
 
 
 def test_reviewer_superpowers_by_target_mapping_is_complete() -> None:
@@ -1252,233 +1117,6 @@ def test_load_reviewer_prompt_impl_target_loads_impl_composition() -> None:
     # If the loader silently fell back to reviewer.md, this would fail.
     assert "impl pull request" in actual.lower() or "impl-pr variant" in actual.lower()
 
-
-
-# ----------------------------------------------------------------------
-# foreman#91 — final_labels is the authoritative post-transition set
-#
-# The Reviewer must return ``final_labels`` matching the in-process
-# transition (``(initial_labels - {entry_label}) | {add_label}``), so
-# ``DaemonRunners.run_reviewer`` can populate the worker's
-# ``RoleResult.new_labels`` without a post-mutation host re-read that
-# would race GitHub's eventual-consistency window.
-# ----------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("seed_with_impl", "labels", "outcome", "expected_final"),
-    [
-        # spec_pr + clean → planning removed, plan-approved added
-        (False, ["foreman:planning"], "clean", ["foreman:plan-approved"]),
-        # spec_pr + needs_fix → planning removed, spec-fix added
-        (False, ["foreman:planning"], "needs_fix", ["foreman:spec-fix"]),
-        # impl_pr + clean → impl-review removed, impl-approved added
-        (True, ["foreman:impl-review"], "clean", ["foreman:impl-approved"]),
-        # impl_pr + needs_fix → impl-review removed, impl-fix added
-        (True, ["foreman:impl-review"], "needs_fix", ["foreman:impl-fix"]),
-    ],
-)
-async def test_run_reviewer_returns_authoritative_final_labels(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    seed_with_impl: bool,
-    labels: list[str],
-    outcome: str,
-    expected_final: list[str],
-) -> None:
-    """foreman#91: ``ReviewerRunResult.final_labels`` is the sorted list
-    of ``(initial_issue_labels - {entry_label}) | {add_label}`` for each
-    branch, computed in-process from the role's known transitions —
-    not from a post-mutation host re-read."""
-    clone = tmp_path / "clone"
-    if seed_with_impl:
-        head_sha = _seed_clone_with_impl_branch(clone, issue_number=42)
-        pr_url = "https://github.com/jeffrichley/voice/pull/99"
-    else:
-        head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
-        pr_url = "https://github.com/jeffrichley/voice/pull/77"
-    monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
-
-    cfg = _make_config(clone)
-    if seed_with_impl:
-        repo, _pr, _issue = _make_fake_impl_repo(
-            issue_number=42, head_sha=head_sha, labels=labels
-        )
-    else:
-        repo, _pr, _issue = _make_fake_repo(
-            issue_number=42, head_sha=head_sha, labels=labels
-        )
-    client = _FakeReviewerClient(repo=repo)
-    registry = _make_registry(client)
-
-    llm_output = (
-        _make_clean_output() if outcome == "clean" else _make_needs_fix_output()
-    )
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_with_usage(llm_output))
-
-    result = await run_reviewer(
-        pr_url=pr_url,
-        config=cfg,
-        project_name="voice",
-        worktrees_root=tmp_path / "worktrees",
-        provider=fake_provider,
-        identity_registry=registry,
-    )
-
-    assert isinstance(result, ReviewerRunResult)
-    assert result.final_labels == expected_final
-
-
-@pytest.mark.asyncio
-async def test_run_reviewer_preserves_non_foreman_labels_added_during_window(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Pass 2 HIGH: operator-added labels (``priority:high``,
-    ``needs:design``) added DURING the LLM call must survive the
-    transition. ``set_labels`` REPLACES the full label set on GitHub —
-    any label not present in the call's argument list is dropped. The
-    role must re-read labels at the WRITE site (not from the pre-LLM
-    snapshot, which was minutes stale by the time the LLM returned)
-    and merge in operator-added labels.
-
-    Simulates the race by mutating the fake issue's labels via a
-    side_effect on ``run_agent`` (the LLM call) — when the role
-    re-reads at the write site, it sees the operator-added labels.
-    """
-    clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
-    monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
-
-    cfg = _make_config(clone)
-    # Start with just ``foreman:planning`` — the operator labels arrive
-    # during the LLM call.
-    repo, _pr, issue = _make_fake_repo(
-        issue_number=42, head_sha=head_sha, labels=["foreman:planning"]
-    )
-    client = _FakeReviewerClient(repo=repo)
-    registry = _make_registry(client)
-
-    async def _mutate_then_return(*args: Any, **kwargs: Any) -> tuple[ReviewerOutput, UsageInfo]:
-        # Operator adds two non-foreman labels + one foreman label NOT
-        # under the Reviewer's control (e.g., a manual pause) during
-        # the LLM call. All three must be preserved by the transition.
-        # Mutate ``_remote_labels`` (the simulated GitHub state) — NOT
-        # the cached ``labels`` property — so the role's
-        # ``issue.update()`` at the WRITE site re-reads the operator
-        # changes from "GitHub", matching PyGithub's real caching shape.
-        issue._remote_labels.append("priority:high")
-        issue._remote_labels.append("team:backend")
-        issue._remote_labels.append("foreman:hold")
-        return _with_usage(_make_clean_output())
-
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(side_effect=_mutate_then_return)
-
-    await run_reviewer(
-        pr_url="https://github.com/jeffrichley/voice/pull/77",
-        config=cfg,
-        project_name="voice",
-        worktrees_root=tmp_path / "worktrees",
-        provider=fake_provider,
-        identity_registry=registry,
-    )
-
-    # Exactly one atomic set_labels call carrying the FULL final set.
-    assert len(issue.set_labels_calls) == 1
-    final = set(issue.set_labels_calls[0])
-    # Entry label removed, outcome label added (Reviewer's verdict).
-    assert "foreman:planning" not in final
-    assert "foreman:plan-approved" in final
-    # Operator-added labels preserved (the bug this test guards).
-    assert "priority:high" in final
-    assert "team:backend" in final
-    # Foreman label NOT under the role's control also preserved.
-    assert "foreman:hold" in final
-
-
-@pytest.mark.asyncio
-async def test_run_reviewer_calls_update_before_write_site_label_read(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Pass 3 CRITICAL: Stage 4's "re-read labels at WRITE site" is
-    illusory without ``issue.update()`` because PyGithub's
-    ``Issue.labels`` is a cached property — the first access materializes
-    the list, subsequent accesses return the same snapshot. Operator
-    labels added during the minute-long LLM call would be silently
-    dropped without an explicit cache refresh.
-
-    This test simulates the timing precisely: the operator's label
-    arrives between the role's first ``issue.labels`` read (the pre-flight
-    label gate at the top of ``run_reviewer``) and the WRITE-site read
-    (just before ``set_labels``). The label arrival is gated on the
-    role calling ``issue.update()`` — if it doesn't, the cache stays
-    stale and the operator label is dropped from the final set.
-    """
-    clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
-    monkeypatch.setenv("FOREMAN_REVIEWER_APP_ID", "123456")
-
-    cfg = _make_config(clone)
-    repo, _pr, issue = _make_fake_repo(
-        issue_number=42, head_sha=head_sha, labels=["foreman:planning"]
-    )
-    client = _FakeReviewerClient(repo=repo)
-    registry = _make_registry(client)
-
-    # Track when ``update()`` is called and use that observation to
-    # inject the operator's label at the realistic timing — after the
-    # LLM call has returned but before the WRITE site reads labels.
-    # The role's contract: call ``update()`` IMMEDIATELY before the
-    # WRITE-site ``issue.labels`` read. Hooking ``update()`` lets us
-    # confirm that contract directly.
-    original_update = issue.update
-
-    def tracked_update() -> None:
-        # The operator added a label at some point during the LLM call;
-        # the role hasn't seen it yet because the labels cache holds the
-        # pre-LLM snapshot. ``update()`` is the cache-invalidation point
-        # — once it runs, the next ``issue.labels`` read re-fetches and
-        # the operator's label appears.
-        if "priority:high" not in issue._remote_labels:
-            issue._remote_labels.append("priority:high")
-        original_update()
-
-    issue.update = tracked_update  # type: ignore[method-assign]
-
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_clean_output()))
-
-    await run_reviewer(
-        pr_url="https://github.com/jeffrichley/voice/pull/77",
-        config=cfg,
-        project_name="voice",
-        worktrees_root=tmp_path / "worktrees",
-        provider=fake_provider,
-        identity_registry=registry,
-    )
-
-    # Assertion 1: ``update()`` was actually called (at least once at the
-    # WRITE site). Without this call, the cached snapshot from the
-    # pre-flight read at the top of ``run_reviewer`` would be reused and
-    # the operator label would be silently dropped.
-    assert issue.update_calls >= 1, (
-        "Reviewer must call issue.update() before WRITE-site label read; "
-        "PyGithub's Issue.labels is cached and stale snapshots silently "
-        "drop operator-added labels"
-    )
-
-    # Assertion 2: the operator's label survived the transition. This is
-    # the load-bearing assertion — it would FAIL without the
-    # ``issue.update()`` call, because the cache would still hold the
-    # pre-LLM ["foreman:planning"] snapshot.
-    assert issue.set_labels_calls
-    final = set(issue.set_labels_calls[-1])
-    assert "priority:high" in final
-    # And the role's verdict still landed.
-    assert "foreman:planning" not in final
-    assert "foreman:plan-approved" in final
 
 
 # ----------------------------------------------------------------------
