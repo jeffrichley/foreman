@@ -1,11 +1,15 @@
 """Integration test for ``run_fixer`` with a fake PyGithub client + fake
 ProviderFacade.
 
-Verifies orchestration wiring: issue URL parsing, entry-condition label
-pre-flight, max-3-attempts gate, attempt-counter increment, worktree
-attach (no new branch), LLM dispatch with Pydantic-first contract +
-env-injection, fix_comment posted as PR comment (NOT review), issue-label
-advancement based on outcome, stats JSONL line emission.
+Verifies orchestration wiring: issue URL parsing, worktree attach (no
+new branch), LLM dispatch with Pydantic-first contract + env-injection,
+fix_comment posted as PR comment (NOT review), stats JSONL line
+emission.
+
+Under v4, the Fixer does not read or write labels —
+``LabelObservabilityObserver`` owns every ``foreman:*`` write off
+state-machine transitions; the v4 state machine's retry cap owns
+attempt counting. This test file no longer asserts label state.
 
 A real-engine integration test (against actual Anthropic API + real
 GitHub) is gated behind ``real_engine`` and lives separately.
@@ -25,7 +29,6 @@ from foreman.provider import UsageInfo
 from foreman.roles import fixer as _fixer_mod
 from foreman.roles.fixer import (
     FIXER_ALLOWED_TOOLS,
-    _count_fix_attempts,
     _extract_findings_from_review_comment,
     parse_issue_url,
     run_fixer,
@@ -95,32 +98,6 @@ def test_parse_issue_url_extracts_owner_repo_number() -> None:
 def test_parse_issue_url_rejects_pr_url() -> None:
     with pytest.raises(ValueError, match="Not a GitHub issue URL"):
         parse_issue_url("https://github.com/owner/repo/pull/42")
-
-
-# ----------------------------------------------------------------------
-# _count_fix_attempts
-# ----------------------------------------------------------------------
-
-
-def test_count_fix_attempts_zero_with_no_labels() -> None:
-    assert _count_fix_attempts(set()) == 0
-
-
-def test_count_fix_attempts_zero_with_only_unrelated_labels() -> None:
-    assert _count_fix_attempts({"foreman:spec-fix", "bug", "P1"}) == 0
-
-
-def test_count_fix_attempts_returns_max_existing() -> None:
-    assert _count_fix_attempts({"foreman:fix-attempt-1", "foreman:fix-attempt-2"}) == 2
-
-
-def test_count_fix_attempts_handles_single_attempt() -> None:
-    assert _count_fix_attempts({"foreman:fix-attempt-1"}) == 1
-
-
-def test_count_fix_attempts_skips_partial_matches() -> None:
-    # `foreman:fix-attempt-` with no digit, and unrelated labels, should not count.
-    assert _count_fix_attempts({"foreman:fix-attempt-x", "foreman:fix-attempt"}) == 0
 
 
 # ----------------------------------------------------------------------
@@ -454,7 +431,7 @@ def _make_registry(client: _FakeFixerClient, token: str = "ghs_fixer_token") -> 
 
 
 @pytest.mark.asyncio
-async def test_run_fixer_fixed_outcome_advances_back_to_planning(
+async def test_run_fixer_fixed_outcome_posts_comment_and_returns_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clone = tmp_path / "clone"
@@ -499,15 +476,12 @@ async def test_run_fixer_fixed_outcome_advances_back_to_planning(
     assert pr.issue_comments_posted == ["fixed — addressed AC bullet 3."]
     assert pr.reviews_posted == []
 
-    # First-attempt label stamped at entry; v3 spec-side outcome advances
-    # to ``foreman:planning`` (the planning umbrella) so the reconciler
-    # re-fires ``dispatch_reviewer_spec`` on the updated PR head.
-    assert "foreman:fix-attempt-1" in issue.added
-    assert "foreman:planning" in issue.added
-    # Per-episode counter reset: on outcome=fixed, the fix-attempt-N label
-    # is also dropped so the next fix-episode (if any) gets a fresh budget.
-    assert "foreman:spec-fix" in issue.removed
-    assert "foreman:fix-attempt-1" in issue.removed
+    # Under v4, the Fixer does NOT mutate labels —
+    # ``LabelObservabilityObserver`` owns ``foreman:*`` writes off
+    # state-machine transitions.
+    assert issue.set_labels_calls == []
+    assert issue.added == []
+    assert issue.removed == []
 
     # Return type
     assert result.attempt == 1
@@ -515,15 +489,15 @@ async def test_run_fixer_fixed_outcome_advances_back_to_planning(
 
 
 @pytest.mark.asyncio
-async def test_run_fixer_uses_atomic_set_labels_for_outcome_transition(
+async def test_run_fixer_does_not_mutate_labels(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Adversarial review MEDIUM #12: the Fixer's outcome transition must
-    land via a single ``issue.set_labels(...)`` call so a subprocess
-    crash cannot leave the issue with the spec-fix label cleared but
-    the planning label not yet applied (which would drop it out of the
-    v3 observer's GraphQL ``filterBy.labels`` filter, silently stalling
-    the pipeline).
+    """Under v4, the role no longer reads or writes ``foreman:*`` labels
+    — ``LabelObservabilityObserver`` owns every label write off
+    state-machine transitions. This test pins the "no label mutation"
+    contract for BOTH success and failure outcomes so a regression that
+    re-introduces a ``set_labels`` / ``add_to_labels`` call at the role
+    boundary is caught immediately.
     """
     clone = tmp_path / "clone"
     head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
@@ -547,15 +521,9 @@ async def test_run_fixer_uses_atomic_set_labels_for_outcome_transition(
         identity_registry=registry,
     )
 
-    # At least one ``set_labels`` call landed (the post-LLM outcome
-    # transition). The final call's argument set is the authoritative
-    # post-transition shape: foreman:planning present, foreman:spec-fix
-    # and foreman:fix-attempt-1 cleared.
-    assert issue.set_labels_calls, "expected at least one atomic set_labels call"
-    final = set(issue.set_labels_calls[-1])
-    assert "foreman:planning" in final
-    assert "foreman:spec-fix" not in final
-    assert "foreman:fix-attempt-1" not in final
+    assert issue.set_labels_calls == []
+    assert issue.added == []
+    assert issue.removed == []
 
 
 # ----------------------------------------------------------------------
@@ -564,7 +532,7 @@ async def test_run_fixer_uses_atomic_set_labels_for_outcome_transition(
 
 
 @pytest.mark.asyncio
-async def test_run_fixer_incomplete_outcome_keeps_spec_fix_adds_needs_help(
+async def test_run_fixer_incomplete_outcome_posts_comment_and_returns_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clone = tmp_path / "clone"
@@ -594,225 +562,18 @@ async def test_run_fixer_incomplete_outcome_keeps_spec_fix_adds_needs_help(
     assert "incomplete" in pr.issue_comments_posted[0]
     assert pr.reviews_posted == []
 
-    # spec-fix kept; needs-help added; first-attempt stamped
-    assert "foreman:fix-attempt-1" in issue.added
-    assert "foreman:needs-help" in issue.added
-    assert "foreman:spec-fix" not in issue.removed
-
-    # NOT the final attempt, so failed should NOT be added
-    assert "foreman:failed" not in issue.added
+    # Under v4, the Fixer does NOT mutate labels.
+    assert issue.set_labels_calls == []
+    assert issue.added == []
+    assert issue.removed == []
 
     assert result.attempt == 1
     assert result.llm_output.outcome == "incomplete"
 
 
-@pytest.mark.asyncio
-async def test_run_fixer_incomplete_at_attempt_3_also_adds_failed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """At the third (last) attempt, an incomplete outcome escalates to
-    ``foreman:failed``."""
-    clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
-    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
-    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
-
-    cfg = _make_config(clone)
-    # 2 prior attempts already on the issue
-    repo, _pr, issue = _make_fake_repo(
-        issue_number=42,
-        head_sha=head_sha,
-        labels=[
-            "foreman:spec-fix",
-            "foreman:fix-attempt-1",
-            "foreman:fix-attempt-2",
-        ],
-    )
-    client = _FakeFixerClient(repo=repo)
-    registry = _make_registry(client)
-
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_incomplete_output()))
-
-    result = await run_fixer(
-        issue_url="https://github.com/jeffrichley/voice/issues/42",
-        config=cfg,
-        project_name="voice",
-        worktrees_root=tmp_path / "worktrees",
-        provider=fake_provider,
-        identity_registry=registry,
-    )
-
-    assert "foreman:fix-attempt-3" in issue.added
-    assert "foreman:needs-help" in issue.added
-    assert "foreman:failed" in issue.added
-    assert result.attempt == 3
-
-
-# ----------------------------------------------------------------------
-# Attempt counter increments correctly
-# ----------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_run_fixer_attempt_counter_increments_with_existing_labels(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Two existing fix-attempt-* labels → new attempt is 3."""
-    clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
-    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
-    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
-
-    cfg = _make_config(clone)
-    repo, _pr, issue = _make_fake_repo(
-        issue_number=42,
-        head_sha=head_sha,
-        labels=[
-            "foreman:spec-fix",
-            "foreman:fix-attempt-1",
-            "foreman:fix-attempt-2",
-        ],
-    )
-    client = _FakeFixerClient(repo=repo)
-    registry = _make_registry(client)
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
-
-    result = await run_fixer(
-        issue_url="https://github.com/jeffrichley/voice/issues/42",
-        config=cfg,
-        project_name="voice",
-        worktrees_root=tmp_path / "worktrees",
-        provider=fake_provider,
-        identity_registry=registry,
-    )
-
-    assert result.attempt == 3
-    assert "foreman:fix-attempt-3" in issue.added
-
-
 # ----------------------------------------------------------------------
 # Pre-flight gates
 # ----------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_run_fixer_missing_spec_fix_label_raises(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
-    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
-    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
-
-    cfg = _make_config(clone)
-    repo, pr, issue = _make_fake_repo(issue_number=42, head_sha=head_sha, labels=["random-label"])
-    client = _FakeFixerClient(repo=repo)
-    registry = _make_registry(client)
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
-
-    with pytest.raises(RuntimeError, match="foreman:spec-fix"):
-        await run_fixer(
-            issue_url="https://github.com/jeffrichley/voice/issues/42",
-            config=cfg,
-            project_name="voice",
-            worktrees_root=tmp_path / "worktrees",
-            provider=fake_provider,
-            identity_registry=registry,
-        )
-
-    # No LLM, no comment, no label mutation, no PR fetch
-    fake_provider.run_agent.assert_not_called()
-    assert pr.issue_comments_posted == []
-    assert issue.removed == []
-    assert issue.added == []
-
-
-@pytest.mark.asyncio
-async def test_run_fixer_max_attempts_gate_raises_before_llm(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """3 fix-attempt-* labels already present → attempt 4 would be next →
-    refuse with clear RuntimeError."""
-    clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
-    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
-    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
-
-    cfg = _make_config(clone)
-    repo, pr, issue = _make_fake_repo(
-        issue_number=42,
-        head_sha=head_sha,
-        labels=[
-            "foreman:spec-fix",
-            "foreman:fix-attempt-1",
-            "foreman:fix-attempt-2",
-            "foreman:fix-attempt-3",
-        ],
-    )
-    client = _FakeFixerClient(repo=repo)
-    registry = _make_registry(client)
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
-
-    with pytest.raises(RuntimeError, match="max 3 fix-attempts"):
-        await run_fixer(
-            issue_url="https://github.com/jeffrichley/voice/issues/42",
-            config=cfg,
-            project_name="voice",
-            worktrees_root=tmp_path / "worktrees",
-            provider=fake_provider,
-            identity_registry=registry,
-        )
-
-    # No LLM dispatch, no new labels added (no fix-attempt-4 stamped)
-    fake_provider.run_agent.assert_not_called()
-    assert "foreman:fix-attempt-4" not in issue.added
-    assert pr.issue_comments_posted == []
-
-
-@pytest.mark.asyncio
-async def test_run_fixer_honors_project_max_fix_attempts_override(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """When ``ProjectConfig.max_fix_attempts`` overrides the default, the
-    gate fires at the overridden value, not at the historical 3. Pinning
-    this empirically because otherwise the configurable feature could
-    silently regress to ``hardcoded 3`` and the default-only tests would
-    never notice (the symptom this whole ticket exists to prevent).
-    """
-    clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
-    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
-    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
-
-    cfg = _make_config(clone)
-    # Tighten the cap to 1 — first attempt is allowed; second must raise.
-    cfg.projects[0] = cfg.projects[0].model_copy(update={"max_fix_attempts": 1})
-    repo, pr, issue = _make_fake_repo(
-        issue_number=42,
-        head_sha=head_sha,
-        labels=["foreman:spec-fix", "foreman:fix-attempt-1"],
-    )
-    client = _FakeFixerClient(repo=repo)
-    registry = _make_registry(client)
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
-
-    with pytest.raises(RuntimeError, match="max 1 fix-attempts"):
-        await run_fixer(
-            issue_url="https://github.com/jeffrichley/voice/issues/42",
-            config=cfg,
-            project_name="voice",
-            worktrees_root=tmp_path / "worktrees",
-            provider=fake_provider,
-            identity_registry=registry,
-        )
-
-    fake_provider.run_agent.assert_not_called()
-    assert "foreman:fix-attempt-2" not in issue.added
 
 
 @pytest.mark.asyncio
@@ -1454,25 +1215,12 @@ async def test_run_fixer_uses_empty_findings_when_review_body_lacks_block(
 
 
 # ----------------------------------------------------------------------
-# Per-target prompt + precondition routing — foreman#79
+# Per-target prompt routing — foreman#79
 #
-# The Fixer's ``target`` kwarg now drives both the entry-label
-# precondition and the prompt loaded. Today's bug (foreman#79) was
-# that ``target="impl_pr"`` got plumbed through DaemonRunners but
-# the role function rejected the issue because ``foreman:impl-fix``
-# was not in its hardcoded acceptance set (only ``foreman:spec-fix``).
-# These tests pin both halves of the routing.
+# The Fixer's ``target`` kwarg drives the prompt loaded. Under v4 the
+# role no longer reads labels for gating; the v4 state machine picks
+# the target and the role just composes the right prompt for it.
 # ----------------------------------------------------------------------
-
-
-def test_fixer_entry_label_by_target_mapping_is_complete() -> None:
-    """The mapping covers the two valid targets and nothing else."""
-    from foreman.roles.fixer import _FIXER_ENTRY_LABEL_BY_TARGET
-
-    assert _FIXER_ENTRY_LABEL_BY_TARGET == {
-        "spec_pr": "foreman:spec-fix",
-        "impl_pr": "foreman:impl-fix",
-    }
 
 
 def test_fixer_superpowers_by_target_mapping_is_complete() -> None:
@@ -1529,225 +1277,17 @@ def test_load_fixer_prompt_impl_target_loads_impl_composition() -> None:
 
 
 # ----------------------------------------------------------------------
-# foreman#91 — final_labels is the authoritative post-transition set
-# ----------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("output_factory", "starting_labels", "expected_final"),
-    [
-        # fixed outcome (spec target): spec-fix removed, planning added
-        # (v3: reconciler re-fires on planning + open spec PR),
-        # fix-attempt-1 cleared (per-episode reset).
-        (
-            _fixed_output,
-            ["foreman:spec-fix"],
-            ["foreman:planning"],
-        ),
-        # incomplete: spec-fix kept, fix-attempt-1 retained, needs-help added.
-        (
-            _incomplete_output,
-            ["foreman:spec-fix"],
-            sorted(
-                [
-                    "foreman:spec-fix",
-                    "foreman:fix-attempt-1",
-                    "foreman:needs-help",
-                ]
-            ),
-        ),
-    ],
-)
-async def test_run_fixer_returns_authoritative_final_labels(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    output_factory: Any,
-    starting_labels: list[str],
-    expected_final: list[str],
-) -> None:
-    """foreman#91: ``FixerRunResult.final_labels`` is the deterministic
-    post-transition set, computed in-process from the role's known
-    mutations. Not a host re-read."""
-    clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
-    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
-    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
-
-    cfg = _make_config(clone)
-    repo, _pr, _issue = _make_fake_repo(
-        issue_number=42, head_sha=head_sha, labels=starting_labels
-    )
-    client = _FakeFixerClient(repo=repo)
-    registry = _make_registry(client)
-
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(return_value=_with_usage(output_factory()))
-
-    result = await run_fixer(
-        issue_url="https://github.com/jeffrichley/voice/issues/42",
-        config=cfg,
-        project_name="voice",
-        worktrees_root=tmp_path / "worktrees",
-        provider=fake_provider,
-        identity_registry=registry,
-    )
-
-    assert result.final_labels == expected_final
-
-
-@pytest.mark.asyncio
-async def test_run_fixer_preserves_non_foreman_labels_added_during_window(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Pass 2 HIGH: operator-added labels (``priority:high``,
-    ``needs:design``) added DURING the LLM call must survive the
-    transition. ``set_labels`` REPLACES the full label set on GitHub —
-    any label not present in the call's argument list is dropped. The
-    role must re-read labels at the WRITE site (not from the pre-LLM
-    snapshot) and merge in operator-added labels.
-
-    Simulates the race by mutating the fake issue's labels via a
-    side_effect on ``run_agent`` (the LLM call). Also asserts that a
-    foreman label NOT under the Fixer's control (``foreman:hold``,
-    e.g., a manual operator pause) survives.
-    """
-    clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
-    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
-    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
-
-    cfg = _make_config(clone)
-    repo, _pr, issue = _make_fake_repo(
-        issue_number=42, head_sha=head_sha, labels=["foreman:spec-fix"]
-    )
-    client = _FakeFixerClient(repo=repo)
-    registry = _make_registry(client)
-
-    async def _mutate_then_return(*args: Any, **kwargs: Any) -> tuple[FixerOutput, UsageInfo]:
-        # Operator adds two non-foreman labels + one foreman label NOT
-        # under the Fixer's control during the LLM call. All three
-        # must be preserved by the transition.
-        # Mutate ``_remote_labels`` (simulated GitHub state) — NOT the
-        # cached ``labels`` property — so the role's ``issue.update()``
-        # at the WRITE site re-reads the operator changes from "GitHub",
-        # matching PyGithub's real caching shape.
-        issue._remote_labels.append("priority:high")
-        issue._remote_labels.append("team:backend")
-        issue._remote_labels.append("foreman:hold")
-        return _with_usage(_fixed_output())
-
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(side_effect=_mutate_then_return)
-
-    await run_fixer(
-        issue_url="https://github.com/jeffrichley/voice/issues/42",
-        config=cfg,
-        project_name="voice",
-        worktrees_root=tmp_path / "worktrees",
-        provider=fake_provider,
-        identity_registry=registry,
-    )
-
-    # The post-LLM set_labels call is the last one. (The Fixer also
-    # uses add_to_labels for the attempt counter near the start —
-    # that doesn't go through set_labels.)
-    assert issue.set_labels_calls, "expected at least one atomic set_labels call"
-    final = set(issue.set_labels_calls[-1])
-    # Fixer's verdict: spec-fix removed, planning added.
-    assert "foreman:spec-fix" not in final
-    assert "foreman:planning" in final
-    # Per-episode reset still drops fix-attempt-N + needs-help (the
-    # role's known transitions).
-    assert "foreman:fix-attempt-1" not in final
-    # Operator-added labels preserved (the bug this test guards).
-    assert "priority:high" in final
-    assert "team:backend" in final
-    # Foreman label NOT under the role's control also preserved.
-    assert "foreman:hold" in final
-
-
-@pytest.mark.asyncio
-async def test_run_fixer_calls_update_before_write_site_label_read(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Pass 3 CRITICAL: Stage 4's "re-read labels at WRITE site" is
-    illusory without ``issue.update()`` because PyGithub's
-    ``Issue.labels`` is a cached property — the first access materializes
-    the list, subsequent accesses return the same snapshot. Operator
-    labels added during the minute-long LLM call would be silently
-    dropped without an explicit cache refresh.
-
-    This test simulates the timing precisely: the operator's label
-    arrives during the LLM call. Without ``issue.update()`` at the
-    WRITE site, the labels cache still holds the pre-LLM snapshot and
-    the operator label disappears from the final set.
-    """
-    clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
-    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
-    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
-
-    cfg = _make_config(clone)
-    repo, _pr, issue = _make_fake_repo(
-        issue_number=42, head_sha=head_sha, labels=["foreman:spec-fix"]
-    )
-    client = _FakeFixerClient(repo=repo)
-    registry = _make_registry(client)
-
-    # Operator's label arrives during the LLM call. If the role doesn't
-    # call ``issue.update()`` before reading labels at the WRITE site,
-    # the cached snapshot from the top of ``run_fixer`` is reused and
-    # ``priority:high`` is silently dropped.
-    async def _operator_adds_label_during_llm(
-        *args: Any, **kwargs: Any
-    ) -> tuple[FixerOutput, UsageInfo]:
-        issue._remote_labels.append("priority:high")
-        return _with_usage(_fixed_output())
-
-    fake_provider = MagicMock()
-    fake_provider.run_agent = AsyncMock(side_effect=_operator_adds_label_during_llm)
-
-    await run_fixer(
-        issue_url="https://github.com/jeffrichley/voice/issues/42",
-        config=cfg,
-        project_name="voice",
-        worktrees_root=tmp_path / "worktrees",
-        provider=fake_provider,
-        identity_registry=registry,
-    )
-
-    # Assertion 1: ``update()`` was called at least once at the WRITE
-    # site. Without this call, the cached snapshot from the top of
-    # ``run_fixer`` would be reused and the operator label silently
-    # dropped.
-    assert issue.update_calls >= 1, (
-        "Fixer must call issue.update() before WRITE-site label read; "
-        "PyGithub's Issue.labels is cached and stale snapshots silently "
-        "drop operator-added labels"
-    )
-
-    # Assertion 2: the operator's label survived the transition.
-    assert issue.set_labels_calls
-    final = set(issue.set_labels_calls[-1])
-    assert "priority:high" in final
-    # And the role's verdict still landed.
-    assert "foreman:spec-fix" not in final
-    assert "foreman:planning" in final
-
-
-# ----------------------------------------------------------------------
 # foreman#239 — failure-path stats logging (mirrors foreman#235 for Planner)
 #
 # Before #239, ``log_fixer_run`` was only called on the success path —
-# after ``pr.create_issue_comment`` + the atomic label set. If anything
-# between ``provider.run_agent`` returning and the success log call
-# raised (e.g., ``create_issue_comment`` crashed, ``issue.set_labels``
-# 5xx'd, ``issue.update`` raised), the exception propagated up to the
-# daemon and NO JSONL row was written for the failed Fixer run. Cost
-# telemetry for failures vanished. #239 wraps the body in try/except
-# so the failure path also writes a row tagged ``outcome="exception"``
-# with whatever partial ``usage`` was captured before the failure.
+# after ``pr.create_issue_comment``. If anything between
+# ``provider.run_agent`` returning and the success log call raised
+# (e.g., ``create_issue_comment`` crashed), the exception propagated up
+# to the daemon and NO JSONL row was written for the failed Fixer run.
+# Cost telemetry for failures vanished. #239 wraps the body in
+# try/except so the failure path also writes a row tagged
+# ``outcome="exception"`` with whatever partial ``usage`` was captured
+# before the failure.
 #
 # Note: ``"incomplete"`` is the Fixer's SELF-REPORTED outcome (LLM said
 # it didn't finish) — a different shape from an uncaught exception in

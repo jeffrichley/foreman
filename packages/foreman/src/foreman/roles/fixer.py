@@ -1,44 +1,31 @@
 """Fixer role dispatcher.
 
-The Fixer LLM consumes the Reviewer's findings on a spec PR, applies
-addressable edits to the spec doc, commits + pushes, and returns a
+The Fixer LLM consumes the Reviewer's findings on a spec or impl PR,
+applies addressable edits, commits + pushes, and returns a
 :class:`~foreman.schemas.fixer.FixerOutput`. Foreman core then:
 
   1. Posts ``fix_comment`` as a PR **comment** (not a review) via
      :meth:`PullRequest.create_issue_comment` — the Fixer is not
      re-reviewing.
-  2. Advances the originating issue's label deterministically:
-     - ``fixed`` (spec target) → remove ``foreman:spec-fix``, add
-       ``foreman:planning`` (back to the planning umbrella state so
-       v3's reconciler re-fires ``dispatch_reviewer_spec`` on the
-       updated PR)
-     - ``fixed`` (impl target) → remove ``foreman:impl-fix``, add
-       ``foreman:impl-review`` (back to Reviewer-on-impl)
-     - ``incomplete`` → keep entry label, add ``foreman:needs-help``;
-       if attempt == 3, ALSO add ``foreman:failed``
+  2. Emits FOREMAN_OUTCOME so the v4 state machine can advance the
+     ticket.
   3. Appends a JSONL line to ``~/.foreman/stats/<repo>/fixer.jsonl``
      for lifecycle stats (proto for foreman#11).
   4. Returns :class:`~foreman.schemas.fixer.FixerOutput` to the caller.
 
-The fix-attempt counter is tracked via the issue's
-``foreman:fix-attempt-N`` labels (set on entry, never removed for
-audit). Max N attempts (per-project configurable via
-``ProjectConfig.max_fix_attempts``, default 3); the N+1 dispatch
-raises before any LLM dispatch.
+Under v4, ``LabelObservabilityObserver`` owns every ``foreman:*`` label
+write off state-machine transitions; the Fixer itself no longer reads
+or writes labels (the v4 state machine's retry cap, foreman#8c.2, owns
+attempt counting now). SQLite is the source of truth — labels are
+write-only observability.
 
-The Fixer's tool surface includes Edit + Write (it edits the spec
-doc) plus Read / Grep / Glob / Bash. Bash is needed so the LLM can
-``git add`` + ``git commit`` + ``git push`` directly — Foreman core's
-host abstraction is read+post-only here; the commit machinery lives in
-the LLM's hands inside the worktree, because the LLM is the one deciding
-which edits to bundle into which commit per the prompt's discipline.
-
-Pre-flight guards: if the issue is missing ``foreman:spec-fix`` we
-refuse to run; if the issue already has max ``foreman:fix-attempt-*``
-labels (per-project configurable via
-``ProjectConfig.max_fix_attempts``, default 3), we refuse to run with
-a clear "needs human intervention" RuntimeError. Both raise before any
-LLM dispatch — cheap deterministic checks.
+The Fixer's tool surface includes Edit + Write (it edits the spec doc
+or impl code) plus Read / Grep / Glob / Bash. Bash is needed so the LLM
+can ``git add`` + ``git commit`` + ``git push`` directly — Foreman
+core's host abstraction is read+post-only here; the commit machinery
+lives in the LLM's hands inside the worktree, because the LLM is the one
+deciding which edits to bundle into which commit per the prompt's
+discipline.
 """
 
 from __future__ import annotations
@@ -91,7 +78,6 @@ _FINDINGS_BLOCK_RE = re.compile(
 _ISSUE_URL_RE = re.compile(
     r"https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/issues/(?P<number>\d+)"
 )
-_FIX_ATTEMPT_RE = re.compile(r"^foreman:fix-attempt-(\d+)$")
 
 # Tool capabilities matrix for the Fixer. Edit + Write so it can modify
 # the spec doc; Bash so it can stage / commit / push from inside the
@@ -100,43 +86,10 @@ _FIX_ATTEMPT_RE = re.compile(r"^foreman:fix-attempt-(\d+)$")
 # the walking skeleton that mutates the worktree directly.
 FIXER_ALLOWED_TOOLS = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]
 
-# Labels the Fixer touches on the originating issue.
-_LABEL_SPEC_FIX = "foreman:spec-fix"
-# v3: a successful spec-side fix transitions the issue back to the
-# planning umbrella state; the reconciler then re-fires
-# ``dispatch_reviewer_spec`` once the PR head moves.
-_LABEL_PLANNING = "foreman:planning"
-_LABEL_NEEDS_HELP = "foreman:needs-help"
-_LABEL_FAILED = "foreman:failed"
-
-# foreman#79: per-target routing for the Fixer. The role accepts a
-# ``target`` kwarg (added by foreman#41 via DaemonRunners) that
-# distinguishes spec-PR fixes from impl-PR fixes. Each target gets
-# its own entry-label precondition and its own prompt composition.
-_LABEL_IMPL_FIX = "foreman:impl-fix"
-_LABEL_IMPL_REVIEW = "foreman:impl-review"
-
-_FIXER_ENTRY_LABEL_BY_TARGET: dict[str, str] = {
-    "spec_pr": _LABEL_SPEC_FIX,
-    "impl_pr": _LABEL_IMPL_FIX,
-}
-
-
-class _FixerPreflightRefusal(RuntimeError):
-    """Fixer refused to proceed because either (a) the issue lacks the
-    expected entry label (``foreman:spec-fix`` or ``foreman:impl-fix``),
-    or (b) the fix-attempt counter has hit ``max_fix_attempts``.
-
-    Subclass of :class:`RuntimeError` so existing callers'
-    ``except RuntimeError`` clauses and ``pytest.raises`` patterns work
-    unchanged. The distinguishing purpose is to tell the runaway-burn
-    defense (#229 helper invocation) to SKIP firing: both refusals are
-    deliberate (operator removed the label, or the attempt budget IS
-    the human-intervention escalation surface) — not a runaway signal.
-    Firing the helper would override operator intent.
-    """
-
-
+# foreman#79: per-target prompt-composition routing for the Fixer. The
+# role accepts a ``target`` kwarg (added by foreman#41 via DaemonRunners)
+# that distinguishes spec-PR fixes from impl-PR fixes. Each target gets
+# its own prompt composition.
 _FIXER_SUPERPOWERS_BY_TARGET: dict[str, list[str]] = {
     # Spec-side: today's discipline — receiving review feedback.
     "spec_pr": ["receiving-code-review"],
@@ -162,20 +115,6 @@ def parse_issue_url(url: str) -> tuple[str, str, int]:
     if not m:
         raise ValueError(f"Not a GitHub issue URL: {url!r}")
     return m["owner"], m["repo"], int(m["number"])
-
-
-def _count_fix_attempts(label_names: set[str]) -> int:
-    """Return the highest existing fix-attempt counter (0 if none).
-
-    Reads existing ``foreman:fix-attempt-N`` labels and returns the
-    largest N. The new attempt is ``_count_fix_attempts(...) + 1``.
-    """
-    attempts: list[int] = []
-    for name in label_names:
-        m = _FIX_ATTEMPT_RE.match(name)
-        if m:
-            attempts.append(int(m.group(1)))
-    return max(attempts) if attempts else 0
 
 
 def _load_fixer_prompt(target: Literal["spec_pr", "impl_pr"] = "spec_pr") -> str:
@@ -449,16 +388,13 @@ async def run_fixer(
 
     Raises:
         ValueError: Issue URL malformed or repo mismatch.
-        RuntimeError: Issue missing ``foreman:spec-fix``, or max
-            attempts (``project.max_fix_attempts``) already reached, or
-            no open spec PR / no Reviewer review found.
+        RuntimeError: No open spec PR / no Reviewer review found.
     """
     # Post-adversarial-review (#1): wrap the initial setup — URL parse,
     # project lookup, identity setup, ``repo.get_issue`` — in a
     # defensive try block so a transient failure fires the runaway-burn
     # helper on the FIRST failure instead of letting #228's rate-limit
-    # catch it at N=3. Refusals raise the marker subclass and are
-    # raised AFTER this block, so they don't enter it.
+    # catch it at N=3.
     _setup_issue_number: int | None = None
     _setup_repo_slug: str | None = None
     _setup_issue: Issue | None = None
@@ -493,7 +429,6 @@ async def run_fixer(
         repo: Repository = fixer_client.get_repo(actual_repo_slug)
         issue = repo.get_issue(issue_number)
         _setup_issue = issue
-        issue_labels = {label.name for label in issue.labels}
     except Exception as exc:
         if _setup_issue is not None and _setup_issue_number is not None:
             bound_issue = _setup_issue
@@ -506,58 +441,25 @@ async def run_fixer(
             )
         raise
 
-    # Pre-flight: refuse to run without the entry-condition label.
-    expected_label = _FIXER_ENTRY_LABEL_BY_TARGET[target]
-    if expected_label not in issue_labels:
-        # Graceful refusal — see _FixerPreflightRefusal docstring.
-        raise _FixerPreflightRefusal(
-            f"Issue #{issue_number} does not carry the {expected_label!r} "
-            f"label (labels: "
-            + ", ".join(sorted(issue_labels) or ["<none>"])
-            + f"). The Fixer only acts on issues queued by the Reviewer "
-            f"for target={target!r}."
-        )
-
-    # Pre-flight: max-attempts gate. If max fix-attempt labels already
-    # exist, refuse to run — this prevents infinite-loop drain and
-    # forces human intervention via the foreman:failed escalation.
-    # The cap is read from ``ProjectConfig.max_fix_attempts`` so each
-    # project can size it to their own appetite (default 3).
+    # Under v4, the state machine's retry cap (foreman#8c.2) owns
+    # attempt counting; the role no longer reads or writes
+    # ``foreman:fix-attempt-N`` labels. Each invocation IS attempt 1
+    # from the role's vantage; the v4 state machine routes subsequent
+    # attempts via its own retry budget. ``attempt`` stays in the
+    # schema for stats compatibility.
+    attempt = 1
     max_fix_attempts = project.max_fix_attempts
-    previous_attempts = _count_fix_attempts(issue_labels)
-    attempt = previous_attempts + 1
-    if attempt > max_fix_attempts:
-        # Graceful refusal — the max-attempts gate IS the escalation
-        # surface, not a runaway-burn signal.
-        raise _FixerPreflightRefusal(
-            f"Issue #{issue_number} has hit the max {max_fix_attempts} "
-            "fix-attempts; needs human intervention via foreman:failed. "
-            f"Existing attempts: {previous_attempts}."
-        )
-
-    # foreman#91: track the in-process label set parallel to each
-    # remote add/remove so the role can return the authoritative
-    # post-transition set in ``FixerRunResult.final_labels``. Avoids
-    # the eventual-consistency race of a post-mutation host re-read.
-    current_labels: set[str] = set(issue_labels)
-
-    # Stamp the new attempt label IMMEDIATELY so it's visible even if
-    # the LLM dispatch crashes mid-run. Audit-trail before audit-loss.
-    attempt_label = f"foreman:fix-attempt-{attempt}"
-    issue.add_to_labels(attempt_label)
-    current_labels.add(attempt_label)
 
     # foreman#239: stamp ``start_time`` BEFORE the body wrap and
     # initialize ``usage`` / ``pr_number`` to ``None`` so the except
     # branch below can log partial state regardless of where in the
     # pipeline a failure surfaces. ``WorktreeManager.attach``,
     # ``_find_spec_pr``, ``_latest_reviewer_review_comment``,
-    # ``provider.run_agent``, ``pr.create_issue_comment``,
-    # ``issue.update``, and ``issue.set_labels`` are all inside the
-    # wrap; pre-#239 any of those raising silently dropped the run's
-    # cost telemetry because the success-path ``log_fixer_run`` call
-    # below never executed. Mirrors the foreman#235 / PR #236 pattern
-    # for Planner.
+    # ``provider.run_agent``, and ``pr.create_issue_comment`` are all
+    # inside the wrap; pre-#239 any of those raising silently dropped
+    # the run's cost telemetry because the success-path
+    # ``log_fixer_run`` call below never executed. Mirrors the
+    # foreman#235 / PR #236 pattern for Planner.
     start_time = time.monotonic()
     usage: UsageInfo | None = None
     pr_number: int | None = None
@@ -645,8 +547,8 @@ async def run_fixer(
         pr = _find_spec_pr(repo, owner=owner, branch=branch)
         # foreman#239: hoist ``pr_number`` to the outer scope right
         # after the PR is resolved so the fixer_failed row reports it
-        # even when a later step (run_agent, create_issue_comment,
-        # set_labels) raises.
+        # even when a later step (run_agent, create_issue_comment)
+        # raises.
         pr_number = pr.number
         review_comment = _latest_reviewer_review_comment(pr)
 
@@ -681,9 +583,10 @@ async def run_fixer(
         spec_doc_content = _read_spec_doc(wt_path, issue_number)
         instructions = load_project_instructions(Path(project.local_clone_path))
 
-        # Pre-flight gate above (_FIXER_ENTRY_LABEL_BY_TARGET[target]) guarantees
-        # target is one of the two Literals by this point; cast to satisfy mypy
-        # without widening _load_fixer_prompt's signature.
+        # The ``target`` kwarg is the v3-vocabulary "spec_pr" / "impl_pr"
+        # form. Cast to satisfy mypy without widening
+        # ``_load_fixer_prompt``'s signature. Unknown values fall back to
+        # the spec composition inside the loader.
         system_prompt = _load_fixer_prompt(target=cast(Literal["spec_pr", "impl_pr"], target))
         user_prompt = _build_user_prompt(
             issue_title=issue.title or "",
@@ -707,9 +610,8 @@ async def run_fixer(
             env={**os.environ, "GH_TOKEN": fixer_token},
         )
         # foreman#239: hoist ``usage`` to the outer scope IMMEDIATELY
-        # so a failure in any later step (create_issue_comment,
-        # set_labels) still records the per-call token cost in the
-        # fixer_failed row.
+        # so a failure in any later step (create_issue_comment) still
+        # records the per-call token cost in the fixer_failed row.
         usage = run_usage
         duration_seconds = time.monotonic() - start_time
 
@@ -717,96 +619,11 @@ async def run_fixer(
         # acting on the Reviewer's feedback; reviews come from Reviewers.
         pr.create_issue_comment(body=llm_output.fix_comment)
 
-        # Advance the issue's label deterministically.
-        #
-        # Atomic label transitions (adversarial review MEDIUM #12): every
-        # outcome computes the final ``current_labels`` set in memory, then
-        # applies it via a single ``issue.set_labels(...)`` call (PUT
-        # /issues/{N}/labels — atomic on GitHub's side). Sequential
-        # ``remove_from_labels`` + ``add_to_labels`` were the failure mode:
-        # a subprocess crash between the two PyGithub calls left the issue
-        # with neither the entry label nor the outcome label, falling out
-        # of the v3 observer's GraphQL ``filterBy.labels`` filter — silent
-        # stall.
-        #
-        # Per-branch declaration of which foreman labels the role is
-        # MUTATING this transition (Pass 2 HIGH — namespace-scoped merge).
-        # ``removed_foreman`` + ``added_foreman`` capture the role's intent;
-        # everything NOT in those sets — non-foreman labels (``priority:high``)
-        # AND foreman labels the role isn't touching (``foreman:hold``) —
-        # passes through. The actual set_labels call re-reads the label set
-        # just before writing to minimize the race window.
-        removed_foreman: set[str] = set()
-        added_foreman: set[str] = set()
-        if llm_output.outcome == "fixed":
-            # Back to the Reviewer for a second pass. Per-episode counter
-            # reset: clear all fix-attempt-N labels (and needs-help if
-            # present) since this fix-episode closed cleanly. Each new
-            # spec-fix → spec-review cycle gets a fresh 3-attempt budget.
-            # Lifecycle stats JSONL preserves the cumulative audit trail;
-            # labels reflect current-cycle state only.
-            if target == "impl_pr":
-                current_labels.discard(_LABEL_IMPL_FIX)
-                current_labels.add(_LABEL_IMPL_REVIEW)
-                removed_foreman.add(_LABEL_IMPL_FIX)
-                added_foreman.add(_LABEL_IMPL_REVIEW)
-            else:
-                # v3: spec-side Fixer returns the issue to ``foreman:planning``
-                # so the reconciler can re-fire ``dispatch_reviewer_spec`` on
-                # the updated PR head. (v2 transitioned to a now-removed
-                # ``foreman:spec-review`` label; v3 has no separate
-                # spec-review state.)
-                current_labels.discard(_LABEL_SPEC_FIX)
-                current_labels.add(_LABEL_PLANNING)
-                removed_foreman.add(_LABEL_SPEC_FIX)
-                added_foreman.add(_LABEL_PLANNING)
-            all_known_labels = issue_labels | {attempt_label}
-            for label_name in all_known_labels:
-                if label_name.startswith("foreman:fix-attempt-") or label_name == _LABEL_NEEDS_HELP:
-                    current_labels.discard(label_name)
-        else:
-            # incomplete: keep spec-fix so the human (or a later daemon
-            # pass) can re-trigger; flag for help; if last attempt, also
-            # add the failed escalation.
-            current_labels.add(_LABEL_NEEDS_HELP)
-            added_foreman.add(_LABEL_NEEDS_HELP)
-            if attempt == max_fix_attempts:
-                current_labels.add(_LABEL_FAILED)
-                added_foreman.add(_LABEL_FAILED)
-
-        # Namespace-scoped merge (Pass 2 HIGH): re-read labels NOW (not
-        # from the pre-LLM snapshot) so any operator-added label
-        # (``priority:high``, ``needs:design``) AND any foreman label the
-        # role isn't touching (e.g., ``foreman:hold``) passes through.
-        # The role's verdict is encoded in ``removed_foreman`` /
-        # ``added_foreman``; everything else survives. Race window shrinks
-        # from minutes (LLM duration) to API round-trip (~hundreds of ms).
-        #
-        # Pass 3 CRITICAL: ``issue.labels`` is a cached property in PyGithub
-        # — without ``issue.update()`` (conditional GET, see
-        # ``.venv/Lib/site-packages/github/GithubObject.py:638``) the read
-        # below returns the SAME snapshot we took at the top of
-        # ``run_fixer`` minutes ago. The minute-long LLM call would silently
-        # drop any operator-added label (``priority:high`` etc.) — the very
-        # bug this namespace-scoped merge exists to prevent. ``update()``
-        # invalidates the labels cache so the next access re-fetches.
-        issue.update()
-        current_label_names = {label.name for label in issue.labels}
-        if llm_output.outcome == "fixed":
-            # Resolve the "drop all fix-attempt-N + needs-help" rule
-            # against the CURRENT remote label set, not the pre-LLM
-            # snapshot (the semantic is "clean the episode from what's
-            # actually there now").
-            removed_foreman |= {
-                n
-                for n in current_label_names
-                if n.startswith("foreman:fix-attempt-") or n == _LABEL_NEEDS_HELP
-            }
-        final_label_set = (current_label_names - removed_foreman) | added_foreman
-        issue.set_labels(*sorted(final_label_set))
-        # Keep the in-process tracking aligned with what was actually
-        # applied so the FixerRunResult.final_labels matches reality.
-        current_labels = final_label_set
+        # The Fixer does not mutate labels. Under v4,
+        # ``LabelObservabilityObserver`` owns every ``foreman:*`` write
+        # off state-machine transitions; ``final_labels`` here is just
+        # the post-call snapshot returned for the daemon's audit trail.
+        final_labels = sorted({label.name for label in issue.labels})
 
         # JSONL stats — write regardless of outcome.
         unaddressed_hist = _unaddressed_by_reason_histogram(llm_output)
@@ -867,7 +684,7 @@ async def run_fixer(
         return FixerRunResult(
             llm_output=llm_output,
             attempt=attempt,
-            final_labels=sorted(current_labels),
+            final_labels=final_labels,
         )
     except ProviderError as exc:
         # foreman#266: typed catch for the documented provider-boundary
@@ -955,30 +772,23 @@ class _V4FixerResult:
 def _run_fixer_for_v4(
     *, project: str, issue_number: int, target: str
 ) -> _V4FixerResult:
-    """Run the fixer the same way the legacy ``fix`` command does,
-    but without label-writing on top.
+    """Run the fixer end-to-end for a v4 caller.
 
-    Option B per the Phase 5.2/5.3 plan: duplicate the fixer-invocation
-    sequence rather than refactor the legacy ``run_fixer`` body. The
-    legacy ``run_fixer`` is re-used here — it already contains the
-    full preflight → worktree → LLM → commit-push sequence, and v3's
-    label-writing behavior is benign for v4 callers (the v4 state
-    machine drives off the FOREMAN_OUTCOME emitted below, not off
-    GitHub labels). The label-writing tail goes away in Phase 8.
+    Wraps the role's ``run_fixer`` (worktree attach → LLM dispatch →
+    commit/push → PR comment post) and flattens its result into the
+    v4 shape consumed by ``run_fixer_cli``. The v4 state machine
+    drives off the FOREMAN_OUTCOME emitted below, not off GitHub
+    labels — ``LabelObservabilityObserver`` owns ``foreman:*`` writes
+    off state-machine transitions.
 
-    ``target`` arrives in v4 vocabulary ("spec" / "impl"); the legacy
-    ``run_fixer`` takes the "spec_pr" / "impl_pr" form for its
-    entry-label gate and prompt selection. Translation happens at the
-    boundary; the legacy vocabulary is preserved inside ``run_fixer``.
+    ``target`` arrives in v4 vocabulary ("spec" / "impl"); the role's
+    ``run_fixer`` takes the "spec_pr" / "impl_pr" form for prompt
+    selection. Translation happens at the boundary.
 
-    Escalation detection: the legacy ``run_fixer`` raises
-    ``_FixerPreflightRefusal`` when the max-attempts cap is hit (the
-    refusal IS the escalation surface) — that exception bubbles out
-    here and ``run_fixer_cli`` maps it to ``NEEDS_HELP``. A "soft"
-    incomplete (LLM returned ``outcome="incomplete"`` but attempt is
-    still below the cap) maps to NEEDS_HELP as well; the v4 state
-    machine treats both as "this attempt didn't land — surface to a
-    human" without distinguishing further.
+    Escalation: a "soft" incomplete (LLM returned
+    ``outcome="incomplete"``) maps to NEEDS_HELP — the v4 state
+    machine's retry cap owns the budget; the role does not refuse on
+    its own.
     """
     cfg_path = Path(os.environ.get("FOREMAN_V4_CONFIG", _DEFAULT_V4_CONFIG))
     cfg = load_v4_config(cfg_path)
@@ -1041,13 +851,11 @@ def _run_fixer_for_v4(
     )
 
     # Flatten legacy → v4 shape. The legacy ``FixerOutput.outcome`` is
-    # "fixed" or "incomplete"; the legacy ``attempt`` counter tells us
-    # whether we're at the cap. The v4 surface needs a binary
+    # "fixed" or "incomplete"; the v4 surface needs a binary
     # ``pushed`` (CLEAN) vs ``escalated`` (NEEDS_HELP) — anything
-    # short of "fixed" is treated as needing human help. The
-    # ``_FixerPreflightRefusal`` cap-hit case is handled one layer up
-    # in ``run_fixer_cli`` because it surfaces as an exception, not a
-    # ``FixerRunResult``.
+    # short of "fixed" is treated as needing human help. Retry budget
+    # lives in the v4 state machine (foreman#8c.2); the role no longer
+    # caps attempts itself.
     llm = legacy_result.llm_output
     pushed = llm.outcome == "fixed"
     summary = (
@@ -1090,24 +898,6 @@ def run_fixer_cli(*, project: str, issue_number: int, target: str) -> int:
         result = _run_fixer_for_v4(
             project=project, issue_number=issue_number, target=target
         )
-    except _FixerPreflightRefusal as exc:
-        # Cap-hit escalation IS the resumable case. Route to NEEDS_HELP
-        # so the v4 state machine moves to NeedsHelpState
-        # (operator-resumable via ``foreman resume``), NOT FailedState
-        # (no-recovery terminal). See the legacy ``run_fixer`` comment
-        # at the cap-hit raise: "the max-attempts gate IS the
-        # escalation surface, not a runaway-burn signal." This catch
-        # must precede the broad ``except Exception`` arm because
-        # ``_FixerPreflightRefusal`` subclasses ``RuntimeError`` and
-        # would otherwise be swallowed into ERROR → FailedState.
-        emit_outcome(
-            Outcome(
-                kind=OutcomeKind.NEEDS_HELP,
-                confidence=OutcomeConfidence.HIGH,
-                summary=str(exc)[:500],
-            )
-        )
-        return 0
     except Exception as exc:
         emit_outcome(
             Outcome(
