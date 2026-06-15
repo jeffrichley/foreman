@@ -225,6 +225,54 @@ class RepositoryContract:
         )
         assert repo.count_state_instances_for_ticket(t.id) == 1
 
+    def test_count_consecutive_same_state_returns_zero_for_no_instances(
+        self, repo: TicketRepository
+    ):
+        t = repo.create_ticket(project="p", issue_number=1, now=_now())
+        assert repo.count_consecutive_same_state(
+            ticket_id=t.id, state="SpecReview"
+        ) == 0
+
+    def test_count_consecutive_same_state_counts_run_correctly(
+        self, repo: TicketRepository
+    ):
+        """Walk back from latest sequence; stop at first non-match.
+
+        History: SpecReview, SpecReview, SpecReview, Planning, SpecReview,
+        SpecReview. Walking back from sequence=6 we see two SpecReviews,
+        then Planning breaks the run. Only the trailing two count.
+        """
+        t = repo.create_ticket(project="p", issue_number=1, now=_now())
+        for seq, name in enumerate(
+            ["SpecReview", "SpecReview", "SpecReview", "Planning",
+             "SpecReview", "SpecReview"],
+            start=1,
+        ):
+            repo.open_state_instance(
+                ticket_id=t.id, state_name=name, sequence=seq, now=_now(),
+            )
+        assert repo.count_consecutive_same_state(
+            ticket_id=t.id, state="SpecReview"
+        ) == 2
+        # A different state name never matched the latest sequence.
+        assert repo.count_consecutive_same_state(
+            ticket_id=t.id, state="Planning"
+        ) == 0
+
+    def test_count_consecutive_same_state_full_history_match(
+        self, repo: TicketRepository
+    ):
+        """Every row matches → count equals total instances."""
+        t = repo.create_ticket(project="p", issue_number=1, now=_now())
+        for seq in range(1, 4):
+            repo.open_state_instance(
+                ticket_id=t.id, state_name="SpecReview", sequence=seq,
+                now=_now(),
+            )
+        assert repo.count_consecutive_same_state(
+            ticket_id=t.id, state="SpecReview"
+        ) == 3
+
     def test_set_and_get_dependencies(self, repo: TicketRepository):
         a = repo.create_ticket(project="p", issue_number=1, now=_now())
         b = repo.create_ticket(project="p", issue_number=2, now=_now())

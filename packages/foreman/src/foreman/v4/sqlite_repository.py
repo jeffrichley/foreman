@@ -349,6 +349,24 @@ class SqliteTicketRepository:
             ).fetchone()
             return int(row["n"])
 
+    def count_consecutive_same_state(
+        self, *, ticket_id: int, state: str
+    ) -> int:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT state_name FROM state_instances "
+                "WHERE ticket_id = ? "
+                "ORDER BY sequence DESC",
+                (ticket_id,),
+            ).fetchall()
+            count = 0
+            for row in rows:
+                if row["state_name"] == state:
+                    count += 1
+                else:
+                    break
+            return count
+
     # --- Dependency tracking ---
 
     def set_ticket_dependencies(self, ticket_id: int, *, deps: list[int]) -> None:

@@ -80,6 +80,19 @@ class TicketRepository(Protocol):
 
     def latest_pr_number_for_ticket(self, ticket_id: int) -> int | None: ...
     def count_state_instances_for_ticket(self, ticket_id: int) -> int: ...
+    def count_consecutive_same_state(
+        self, *, ticket_id: int, state: str
+    ) -> int:
+        """Return the number of consecutive ``state_instances`` rows for
+        ``ticket_id`` whose ``state_name`` matches ``state``, walking
+        back from the latest sequence. Stops at the first row that
+        doesn't match.
+
+        Used by the state machine (Phase 8c.2) to detect a runaway loop
+        on a single state before the daemon burns more cycles. Returns
+        zero if no instances exist for the ticket.
+        """
+        ...
 
     # --- Dependency tracking ---
 
@@ -274,6 +287,21 @@ class InMemoryTicketRepository:
 
     def count_state_instances_for_ticket(self, ticket_id: int) -> int:
         return sum(1 for i in self._instances.values() if i.ticket_id == ticket_id)
+
+    def count_consecutive_same_state(
+        self, *, ticket_id: int, state: str
+    ) -> int:
+        matches = [
+            i for i in self._instances.values() if i.ticket_id == ticket_id
+        ]
+        matches.sort(key=lambda i: i.sequence, reverse=True)
+        count = 0
+        for inst in matches:
+            if inst.state_name == state:
+                count += 1
+            else:
+                break
+        return count
 
     # --- Dependency tracking ---
 
