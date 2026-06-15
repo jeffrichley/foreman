@@ -59,6 +59,27 @@ def _state_label(state_name: str) -> str:
     return f"foreman:state-{state_name.lower()}"
 
 
+#: Operator-applied trigger label the Poller searches for. Once the ticket
+#: has progressed into a real state, the trigger has done its job and the
+#: observer drops it so the issue's label set reflects current lifecycle
+#: position only. Hardcoded here (mirrors ``ProjectConfig.trigger_label``
+#: default) because the observer is global to the EventBus, not per-project
+#: — threading per-project config through would require a project→label
+#: lookup the observer doesn't otherwise need. If a project ever customizes
+#: its trigger label, this constant becomes the gap to plug.
+_TRIGGER_LABEL = "foreman:plan"
+
+#: The first states a ticket enters after Poller pickup. Both are listed
+#: defensively: tickets are CREATED in ``Queued``, so the normal path is
+#: ``StateEnteredEvent(Queued)`` first. But if the observer joined mid-
+#: transition (e.g. daemon restart after Queued already exited), the first
+#: event it sees is ``StateEnteredEvent(Planning)`` and the trigger label
+#: still needs to be cleared. Cheaper than tracking per-ticket "have I
+#: cleared the trigger yet?" state — the writer no-ops idempotently if
+#: the label is already gone.
+_FIRST_STATES = frozenset({"Queued", "Planning"})
+
+
 class LabelObservabilityObserver:
     """Stamps state-progress labels on the issue without touching others."""
 
@@ -75,13 +96,28 @@ class LabelObservabilityObserver:
             return
 
     def _on_state_entered(self, event: StateEnteredEvent) -> None:
-        """Add the new state's label. Never touches other labels."""
+        """Add the new state's label, and on first-state entry drop the
+        trigger label.
+
+        Phase 8d.8 moved the ``foreman:plan`` removal here after 8d.3
+        stripped the Planner's manual removal. Roles don't touch labels;
+        the observer owns the entire label surface. The trigger removal
+        runs on entry to ``Queued`` OR ``Planning`` — both are treated as
+        "first states" so a daemon that restarts mid-transition still
+        clears the trigger when it sees Planning fresh.
+        """
         ticket = self._repo.get_ticket(event.ticket_id)
         self._writer.add_labels(
             project=ticket.project,
             issue_number=ticket.issue_number,
             labels={_state_label(event.state_name)},
         )
+        if event.state_name in _FIRST_STATES:
+            self._writer.remove_labels(
+                project=ticket.project,
+                issue_number=ticket.issue_number,
+                labels={_TRIGGER_LABEL},
+            )
 
     def _on_state_exited(self, event: StateExitedEvent) -> None:
         """Remove the now-old state's label.

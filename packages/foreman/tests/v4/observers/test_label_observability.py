@@ -61,20 +61,28 @@ def _make_repo_and_ticket(state_name: str = "Planning"):
 
 
 def test_observer_adds_state_label_on_state_entered() -> None:
-    """StateEntered triggers add_labels with the new state's label only."""
-    repo, ticket = _make_repo_and_ticket("Planning")
+    """StateEntered triggers add_labels with the new state's label.
+
+    Uses ``SpecReview`` (a mid-lifecycle, non-first state) so the
+    trigger-label removal from Phase 8d.8 is out of scope and the
+    assertion stays focused on the add-side behavior. The first-state
+    trigger-label cases are covered separately by
+    ``test_observer_removes_trigger_label_on_first_state_transition`` and
+    ``test_observer_does_not_remove_trigger_label_on_later_transitions``.
+    """
+    repo, ticket = _make_repo_and_ticket("SpecReview")
     writer = _RecordingWriter()
     obs = LabelObservabilityObserver(writer=writer, repo=repo)
     obs(
         StateEnteredEvent(
             ticket_id=ticket.id,
             instance_id=99,
-            state_name="Planning",
+            state_name="SpecReview",
             sequence=1,
             at=_T0,
         )
     )
-    assert writer.add_calls == [("foreman", 42, {"foreman:state-planning"})]
+    assert writer.add_calls == [("foreman", 42, {"foreman:state-specreview"})]
     assert writer.remove_calls == []
 
 
@@ -192,6 +200,76 @@ def test_observer_does_not_touch_trigger_label() -> None:
     # Sanity: the observer DID do its job (added new, removed old).
     assert writer.add_calls == [("foreman", 42, {"foreman:state-specreview"})]
     assert writer.remove_calls == [("foreman", 42, {"foreman:state-planning"})]
+
+
+def test_observer_removes_trigger_label_on_first_state_transition() -> None:
+    """Phase 8d.8 — observer removes ``foreman:plan`` when the ticket enters
+    its first state.
+
+    The Poller adopts a ticket once it sees ``foreman:plan`` and enqueues
+    ``WorkItem(state_name="Queued")``. The first ``StateEnteredEvent`` the
+    observer sees is therefore ``Queued``. Since 8d.3 stripped the Planner's
+    manual trigger-label removal (per "roles don't touch labels"), the
+    trigger label is moved into the observer. The observer must, on the
+    first-state ``StateEnteredEvent``, call ``remove_labels`` with
+    ``foreman:plan`` so the operator-applied trigger is cleared exactly
+    once at the start of the lifecycle.
+    """
+    repo, ticket = _make_repo_and_ticket("Queued")
+    writer = _RecordingWriter()
+    obs = LabelObservabilityObserver(writer=writer, repo=repo)
+    obs(
+        StateEnteredEvent(
+            ticket_id=ticket.id,
+            instance_id=99,
+            state_name="Queued",
+            sequence=1,
+            at=_T0,
+        )
+    )
+    # Exactly one remove_labels call, carrying foreman:plan.
+    trigger_removals = [
+        labels for _project, _issue, labels in writer.remove_calls
+        if "foreman:plan" in labels
+    ]
+    assert len(trigger_removals) == 1, (
+        f"expected one remove_labels call with foreman:plan, got: "
+        f"{writer.remove_calls!r}"
+    )
+    assert trigger_removals[0] == {"foreman:plan"}
+
+
+def test_observer_does_not_remove_trigger_label_on_later_transitions() -> None:
+    """Phase 8d.8 — observer only removes ``foreman:plan`` on the first
+    state, not on every subsequent ``StateEnteredEvent``.
+
+    On entry to ``SpecReview`` (not a first state), the observer still
+    calls ``add_labels`` for the new state's progress label, but no
+    ``remove_labels`` call should carry ``foreman:plan`` — only the
+    operator-applied trigger removal on the FIRST state is the observer's
+    job. Note: the observer still emits ``remove_labels`` separately when
+    handling the paired ``StateExitedEvent`` to drop the prior state's
+    progress label; this test is scoped to the ``StateEnteredEvent`` for a
+    non-first state and asserts ``foreman:plan`` does not appear in any
+    labels set.
+    """
+    repo, ticket = _make_repo_and_ticket("SpecReview")
+    writer = _RecordingWriter()
+    obs = LabelObservabilityObserver(writer=writer, repo=repo)
+    obs(
+        StateEnteredEvent(
+            ticket_id=ticket.id,
+            instance_id=99,
+            state_name="SpecReview",
+            sequence=1,
+            at=_T0,
+        )
+    )
+    for _project, _issue, labels in writer.remove_calls:
+        assert "foreman:plan" not in labels, (
+            f"foreman:plan leaked into remove_labels on a later "
+            f"transition: {labels!r}"
+        )
 
 
 def test_writer_failure_propagates() -> None:
