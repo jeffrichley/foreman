@@ -42,14 +42,13 @@ def _isolate_v4_logging():
     (notably the caplog-based observer suites that assume
     propagate=True). Mirrors the same pattern in test_bootstrap.py.
     """
-    import logging as _logging
     snapshots = {
-        n: _logging.getLogger(n).propagate for n in _V4_LOGGER_NAMES
+        n: logging.getLogger(n).propagate for n in _V4_LOGGER_NAMES
     }
     yield
     reset_logging()
     for name, propagate in snapshots.items():
-        _logging.getLogger(name).propagate = propagate
+        logging.getLogger(name).propagate = propagate
 
 
 def test_status_when_no_pid_file(tmp_path: Path, monkeypatch):

@@ -24,7 +24,7 @@ import os
 import signal
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import typer
 
@@ -56,7 +56,7 @@ def _build_sighup_handler(config: V4Config) -> Callable[..., None]:
     log_dir = Path(config.log_dir)
     log_level = config.log_level
 
-    def _reload_logging(*_args: Any) -> None:
+    def _reload_logging(*_args: object) -> None:
         reset_logging()
         configure_logging(log_dir=log_dir, level=log_level)
 
