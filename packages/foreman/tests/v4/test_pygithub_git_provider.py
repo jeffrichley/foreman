@@ -83,3 +83,17 @@ def test_enqueue_merge_queue_looks_up_pr(mock_github, mock_repo):
     provider = PyGithubGitProvider(github=mock_github, repo_full_name="owner/p")
     provider.enqueue_merge_queue(project="p", pr_number=11)
     mock_repo.get_pull.assert_called_with(11)
+
+
+def test_write_labels_calls_set_labels_with_sorted_names(mock_github, mock_repo):
+    """``write_labels`` replaces the issue's labels via PyGithub's
+    ``set_labels``. Sorting the names makes the call deterministic for
+    snapshot/log assertions."""
+    mock_issue = MagicMock()
+    mock_repo.get_issue.return_value = mock_issue
+    provider = PyGithubGitProvider(github=mock_github, repo_full_name="owner/p")
+    provider.write_labels(
+        project="p", issue_number=42, labels={"b", "a", "c"},
+    )
+    mock_repo.get_issue.assert_called_once_with(42)
+    mock_issue.set_labels.assert_called_once_with("a", "b", "c")

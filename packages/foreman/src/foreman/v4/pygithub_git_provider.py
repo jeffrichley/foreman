@@ -85,3 +85,13 @@ class PyGithubGitProvider:
     ) -> list[int]:
         issues = self._repo.get_issues(state="open", labels=[label])
         return [issue.number for issue in issues if issue.pull_request is None]
+
+    def write_labels(
+        self, *, project: str, issue_number: int, labels: set[str],
+    ) -> None:
+        # PyGithub's set_labels takes label names as positional args and
+        # replaces the existing label set on the issue. Sort for
+        # deterministic call shape — useful for log assertions and
+        # snapshot tests.
+        issue = self._repo.get_issue(issue_number)
+        issue.set_labels(*sorted(labels))

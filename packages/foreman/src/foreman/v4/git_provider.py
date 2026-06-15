@@ -38,6 +38,16 @@ class GitProvider(Protocol):
     def merge_spec_pr(self, *, project: str, pr_number: int) -> None: ...
     def enqueue_merge_queue(self, *, project: str, pr_number: int) -> None: ...
     def merge_verdict(self, *, project: str, pr_number: int) -> MergeVerdict: ...
+    def write_labels(
+        self, *, project: str, issue_number: int, labels: set[str]
+    ) -> None:
+        """Replace the labels on the given issue with the given set.
+
+        Satisfies the ``LabelObservabilityObserver.LabelWriter`` Protocol
+        so a GitProvider can be wired straight into bootstrap as the
+        observer's writer — no separate adapter class.
+        """
+        ...
 
 
 class FakeGitProvider:
@@ -48,6 +58,10 @@ class FakeGitProvider:
         self.merge_queue: set[tuple[str, int]] = set()
         self._verdicts: dict[tuple[str, int], MergeVerdict] = {}
         self._labeled_issues: dict[tuple[str, str], set[int]] = {}
+        # write_labels call log — latest set per (project, issue_number).
+        # Replace-semantics matches PyGithub's set_labels, so the most
+        # recent call IS the current label state.
+        self._issue_labels: dict[tuple[str, int], set[str]] = {}
 
     def set_open_issues_with_label(
         self, *, project: str, label: str, issue_numbers: set[int],
@@ -92,3 +106,16 @@ class FakeGitProvider:
                 merged=True, mergeable=existing.mergeable,
                 ci_passing=existing.ci_passing,
             )
+
+    def write_labels(
+        self, *, project: str, issue_number: int, labels: set[str],
+    ) -> None:
+        """Replace-semantics matches PyGithub's ``issue.set_labels``."""
+        self._issue_labels[(project, issue_number)] = set(labels)
+
+    def set_issue_labels(
+        self, *, project: str, issue_number: int,
+    ) -> set[str]:
+        """Inspect-only: the most recently written label set, or an
+        empty set if nothing has been written for this issue."""
+        return set(self._issue_labels.get((project, issue_number), set()))
