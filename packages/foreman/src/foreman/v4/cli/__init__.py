@@ -187,10 +187,20 @@ def main() -> None:
     )
 
     def _git_factory(repo: str) -> PyGithubGitProvider:
-        # Reuse the identity layer's "orchestrator" token for read paths;
-        # role-specific tokens flow through SubprocessRoleDispatcher.
-        token = identity.get_role_token("orchestrator")
-        return PyGithubGitProvider(github=Github(token), repo_full_name=repo)
+        # Pass a callable rather than a static Github client so the
+        # provider can rebuild the client when the App installation
+        # token nears expiry. V4IdentityRegistry handles the token
+        # cache + 5-min-pre-expiry refresh; this factory seam ensures
+        # the PyGithub client SEES the refresh instead of clinging to a
+        # token that 401s at minute ~60. Role-specific tokens still
+        # flow through SubprocessRoleDispatcher; this seam is for the
+        # daemon's orchestrator read-path only.
+        return PyGithubGitProvider(
+            github_factory=lambda: Github(
+                identity.get_role_token("orchestrator"),
+            ),
+            repo_full_name=repo,
+        )
 
     ctx = bootstrap_cli_context(
         config=config,
