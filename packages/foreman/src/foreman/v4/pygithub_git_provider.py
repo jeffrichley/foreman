@@ -16,7 +16,7 @@ at minute ~60 with ``BadCredentialsException: 401``.
 The fix is a factory seam: ``PyGithubGitProvider`` takes a callable
 that mints a fresh ``Github`` client (which internally calls
 ``identity.get_role_token(...)``), and rebuilds the cached client when
-it's older than ``refresh_after_seconds`` (default 50 min — well
+it's older than ``refresh_after_seconds`` (default 50 min = 3000s — well
 inside the 1-hour TTL with safety margin). The :class:`Repository`
 handle and PyGithub's name-mangled GraphQL requester both live INSIDE
 each ``Github`` instance, so rebuilding the client invalidates both.
@@ -75,7 +75,7 @@ class PyGithubGitProvider:
             clock advance without sleeping.
         refresh_after_seconds:
             How long a cached ``Github`` client can live before the
-            next ``_gh`` access rebuilds it. Default 50 min; see the
+            next ``_gh`` access rebuilds it. Default 50 min = 3000s; see the
             module-level docstring for why this is load-bearing.
         """
         self._github_factory = github_factory
@@ -103,11 +103,9 @@ class PyGithubGitProvider:
         not cache a ``Github`` reference outside this property.
         """
         now = self._clock()
-        if (
-            self._cached_github is None
-            or self._cached_at is None
-            or (now - self._cached_at) > self._refresh_after
-        ):
+        # _cached_github and _cached_at are set together; check _cached_at
+        # alone — its None state proves the cache is uninitialized.
+        if self._cached_at is None or (now - self._cached_at) > self._refresh_after:
             self._cached_github = self._github_factory()
             self._cached_at = now
             # Repository handle is scoped to the OLD Github client's
