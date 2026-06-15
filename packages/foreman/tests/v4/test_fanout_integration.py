@@ -42,11 +42,20 @@ class _DemoState(TicketState):
 
 
 class _RecordingWriter:
-    def __init__(self) -> None:
-        self.calls: list[dict] = []
+    """Records add_labels + remove_labels calls in arrival order.
 
-    def write_labels(self, **kwargs: object) -> None:
-        self.calls.append(kwargs)
+    Each entry is ``(op, kwargs)`` where ``op`` is ``"add"`` or
+    ``"remove"`` so the test can distinguish which side of a transition
+    the call came from."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def add_labels(self, **kwargs: object) -> None:
+        self.calls.append(("add", kwargs))
+
+    def remove_labels(self, **kwargs: object) -> None:
+        self.calls.append(("remove", kwargs))
 
 
 def test_one_transition_reaches_all_four_observers(caplog):
@@ -77,9 +86,16 @@ def test_one_transition_reaches_all_four_observers(caplog):
     events_logged = {json.loads(line)["event"] for line in log_lines}
     assert {"state_entered", "execute_started", "execute_completed", "state_exited"} <= events_logged
 
-    # 2. Label observer wrote one state-label call (on StateEntered):
+    # 2. Label observer fired on both lifecycle boundaries: add on
+    #    StateEntered (stamps the new state) and remove on StateExited
+    #    (cleans up the now-exited state). Trigger label preservation
+    #    lives in the dedicated observer tests; here we just verify the
+    #    fanout shape.
     assert writer.calls == [
-        {"project": "p", "issue_number": 1, "labels": {"foreman:state-demo"}}
+        ("add", {"project": "p", "issue_number": 1,
+                 "labels": {"foreman:state-demo"}}),
+        ("remove", {"project": "p", "issue_number": 1,
+                    "labels": {"foreman:state-demo"}}),
     ]
 
     # 3. Event-archive observer wrote rows into events table:
