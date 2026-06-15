@@ -105,4 +105,5 @@ def bootstrap_cli_context(
         daemon=daemon,
         git=git_for_pollers,
         dispatcher=dispatcher,
+        config=config,
     )

@@ -50,7 +50,13 @@ def configure_logging(*, log_dir: Path, level: str = "INFO") -> None:
 
 
 def reset_logging() -> None:
-    """Tear down handlers — test helper, not for production use."""
+    """Tear down all v4 logger handlers.
+
+    Used by the daemon's SIGHUP handler to drop existing
+    Rich/JsonLines handlers before reconfigure, preventing
+    handler-stacking on repeated reloads. Also used by tests
+    that want a fresh logging surface.
+    """
     for name in _V4_LOGGER_NAMES:
         logger = logging.getLogger(name)
         for handler in list(logger.handlers):

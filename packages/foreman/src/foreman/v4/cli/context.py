@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from foreman.v4.config import V4Config
     from foreman.v4.daemon import Daemon
     from foreman.v4.git_provider import GitProvider
     from foreman.v4.queue_manager import QueueManager
@@ -33,6 +34,12 @@ class CliContext:
     daemon: Daemon | None = None
     git: GitProvider | None = None
     dispatcher: RoleDispatcher | None = None
+    # config is Optional so test ergonomics stay light (tests that
+    # don't care about config still build a context with just repo).
+    # Production wiring via bootstrap_cli_context always threads a
+    # real V4Config so the daemon-start SIGHUP handler can reach
+    # log_dir + log_level without re-reading config from disk.
+    config: V4Config | None = None
 
 
 def build_cli_context(
@@ -42,6 +49,7 @@ def build_cli_context(
     daemon: Daemon | None = None,
     git: GitProvider | None = None,
     dispatcher: RoleDispatcher | None = None,
+    config: V4Config | None = None,
 ) -> CliContext:
     """The single point of construction for CliContext.
 
@@ -49,5 +57,10 @@ def build_cli_context(
     ``obj=`` to runner.invoke / typer. Both paths route through here.
     """
     return CliContext(
-        repo=repo, qm=qm, daemon=daemon, git=git, dispatcher=dispatcher,
+        repo=repo,
+        qm=qm,
+        daemon=daemon,
+        git=git,
+        dispatcher=dispatcher,
+        config=config,
     )
