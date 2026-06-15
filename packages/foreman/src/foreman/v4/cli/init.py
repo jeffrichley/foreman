@@ -1,27 +1,15 @@
 """``foreman init <project>`` — bootstrap a project repo for v4.
 
-Creates the 19 foreman state/modifier/attempt labels, verifies bot
-installations, validates the local clone, and writes the per-project
+Creates the v4 foreman state labels, verifies bot installations,
+validates the local clone, and writes the per-project
 ``.foreman/INSTRUCTIONS.md`` template. Does NOT touch any config file —
 v4 config is the source of truth; this command consumes it.
 
-Delegates to v3 helpers in :mod:`foreman.init` for the label / bot /
+Delegates to helpers in :mod:`foreman.init` for the label / bot /
 instructions work. ``foreman.init`` is in the v4 survival set per the
-isolation guard (``tests/v4/test_isolation.py``), so importing the
-helpers does not violate v4-isolation discipline.
-
-Caveats:
-
-* The 19 foreman label catalog + the bot-verification + the
-  instructions-template logic are stable v3 surfaces we don't want to
-  fork into v4 just to rename them. The private (`_`-prefixed) names
-  are imported intentionally; a future Phase 8b polish task could
-  promote them on the v3 side, but that's out of scope for 8b.1.
-* This module contains a small "v4 AppsConfig → v3 AppsConfig"
-  shim used only by ``_verify_bot_installation`` (the v3 helper that
-  resolves per-role App credentials via its env-var fallback shape).
-  Phase 8d.9 ports the rest of ``foreman init`` to V4Config and
-  retires this shim alongside the v3 ``Config`` write.
+isolation guard (``tests/v4/test_isolation.py``); after Phase 8d.9 the
+helpers it exposes operate directly on :class:`V4Config` /
+:class:`AppsConfig`, so this command no longer needs a v3 shim.
 """
 from __future__ import annotations
 
@@ -31,7 +19,6 @@ from pathlib import Path
 import typer
 from github import Auth, Github
 
-from foreman.config import AppsConfig as V3AppsConfig
 from foreman.init import (
     _ROLE_NAMES,
     BotVerification,
@@ -133,25 +120,10 @@ def cmd_init(
     )
 
     # Best-effort bot verification. v4 has shared apps at the V4Config
-    # level (not per-project like v3); construct a v3-shaped AppsConfig
-    # for ``_verify_bot_installation`` to consume. The v3 helper looks
-    # up credentials via ``resolve_<role>_app_id`` /
-    # ``resolve_<role>_private_key_path``, which fall back to the
-    # config-file values when the corresponding env var is unset — so
-    # populating the per-role app_id and private_key_path fields is
-    # sufficient.
-    v3_apps = V3AppsConfig(
-        planner_app_id=config.apps.planner.app_id,
-        planner_private_key_path=config.apps.planner.private_key_path,
-        reviewer_app_id=config.apps.reviewer.app_id,
-        reviewer_private_key_path=config.apps.reviewer.private_key_path,
-        fixer_app_id=config.apps.fixer.app_id,
-        fixer_private_key_path=config.apps.fixer.private_key_path,
-        worker_app_id=config.apps.worker.app_id,
-        worker_private_key_path=config.apps.worker.private_key_path,
-    )
+    # level — pass ``config.apps`` straight through; the helper now
+    # speaks v4 :class:`AppsConfig` natively (Phase 8d.9).
     bot_verifications: list[BotVerification] = [
-        _verify_bot_installation(role=role, apps=v3_apps, repo_slug=project_cfg.repo)
+        _verify_bot_installation(role=role, apps=config.apps, repo_slug=project_cfg.repo)
         for role in _ROLE_NAMES
     ]
 

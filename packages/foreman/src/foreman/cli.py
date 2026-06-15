@@ -370,7 +370,7 @@ def implement(issue_url: str, project: str, config_path: Path | None) -> None:
     "--name",
     default=None,
     help=(
-        "Project name used as the [projects.<name>] config key. "
+        "Project name used as the [[projects]].name config key. "
         "Defaults to the <repo> portion of <owner/repo>."
     ),
 )
@@ -395,14 +395,14 @@ def implement(issue_url: str, project: str, config_path: Path | None) -> None:
     "--force",
     is_flag=True,
     default=False,
-    help="Overwrite an existing [projects.<name>] block in the config.",
+    help="Overwrite an existing matching [[projects]] block in the config.",
 )
 @click.option(
     "--config",
     "config_path",
     type=click.Path(dir_okay=False, path_type=Path),
     default=None,
-    help="Path to foreman config (default: $FOREMAN_CONFIG or ~/.foreman/config.toml)",
+    help="Path to foreman v4 config (default: ~/.foreman/v4/config.toml)",
 )
 def init(
     repo: str,
@@ -412,16 +412,26 @@ def init(
     force: bool,
     config_path: Path | None,
 ) -> None:
-    """Onboard a new GitHub repo onto Foreman.
+    """Onboard a new GitHub repo onto Foreman (v4 substrate).
 
     REPO is the target repo in ``owner/repo`` form.
 
-    Writes the project's config block, creates Foreman's labels on the
-    repo, writes a ``.foreman/INSTRUCTIONS.md`` template (skipping if it
-    already exists), and best-effort verifies that each role's GitHub
-    App is installed on the target repo.
+    Writes the project's config block to ``~/.foreman/v4/config.toml``,
+    creates Foreman's v4 state labels on the repo, writes a
+    ``.foreman/INSTRUCTIONS.md`` template (skipping if it already
+    exists), and best-effort verifies that each role's GitHub App is
+    installed on the target repo.
+
+    Phase 8d.9: this command now writes the v4 config shape. The v3
+    config path (``~/.foreman/config.toml``) is no longer used by init.
     """
-    cfg_path = config_path or _default_config_path()
+    # Phase 8d.9: default to the v4 config path. ``foreman.init``'s
+    # ``_DEFAULT_CONFIG_PATH`` is the single source of truth — pulling
+    # it from the helper module instead of re-deriving it here keeps
+    # the two surfaces from drifting.
+    from foreman.init import _DEFAULT_CONFIG_PATH as _V4_DEFAULT_CONFIG_PATH
+
+    cfg_path = config_path or _V4_DEFAULT_CONFIG_PATH
 
     # Default --name from the repo's tail.
     if name is None:

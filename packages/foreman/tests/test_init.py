@@ -6,6 +6,11 @@ existing config, idempotent label creation, skips existing instructions
 file, best-effort bot verification, correct config block writing,
 summary content. Uses a fake admin GitHub client + fake AppsConfig so
 the tests don't hit the network.
+
+Phase 8d.9: ported off v3 ``Config`` / ``[projects.<name>]`` shape onto
+v4 ``V4Config`` / ``[[projects]]`` shape. The label-set assertion now
+pins the v4 ``foreman:state-*`` vocabulary instead of the legacy v3
+catalog.
 """
 
 from __future__ import annotations
@@ -16,7 +21,6 @@ from pathlib import Path
 import pytest
 from github import GithubException
 
-from foreman.config import AppsConfig
 from foreman.init import (
     _FOREMAN_LABELS,
     BotVerification,
@@ -32,6 +36,7 @@ from foreman.init import (
     detect_matching_clone,
     run_init,
 )
+from foreman.v4.config import AppsConfig
 
 # ----------------------------------------------------------------------
 # Fake PyGithub admin surface
@@ -249,7 +254,8 @@ def test_format_project_block_default_check_command_omitted(tmp_path: Path) -> N
         clone_path=clone,
         check_command="just check",
     )
-    assert "[projects.foreman]" in block
+    assert "[[projects]]" in block
+    assert 'name = "foreman"' in block
     assert 'repo = "jeffrichley/foreman"' in block
     assert "check_command" not in block  # default → omitted
 
@@ -278,38 +284,57 @@ def test_format_project_block_uses_posix_path(tmp_path: Path) -> None:
 
 
 def test_write_project_block_creates_config_when_absent(tmp_path: Path) -> None:
+    """When the config file doesn't exist, init writes a full v4
+    skeleton (``[daemon]`` / ``[apps.*]`` / ``[orchestrator]``) plus
+    the project block — so the file is daemon-loadable as a schema."""
     cfg = tmp_path / "config.toml"
-    block = '[projects.foreman]\nrepo = "jeffrichley/foreman"\n'
+    block = '[[projects]]\nname = "foreman"\nrepo = "jeffrichley/foreman"\n'
     _write_project_block_to_config(config_path=cfg, block_text=block, name="foreman", force=False)
-    assert cfg.read_text(encoding="utf-8") == block
+    contents = cfg.read_text(encoding="utf-8")
+    # Skeleton blocks are present.
+    assert "[daemon]" in contents
+    assert "[apps.planner]" in contents
+    assert "[apps.reviewer]" in contents
+    assert "[apps.fixer]" in contents
+    assert "[apps.worker]" in contents
+    assert "[orchestrator]" in contents
+    # And the project block landed at the tail.
+    assert block in contents
 
 
 def test_write_project_block_appends_to_existing_config(tmp_path: Path) -> None:
     cfg = tmp_path / "config.toml"
-    cfg.write_text('[projects.voice]\nrepo = "jeffrichley/voice"\n', encoding="utf-8")
-    block = '[projects.foreman]\nrepo = "jeffrichley/foreman"\n'
+    cfg.write_text(
+        '[[projects]]\nname = "voice"\nrepo = "jeffrichley/voice"\n',
+        encoding="utf-8",
+    )
+    block = '[[projects]]\nname = "foreman"\nrepo = "jeffrichley/foreman"\n'
     _write_project_block_to_config(config_path=cfg, block_text=block, name="foreman", force=False)
     contents = cfg.read_text(encoding="utf-8")
     # Existing block survives unchanged.
-    assert "[projects.voice]" in contents
+    assert 'name = "voice"' in contents
     assert 'repo = "jeffrichley/voice"' in contents
     # New block appended.
-    assert "[projects.foreman]" in contents
+    assert 'name = "foreman"' in contents
     assert 'repo = "jeffrichley/foreman"' in contents
 
 
 def test_write_project_block_replaces_when_force(tmp_path: Path) -> None:
-    """Force overwrite: the named block is replaced; siblings stay put."""
+    """Force overwrite: the matching ``[[projects]]`` block is replaced;
+    siblings stay put."""
     cfg = tmp_path / "config.toml"
     cfg.write_text(
         (
-            '[projects.voice]\nrepo = "jeffrichley/voice"\n\n'
-            '[projects.foreman]\nrepo = "OLD_VALUE/foreman"\n'
+            '[[projects]]\nname = "voice"\nrepo = "jeffrichley/voice"\n\n'
+            '[[projects]]\nname = "foreman"\nrepo = "OLD_VALUE/foreman"\n'
             'local_clone_path = "/tmp/old"\n'
         ),
         encoding="utf-8",
     )
-    new_block = '[projects.foreman]\nrepo = "jeffrichley/foreman"\nlocal_clone_path = "/new/path"\n'
+    new_block = (
+        '[[projects]]\nname = "foreman"\nrepo = "jeffrichley/foreman"\n'
+        'local_clone_path = "/new/path"\n'
+    )
     _write_project_block_to_config(
         config_path=cfg, block_text=new_block, name="foreman", force=True
     )
@@ -321,42 +346,57 @@ def test_write_project_block_replaces_when_force(tmp_path: Path) -> None:
     assert 'repo = "jeffrichley/voice"' in contents
 
 
-def test_write_project_block_preserves_apps_subblock_on_force(tmp_path: Path) -> None:
-    """The ``[projects.<name>.apps]`` sub-block is operator-managed; a
-    --force overwrite of the main block MUST leave it intact."""
+def test_write_project_block_preserves_apps_block_on_force(tmp_path: Path) -> None:
+    """The top-level ``[apps.<role>]`` / ``[orchestrator]`` blocks are
+    operator-curated; a --force overwrite of one ``[[projects]]`` block
+    MUST leave them intact."""
     cfg = tmp_path / "config.toml"
     cfg.write_text(
         (
-            '[projects.foreman]\nrepo = "OLD/foreman"\n'
-            'local_clone_path = "/tmp/old"\n\n'
-            "[projects.foreman.apps]\n"
-            "planner_app_id = 123456\n"
-            'planner_private_key_path = "/keys/planner.pem"\n'
+            "[apps.planner]\n"
+            "app_id = 123456\n"
+            'private_key_path = "/keys/planner.pem"\n\n'
+            "[orchestrator]\n"
+            "app_id = 99999\n"
+            'private_key_path = "/keys/orchestrator.pem"\n\n'
+            '[[projects]]\nname = "foreman"\nrepo = "OLD/foreman"\n'
+            'local_clone_path = "/tmp/old"\n'
         ),
         encoding="utf-8",
     )
-    new_block = '[projects.foreman]\nrepo = "jeffrichley/foreman"\nlocal_clone_path = "/new"\n'
+    new_block = (
+        '[[projects]]\nname = "foreman"\nrepo = "jeffrichley/foreman"\n'
+        'local_clone_path = "/new"\n'
+    )
     _write_project_block_to_config(
         config_path=cfg, block_text=new_block, name="foreman", force=True
     )
     contents = cfg.read_text(encoding="utf-8")
-    # Apps block survives.
-    assert "[projects.foreman.apps]" in contents
-    assert "planner_app_id = 123456" in contents
-    # Main block was updated.
+    # apps + orchestrator blocks survive.
+    assert "[apps.planner]" in contents
+    assert "app_id = 123456" in contents
+    assert "[orchestrator]" in contents
+    assert "app_id = 99999" in contents
+    # Project block was updated.
     assert 'repo = "jeffrichley/foreman"' in contents
     assert "OLD/foreman" not in contents
 
 
 def test_project_block_exists_true_after_write(tmp_path: Path) -> None:
     cfg = tmp_path / "config.toml"
-    cfg.write_text('[projects.foreman]\nrepo = "jeffrichley/foreman"\n', encoding="utf-8")
+    cfg.write_text(
+        '[[projects]]\nname = "foreman"\nrepo = "jeffrichley/foreman"\n',
+        encoding="utf-8",
+    )
     assert _project_block_exists(cfg, "foreman") is True
 
 
 def test_project_block_exists_false_for_other_project(tmp_path: Path) -> None:
     cfg = tmp_path / "config.toml"
-    cfg.write_text('[projects.voice]\nrepo = "jeffrichley/voice"\n', encoding="utf-8")
+    cfg.write_text(
+        '[[projects]]\nname = "voice"\nrepo = "jeffrichley/voice"\n',
+        encoding="utf-8",
+    )
     assert _project_block_exists(cfg, "foreman") is False
 
 
@@ -392,6 +432,33 @@ def _make_init_config(
     return init_config, clone
 
 
+def _v4_skeleton_config() -> str:
+    """Return a minimum-valid V4Config TOML — every required block,
+    placeholder values. Used by tests that need ``_load_config_or_empty``
+    to return a usable :class:`V4Config` so ``_verify_bot_installation``
+    actually runs against an apps shape."""
+    return (
+        "[daemon]\n"
+        'db_path = "/tmp/v4.db"\n'
+        'log_dir = "/tmp/logs"\n\n'
+        "[apps.planner]\n"
+        "app_id = 12345\n"
+        'private_key_path = "/keys/planner.pem"\n\n'
+        "[apps.reviewer]\n"
+        "app_id = 12345\n"
+        'private_key_path = "/keys/reviewer.pem"\n\n'
+        "[apps.fixer]\n"
+        "app_id = 12345\n"
+        'private_key_path = "/keys/fixer.pem"\n\n'
+        "[apps.worker]\n"
+        "app_id = 12345\n"
+        'private_key_path = "/keys/worker.pem"\n\n'
+        "[orchestrator]\n"
+        "app_id = 99999\n"
+        'private_key_path = "/keys/orchestrator.pem"\n\n'
+    )
+
+
 def test_run_init_writes_config_block(tmp_path: Path) -> None:
     init_config, _clone = _make_init_config(tmp_path=tmp_path)
     fake_repo = _FakeRepo(slug=init_config.repo)
@@ -400,8 +467,13 @@ def test_run_init_writes_config_block(tmp_path: Path) -> None:
     result = run_init(init_config, admin_client=admin)
 
     contents = init_config.config_path.read_text(encoding="utf-8")
-    assert "[projects.foreman]" in contents
+    assert "[[projects]]" in contents
+    assert 'name = "foreman"' in contents
     assert 'repo = "jeffrichley/foreman"' in contents
+    # Brand-new config gets the full v4 skeleton.
+    assert "[daemon]" in contents
+    assert "[apps.planner]" in contents
+    assert "[orchestrator]" in contents
     assert result.config_path == init_config.config_path
 
 
@@ -440,45 +512,39 @@ def test_run_init_skips_instructions_when_file_exists(tmp_path: Path) -> None:
     assert result.instructions_written is False
 
 
-def test_run_init_creates_all_v3_labels_on_empty_repo(tmp_path: Path) -> None:
+def test_run_init_creates_all_v4_labels_on_empty_repo(tmp_path: Path) -> None:
+    """Phase 8d.9: ``foreman init`` writes the v4 label vocabulary —
+    the ``foreman:plan`` trigger plus one ``foreman:state-*`` label per
+    :data:`STATE_REGISTRY` entry. Pinning the exact set here protects
+    the catalog from silently drifting back to v3 or growing a label
+    the observer doesn't actually stamp."""
     init_config, _clone = _make_init_config(tmp_path=tmp_path)
     fake_repo = _FakeRepo(slug=init_config.repo)
     admin = _FakeAdminClient(repo=fake_repo)
 
     result = run_init(init_config, admin_client=admin)
 
-    # v3 label vocabulary: 10 state/modifier labels (incl. failed terminal)
-    # + 3 impl-attempt + 3 fix-attempt counters = 16 total. v2's plan/
-    # spec-review/spec-ready/implementing/implementing-ready/ready-for-merge
-    # labels were removed.
-    expected_names = [name for name, _color, _desc in _FOREMAN_LABELS]
+    expected_names = [str(name) for name, _color, _desc in _FOREMAN_LABELS]
     assert len(result.labels_created) == len(expected_names)
     assert len(result.labels_existing) == 0
     created_names = [c["name"] for c in fake_repo.create_label_calls]
     assert sorted(created_names) == sorted(expected_names)
-    # Pin the v3 vocabulary explicitly so the catalog can't silently
-    # drift back to v2 names.
+    # Pin the v4 vocabulary explicitly. The state-* labels are derived
+    # from :data:`foreman.v4.states.registry.STATE_REGISTRY`; the
+    # trigger label stays on the typed ``foreman.labels.Label`` enum.
     assert set(expected_names) == {
-        # foreman#171: queue label, auto-transitions to foreman:planning
         "foreman:plan",
-        "foreman:planning",
-        "foreman:plan-approved",
-        "foreman:merging-plan",
-        "foreman:spec-fix",
-        "foreman:impl-review",
-        "foreman:impl-approved",
-        "foreman:merging-impl",
-        "foreman:impl-fix",
-        "foreman:needs-help",
-        "foreman:hold",
-        "foreman:done",
-        "foreman:failed",
-        "foreman:impl-attempt-1",
-        "foreman:impl-attempt-2",
-        "foreman:impl-attempt-3",
-        "foreman:fix-attempt-1",
-        "foreman:fix-attempt-2",
-        "foreman:fix-attempt-3",
+        "foreman:state-queued",
+        "foreman:state-planning",
+        "foreman:state-spec-review",
+        "foreman:state-spec-fix",
+        "foreman:state-implementing",
+        "foreman:state-impl-review",
+        "foreman:state-impl-fix",
+        "foreman:state-merging",
+        "foreman:state-done",
+        "foreman:state-failed",
+        "foreman:state-needs-help",
     }
 
 
@@ -489,11 +555,11 @@ def test_run_init_skips_existing_labels(tmp_path: Path) -> None:
         slug=init_config.repo,
         existing_labels=[
             _FakeLabel(
-                name="foreman:planning",
+                name="foreman:state-planning",
                 color="CCCCCC",
                 description="Custom operator description",
             ),
-            _FakeLabel(name="foreman:hold"),
+            _FakeLabel(name="foreman:state-done"),
         ],
     )
     admin = _FakeAdminClient(repo=fake_repo)
@@ -502,9 +568,11 @@ def test_run_init_skips_existing_labels(tmp_path: Path) -> None:
 
     total = len(_FOREMAN_LABELS)
     assert len(result.labels_created) == total - 2
-    assert sorted(result.labels_existing) == ["foreman:hold", "foreman:planning"]
+    assert sorted(result.labels_existing) == ["foreman:state-done", "foreman:state-planning"]
     # The pre-existing label's color/description was NOT overwritten.
-    plan_label = next(lbl for lbl in fake_repo._labels if lbl.name == "foreman:planning")
+    plan_label = next(
+        lbl for lbl in fake_repo._labels if lbl.name == "foreman:state-planning"
+    )
     assert plan_label.color == "CCCCCC"
     assert plan_label.description == "Custom operator description"
 
@@ -516,7 +584,7 @@ def test_run_init_treats_422_create_as_existing(tmp_path: Path) -> None:
     fake_repo = _FakeRepo(
         slug=init_config.repo,
         raise_on_create={
-            "foreman:hold": GithubException(
+            "foreman:state-done": GithubException(
                 status=422, data={"message": "Validation Failed"}, headers=None
             )
         },
@@ -525,14 +593,15 @@ def test_run_init_treats_422_create_as_existing(tmp_path: Path) -> None:
 
     result = run_init(init_config, admin_client=admin)
 
-    assert "foreman:hold" in result.labels_existing
-    assert "foreman:hold" not in result.labels_created
+    assert "foreman:state-done" in result.labels_existing
+    assert "foreman:state-done" not in result.labels_created
 
 
 def test_run_init_refuses_overwrite_without_force(tmp_path: Path) -> None:
     init_config, _clone = _make_init_config(tmp_path=tmp_path)
     init_config.config_path.write_text(
-        '[projects.foreman]\nrepo = "someone/else"\n', encoding="utf-8"
+        '[[projects]]\nname = "foreman"\nrepo = "someone/else"\n',
+        encoding="utf-8",
     )
     fake_repo = _FakeRepo(slug=init_config.repo)
     admin = _FakeAdminClient(repo=fake_repo)
@@ -547,7 +616,8 @@ def test_run_init_refuses_overwrite_without_force(tmp_path: Path) -> None:
 def test_run_init_overwrites_with_force(tmp_path: Path) -> None:
     init_config, _clone = _make_init_config(tmp_path=tmp_path, force=True)
     init_config.config_path.write_text(
-        '[projects.foreman]\nrepo = "someone/else"\nlocal_clone_path = "/tmp/old"\n',
+        '[[projects]]\nname = "foreman"\nrepo = "someone/else"\n'
+        'local_clone_path = "/tmp/old"\n',
         encoding="utf-8",
     )
     fake_repo = _FakeRepo(slug=init_config.repo)
@@ -624,6 +694,14 @@ def test_run_init_bot_verification_records_failure_without_aborting(
     fake_repo = _FakeRepo(slug=init_config.repo)
     admin = _FakeAdminClient(repo=fake_repo)
 
+    # Seed an existing config so `_verify_bot_installation` is reached
+    # (without v4 apps on disk, run_init reports every role as skipped
+    # without consulting the verifier at all).
+    init_config.config_path.parent.mkdir(parents=True, exist_ok=True)
+    init_config.config_path.write_text(
+        _v4_skeleton_config(), encoding="utf-8"
+    )
+
     # Stub _verify_bot_installation to simulate one fail + three skip.
     from foreman import init as init_mod
 
@@ -657,16 +735,18 @@ def test_run_init_summary_contains_expected_fields(tmp_path: Path) -> None:
 
     summary = result.summary
     assert "jeffrichley/foreman" in summary
-    assert "[projects.foreman]" in summary
+    # v4: the summary names the [[projects]] block with the project's
+    # ``name`` key.
+    assert "[[projects]]" in summary
+    assert "'foreman'" in summary
     assert "INSTRUCTIONS.md" in summary
     assert f"{len(_FOREMAN_LABELS)} labels" in summary
     assert "Next steps" in summary
-    assert "foreman plan https://github.com/jeffrichley/foreman/issues/" in summary
-    # v3: the next-steps prompt now points operators at the v3 entry
-    # label (``foreman:planning``); the legacy ``foreman:plan`` label
-    # was removed.
-    assert "foreman:planning" in summary
-    assert "foreman:plan and run" not in summary
+    # v4: the next-steps prompt points operators at the v4 trigger
+    # label (``foreman:plan``) + the daemon-start command, not the
+    # legacy v3 ``foreman plan <url>`` invocation.
+    assert "foreman:plan" in summary
+    assert "foreman daemon start" in summary
 
 
 def test_run_init_summary_notes_existing_instructions(tmp_path: Path) -> None:
@@ -857,54 +937,60 @@ def test_template_render_is_timestamp_stable() -> None:
 
 
 # ---------------------------------------------------------------------------
-# D1 (architecture stability plan 2026-06-11): drift detection between the
-# init catalog and the Label StrEnum. Init owns CREATION metadata (color +
-# description); labels module owns the string + classification. The two must
-# enumerate the same set; if they drift, the next ``foreman init`` either
-# creates labels the rules don't understand or omits labels that rules do.
+# Phase 8d.9: drift detection between the init catalog and the v4 state
+# machine. Init owns the v4 label-creation metadata (color + description);
+# :data:`foreman.v4.states.registry.STATE_REGISTRY` owns the state names.
+# The two must enumerate the same set so an operator running ``foreman
+# init`` ends up with one ``foreman:state-*`` label per state the
+# observer might stamp.
 # ---------------------------------------------------------------------------
 
 
-def test_init_foreman_labels_matches_label_enum() -> None:
-    """Pin that the init catalog and the Label enum enumerate the same set.
+def test_init_foreman_labels_covers_every_v4_state() -> None:
+    """Every entry in :data:`STATE_REGISTRY` must have a matching
+    ``foreman:state-<kebab>`` label in the init catalog.
 
-    Drift is the failure mode foreman#194 was supposed to prevent the
-    first time around (and the orphan-PR bug let regression sneak back
-    in). This is the durable artifact that catches it next time —
-    explicitly testing the cross-module agreement so adding a label in
-    one place without the other breaks loudly.
+    Drift detection: adding a new state to the registry without
+    teaching init how to create the label would leave the observer
+    trying to stamp a label the repo doesn't have. The 422 fallback in
+    ``_ensure_labels`` would mask the create-as-needed, but the
+    observer's ``add_to_labels`` would fail in production.
     """
+    from foreman.v4.states.registry import STATE_REGISTRY
+
+    init_names = {str(entry[0]) for entry in _FOREMAN_LABELS}
+    expected_state_labels = {
+        f"foreman:state-{_kebab(name)}" for name in STATE_REGISTRY
+    }
+    missing = expected_state_labels - init_names
+    assert not missing, f"States in registry without an init-time label: {missing}"
+
+
+def _kebab(state_name: str) -> str:
+    """Test helper: mirror init's ``_state_label_name`` kebab transform."""
+    import re
+
+    return re.sub(r"(?<!^)([A-Z])", r"-\1", state_name).lower()
+
+
+def test_init_foreman_labels_includes_trigger_label() -> None:
+    """The ``foreman:plan`` trigger label must always be in the catalog.
+    Without it an operator who runs ``foreman init`` then labels an
+    issue with ``foreman:plan`` gets a 'label does not exist' GitHub
+    API error."""
     from foreman.labels import Label
 
-    init_names = {entry[0].value for entry in _FOREMAN_LABELS}
-    enum_names = {m.value for m in Label}
-    assert init_names == enum_names, (
-        f"In init catalog but not Label enum: {init_names - enum_names}; "
-        f"in Label enum but not init catalog: {enum_names - init_names}"
-    )
-
-
-def test_init_foreman_labels_uses_label_members_not_strings() -> None:
-    """The init catalog's name column must be a :class:`Label` member,
-    not a bare string. StrEnum equality means a bare string would
-    silently work at runtime; this test enforces the discipline that
-    the catalog goes through the typed source-of-truth."""
-    from foreman.labels import Label
-
-    for entry in _FOREMAN_LABELS:
-        assert isinstance(entry[0], Label), (
-            f"init catalog entry {entry!r} uses bare string for name; "
-            f"must be a Label member so drift-detection is structural"
-        )
+    init_names = {str(entry[0]) for entry in _FOREMAN_LABELS}
+    assert Label.PLAN.value in init_names
 
 
 def test_init_foreman_labels_has_no_duplicate_names() -> None:
-    """Each Label must appear at most once in the init catalog. A
+    """Each label name must appear at most once in the init catalog. A
     duplicate would cause ``_ensure_labels`` to attempt to create the
     same label twice on a fresh repo, and the second create would 422
     — currently silently treated as 'already existed.' Better to catch
     duplicates in the catalog up front."""
-    names = [entry[0] for entry in _FOREMAN_LABELS]
+    names = [str(entry[0]) for entry in _FOREMAN_LABELS]
     assert len(names) == len(set(names)), (
         f"Duplicate label in _FOREMAN_LABELS: {[n for n in names if names.count(n) > 1]}"
     )

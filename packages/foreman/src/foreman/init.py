@@ -3,15 +3,17 @@
 The init flow is a one-shot setup pass that:
 
   1. Validates the target repo + clone path
-  2. Refuses to overwrite an existing ``[projects.<name>]`` config block
-     unless ``--force`` is passed
+  2. Refuses to overwrite an existing ``[[projects]]`` block whose
+     ``name`` matches unless ``--force`` is passed
   3. Writes a ``.foreman/INSTRUCTIONS.md`` template into the local clone
      (skipping if one already exists — even with ``--force``)
-  4. Creates the Foreman state + modifier + attempt labels on the
-     target repo (idempotent: existing labels are left alone)
+  4. Creates the Foreman v4 state labels on the target repo (idempotent:
+     existing labels are left alone). The label set tracks the v4
+     observer-owned state machine: the ``foreman:plan`` trigger plus the
+     ``foreman:state-*`` set, one per :data:`STATE_REGISTRY` entry.
   5. Best-effort verifies that each role's GitHub App can mint an
      installation token against the target repo
-  6. Appends the ``[projects.<name>]`` block to ``~/.foreman/config.toml``
+  6. Appends the ``[[projects]]`` block to ``~/.foreman/v4/config.toml``
   7. Returns a structured :class:`InitResult` the CLI surfaces as a
      ready-to-use summary
 
@@ -27,13 +29,20 @@ Design notes:
 * Bot verification is best-effort. The operator may want to set up
   labels + config now and install bots later; refusing to finish init
   because one bot isn't installed would force them to interleave.
-* The ``[projects.<name>.apps]`` block is NOT written. App IDs are
-  per-bot and operator-managed; the summary points at the existing
-  ``voice`` config as a reference shape.
+* The top-level ``[apps.<role>]`` and ``[orchestrator]`` blocks are NOT
+  written when adding a new project to an existing config; they are
+  operator-curated single-source identity blocks that ``run_init``
+  refuses to clobber. When the config file does not exist yet, init
+  writes a templated full v4 shape with placeholder values the operator
+  must edit before the daemon will start.
 * TOML writing uses string manipulation rather than ``tomli_w`` (not a
   current dep). Existing project blocks and comments are preserved
   verbatim — we only append the new block (or replace it block-by-block
   under ``--force``).
+
+Phase 8d.9: this module was rewritten end-to-end onto the v4 substrate
+(V4Config / v4/config.toml / v4 state labels). The v3 ``foreman init``
+ergonomic now writes a config the v4 daemon can actually read.
 """
 
 from __future__ import annotations
@@ -48,8 +57,9 @@ from pathlib import Path
 from github import Github, GithubException
 
 from foreman.auth import fetch_app_metadata, mint_installation_token
-from foreman.config import AppsConfig, Config, load_config
 from foreman.labels import Label
+from foreman.v4.config import AppsConfig, V4Config, load_config
+from foreman.v4.states.registry import STATE_REGISTRY
 
 _log = logging.getLogger(__name__)
 
@@ -67,67 +77,80 @@ _TEMPLATE_RESOURCE_NAME = "instructions.md.template"
 # rather than imported so init has no dependency on the worker module.
 _DEFAULT_CHECK_COMMAND = "just check"
 
-# Default config path. Mirrors ``cli._default_config_path`` but without
-# requiring click in this module.
-_DEFAULT_CONFIG_PATH = Path.home() / ".foreman" / "config.toml"
+# Default v4 config path. Mirrors ``foreman.v4.cli.init._DEFAULT_CONFIG``
+# but without requiring typer in this module. Phase 8d.9 moved this from
+# ``~/.foreman/config.toml`` (v3) to ``~/.foreman/v4/config.toml`` so a
+# fresh ``foreman init`` produces a file the v4 daemon can read.
+_DEFAULT_CONFIG_PATH = Path.home() / ".foreman" / "v4" / "config.toml"
 
-# The Foreman labels created on the target repo. Order is intentional:
-# state labels first (in v3 pipeline order), then modifier labels, then
-# attempt counters. The structure mirrors the operator's mental model of
-# the pipeline rather than alphabetic order.
-#
-# D1 (architecture stability plan 2026-06-11): the name column is now
-# the :class:`foreman.labels.Label` StrEnum member rather than a raw
-# string. Equality with the bare string still works (StrEnum), and the
-# drift test in ``test_init.py`` pins that this catalog's name column
-# matches the :class:`Label` membership exactly — neither side can grow
-# a label the other doesn't have.
-_FOREMAN_LABELS: list[tuple[Label, str, str]] = [
-    # name (Label member), color (no leading '#'), description
-    (
-        Label.PLAN,
-        "0E8A16",
-        "Foreman: queue for planning (auto-transitions to foreman:planning)",
-    ),
-    (Label.PLANNING, "FBCA04", "Foreman: spec phase (Planner + Reviewer)"),
-    (
-        Label.PLAN_APPROVED,
-        "0E8A16",
-        "Foreman: spec approved, queued for Worker",
-    ),
-    (
-        Label.MERGING_PLAN,
-        "FBCA04",
-        "Foreman: attempting to merge the spec PR",
-    ),
-    (Label.SPEC_FIX, "D93F0B", "Foreman: spec PR needs human follow-up"),
-    (Label.IMPL_REVIEW, "FBCA04", "Foreman: impl PR ready for Reviewer"),
-    (
-        Label.IMPL_APPROVED,
-        "0E8A16",
-        "Foreman: impl approved, queued for merge",
-    ),
-    (
-        Label.MERGING_IMPL,
-        "FBCA04",
-        "Foreman: attempting to merge the impl PR",
-    ),
-    (Label.IMPL_FIX, "D93F0B", "Foreman: impl PR needs Fixer follow-up"),
-    (
-        Label.NEEDS_HELP,
-        "FBCA04",
-        "Foreman: surfaced for human intervention",
-    ),
-    (Label.HOLD, "BFD4F2", "Foreman: manual pause (blocks all rules)"),
-    (Label.DONE, "6F42C1", "Foreman: ticket complete"),
-    (Label.FAILED, "B60205", "Foreman: ticket exhausted retries (terminal)"),
-    (Label.IMPL_ATTEMPT_1, "BFD4F2", "Foreman: impl cycle attempt 1 of 3"),
-    (Label.IMPL_ATTEMPT_2, "BFD4F2", "Foreman: impl cycle attempt 2 of 3"),
-    (Label.IMPL_ATTEMPT_3, "BFD4F2", "Foreman: impl cycle attempt 3 of 3"),
-    (Label.FIX_ATTEMPT_1, "BFD4F2", "Foreman: fix cycle attempt 1 of 3"),
-    (Label.FIX_ATTEMPT_2, "BFD4F2", "Foreman: fix cycle attempt 2 of 3"),
-    (Label.FIX_ATTEMPT_3, "BFD4F2", "Foreman: fix cycle attempt 3 of 3"),
-]
+# Default v4 daemon paths used when we emit a brand-new config file.
+_DEFAULT_DB_PATH = "~/.foreman/v4/state.db"
+_DEFAULT_LOG_DIR = "~/.foreman/v4/logs"
+
+
+def _state_label_name(state_name: str) -> str:
+    """Map a STATE_REGISTRY entry ("Queued", "SpecReview", ...) to a label.
+
+    The label form is ``foreman:state-<kebab>``. "SpecReview" →
+    "spec-review", "NeedsHelp" → "needs-help".
+    """
+    kebab = re.sub(r"(?<!^)([A-Z])", r"-\1", state_name).lower()
+    return f"foreman:state-{kebab}"
+
+
+def _build_v4_label_catalog() -> list[tuple[Label | str, str, str]]:
+    """Catalog the v4 labels ``foreman init`` writes to a target repo.
+
+    Returns a list of ``(name, color, description)`` triples where
+    ``name`` is a :class:`Label` member when the label already lives in
+    the typed enum (the ``foreman:plan`` trigger), otherwise a bare
+    string for the observer-owned ``foreman:state-*`` set.
+
+    The ``foreman:state-*`` set is derived from
+    :data:`foreman.v4.states.registry.STATE_REGISTRY` so adding a new
+    state automatically grows the init-time label set — no second place
+    to keep in sync. Color coding by category mirrors the v3 catalog's
+    intent (queue/in-flight/blocking/terminal palettes).
+    """
+    # Map state name → (color, description). Anything not listed here
+    # is treated as in-flight (yellow) — defense in depth so a new state
+    # added to the registry without being categorized still gets a
+    # plausible label.
+    state_metadata: dict[str, tuple[str, str]] = {
+        "Queued": ("0E8A16", "Foreman v4: queued, waiting for Poller"),
+        "Planning": ("FBCA04", "Foreman v4: Planner running"),
+        "SpecReview": ("FBCA04", "Foreman v4: Reviewer running on spec PR"),
+        "SpecFix": ("D93F0B", "Foreman v4: Fixer running on spec PR"),
+        "Implementing": ("FBCA04", "Foreman v4: Worker running"),
+        "ImplReview": ("FBCA04", "Foreman v4: Reviewer running on impl PR"),
+        "ImplFix": ("D93F0B", "Foreman v4: Fixer running on impl PR"),
+        "Merging": ("FBCA04", "Foreman v4: Orchestrator merging PR"),
+        "Done": ("6F42C1", "Foreman v4: ticket complete"),
+        "Failed": ("B60205", "Foreman v4: ticket exhausted retries (terminal)"),
+        "NeedsHelp": ("FBCA04", "Foreman v4: surfaced for human intervention"),
+    }
+    catalog: list[tuple[Label | str, str, str]] = [
+        (
+            Label.PLAN,
+            "0E8A16",
+            "Foreman v4: trigger label — Poller picks up the ticket",
+        ),
+    ]
+    for state_name in STATE_REGISTRY:
+        color, description = state_metadata.get(
+            state_name,
+            ("FBCA04", f"Foreman v4: state {state_name}"),
+        )
+        catalog.append((_state_label_name(state_name), color, description))
+    return catalog
+
+
+# The Foreman v4 labels created on the target repo. Phase 8d shifted all
+# label writes to the observer + state machine; the init-time catalog
+# mirrors that set so an operator can label an issue ``foreman:plan`` and
+# expect the rest of the ``foreman:state-*`` labels to be available for
+# the observer to stamp.
+_FOREMAN_LABELS: list[tuple[Label | str, str, str]] = _build_v4_label_catalog()
 
 # The four role names init knows about; mirrors :mod:`foreman.identity`.
 _ROLE_NAMES: tuple[str, ...] = ("planner", "reviewer", "fixer", "worker")
@@ -151,7 +174,7 @@ class InitConfig:
     """Target GitHub repo in ``owner/name`` form."""
 
     name: str
-    """Project name used as the ``[projects.<name>]`` key in the config."""
+    """Project name used as the ``[[projects]].name`` key in the config."""
 
     clone_path: Path
     """Absolute path to the local clone on disk."""
@@ -161,10 +184,10 @@ class InitConfig:
     different from the default (see :func:`run_init`)."""
 
     force: bool
-    """When True, overwrite an existing ``[projects.<name>]`` block."""
+    """When True, overwrite an existing matching ``[[projects]]`` block."""
 
     config_path: Path
-    """Path to ``~/.foreman/config.toml`` (or override)."""
+    """Path to ``~/.foreman/v4/config.toml`` (or override)."""
 
 
 @dataclass
@@ -427,7 +450,12 @@ def _ensure_labels(*, client: Github, repo_slug: str) -> tuple[list[str], list[s
     existing_names = {label.name for label in repo.get_labels()}
     newly_created: list[str] = []
     already_existed: list[str] = []
-    for name, color, description in _FOREMAN_LABELS:
+    for label_id, color, description in _FOREMAN_LABELS:
+        # Catalog entries are either a Label enum member (typed) or a
+        # bare string (state-* labels). Coerce to string for the GitHub
+        # API; both forms are equal-comparable for the set membership
+        # check above.
+        name = str(label_id)
         if name in existing_names:
             already_existed.append(name)
             continue
@@ -453,10 +481,11 @@ def _ensure_labels(*, client: Github, repo_slug: str) -> tuple[list[str], list[s
 def _verify_bot_installation(*, role: str, apps: AppsConfig, repo_slug: str) -> BotVerification:
     """Best-effort check that ``role``'s App is installed on ``repo_slug``.
 
-    Skipped (with a clear ``detail``) when the role's App ID is not
-    configured — the operator may set up apps incrementally. Failures
-    (network errors, missing key file, installation absent) are
-    recorded but do not raise; init continues with the next role.
+    Skipped (with a clear ``detail``) when the role's App credentials
+    are placeholders or unreadable — the operator may set up apps
+    incrementally. Failures (network errors, missing key file,
+    installation absent) are recorded but do not raise; init continues
+    with the next role.
     """
     try:
         app_id = _resolve_app_id(role, apps)
@@ -474,19 +503,21 @@ def _verify_bot_installation(*, role: str, apps: AppsConfig, repo_slug: str) -> 
 
 
 def _resolve_app_id(role: str, apps: AppsConfig) -> int:
-    """Look up a role's App ID via :class:`AppsConfig`'s resolvers."""
-    resolver_name = f"resolve_{role}_app_id"
-    resolver = getattr(apps, resolver_name)
-    result: int = resolver()
-    return result
+    """Look up a role's App ID on a v4 :class:`AppsConfig`."""
+    creds = getattr(apps, role)
+    app_id: int = creds.app_id
+    if app_id <= 0:
+        raise RuntimeError(f"apps.{role}.app_id is not set (got {app_id})")
+    return app_id
 
 
 def _resolve_key_path(role: str, apps: AppsConfig) -> Path:
-    """Look up a role's private-key path via :class:`AppsConfig`."""
-    resolver_name = f"resolve_{role}_private_key_path"
-    resolver = getattr(apps, resolver_name)
-    result: Path = resolver()
-    return result
+    """Look up a role's private-key path on a v4 :class:`AppsConfig`."""
+    creds = getattr(apps, role)
+    raw: str = creds.private_key_path
+    if not raw:
+        raise RuntimeError(f"apps.{role}.private_key_path is not set")
+    return Path(raw)
 
 
 # ----------------------------------------------------------------------
@@ -495,14 +526,15 @@ def _resolve_key_path(role: str, apps: AppsConfig) -> Path:
 
 
 def _format_project_block(*, name: str, repo: str, clone_path: Path, check_command: str) -> str:
-    """Render a ``[projects.<name>]`` TOML block.
+    """Render a ``[[projects]]`` TOML block.
 
     ``check_command`` is omitted when it equals the default — the
     Worker resolves None to ``"just check"``, so a project on the
     default doesn't need to repeat it in config. Projects with a
     non-default value emit the line so it's discoverable.
     """
-    lines = [f"[projects.{name}]"]
+    lines = ["[[projects]]"]
+    lines.append(f'name = "{name}"')
     lines.append(f'repo = "{repo}"')
     # Normalize Windows backslashes to forward slashes inside the TOML
     # so the config is portable across OSes (TOML treats backslashes
@@ -515,23 +547,83 @@ def _format_project_block(*, name: str, repo: str, clone_path: Path, check_comma
 
 
 def _project_block_re(name: str) -> re.Pattern[str]:
-    """Compile a regex matching the ``[projects.<name>]`` block.
+    """Compile a regex matching the ``[[projects]]`` block whose
+    ``name`` field equals ``name``.
 
-    The match runs from the block header through the start of the next
-    top-level block (``[`` at line start) or end of file. Sub-blocks
-    like ``[projects.<name>.apps]`` are NOT included — those are
-    operator-curated and we deliberately leave them untouched on
-    overwrite (so the bot config survives a re-init).
+    The match runs from the ``[[projects]]`` header through the start
+    of the next top-level block (``[`` at line start) or end of file.
+    The block must contain a ``name = "<name>"`` line — we anchor on
+    that so the regex only matches blocks belonging to the named project.
 
     Each repeated content line is anchored to ``^`` in multiline mode
     so we never let ``[^\\[].*`` accidentally cross a newline into a
     subsequent ``[…]`` block header. Blank lines DO match (their first
-    char is ``\\n``, not ``[``), which is what we want — operators
-    typically leave a blank line between the main block and the
-    ``.apps`` sub-block.
+    char is ``\\n``, not ``[``).
     """
-    pattern = r"^\[projects\." + re.escape(name) + r"\][^\n]*\n" + r"(?:^[^\[\n].*\n)*"
+    escaped = re.escape(name)
+    pattern = (
+        r"^\[\[projects\]\][^\n]*\n"
+        r"(?:^[^\[\n].*\n)*?"
+        r"^name = \"" + escaped + r"\"\n"
+        r"(?:^[^\[\n].*\n)*"
+    )
     return re.compile(pattern, flags=re.MULTILINE)
+
+
+_INITIAL_CONFIG_TEMPLATE = """\
+# Foreman v4 config — written by ``foreman init``.
+#
+# Edit the [apps.<role>] / [orchestrator] placeholders below to point at
+# real GitHub App credentials before starting the daemon. The
+# ``foreman init`` command does NOT write real credentials; it leaves
+# placeholders so the file is daemon-loadable as a schema but refuses
+# to run until the operator wires identity.
+
+[daemon]
+db_path = "{db_path}"
+log_dir = "{log_dir}"
+log_level = "INFO"
+tick_seconds = 30.0
+max_in_flight = 1
+role_timeout_seconds = 600
+max_state_attempts = 3
+merge_mechanism = "queue"
+
+[apps.planner]
+app_id = 0
+private_key_path = ""
+
+[apps.reviewer]
+app_id = 0
+private_key_path = ""
+
+[apps.fixer]
+app_id = 0
+private_key_path = ""
+
+[apps.worker]
+app_id = 0
+private_key_path = ""
+
+[orchestrator]
+app_id = 0
+private_key_path = ""
+
+"""
+
+
+def _initial_v4_config_text() -> str:
+    """Return the boilerplate written when ``config.toml`` doesn't exist.
+
+    Includes a full V4Config skeleton — ``[daemon]``, ``[apps.<role>]``
+    x4, ``[orchestrator]`` — with placeholder values the operator must
+    edit before the daemon will accept the file. Trailing newline so the
+    first ``[[projects]]`` block appears separated.
+    """
+    return _INITIAL_CONFIG_TEMPLATE.format(
+        db_path=_DEFAULT_DB_PATH,
+        log_dir=_DEFAULT_LOG_DIR,
+    )
 
 
 def _write_project_block_to_config(
@@ -541,24 +633,26 @@ def _write_project_block_to_config(
     name: str,
     force: bool,
 ) -> None:
-    """Append or replace the project block in the config file.
+    """Append or replace the project block in the v4 config file.
 
     Behavior:
-      * Config missing → create with just this block.
+      * Config missing → create with the full v4 skeleton +
+        ``[[projects]]`` block.
       * Block absent → append (separated by a blank line for readability).
       * Block present + ``force`` False → :class:`FileExistsError`
         (the caller should have checked earlier; this is a defense in
         depth so the write-step never silently overwrites).
-      * Block present + ``force`` True → replace ONLY the
-        ``[projects.<name>]`` block; do not touch the sibling
-        ``[projects.<name>.apps]`` block (operator-managed).
+      * Block present + ``force`` True → replace ONLY the matching
+        ``[[projects]]`` block; do not touch sibling blocks or the
+        operator-curated ``[apps.<role>]`` / ``[orchestrator]`` blocks.
 
     String-based to avoid a new ``tomli_w`` dependency. Existing
     project blocks and comments are preserved verbatim.
     """
     config_path.parent.mkdir(parents=True, exist_ok=True)
     if not config_path.exists():
-        config_path.write_text(block_text, encoding="utf-8")
+        skeleton = _initial_v4_config_text()
+        config_path.write_text(skeleton + block_text, encoding="utf-8")
         return
 
     existing = config_path.read_text(encoding="utf-8")
@@ -572,29 +666,40 @@ def _write_project_block_to_config(
     if not force:
         # Defense in depth — the orchestrator already raised before we
         # got here, but never trust the caller blindly with a write.
-        raise FileExistsError(f"Project block [projects.{name}] already exists in {config_path}")
+        raise FileExistsError(
+            f"Project block for {name!r} already exists in {config_path}"
+        )
     replaced = block_re.sub(block_text, existing, count=1)
     config_path.write_text(replaced, encoding="utf-8")
 
 
 def _project_block_exists(config_path: Path, name: str) -> bool:
-    """Return True iff ``[projects.<name>]`` is already in the config."""
+    """Return True iff a ``[[projects]]`` block with ``name = "<name>"``
+    is already in the config."""
     if not config_path.exists():
         return False
     existing = config_path.read_text(encoding="utf-8")
     return _project_block_re(name).search(existing) is not None
 
 
-def _load_config_or_empty(config_path: Path) -> Config:
-    """Load the config or return an empty one when the file is absent.
+def _load_config_or_empty(config_path: Path) -> V4Config | None:
+    """Load the v4 config, or return ``None`` when absent / unparseable.
 
-    Used to read the existing ``[projects.<name>.apps]`` block (if any)
-    so bot verification can run against operator-supplied App IDs even
-    on a fresh-but-partial init.
+    Returns ``None`` (not a blank V4Config) when the file is absent or
+    when parsing raises — V4Config requires ``apps`` + ``orchestrator``,
+    so we can't fabricate a default. Callers treat ``None`` as
+    "skip per-project bot verification — no usable apps shape yet".
     """
     if not config_path.exists():
-        return Config()
-    return load_config(config_path)
+        return None
+    try:
+        return load_config(config_path)
+    except Exception as exc:
+        # Defensive: config-load failures (bad TOML, missing required
+        # blocks) must not crash init. Bot verification falls back to
+        # "skipped" for every role and the operator sees a clear summary.
+        _log.debug("v4 config at %s unparseable: %s", config_path, exc)
+        return None
 
 
 # ----------------------------------------------------------------------
@@ -617,7 +722,7 @@ def _format_summary(result: InitResult) -> str:
     head = (
         f"OK Foreman initialized for {result.repo}\n"
         f"  Config block:  {result.config_path} "
-        f"(added [projects.{result.name}])\n"
+        f"(added [[projects]] name={result.name!r})\n"
         f"  Instructions:  {result.instructions_path} ({instructions_note})\n"
         f"  Labels:        {len(_FOREMAN_LABELS)} labels total on {result.repo} "
         f"({len(result.labels_created)} newly created, "
@@ -627,13 +732,11 @@ def _format_summary(result: InitResult) -> str:
     next_steps = (
         "\n"
         "Next steps:\n"
-        f"  1. Add the [projects.{result.name}.apps] block to "
-        f"{result.config_path} with your\n"
-        "     bot App IDs (see an existing project's apps block for reference).\n"
+        f"  1. Edit {result.config_path} — fill in real app_id /\n"
+        "     private_key_path for [apps.<role>] and [orchestrator].\n"
         f"  2. Review and customize {result.instructions_path}\n"
-        "  3. Label an issue with foreman:planning and run:\n"
-        f"     foreman plan https://github.com/{result.repo}/issues/<N> "
-        f"--project {result.name}"
+        "  3. Label an issue with foreman:plan and start the daemon:\n"
+        "     foreman daemon start"
     )
     if result.instructions_dirty_warning:
         warning_block = (
@@ -649,6 +752,17 @@ def _format_summary(result: InitResult) -> str:
 # ----------------------------------------------------------------------
 # Orchestrator
 # ----------------------------------------------------------------------
+
+
+def _find_project(config: V4Config, name: str) -> AppsConfig | None:
+    """Return the ``apps`` block usable for bot verification.
+
+    V4Config carries a single top-level :class:`AppsConfig`; the
+    ``name`` argument is accepted (and unused beyond a presence check)
+    so the caller's intent stays clear at the call site.
+    """
+    _ = name  # presence-only — v4 apps are top-level, not per-project
+    return config.apps
 
 
 def run_init(
@@ -673,8 +787,8 @@ def run_init(
     Raises:
         ValueError: Args are invalid (bad repo slug, clone-path
             mismatch, etc.).
-        FileExistsError: ``[projects.<name>]`` already exists and
-            ``force`` was not set.
+        FileExistsError: A matching ``[[projects]]`` block already
+            exists and ``force`` was not set.
     """
     owner, _repo_name = _validate_repo_slug(init_config.repo)
     _ = owner  # presence is enough; consumed by _validate_repo_slug
@@ -706,18 +820,26 @@ def run_init(
     )
 
     # Step 5: best-effort bot verification. Read the apps block from
-    # the existing config (if any) so operators who already populated
-    # ``[projects.<name>.apps]`` benefit from verification on re-init.
+    # the existing config (if any). v4 apps are top-level — shared
+    # across every project on this host — so they don't need to be
+    # re-resolved per project. When the config is absent or
+    # unparseable, every role is reported as ``skipped``.
     existing_config = _load_config_or_empty(init_config.config_path)
-    apps = (
-        existing_config.projects[init_config.name].apps
-        if init_config.name in existing_config.projects
-        else AppsConfig()
-    )
-    bot_verifications = [
-        _verify_bot_installation(role=role, apps=apps, repo_slug=init_config.repo)
-        for role in _ROLE_NAMES
-    ]
+    apps = existing_config.apps if existing_config is not None else None
+    bot_verifications: list[BotVerification] = []
+    for role in _ROLE_NAMES:
+        if apps is None:
+            bot_verifications.append(
+                BotVerification(
+                    role=role,
+                    ok=False,
+                    detail="skipped: no v4 apps config on disk yet",
+                )
+            )
+            continue
+        bot_verifications.append(
+            _verify_bot_installation(role=role, apps=apps, repo_slug=init_config.repo)
+        )
 
     # Step 6: write the project block. We intentionally do this LAST so
     # any failure above leaves the config untouched.
