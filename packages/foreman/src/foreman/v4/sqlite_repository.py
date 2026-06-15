@@ -122,6 +122,19 @@ class SqliteTicketRepository:
     def at_path(cls, path: Path) -> SqliteTicketRepository:
         return cls(sqlite3.connect(path, check_same_thread=False))
 
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """Read-only handle to the underlying SQLite connection.
+
+        Exposed so bootstrap can pass it to ``EventArchiveObserver``
+        without reaching into ``_conn``. Callers MUST treat this as the
+        shared connection — additional writes from outside the
+        repository are still serialized by the same RLock-less SQLite
+        engine layer, so observer writes (single ``INSERT INTO events``
+        per event) are safe under WAL.
+        """
+        return self._conn
+
     # --- Ticket CRUD ---
 
     def create_ticket(
