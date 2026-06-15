@@ -33,13 +33,19 @@ _TERMINAL_STATES = ("Done", "Failed", "NeedsHelp")
 def _run_until_terminal(repo, ticket_id, *, dispatcher, git, bus):
     """Drive the ticket one transition at a time until it reaches a terminal.
 
-    Terminal states (Done/Failed/NeedsHelp) get one final state_instance row
-    for the journal — their transition() is a no-op execute that records the
-    landing. The loop exits once that landing instance is closed.
+    Terminal landings (Done/Failed/NeedsHelp) are synthesized inline by
+    ``state._enter_terminal`` — the transition that decides to advance
+    to the terminal also creates the journal row + emits
+    ``StateEnteredEvent`` for it. The WorkerPool never re-enqueues a
+    terminally-parked ticket, and this loop mirrors that: it checks
+    ticket state at the top of each iteration and returns as soon as
+    the ticket lands on a terminal.
     """
     seq = 0
     while True:
         ticket = repo.get_ticket(ticket_id)
+        if ticket.current_state in _TERMINAL_STATES:
+            return ticket
         seq += 1
         state = build_state(ticket.current_state)
         instance = repo.open_state_instance(
@@ -57,8 +63,6 @@ def _run_until_terminal(repo, ticket_id, *, dispatcher, git, bus):
         if isinstance(state, MergingState):
             state._pr_number_for = lambda _ctx: 42  # type: ignore[method-assign]
         state.transition(ctx)
-        if ticket.current_state in _TERMINAL_STATES:
-            return repo.get_ticket(ticket_id)
         if seq > 25:
             raise AssertionError("did not converge; check canned outcomes")
 

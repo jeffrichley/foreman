@@ -272,6 +272,34 @@ def test_observer_does_not_remove_trigger_label_on_later_transitions() -> None:
         )
 
 
+def test_observer_stamps_terminal_state_label_on_state_entered() -> None:
+    """Phase 8d.12 — observer stamps ``foreman:state-needshelp`` (or
+    ``-done`` / ``-failed``) when transition() emits StateEnteredEvent
+    for a terminal landing.
+
+    This is the bug surfaced by algokit#21's dogfood: the ticket
+    transitioned into NeedsHelp at the state-machine level, but no
+    StateEnteredEvent fired for the terminal, so the observer never
+    stamped the issue. The fix in state._enter_terminal synthesizes the
+    event; this test pins the observer's response to it.
+    """
+    repo, ticket = _make_repo_and_ticket("NeedsHelp")
+    writer = _RecordingWriter()
+    obs = LabelObservabilityObserver(writer=writer, repo=repo)
+    obs(
+        StateEnteredEvent(
+            ticket_id=ticket.id,
+            instance_id=99,
+            state_name="NeedsHelp",
+            sequence=4,
+            at=_T0,
+        )
+    )
+    assert writer.add_calls == [
+        ("foreman", 42, {"foreman:state-needshelp"}),
+    ]
+
+
 def test_writer_failure_propagates() -> None:
     """Label-write failure propagates — the EventBus owns the firewall,
     not the observer. We assert the exception class so EventBus's

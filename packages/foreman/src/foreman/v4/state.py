@@ -79,6 +79,59 @@ def _publish(ctx: StateContext, event_type: type, **kwargs: Any) -> None:
     ))
 
 
+#: State names whose transition() returns ``None`` (no further work). The
+#: WorkerPool will not re-enqueue the ticket once it lands here, so the
+#: state machine must emit lifecycle events for the terminal landing
+#: inline — see ``_enter_terminal``. Mirrors ``poller._TERMINAL_STATES``
+#: (the Poller skips polling tickets parked in any of these). Note this
+#: is intentionally broader than ``repository._TERMINAL_STATES``
+#: ({Done, Failed}) — that constant gates ``list_open_tickets``, which
+#: must keep NeedsHelp visible to operators awaiting human action.
+_TERMINAL_STATE_NAMES = frozenset({"Done", "Failed", "NeedsHelp"})
+
+
+def _enter_terminal(ctx: StateContext, terminal: TicketState) -> None:
+    """Create a state_instance row for ``terminal`` and emit ``StateEnteredEvent``.
+
+    Terminal states (Done/Failed/NeedsHelp) have nothing to do — their
+    ``execute()`` returns a CLEAN landing outcome and ``next_state()``
+    returns ``None``. The WorkerPool therefore never re-enqueues them,
+    which means the normal "next tick opens a new instance and emits
+    StateEntered" flow never runs for the terminal landing. Without
+    this helper, ``LabelObservabilityObserver`` (and any other observer
+    listening for ``StateEnteredEvent``) silently misses the terminal,
+    leaving the GitHub issue with no ``foreman:state-<terminal>`` label
+    — the gap that wedged the 2026-06-15 algokit#21 dogfood.
+
+    Resolution: synthesize the terminal's journal row + lifecycle event
+    in the same transition that decided to advance to it. No
+    ``StateExitedEvent`` is emitted — the ticket is permanently parked
+    here, so the state-progress label should remain on the issue for
+    human visibility.
+    """
+    now = ctx.clock()
+    sequence = ctx.repo.count_state_instances_for_ticket(ctx.ticket.id) + 1
+    terminal_instance = ctx.repo.open_state_instance(
+        ticket_id=ctx.ticket.id,
+        state_name=terminal.state_name,
+        sequence=sequence,
+        now=now,
+    )
+    if ctx.bus is not None:
+        ctx.bus.publish(StateEnteredEvent(
+            ticket_id=ctx.ticket.id,
+            instance_id=terminal_instance.id,
+            state_name=terminal.state_name,
+            sequence=terminal_instance.sequence,
+            at=now,
+        ))
+    # Close the row immediately. The ticket has landed; the row exists
+    # for journal completeness, not for further dispatch. We deliberately
+    # skip StateExitedEvent so the observer keeps the terminal label
+    # visible on the issue.
+    ctx.repo.close_state_instance(terminal_instance.id, now=now)
+
+
 class TicketState(ABC):
     """One phase in the ticket's lifecycle.
 
@@ -173,6 +226,10 @@ class TicketState(ABC):
                 ctx.ticket.id, needs_help.state_name, now=ctx.clock(),
             )
             ctx.repo.close_state_instance(ctx.instance.id, now=ctx.clock())
+            # Synthesize the terminal landing event so observers see it
+            # — WorkerPool will not re-enqueue once the ticket is parked
+            # in NeedsHelp. See ``_enter_terminal`` for the full rationale.
+            _enter_terminal(ctx, needs_help)
             return needs_help
 
         try:
@@ -227,6 +284,11 @@ class TicketState(ABC):
                 ctx.repo.set_ticket_state(
                     ctx.ticket.id, next_.state_name, now=ctx.clock(),
                 )
+                if next_.state_name in _TERMINAL_STATE_NAMES:
+                    # WorkerPool won't re-enqueue once parked here, so
+                    # the terminal landing event has to be synthesized
+                    # inline. See ``_enter_terminal`` for the rationale.
+                    _enter_terminal(ctx, next_)
             return next_
         finally:
             try:
