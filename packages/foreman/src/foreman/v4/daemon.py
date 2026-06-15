@@ -113,9 +113,20 @@ class Daemon:
                 self.tick_once()
                 self._stop.wait(self._config.tick_seconds)
         finally:
-            self._pool.shutdown(wait=True)
+            self.shutdown(wait=True)
 
     def stop(self) -> None:
         """Signal the loop to exit. Safe to call from a signal handler
         — threading.Event.set() is async-signal-safe."""
         self._stop.set()
+
+    def shutdown(self, *, wait: bool = True) -> None:
+        """Drain the WorkerPool. Idempotent — safe to call more than once.
+
+        ``wait=True`` blocks until every in-flight transition completes;
+        ``wait=False`` returns as soon as the executor stops accepting
+        new submits. Delegates to ``WorkerPool.shutdown``, which wraps
+        ``concurrent.futures.ThreadPoolExecutor.shutdown`` — itself
+        documented as safe to call repeatedly.
+        """
+        self._pool.shutdown(wait=wait)

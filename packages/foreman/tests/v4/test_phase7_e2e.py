@@ -134,4 +134,4 @@ def test_full_boot_from_toml_to_done(tmp_path: Path, monkeypatch):
         # tests don't see this run's JsonLinesHandler still attached.
         reset_logging()
         if "ctx" in locals() and ctx.daemon is not None:
-            ctx.daemon._pool.shutdown(wait=True)  # type: ignore[attr-defined]
+            ctx.daemon.shutdown(wait=True)
