@@ -43,7 +43,7 @@ from github.PullRequest import PullRequest
 from github.Repository import Repository
 from pydantic import ValidationError
 
-from foreman.branches import spec_branch
+from foreman.branches import impl_branch, spec_branch
 from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
@@ -300,11 +300,24 @@ def _read_spec_doc(worktree_path: Path, issue_number: int) -> str | None:
         return None
 
 
-def _find_spec_pr(repo: Repository, owner: str, branch: str) -> PullRequest:
-    """Locate the open spec PR whose head branch matches ``branch``.
+def _find_role_pr(
+    repo: Repository,
+    owner: str,
+    branch: str,
+    *,
+    target: Literal["spec_pr", "impl_pr"],
+) -> PullRequest:
+    """Locate the open PR whose head branch matches ``branch``.
 
-    The Planner names spec branches ``foreman/issue-<N>``. We query
-    open PRs by head (``owner:branch``) and take the first match.
+    The Planner names spec branches ``foreman/issue-<N>`` and the
+    Worker names impl branches ``foreman/impl-<N>``. We query open
+    PRs by head (``owner:branch``) and take the first match.
+
+    ``target`` selects the error-wording shape so callers reaching
+    for the impl PR don't get spec-flavored boilerplate (the
+    algokit#21 dogfood bug: the legacy lookup always raised "spec PR"
+    even when the Fixer was invoked for the impl side).
+
     Raises if no open PR is found — the Fixer is only meant to act on
     PRs the Reviewer flagged, so an absent PR is an upstream-state
     error worth surfacing loudly.
@@ -312,10 +325,16 @@ def _find_spec_pr(repo: Repository, owner: str, branch: str) -> PullRequest:
     head_qualifier = f"{owner}:{branch}"
     pulls = list(repo.get_pulls(state="open", head=head_qualifier))
     if not pulls:
+        if target == "impl_pr":
+            opener = "Worker-opened impl PR"
+            pr_label = "impl PR"
+        else:
+            opener = "Planner-opened spec PR"
+            pr_label = "spec PR"
         raise RuntimeError(
             f"No open PR found for branch {branch!r} in {repo.full_name!r}. "
-            "The Fixer expects the Planner-opened spec PR to still be open "
-            "for the issue it's fixing."
+            f"The Fixer expects the {opener} to still be open "
+            f"for the issue it's fixing ({pr_label})."
         )
     return pulls[0]
 
@@ -387,7 +406,8 @@ async def run_fixer(
 
     Raises:
         ValueError: Issue URL malformed or repo mismatch.
-        RuntimeError: No open spec PR / no Reviewer review found.
+        RuntimeError: No open PR (spec or impl, per ``target``) /
+            no Reviewer review found.
     """
     # Post-adversarial-review (#1): wrap the initial setup — URL parse,
     # project lookup, identity setup, ``repo.get_issue`` — in a
@@ -452,7 +472,7 @@ async def run_fixer(
     # initialize ``usage`` / ``pr_number`` to ``None`` so the except
     # branch below can log partial state regardless of where in the
     # pipeline a failure surfaces. ``WorktreeManager.attach``,
-    # ``_find_spec_pr``, ``_latest_reviewer_review_comment``,
+    # ``_find_role_pr``, ``_latest_reviewer_review_comment``,
     # ``provider.run_agent``, and ``pr.create_issue_comment`` are all
     # inside the wrap; pre-#239 any of those raising silently dropped
     # the run's cost telemetry because the success-path
@@ -541,9 +561,19 @@ async def run_fixer(
         )
 
     try:
-        # Resolve the spec PR from the issue's branch convention.
-        branch = spec_branch(issue_number)
-        pr = _find_spec_pr(repo, owner=owner, branch=branch)
+        # Resolve the role's PR from the issue's branch convention.
+        # ``target`` selects which branch shape to look up: the Planner-
+        # opened spec branch (``foreman/issue-<N>``) for spec-side fixes,
+        # or the Worker-opened impl branch (``foreman/impl-<N>``) for
+        # impl-side fixes. Pre-Phase 8d.21 this hardcoded the spec
+        # branch and crashed the algokit#21 dogfood at ImplFix because
+        # the impl PR was never found.
+        target_literal = cast(Literal["spec_pr", "impl_pr"], target)
+        if target_literal == "impl_pr":
+            branch = impl_branch(issue_number)
+        else:
+            branch = spec_branch(issue_number)
+        pr = _find_role_pr(repo, owner=owner, branch=branch, target=target_literal)
         # foreman#239: hoist ``pr_number`` to the outer scope right
         # after the PR is resolved so the fixer_failed row reports it
         # even when a later step (run_agent, create_issue_comment)
@@ -810,6 +840,16 @@ def _run_fixer_for_v4(
     # point takes an issue URL — v4's SubprocessRoleDispatcher only
     # knows the issue number + target. Resolve via the fixer App's
     # client (read-only get_pulls is in scope for the fixer identity).
+    #
+    # Phase 8d.21: the legacy ``run_fixer`` ALSO does a target-aware
+    # PR lookup now (it used to hardcode the spec branch — see the
+    # algokit#21 dogfood crash). The wrapper still does its own lookup
+    # because (a) ``_V4FixerResult.pr_number`` is populated from
+    # ``pr.number`` here and ``run_fixer``'s ``FixerRunResult`` does
+    # not surface the PR number to callers, and (b) the wrapper's
+    # lookup early-fails before ``make_provider`` + ``asyncio.run``
+    # spin up, which is cheaper than letting ``run_fixer`` raise
+    # mid-setup.
     registry = V4IdentityRegistry(
         apps=cfg.apps,
         orchestrator=cfg.orchestrator,

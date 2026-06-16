@@ -854,6 +854,168 @@ async def test_run_fixer_stats_disagreed_count_tracks_needed_remediation_wrong(
 
 
 @pytest.mark.asyncio
+async def test_run_fixer_locates_spec_pr_when_target_is_spec_pr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``target='spec_pr'`` (default) queries the spec branch
+    ``foreman/issue-<N>`` head. Regression coverage so the
+    target-aware lookup below doesn't accidentally rewire the
+    default path."""
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    cfg = _make_config(clone)
+    repo, _pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    client = _FakeFixerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
+
+    await run_fixer(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+        target="spec_pr",
+    )
+
+    # PR lookup must have happened against the spec branch head.
+    assert any(
+        call["head"] == "jeffrichley:foreman/issue-42"
+        for call in repo.get_pulls_calls
+    ), (
+        f"target='spec_pr' should query the spec branch "
+        f"'jeffrichley:foreman/issue-42'; saw {repo.get_pulls_calls!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_fixer_locates_impl_pr_when_target_is_impl_pr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``target='impl_pr'`` queries the impl branch
+    ``foreman/impl-<N>`` head. Before this fix, ``run_fixer``
+    ignored ``target`` for the PR lookup and always used the spec
+    branch — so the impl PR was never found and the role raised
+    even when the impl PR existed."""
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    cfg = _make_config(clone)
+    # The fake PR's head_ref reflects the impl branch — the locator
+    # should query for it, find it, and proceed.
+    impl_pr = _FakePR(
+        number=77,
+        title="impl: SSML",
+        body="Implements SSML. Closes #42.",
+        head_ref="foreman/impl-42",
+        head_sha=head_sha,
+        base_ref="foreman/issue-42",
+    )
+    issue = _FakeIssue(
+        number=42,
+        title="SSML",
+        body="Add SSML support.",
+        labels=["foreman:impl-fix"],
+    )
+    repo = _FakeRepo(pr=impl_pr, issue=issue)
+    client = _FakeFixerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
+
+    await run_fixer(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+        target="impl_pr",
+    )
+
+    # PR lookup must have happened against the impl branch head, NOT
+    # the spec branch. This is the bug the algokit#21 dogfood
+    # surfaced — the legacy ``run_fixer`` was hardcoded to
+    # ``spec_branch(issue_number)`` regardless of ``target``.
+    assert any(
+        call["head"] == "jeffrichley:foreman/impl-42"
+        for call in repo.get_pulls_calls
+    ), (
+        f"target='impl_pr' should query the impl branch "
+        f"'jeffrichley:foreman/impl-42'; saw {repo.get_pulls_calls!r}"
+    )
+    assert not any(
+        call["head"] == "jeffrichley:foreman/issue-42"
+        for call in repo.get_pulls_calls
+    ), (
+        f"target='impl_pr' must NOT query the spec branch; "
+        f"saw {repo.get_pulls_calls!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_fixer_raises_target_aware_error_when_impl_pr_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ``target='impl_pr'`` and no open PR matches the impl
+    branch, the raised ``RuntimeError`` must name the impl branch
+    + impl-flavored wording — not the spec-flavored boilerplate."""
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    cfg = _make_config(clone)
+    repo, _pr, _issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+
+    def _empty_pulls(**_: Any) -> list[_FakePR]:
+        return []
+
+    repo.get_pulls = _empty_pulls  # type: ignore[assignment]
+    client = _FakeFixerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await run_fixer(
+            issue_url="https://github.com/jeffrichley/voice/issues/42",
+            config=cfg,
+            project_name="voice",
+            worktrees_root=tmp_path / "worktrees",
+            provider=fake_provider,
+            identity_registry=registry,
+            target="impl_pr",
+        )
+
+    msg = str(excinfo.value)
+    # Branch name in the error must be the impl branch.
+    assert "foreman/impl-42" in msg, (
+        f"impl-target error must name the impl branch; got {msg!r}"
+    )
+    assert "foreman/issue-42" not in msg, (
+        f"impl-target error must NOT name the spec branch; got {msg!r}"
+    )
+    # Wording must reflect the impl side — the spec-flavored
+    # "Planner-opened spec PR" string was load-bearing in the
+    # original bug because Fixer surfaced spec-wording even when
+    # invoked for the impl side.
+    assert "spec PR" not in msg, (
+        f"impl-target error must not say 'spec PR'; got {msg!r}"
+    )
+    assert "impl PR" in msg, (
+        f"impl-target error must reference the impl PR; got {msg!r}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_run_fixer_raises_when_no_open_spec_pr(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
