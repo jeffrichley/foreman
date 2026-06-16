@@ -89,7 +89,7 @@ def test_token_cached_within_refresh_window():
         "foreman.v4.identity.mint_installation_token", side_effect=fake_mint,
     ) as mint:
         first = registry.get_role_token("planner")
-        clock.now += 60  # 1 minute later — well inside the 5-minute safety window
+        clock.now += 60  # 1 minute later — well inside the 15-minute safety window
         second = registry.get_role_token("planner")
 
     assert first == second == "initial-token"
@@ -120,13 +120,94 @@ def test_token_refreshed_when_near_expiry():
         "foreman.v4.identity.mint_installation_token", side_effect=fake_mint,
     ) as mint:
         first = registry.get_role_token("planner")
-        # Advance past the refresh threshold (3600s - 300s safety = 3300s).
+        # Advance past the refresh threshold (3600s - 900s safety = 2700s).
         clock.now += 3400
         second = registry.get_role_token("planner")
 
     assert first == "token-mint-1"
     assert second == "token-mint-2"
     assert mint.call_count == 2
+
+
+def test_get_role_token_mints_fresh_when_in_safety_window():
+    """When the cached token has fewer than ``_REFRESH_SAFETY_SECONDS``
+    (900s) remaining, the next call MUST mint a fresh token.
+
+    Regression guard for the 2026-06-15 dogfood crash: PyGithubGitProvider
+    rebuilds its cached ``Github`` client every 3000s. With the previous
+    300s safety window, a token minted at t=0 (expires at t=3600) had 600s
+    left when the rebuild fired at t=3000 — outside the 300s window — so
+    the registry handed back the SAME expiring token. The provider's new
+    client carried the old token into expiry territory and the daemon
+    crashed with 401 at minute ~60. With safety = 900s, 600s < 900s, so
+    the rebuild path mints fresh.
+    """
+    clock = _MutableClock()
+    registry = V4IdentityRegistry(
+        apps=_apps(),
+        orchestrator=_orchestrator(),
+        installation_repo="owner/project",
+        clock=clock,
+    )
+
+    counter = {"n": 0}
+
+    def fake_mint(app_id, private_key_path, repo_slug):
+        counter["n"] += 1
+        return InstallationToken(
+            token=f"token-mint-{counter['n']}",
+            # 3600s lifetime as of mint time — matches real GitHub behavior.
+            expires_at=int(clock.now) + 3600,
+        )
+
+    with patch(
+        "foreman.v4.identity.mint_installation_token", side_effect=fake_mint,
+    ) as mint:
+        first = registry.get_role_token("planner")
+        # Advance so the cached token has exactly 700s remaining — inside
+        # the 900s safety window, so a refresh MUST mint.
+        clock.now += 3600 - 700
+        second = registry.get_role_token("planner")
+
+    assert first == "token-mint-1"
+    assert second == "token-mint-2"
+    assert mint.call_count == 2
+
+
+def test_get_role_token_uses_cache_outside_safety_window():
+    """When the cached token has MORE than ``_REFRESH_SAFETY_SECONDS``
+    (900s) remaining, the next call MUST return the cached token without
+    minting. Symmetric counter-test to the safety-window mint case —
+    proves the threshold isn't accidentally too eager."""
+    clock = _MutableClock()
+    registry = V4IdentityRegistry(
+        apps=_apps(),
+        orchestrator=_orchestrator(),
+        installation_repo="owner/project",
+        clock=clock,
+    )
+
+    counter = {"n": 0}
+
+    def fake_mint(app_id, private_key_path, repo_slug):
+        counter["n"] += 1
+        return InstallationToken(
+            token=f"token-mint-{counter['n']}",
+            expires_at=int(clock.now) + 3600,
+        )
+
+    with patch(
+        "foreman.v4.identity.mint_installation_token", side_effect=fake_mint,
+    ) as mint:
+        first = registry.get_role_token("planner")
+        # Advance so the cached token has exactly 901s remaining — just
+        # OUTSIDE the 900s safety window, so the cached token MUST be
+        # reused (no mint).
+        clock.now += 3600 - 901
+        second = registry.get_role_token("planner")
+
+    assert first == second == "token-mint-1"
+    assert mint.call_count == 1
 
 
 def test_unknown_role_raises():

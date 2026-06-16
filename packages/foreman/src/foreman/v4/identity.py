@@ -55,10 +55,23 @@ from collections.abc import Callable
 from foreman.auth import InstallationToken, mint_installation_token
 from foreman.v4.config import AppCredentials, AppsConfig, OrchestratorConfig
 
-# Match v3's 5-minute pre-expiry refresh window (foreman.identity uses
-# the same constant). Keeps token-mint amortized; never serve a token
-# that is about to expire mid-request.
-_REFRESH_SAFETY_SECONDS = 300
+# Pre-expiry safety window: refresh the cached token when fewer than this
+# many seconds remain until expiry.
+#
+# Load-bearing dependency on PyGithubGitProvider's rebuild interval:
+# PyGithubGitProvider rebuilds its cached ``Github`` client every
+# ``_DEFAULT_REFRESH_AFTER_SECONDS`` (3000s = 50min) by calling back into
+# ``get_role_token`` via the factory closure. For that rebuild to actually
+# pick up a FRESH installation token (not the same cached one heading
+# toward expiry), this safety window MUST be strictly greater than
+# ``(token_lifetime - PyGithubGitProvider._DEFAULT_REFRESH_AFTER_SECONDS)``.
+# Currently: token_lifetime=3600s, refresh_after=3000s, so safety must be
+# > 600s. 900s = 600s mandatory minimum + 300s margin.
+#
+# If you raise PyGithubGitProvider's refresh interval, you MUST raise this
+# in lockstep, or long-running daemons will 401 at minute ~60 — empirically
+# confirmed by the 2026-06-15 dogfood crash that motivated this constant.
+_REFRESH_SAFETY_SECONDS = 900
 
 _KNOWN_ROLES = ("planner", "reviewer", "fixer", "worker", "orchestrator")
 
@@ -97,7 +110,9 @@ class V4IdentityRegistry:
     Satisfies :class:`~foreman.v4.bootstrap.IdentityProvider` (one
     method: ``get_role_token(role: str) -> str``). Caches one
     installation token per (role, repo_slug) pair; refreshes when
-    within 5 minutes of expiry.
+    within 15 minutes of expiry (see ``_REFRESH_SAFETY_SECONDS`` —
+    the window cooperates with PyGithubGitProvider's 50-min rebuild
+    cadence so client-rebuilds always pick up a fresh token).
 
     All five roles (``planner``, ``reviewer``, ``fixer``, ``worker``,
     ``orchestrator``) resolve their installation-id lookup against

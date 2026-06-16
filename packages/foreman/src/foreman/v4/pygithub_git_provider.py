@@ -7,7 +7,7 @@ Token-refresh seam
 ------------------
 GitHub App installation tokens expire after 1 hour. v4's
 :class:`~foreman.v4.identity.V4IdentityRegistry` mints + caches them
-with a 5-minute pre-expiry refresh, but that refresh is only useful if
+with a pre-expiry refresh window, but that refresh is only useful if
 the consumer ASKS for a fresh token. ``PyGithub.Github(token)`` stores
 the token at construction and never reaches back for a new one — so a
 long-running daemon that constructs the client once at bootstrap dies
@@ -20,6 +20,28 @@ it's older than ``refresh_after_seconds`` (default 50 min = 3000s — well
 inside the 1-hour TTL with safety margin). The :class:`Repository`
 handle and PyGithub's name-mangled GraphQL requester both live INSIDE
 each ``Github`` instance, so rebuilding the client invalidates both.
+
+Cooperation with V4IdentityRegistry's pre-expiry safety window
+--------------------------------------------------------------
+A subtle gotcha bit dogfood at minute 60 on 2026-06-15: rebuilding the
+``Github`` client only helps if the factory closure pulls a FRESH
+installation token from the identity registry. The registry's
+``get_role_token`` will reuse its cached token until the token enters
+its pre-expiry safety window. So the rebuild interval here and the
+identity registry's safety window must cooperate:
+
+    safety_window > (token_lifetime - refresh_after_seconds)
+
+With token_lifetime = 3600s and refresh_after_seconds = 3000s, the
+registry's ``_REFRESH_SAFETY_SECONDS`` must be > 600s. It is currently
+900s — so when we rebuild here at t=3000s, the cached token (minted at
+t=0, expiring at t=3600) has 600s left, which is INSIDE the 900s safety
+window, so the registry mints a fresh one. Every PyGithub rebuild
+reliably gets a brand-new installation token.
+
+Do NOT raise ``_DEFAULT_REFRESH_AFTER_SECONDS`` above ~3300s without
+raising ``V4IdentityRegistry._REFRESH_SAFETY_SECONDS`` in lockstep, or
+the cooperation breaks and the daemon will 401 at minute ~60.
 """
 
 from __future__ import annotations
@@ -41,9 +63,10 @@ _CI_PASSING_STATES = frozenset({"clean", "unstable"})
 # Default refresh window: 50 minutes (3000 seconds). Load-bearing — the
 # GitHub App installation token TTL is 1 hour (3600s); rebuilding the
 # client at 50 min keeps us comfortably inside that window even if the
-# next API call happens a few minutes later. Do not raise this above
-# ~3300s without also revisiting V4IdentityRegistry's 5-min pre-expiry
-# refresh safety margin.
+# next API call happens a few minutes later. See the module-level
+# "Cooperation with V4IdentityRegistry's pre-expiry safety window"
+# docstring for why this constant and V4IdentityRegistry's
+# _REFRESH_SAFETY_SECONDS (currently 900s) must change in lockstep.
 _DEFAULT_REFRESH_AFTER_SECONDS = 3000.0
 
 
