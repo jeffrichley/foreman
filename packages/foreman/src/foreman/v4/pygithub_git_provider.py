@@ -149,9 +149,18 @@ class PyGithubGitProvider:
         Cached alongside ``_gh`` — when ``_gh`` refreshes, the
         ``_cached_repo`` is dropped and the next access re-fetches via
         the new client. Cheap call (one extra GET) per refresh window.
+
+        Always invoke ``self._gh`` first so its time-based rebuild check
+        fires on every ``_repo`` access. Otherwise the Poller's hot path
+        (``self._repo.get_issues(...)`` every tick) would short-circuit
+        on the cached Repository handle and the rebuild path inside
+        ``_gh`` would never trigger — which is the bug that killed the
+        v4 daemon at minute 60 on 2026-06-15 dogfood, despite 8c.3's
+        rebuild logic being correct in isolation.
         """
+        gh = self._gh
         if self._cached_repo is None:
-            self._cached_repo = self._gh.get_repo(self._repo_full_name)
+            self._cached_repo = gh.get_repo(self._repo_full_name)
         return self._cached_repo
 
     def get_pr_state(self, *, project: str, pr_number: int) -> PRState:

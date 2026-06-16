@@ -302,3 +302,69 @@ def test_rebuilds_client_when_cache_expires(mock_github):
     assert second_repo is fresh_repos[1]
     assert second_gh is not first_gh
     assert second_repo is not first_repo
+
+
+def test_repo_access_alone_triggers_gh_rebuild_past_window():
+    """The Poller's hot path only accesses ``_repo``, never ``_gh`` directly.
+
+    Earlier tests pre-2026-06-15 invoked ``provider._gh`` explicitly at
+    the post-expiry timestamp to demonstrate the rebuild. But the
+    realistic daemon code path is ``provider._repo.get_issues(...)`` —
+    the Poller never touches ``_gh`` at all. If ``_repo``'s cached
+    Repository handle short-circuits before ``_gh`` is invoked, the
+    time-based rebuild check inside ``_gh`` never fires, the cached
+    ``Github`` client clings to its expiring installation token, and
+    the daemon 401-dies at minute 60. This test exercises the realistic
+    pattern (only ``_repo`` accesses across the window) and asserts the
+    rebuild fires anyway. Regression guard for the bug confirmed in the
+    2026-06-15 dogfood (foreman v4 daemon died at 60min wall-clock,
+    despite 8c.3 + 8d.13 thresholds being arithmetically correct).
+    """
+    current_time = [0.0]
+    call_count = [0]
+
+    fresh_clients = [MagicMock(name="github_v1"), MagicMock(name="github_v2")]
+    fresh_repos = [MagicMock(name="repo_v1"), MagicMock(name="repo_v2")]
+    for gh, repo in zip(fresh_clients, fresh_repos, strict=True):
+        gh.get_repo.return_value = repo
+
+    def factory():
+        client = fresh_clients[call_count[0]]
+        call_count[0] += 1
+        return client
+
+    def clock() -> float:
+        return current_time[0]
+
+    provider = PyGithubGitProvider(
+        github_factory=factory,
+        repo_full_name="owner/p",
+        clock=clock,
+        refresh_after_seconds=3000.0,
+    )
+
+    # Simulate the Poller's access pattern: only `_repo`, never `_gh`.
+    first_repo = provider._repo
+    assert call_count[0] == 1
+    assert first_repo is fresh_repos[0]
+
+    # Many ticks within the window — same cached Repository, no rebuild.
+    for tick_time in (30.0, 60.0, 1500.0, 2970.0, 3000.0):
+        current_time[0] = tick_time
+        same_repo = provider._repo
+        assert same_repo is fresh_repos[0]
+        assert call_count[0] == 1
+
+    # Past the window: the very next `_repo` access (no intermediate
+    # `_gh` access) must rebuild Github AND re-fetch Repository.
+    current_time[0] = 3001.0
+    rebuilt_repo = provider._repo
+    assert call_count[0] == 2, (
+        "Factory must have been called twice — first at t=0, then again "
+        "when the Poller's _repo access crossed t=3001 past the window. "
+        "Got call_count=1 means _repo short-circuited on the cached "
+        "Repository handle and _gh's rebuild check never fired. "
+        "Daemon would 401-die at minute 60."
+    )
+    assert rebuilt_repo is fresh_repos[1]
+    assert rebuilt_repo is not first_repo
