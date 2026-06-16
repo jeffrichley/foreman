@@ -12,7 +12,7 @@ suffix, and validates against ``Outcome``. See the spec section
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -53,6 +53,20 @@ class Outcome(BaseModel):
     findings: list[Finding] = Field(default_factory=list)
     artifacts: OutcomeArtifacts = Field(default_factory=OutcomeArtifacts)
     raw_role_output_path: str | None = None
+    # Phase 8d.17 / foreman#315: freeform diagnostic detail bag.
+    # Roles populate with their own legacy-output fields (Worker:
+    # work_comment / check_output_summary / did_check_pass / etc.;
+    # Reviewer: pr_review_comment + outcome + confidence; Fixer:
+    # fix_comment + addressed/unaddressed breakdown). State-machine
+    # consumers continue reading kind/summary/artifacts — details is
+    # purely additive observability so operators don't have to spelunk
+    # worktrees + stats jsonl to find the actual cause of a NEEDS_HELP
+    # / NEEDS_FIX outcome (the algokit#21 dogfood needed a 3-step
+    # expedition to find the cause was "Justfile has no `check`
+    # recipe" — now that detail rides on the Outcome). V0: freeform
+    # dict; V1 may tighten to a per-role discriminated union (stretch
+    # goal in foreman#315, deferred).
+    details: dict[str, Any] = Field(default_factory=dict)
 
 
 OUTCOME_MARKER = "FOREMAN_OUTCOME:"

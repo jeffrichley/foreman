@@ -84,6 +84,60 @@ def test_execute_completed_carries_outcome_and_next_state(setup):
     assert completed.next_state == ""  # terminal — no next state
 
 
+# Phase 8d.17 / foreman#315: state machine preserves Outcome.details
+# end-to-end. The ExecuteCompletedEvent carries the Outcome object
+# directly (not a flattened dict), so anything on the role-emitted
+# Outcome including details flows through to subscribers like the
+# EventArchiveObserver and any audit / forensics consumer.
+
+
+class _DiagnosticDetailState(TicketState):
+    """A test state whose execute() returns an Outcome with details populated.
+
+    Mirrors a role's give-up path: NEEDS_HELP with diagnostic detail
+    that operators need to triage. Without Phase 8d.17 this detail was
+    dropped at the v3→v4 flattening point.
+    """
+
+    state_name = "DiagnosticDetail"
+
+    def execute(self, ctx: StateContext) -> Outcome:
+        return Outcome(
+            kind=OutcomeKind.NEEDS_HELP,
+            confidence=OutcomeConfidence.HIGH,
+            summary="incomplete (attempt 1)",
+            details={
+                "work_comment": "could not finish — `check` recipe missing",
+                "did_check_pass": False,
+                "confidence": "low",
+            },
+        )
+
+    def next_state(self, outcome: Outcome) -> TicketState | None:
+        return None
+
+
+def test_execute_completed_event_payload_includes_details(setup):
+    """ExecuteCompletedEvent.outcome.details must round-trip from the
+    role's emitted Outcome through transition() to subscribers."""
+    repo, ticket, instance, received, ctx = setup
+    # Swap to a state-instance row for DiagnosticDetail to match what
+    # transition() expects (state_name on the row matches the state).
+    new_instance = repo.open_state_instance(
+        ticket_id=ticket.id, state_name="DiagnosticDetail", sequence=2,
+        now=dt.datetime(2026, 6, 13),
+    )
+    ctx_diag = StateContext(
+        ticket=ticket, instance=new_instance, repo=repo,
+        clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
+        bus=ctx.bus,
+    )
+    _DiagnosticDetailState().transition(ctx_diag)
+    completed = [ev for ev in received if isinstance(ev, ExecuteCompletedEvent)][0]
+    assert completed.outcome.details["did_check_pass"] is False
+    assert "missing" in completed.outcome.details["work_comment"]
+
+
 def test_enter_failure_emits_failed_event_no_exit(setup):
     repo, ticket, instance, received, ctx = setup
     _FailEnter().transition(ctx)

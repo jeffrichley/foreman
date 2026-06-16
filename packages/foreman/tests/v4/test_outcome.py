@@ -91,3 +91,46 @@ def test_outcome_default_schema_version_is_1():
     raw = '{"kind":"clean","confidence":"high","summary":"x"}'
     outcome = Outcome.model_validate(json.loads(raw))
     assert outcome.schema_version == 1
+
+
+def test_outcome_details_defaults_to_empty_dict():
+    """V0 contract (foreman#315): details is freeform and defaults to {}.
+
+    Backward compatibility — every existing call site that constructs
+    an Outcome without ``details=`` continues to work, and the
+    serialized JSON carries an empty dict that consumers can ignore.
+    """
+    outcome = Outcome(
+        kind=OutcomeKind.CLEAN,
+        confidence=OutcomeConfidence.HIGH,
+        summary="x",
+    )
+    assert outcome.details == {}
+
+
+def test_outcome_details_field_serializes_round_trip():
+    """details survives model_dump_json → model_validate_json.
+
+    The state machine pickles Outcome through SQLite's
+    state_instances.outcome_payload column via outcome.model_dump(mode='json')
+    plus json.dumps, and the EventBus consumers pull it back via
+    Outcome.model_validate_json. If details didn't round-trip we'd lose
+    the diagnostic detail at the SQLite boundary even if the role
+    emitted it correctly.
+    """
+    original = Outcome(
+        kind=OutcomeKind.NEEDS_HELP,
+        confidence=OutcomeConfidence.HIGH,
+        summary="incomplete (attempt 1)",
+        details={
+            "work_comment": "could not finish — algokit Justfile has no `check` recipe",
+            "did_check_pass": False,
+            "check_output_summary": "just: error: Justfile has no recipe named `check`",
+            "confidence": "low",
+        },
+    )
+    raw = original.model_dump_json()
+    reloaded = Outcome.model_validate_json(raw)
+    assert reloaded == original
+    assert reloaded.details["did_check_pass"] is False
+    assert "no `check` recipe" in reloaded.details["work_comment"]

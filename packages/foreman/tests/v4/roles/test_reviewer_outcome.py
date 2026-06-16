@@ -85,3 +85,40 @@ def test_reviewer_exception_emits_error(capsys):
     outcome = parse_outcome_from_stdout(capsys.readouterr().out)
     assert outcome.kind == OutcomeKind.ERROR
     assert "rate limit" in outcome.summary
+
+
+# --- Phase 8d.17 / foreman#315 ---------------------------------------
+
+
+def test_reviewer_run_reviewer_cli_populates_details_with_findings(capsys):
+    """NEEDS_FIX path carries the Reviewer's pr_review_comment in
+    details (findings are already on Outcome.findings; we add the
+    prose so /foreman show + the event archive carry forward the
+    body the Reviewer posted on the PR)."""
+    finding = MagicMock()
+    finding.severity = "important"
+    finding.location = "foo.py:42"
+    finding.description = "missing test"
+    rejected = MagicMock()
+    rejected.approved = False
+    rejected.pr_number = 7
+    rejected.summary = "1 important issue"
+    rejected.findings = [finding]
+    rejected.details = {
+        "pr_review_comment": (
+            "Needs fix: the spec calls for a test on the happy path but no "
+            "test covers it. See finding 1."
+        ),
+        "outcome": "needs_fix",
+        "confidence": "high",
+    }
+    with patch(
+        "foreman.roles.reviewer._run_reviewer_for_v4",
+        return_value=rejected,
+    ):
+        exit_code = run_reviewer_cli(project="p", issue_number=1, target="impl")
+    assert exit_code == 0
+    outcome = parse_outcome_from_stdout(capsys.readouterr().out)
+    assert outcome.kind == OutcomeKind.NEEDS_FIX
+    assert outcome.details["outcome"] == "needs_fix"
+    assert "no test covers it" in outcome.details["pr_review_comment"]

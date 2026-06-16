@@ -711,11 +711,18 @@ class _V4ReviewerResult:
         pr_number: int | None,
         summary: str,
         findings: list[V4Finding],
+        details: dict[str, object] | None = None,
     ) -> None:
         self.approved = approved
         self.pr_number = pr_number
         self.summary = summary
         self.findings = findings
+        # Phase 8d.17 / foreman#315: ReviewerOutput diagnostic detail
+        # forwarded to Outcome.details on emit. Populated by
+        # ``_run_reviewer_for_v4`` from the LLM fields (pr_review_comment,
+        # outcome, confidence) that would otherwise be dropped at the
+        # v3→v4 flatten point.
+        self.details: dict[str, object] = details if details is not None else {}
 
 
 def _run_reviewer_for_v4(
@@ -813,11 +820,23 @@ def _run_reviewer_for_v4(
         )
         for f in llm.findings
     ]
+    # Phase 8d.17 / foreman#315: preserve ReviewerOutput diagnostic
+    # detail by lifting onto Outcome.details. The reviewer's
+    # full ``review_comment`` lives here (the Outcome.summary slot is
+    # capped at 500 chars; reviewer prose often runs longer) along
+    # with the raw outcome literal + confidence so operators can read
+    # the full verdict without pulling the PR review.
+    details: dict[str, object] = {
+        "outcome": llm.outcome,
+        "pr_review_comment": llm.review_comment,
+        "confidence": llm.confidence,
+    }
     return _V4ReviewerResult(
         approved=llm.outcome == "clean",
         pr_number=pr.number,
         summary=llm.review_comment[:500] if llm.review_comment else llm.outcome,
         findings=v4_findings,
+        details=details,
     )
 
 
@@ -858,6 +877,15 @@ def run_reviewer_cli(*, project: str, issue_number: int, target: str) -> int:
         )
         return 1
 
+    # Phase 8d.17 / foreman#315: forward Reviewer diagnostic detail
+    # onto every emitted Outcome (CLEAN, NEEDS_FIX). The isinstance
+    # check keeps the contract backward-compatible — older test
+    # doubles (MagicMock) that don't set ``details`` explicitly
+    # produce a non-dict attribute by default; we ignore it and emit
+    # an empty bag rather than fail pydantic validation.
+    raw_details = getattr(result, "details", None)
+    details: dict[str, object] = raw_details if isinstance(raw_details, dict) else {}
+
     if getattr(result, "approved", False):
         emit_outcome(
             Outcome(
@@ -867,6 +895,7 @@ def run_reviewer_cli(*, project: str, issue_number: int, target: str) -> int:
                 artifacts=OutcomeArtifacts(
                     pr_number=getattr(result, "pr_number", None)
                 ),
+                details=details,
             )
         )
         return 0
@@ -891,6 +920,7 @@ def run_reviewer_cli(*, project: str, issue_number: int, target: str) -> int:
             summary=getattr(result, "summary", None) or f"{len(findings)} issues",
             artifacts=OutcomeArtifacts(pr_number=getattr(result, "pr_number", None)),
             findings=findings,
+            details=details,
         )
     )
     return 0

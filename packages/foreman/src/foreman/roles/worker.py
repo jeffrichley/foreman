@@ -1123,10 +1123,16 @@ class _V4WorkerResult:
         status: str,
         pr_number: int | None,
         summary: str,
+        details: dict[str, object] | None = None,
     ) -> None:
         self.status = status
         self.pr_number = pr_number
         self.summary = summary
+        # Phase 8d.17 / foreman#315: diagnostic detail bag the v4 CLI
+        # forwards to Outcome.details. Populated by
+        # ``_run_worker_for_v4`` from the WorkerOutput LLM fields the
+        # state machine would otherwise drop at the v3→v4 flatten point.
+        self.details: dict[str, object] = details if details is not None else {}
 
 
 def _run_worker_for_v4(*, project: str, issue_number: int) -> _V4WorkerResult:
@@ -1210,7 +1216,36 @@ def _run_worker_for_v4(*, project: str, issue_number: int) -> _V4WorkerResult:
         status = "give_up"
         summary = f"{llm.outcome} (attempt {legacy_result.attempt})"
 
-    return _V4WorkerResult(status=status, pr_number=pr_number, summary=summary)
+    # Phase 8d.17 / foreman#315: preserve WorkerOutput's diagnostic
+    # detail by lifting onto the v4 Outcome. Before this, NEEDS_HELP
+    # outcomes carried only the terse summary and the actual cause
+    # (e.g., "algokit's Justfile has no `check` recipe") lived only on
+    # the in-memory WorkerOutput that was dropped at the v3→v4
+    # flatten point. Operators had to spelunk worktrees + stats jsonl
+    # to recover it. Now the detail rides forward on the Outcome.
+    # ``model_dump(mode="json")`` on the sub-request / commit lists
+    # converts pydantic nested objects into JSON-safe dicts so the
+    # ``Outcome.details: dict[str, Any]`` round-trips through
+    # ``model_dump_json`` cleanly.
+    details: dict[str, object] = {
+        "work_comment": llm.work_comment,
+        "did_check_pass": legacy_result.final_did_check_pass,
+        "check_output_summary": llm.check_output_summary,
+        "confidence": llm.confidence,
+        "outcome": llm.outcome,
+        "attempt": legacy_result.attempt,
+        "commits_made": [c.model_dump(mode="json") for c in llm.commits_made],
+        "implemented_sub_requests": [
+            s.model_dump(mode="json") for s in llm.implemented_sub_requests
+        ],
+        "skipped_sub_requests": [
+            s.model_dump(mode="json") for s in llm.skipped_sub_requests
+        ],
+    }
+
+    return _V4WorkerResult(
+        status=status, pr_number=pr_number, summary=summary, details=details,
+    )
 
 
 def run_worker_cli(*, project: str, issue_number: int) -> int:
@@ -1254,6 +1289,14 @@ def run_worker_cli(*, project: str, issue_number: int) -> int:
 
     status = getattr(result, "status", None)
     artifacts = OutcomeArtifacts(pr_number=getattr(result, "pr_number", None))
+    # Phase 8d.17 / foreman#315: forward Worker diagnostic detail onto
+    # every emitted Outcome (CLEAN, BLOCKED, NEEDS_HELP). The
+    # isinstance check keeps the contract backward-compatible — older
+    # test doubles (MagicMock) that don't set ``details`` explicitly
+    # produce a non-dict attribute by default; we ignore it and emit
+    # an empty bag rather than fail pydantic validation.
+    raw_details = getattr(result, "details", None)
+    details: dict[str, object] = raw_details if isinstance(raw_details, dict) else {}
 
     if status == "ci_passing":
         emit_outcome(
@@ -1262,6 +1305,7 @@ def run_worker_cli(*, project: str, issue_number: int) -> int:
                 confidence=OutcomeConfidence.HIGH,
                 summary=getattr(result, "summary", None) or "impl PR open, CI green",
                 artifacts=artifacts,
+                details=details,
             )
         )
         return 0
@@ -1272,6 +1316,7 @@ def run_worker_cli(*, project: str, issue_number: int) -> int:
                 confidence=OutcomeConfidence.HIGH,
                 summary=getattr(result, "summary", None) or "impl PR open, CI in flight",
                 artifacts=artifacts,
+                details=details,
             )
         )
         return 0
@@ -1282,6 +1327,7 @@ def run_worker_cli(*, project: str, issue_number: int) -> int:
                 confidence=OutcomeConfidence.HIGH,
                 summary=getattr(result, "summary", None) or "worker hit give-up condition",
                 artifacts=artifacts,
+                details=details,
             )
         )
         return 0

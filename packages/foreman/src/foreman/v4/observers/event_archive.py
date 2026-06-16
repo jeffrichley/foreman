@@ -37,6 +37,13 @@ def _payload_for(event: Event) -> dict:
             "confidence": event.outcome.confidence.value,
             "summary": event.outcome.summary,
             "next_state": event.next_state,
+            # Phase 8d.17 / foreman#315: archive the role's
+            # diagnostic detail bag too so the events table is a
+            # complete forensic record. Without this, the audit log
+            # carries only the terse summary and operators have to
+            # spelunk the state_instances.outcome_payload row + the
+            # original worktree to recover what actually happened.
+            "details": event.outcome.details,
         }
     if isinstance(event, StateExitedEvent):
         return {

@@ -93,3 +93,39 @@ def test_fixer_exception_emits_error(capsys):
     assert "push rejected" in outcome.summary
 
 
+# --- Phase 8d.17 / foreman#315 ---------------------------------------
+
+
+def test_fixer_run_fixer_cli_populates_details_with_fix_comment(capsys):
+    """CLEAN path carries FixerOutput fix_comment + addressed counts
+    in details so operators can see what was addressed without
+    pulling the PR comment."""
+    pushed = MagicMock()
+    pushed.pushed = True
+    pushed.escalated = False
+    pushed.pr_number = 11
+    pushed.summary = "amended"
+    pushed.details = {
+        "fix_comment": "Addressed finding 1 by adding the missing test.",
+        "outcome": "fixed",
+        "confidence": "high",
+        "commits_made": [
+            {"sha": "def456", "summary": "test: cover happy path",
+             "findings_addressed": ["foo.py:42"]},
+        ],
+        "addressed_findings": [{"target": "foo.py:42", "summary": "added test"}],
+        "unaddressed_findings": [],
+    }
+    with patch(
+        "foreman.roles.fixer._run_fixer_for_v4",
+        return_value=pushed,
+    ):
+        exit_code = run_fixer_cli(project="p", issue_number=1, target="impl")
+    assert exit_code == 0
+    outcome = parse_outcome_from_stdout(capsys.readouterr().out)
+    assert outcome.kind == OutcomeKind.CLEAN
+    assert outcome.details["outcome"] == "fixed"
+    assert "missing test" in outcome.details["fix_comment"]
+    assert outcome.details["commits_made"][0]["sha"] == "def456"
+
+
