@@ -85,8 +85,16 @@ class TicketRepository(Protocol):
     ) -> int:
         """Return the number of consecutive ``state_instances`` rows for
         ``ticket_id`` whose ``state_name`` matches ``state``, walking
-        back from the latest sequence. Stops at the first row that
-        doesn't match.
+        back from the latest sequence. Stops at the first row whose
+        ``state_name`` doesn't match.
+
+        Rows whose ``failure_phase == 'can_run'`` are skipped (they
+        neither count toward the run nor break it). Those rows record
+        "the ticket was held and the state never actually executed" —
+        they are not runaway-defense signal. Without this skip, holding
+        a ticket for cap+ polls accumulated cap+ can_run-failed rows and
+        immediately tripped the cap on operator-resume, escalating the
+        resumed ticket to NeedsHelp (Phase 8d.15 Bug F4).
 
         Used by the state machine (Phase 8c.2) to detect a runaway loop
         on a single state before the daemon burns more cycles. Returns
@@ -297,6 +305,13 @@ class InMemoryTicketRepository:
         matches.sort(key=lambda i: i.sequence, reverse=True)
         count = 0
         for inst in matches:
+            # Phase 8d.15 (F4): can_run-failed rows record "the ticket
+            # was held and the state never executed" — they are not
+            # runaway-defense signal. Skip them entirely (neither count
+            # nor break the run) so a held-then-resumed ticket doesn't
+            # immediately escalate to NeedsHelp.
+            if inst.failure_phase == "can_run":
+                continue
             if inst.state_name == state:
                 count += 1
             else:

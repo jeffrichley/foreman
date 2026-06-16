@@ -354,13 +354,21 @@ class SqliteTicketRepository:
     ) -> int:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT state_name FROM state_instances "
+                "SELECT state_name, failure_phase FROM state_instances "
                 "WHERE ticket_id = ? "
                 "ORDER BY sequence DESC",
                 (ticket_id,),
             ).fetchall()
             count = 0
             for row in rows:
+                # Phase 8d.15 (F4): can_run-failed rows record "the
+                # ticket was held and the state never executed" — they
+                # are not runaway-defense signal. Skip them entirely
+                # (neither count nor break the run) so a held-then-
+                # resumed ticket doesn't immediately escalate to
+                # NeedsHelp.
+                if row["failure_phase"] == "can_run":
+                    continue
                 if row["state_name"] == state:
                     count += 1
                 else:

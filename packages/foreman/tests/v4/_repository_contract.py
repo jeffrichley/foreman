@@ -273,6 +273,47 @@ class RepositoryContract:
             ticket_id=t.id, state="SpecReview"
         ) == 3
 
+    def test_count_consecutive_same_state_skips_can_run_failures(
+        self, repo: TicketRepository
+    ):
+        """Phase 8d.15 (F4): can_run-failed rows mean "ticket was held,
+        state never ran". They MUST NOT count toward the runaway-defense
+        consecutive-failures cap (and must not break the run either) —
+        otherwise holding a ticket for cap+ polls trips the cap on
+        resume."""
+        t = repo.create_ticket(project="p", issue_number=1, now=_now())
+        # 3 can_run-failed rows (operator hold polled 3 times).
+        for seq in range(1, 4):
+            inst = repo.open_state_instance(
+                ticket_id=t.id, state_name="SpecReview", sequence=seq,
+                now=_now(),
+            )
+            repo.record_failure(
+                inst.id, now=_now(), failure_phase="can_run",
+                failure_reason="held",
+            )
+            repo.close_state_instance(inst.id, now=_now())
+        # Cap-relevant count: 0 — operator's hold polls don't count.
+        assert repo.count_consecutive_same_state(
+            ticket_id=t.id, state="SpecReview"
+        ) == 0
+
+        # Add one real execute-failure on top.
+        inst = repo.open_state_instance(
+            ticket_id=t.id, state_name="SpecReview", sequence=4,
+            now=_now(),
+        )
+        repo.record_failure(
+            inst.id, now=_now(), failure_phase="execute",
+            failure_reason="role crashed",
+        )
+        repo.close_state_instance(inst.id, now=_now())
+        # Now count is 1 — the held-period rows are still skipped, but
+        # the real failure counts.
+        assert repo.count_consecutive_same_state(
+            ticket_id=t.id, state="SpecReview"
+        ) == 1
+
     def test_set_and_get_dependencies(self, repo: TicketRepository):
         a = repo.create_ticket(project="p", issue_number=1, now=_now())
         b = repo.create_ticket(project="p", issue_number=2, now=_now())

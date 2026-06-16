@@ -320,6 +320,131 @@ def test_terminal_landing_state_instance_row_is_closed() -> None:
     assert repo.list_in_flight_state_instances() == []
 
 
+# --- Phase 8d.15: F2 + F4 — early-return paths must emit StateExitedEvent ---
+#
+# Before the fix, both early-return branches in transition() skipped the
+# try/finally block that emits StateExitedEvent for the failing state.
+# LabelObservabilityObserver listens to StateExitedEvent to REMOVE the
+# old state's label. Without that event, the GitHub issue ended up with
+# both foreman:state-<failed-state> AND foreman:state-needshelp labels
+# (retry-cap branch) or with the state label sticking across operator
+# holds (held branch).
+
+
+def test_retry_cap_emits_state_exited_for_failed_state() -> None:
+    """F2: when the runaway-defense cap fires, transition() must emit
+    StateExitedEvent for the failed state before synthesizing the
+    NeedsHelp terminal landing. The event sequence is:
+
+        StateFailedEvent(retry_cap, state=<failed>)
+        StateExitedEvent(state=<failed>)
+        StateEnteredEvent(state=NeedsHelp)
+
+    Without the StateExitedEvent, LabelObservabilityObserver never sees
+    the failed state exit, leaving foreman:state-<failed> stuck on the
+    issue alongside the newly-added foreman:state-needshelp label.
+    """
+    repo = InMemoryTicketRepository()
+    now = dt.datetime(2026, 6, 15, 12, 0, 0)
+    ticket = repo.create_ticket(project="p", issue_number=4, now=now)
+    # Seed 3 consecutive same-state failures so the next attempt trips
+    # the cap immediately.
+    last_seq = 0
+    for seq in range(1, 4):
+        inst = repo.open_state_instance(
+            ticket_id=ticket.id, state_name="Burner", sequence=seq, now=now,
+        )
+        repo.record_failure(
+            inst.id, now=now, failure_phase="execute",
+            failure_reason="role crashed",
+        )
+        repo.close_state_instance(inst.id, now=now)
+        last_seq = seq
+    instance = repo.open_state_instance(
+        ticket_id=ticket.id, state_name="Burner", sequence=last_seq + 1,
+        now=now,
+    )
+
+    class _Burner(TicketState):
+        state_name = "Burner"
+
+        def execute(self, ctx):  # pragma: no cover — cap trips first
+            raise NotImplementedError
+
+        def next_state(self, outcome):  # pragma: no cover
+            return None
+
+    received: list[Event] = []
+    bus = EventBus()
+    bus.subscribe(received.append)
+    ctx = StateContext(
+        ticket=ticket, instance=instance, repo=repo,
+        clock=lambda: now, bus=bus, max_state_attempts=3,
+    )
+    _Burner().transition(ctx)
+
+    # Assert the SEQUENCE: failed → exited(failed) → entered(NeedsHelp).
+    summary = [
+        (type(e).__name__, getattr(e, "state_name", ""))
+        for e in received
+    ]
+    assert ("StateFailedEvent", "Burner") in summary
+    assert ("StateExitedEvent", "Burner") in summary, (
+        f"missing StateExitedEvent(Burner) — observer cannot remove the "
+        f"foreman:state-burner label. Sequence: {summary!r}"
+    )
+    assert ("StateEnteredEvent", "NeedsHelp") in summary
+
+    # The StateExitedEvent for the failed state must come BEFORE the
+    # NeedsHelp terminal landing — otherwise an observer that does a
+    # state-snapshot at the StateEntered moment would still see the
+    # failed-state label on the issue.
+    exited_idx = summary.index(("StateExitedEvent", "Burner"))
+    entered_idx = summary.index(("StateEnteredEvent", "NeedsHelp"))
+    assert exited_idx < entered_idx, (
+        f"StateExitedEvent(Burner) must precede StateEnteredEvent(NeedsHelp); "
+        f"got: {summary!r}"
+    )
+
+    # And the StateFailedEvent for the cap-trip must come before the
+    # StateExitedEvent — failure is what triggers the exit.
+    failed_idx = summary.index(("StateFailedEvent", "Burner"))
+    assert failed_idx < exited_idx
+
+
+def test_held_ticket_emits_state_exited_event() -> None:
+    """F4: when can_run()=False (operator hold), transition() must emit
+    StateExitedEvent so LabelObservabilityObserver can remove the stuck
+    foreman:state-<X> label and reflect the held status correctly."""
+    repo = InMemoryTicketRepository()
+    now = dt.datetime(2026, 6, 15, 12, 0, 0)
+    ticket = repo.create_ticket(project="p", issue_number=5, now=now)
+    repo.hold_ticket(ticket.id, held_by="jeff", reason="paused", now=now)
+    instance = repo.open_state_instance(
+        ticket_id=ticket.id, state_name="Classic", sequence=1, now=now,
+    )
+
+    received: list[Event] = []
+    bus = EventBus()
+    bus.subscribe(received.append)
+    held_ticket = repo.get_ticket(ticket.id)
+    ctx = StateContext(
+        ticket=held_ticket, instance=instance, repo=repo,
+        clock=lambda: now, bus=bus,
+    )
+    _ClassicState().transition(ctx)
+
+    # Two events fire: StateFailedEvent(can_run) then StateExitedEvent.
+    kinds = [type(e).__name__ for e in received]
+    assert "StateFailedEvent" in kinds
+    assert "StateExitedEvent" in kinds, (
+        f"missing StateExitedEvent on held-branch — the state label gets "
+        f"stuck on the issue. Sequence: {kinds!r}"
+    )
+    # Failed precedes exited.
+    assert kinds.index("StateFailedEvent") < kinds.index("StateExitedEvent")
+
+
 def test_terminal_landing_no_bus_does_not_crash() -> None:
     """No bus means no event publishes, but the journal row should still
     get created + closed for audit completeness."""

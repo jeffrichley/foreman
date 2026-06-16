@@ -182,6 +182,29 @@ class TicketState(ABC):
 
     # --- Template Method ---
 
+    def _close_failed_state(self, ctx: StateContext) -> None:
+        """Close the state_instance row and emit StateExitedEvent for a
+        state that failed (or was held) and is exiting WITHOUT going
+        through the normal verify/exit phases.
+
+        Centralizes the lifecycle invariants both early-return branches
+        in transition() must satisfy (can_run-false / retry-cap-trip).
+        Without this:
+
+        * LabelObservabilityObserver listens to StateExitedEvent to REMOVE
+          the old foreman:state-<X> label. Skipping the event leaves the
+          failed-state label stuck on the issue alongside the new state
+          label (Bug F2 — retry-cap branch left BOTH foreman:state-<failed>
+          AND foreman:state-needshelp on the GitHub issue).
+        * close_state_instance flips exited_at, which drops the row from
+          partial index idx_state_instances_inflight. Skipping it leaks
+          rows on every poll-while-held cycle (Bug F4 — held tickets
+          accumulated orphan rows that ALSO tripped the runaway-defense
+          cap and escalated the held ticket to NeedsHelp on resume).
+        """
+        ctx.repo.close_state_instance(ctx.instance.id, now=ctx.clock())
+        _publish(ctx, StateExitedEvent, outcome=None)
+
     def transition(self, ctx: StateContext) -> TicketState | None:
         """Orchestrate the five-hook lifecycle. The base class controls the
         flow; subclasses control the steps. See the docstring of each hook
@@ -193,6 +216,9 @@ class TicketState(ABC):
                 failure_phase="can_run", failure_reason="held",
             )
             _publish(ctx, StateFailedEvent, failure_phase="can_run", failure_reason="held")
+            # Phase 8d.15 (F4): the held branch must close the state_instance
+            # row and emit StateExitedEvent — see _close_failed_state.
+            self._close_failed_state(ctx)
             return None
 
         # Runaway defense (Phase 8c.2). The current row was just opened
@@ -225,7 +251,12 @@ class TicketState(ABC):
             ctx.repo.set_ticket_state(
                 ctx.ticket.id, needs_help.state_name, now=ctx.clock(),
             )
-            ctx.repo.close_state_instance(ctx.instance.id, now=ctx.clock())
+            # Phase 8d.15 (F2): close the failed state's instance row AND
+            # emit StateExitedEvent — the prior code only closed the row,
+            # so LabelObservabilityObserver never saw the failed state
+            # exit and left foreman:state-<failed> stuck on the issue
+            # alongside the new foreman:state-needshelp.
+            self._close_failed_state(ctx)
             # Synthesize the terminal landing event so observers see it
             # — WorkerPool will not re-enqueue once the ticket is parked
             # in NeedsHelp. See ``_enter_terminal`` for the full rationale.

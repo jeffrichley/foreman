@@ -138,7 +138,11 @@ def test_can_run_false_records_held_and_returns_none(setup: tuple[InMemoryTicket
     fetched = repo.get_state_instance(instance.id)
     assert fetched.failure_phase == "can_run"
     assert fetched.failure_reason == "held"
-    assert fetched.is_in_flight  # instance NOT closed; transition is no-op
+    # Phase 8d.15 (F4): the held branch now closes the state_instance row
+    # (and emits StateExitedEvent — covered in test_transition_events).
+    # Without this, the partial index idx_state_instances_inflight
+    # accumulates orphans on every poll-while-held cycle.
+    assert not fetched.is_in_flight
 
 
 def test_enter_raises_records_failure_and_skips_exit(setup: tuple[InMemoryTicketRepository, Any, Any]) -> None:
@@ -337,3 +341,90 @@ def test_state_retry_cap_publishes_state_failed_event() -> None:
     assert len(failed_events) == 1
     assert failed_events[0].failure_phase == "retry_cap"
     assert "Raising" in failed_events[0].failure_reason
+
+
+# --- Phase 8d.15: held-branch and retry-cap-branch close + StateExited fixes ---
+
+
+def test_held_ticket_does_not_escalate_to_needs_help_under_repeated_polls() -> None:
+    """F4 operational invariant: a held ticket polled N>=cap times and
+    then RESUMED must STAY out of NeedsHelp — i.e., the held-period polls
+    MUST NOT count toward the runaway-defense consecutive-failures cap.
+
+    Pre-fix consequence: holding a ticket for cap+ polls counted as cap+
+    "consecutive same-state failures" (each poll opened a fresh
+    state_instance row with the same state_name AND recorded a can_run
+    failure on it). When the operator resumed, the very first
+    post-resume tick walked back, saw cap consecutive same-state-failures,
+    and immediately escalated the resumed ticket to NeedsHelp — defeating
+    the operator's hold intent.
+
+    The cleanest fix: `count_consecutive_same_state` skips rows whose
+    failure_phase=='can_run' when walking back the consecutive-failure
+    run, because those rows mark "we never even tried" (the hold gated
+    execution at can_run). They are not runaway-defense signal.
+    """
+    repo = InMemoryTicketRepository()
+    now = dt.datetime(2026, 6, 15, 12, 0, 0)
+    ticket = repo.create_ticket(project="p", issue_number=1, now=now)
+    repo.hold_ticket(ticket.id, held_by="jeff", reason="paused", now=now)
+
+    # 5 poll cycles while held — well past max_state_attempts=3. Each
+    # cycle opens a fresh state_instance (mirroring WorkerPool behavior)
+    # and runs transition().
+    for seq in range(1, 6):
+        instance = repo.open_state_instance(
+            ticket_id=ticket.id, state_name="Happy", sequence=seq, now=now,
+        )
+        held_ticket = repo.get_ticket(ticket.id)
+        ctx = StateContext(
+            ticket=held_ticket, instance=instance, repo=repo,
+            clock=lambda: now, max_state_attempts=3,
+        )
+        recorder = _Recorder()
+        result = _HappyState(recorder, None).transition(ctx)
+        assert result is None  # held → no transition
+        assert recorder.calls == []  # no hooks ran
+
+    # Operator resumes. The next poll opens a fresh instance — the cap
+    # check at the top of transition() MUST NOT count the held-period
+    # rows, otherwise the resumed ticket immediately escalates.
+    repo.resume_ticket(ticket.id, now=now)
+    next_instance = repo.open_state_instance(
+        ticket_id=ticket.id, state_name="Happy", sequence=6, now=now,
+    )
+    resumed_ticket = repo.get_ticket(ticket.id)
+    ctx = StateContext(
+        ticket=resumed_ticket, instance=next_instance, repo=repo,
+        clock=lambda: now, max_state_attempts=3,
+    )
+    next_state = _NextState()
+    result = _HappyState(_Recorder(), next_state).transition(ctx)
+
+    # Cap NOT tripped — lifecycle ran normally.
+    assert result is next_state
+    assert repo.get_ticket(ticket.id).current_state == "Next"
+    assert repo.get_ticket(ticket.id).current_state != "NeedsHelp"
+
+
+def test_held_ticket_closes_state_instance_and_clears_in_flight() -> None:
+    """F4: each held-poll cycle must close its state_instance row so the
+    partial in_flight index does not accumulate orphans."""
+    repo = InMemoryTicketRepository()
+    now = dt.datetime(2026, 6, 15, 12, 0, 0)
+    ticket = repo.create_ticket(project="p", issue_number=1, now=now)
+    repo.hold_ticket(ticket.id, held_by="jeff", reason="paused", now=now)
+
+    instance = repo.open_state_instance(
+        ticket_id=ticket.id, state_name="Happy", sequence=1, now=now,
+    )
+    held_ticket = repo.get_ticket(ticket.id)
+    ctx = StateContext(
+        ticket=held_ticket, instance=instance, repo=repo,
+        clock=lambda: now,
+    )
+    _HappyState(_Recorder(), None).transition(ctx)
+
+    fetched = repo.get_state_instance(instance.id)
+    assert not fetched.is_in_flight
+    assert repo.list_in_flight_state_instances() == []
