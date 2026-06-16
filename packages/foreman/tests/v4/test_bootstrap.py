@@ -21,6 +21,7 @@ from foreman.v4.observers.event_archive import EventArchiveObserver
 from foreman.v4.observers.label_observability import LabelObservabilityObserver
 from foreman.v4.observers.metrics import MetricsObserver
 from foreman.v4.observers.structured_log import StructuredLogObserver
+from foreman.v4.routing_git_provider import RoutingGitProvider
 
 _V4_LOGGER_NAMES = (
     "foreman.v4",
@@ -180,6 +181,70 @@ def test_bootstrap_wires_event_bus_with_standard_observers(tmp_path: Path):
     assert EventArchiveObserver in observer_types
     assert LabelObservabilityObserver in observer_types
     assert MetricsObserver in observer_types
+
+
+def test_bootstrap_wires_routing_git_provider_for_multi_project(tmp_path: Path):
+    """Phase 8d.16 F1 fix: bootstrap must wrap the per-project providers
+    in a :class:`RoutingGitProvider` for cross-project consumers (the
+    Daemon's state machine, the LabelObservabilityObserver). Before the
+    fix, only the first project's provider was threaded into both — so
+    every other project's writes silently hit project[0]'s repo.
+
+    Asserts the Daemon's ``git`` attribute is a ``RoutingGitProvider``
+    AND that its ``_providers`` map carries one entry per configured
+    project. Per-project Pollers keep their own GitProvider directly
+    (one project per Poller, no routing hop needed) — verified by
+    checking each Poller's ``_git`` is NOT the router."""
+    voice_provider = FakeGitProvider()
+    foreman_provider = FakeGitProvider()
+    by_repo = {"owner/voice": voice_provider, "owner/foreman": foreman_provider}
+
+    config = V4Config(
+        db_path=str(tmp_path / "v4.db"),
+        log_dir=str(tmp_path / "logs"),
+        apps=_apps_config(),
+        orchestrator=_orchestrator_config(),
+        projects=[
+            ProjectConfig(
+                name="voice", repo="owner/voice",
+                local_clone_path=str(tmp_path / "voice"),
+            ),
+            ProjectConfig(
+                name="foreman", repo="owner/foreman",
+                local_clone_path=str(tmp_path / "foreman"),
+            ),
+        ],
+    )
+    ctx = bootstrap_cli_context(
+        config=config,
+        identity=_stub_identity(),
+        git_provider_factory=lambda repo: by_repo[repo],
+    )
+    assert ctx.daemon is not None
+
+    # Daemon receives the router for cross-project calls.
+    daemon_git = ctx.daemon._git  # type: ignore[attr-defined]
+    assert isinstance(daemon_git, RoutingGitProvider), (
+        f"Daemon.git should be a RoutingGitProvider for multi-project "
+        f"routing; got {type(daemon_git).__name__}. F1 not fixed."
+    )
+
+    # And the router's per-project map covers EVERY configured project,
+    # keyed by ProjectConfig.name (not repo full name).
+    routed_projects = set(daemon_git._providers)  # type: ignore[attr-defined]
+    assert routed_projects == {"voice", "foreman"}, (
+        f"router should know every project; got {routed_projects}"
+    )
+
+    # And each Poller still uses its OWN per-project provider directly,
+    # not the router (pollers operate on one project each — routing hop
+    # would be pure overhead).
+    pollers = ctx.daemon._pollers  # type: ignore[attr-defined]
+    for poller in pollers:
+        assert not isinstance(poller._git, RoutingGitProvider), (
+            f"Poller for {poller._project} should hold its own per-project "
+            f"GitProvider, not the router."
+        )
 
 
 def test_bootstrap_skips_label_observer_when_no_projects(tmp_path: Path):
