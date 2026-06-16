@@ -1,9 +1,22 @@
-"""MergingState — artifact-check against MergeQueue verdict."""
+"""MergingState — direct pr.merge() against the impl PR.
+
+Phase 8d.19 collapsed the MergeQueue enqueue-then-poll path into one
+direct merge call. These tests pin down the 3-branch shape of
+``MergingState.execute``:
+
+  - PR already merged externally → CLEAN (no merge_pr call).
+  - PR mergeable + CI passing → call merge_pr → CLEAN.
+  - Anything else → BLOCKED (Poller picks it up next tick).
+
+Granular ``mergeable_state`` handling (CI failed → ImplFix, dirty →
+ImplFix, etc.) is deferred to foreman#317. The BLOCKED branch is the
+catch-all today.
+"""
 from __future__ import annotations
 
 import datetime as dt
 
-from foreman.v4.git_provider import FakeGitProvider, MergeVerdict, PRState
+from foreman.v4.git_provider import FakeGitProvider, PRState
 from foreman.v4.outcome import OutcomeKind
 from foreman.v4.repository import InMemoryTicketRepository
 from foreman.v4.state import StateContext
@@ -32,7 +45,18 @@ def _seed_prior_outcome(
     repo.close_state_instance(prior.id, now=dt.datetime(2026, 6, 13))
 
 
-def _ctx_with_pr(pr_number: int = 99) -> tuple[StateContext, InMemoryTicketRepository, FakeGitProvider]:
+def _ctx_with_pr(
+    pr_number: int = 99, *, pr_state: PRState | None = None,
+) -> tuple[StateContext, InMemoryTicketRepository, FakeGitProvider]:
+    """Build a StateContext where the ticket is in Merging with the
+    named PR seeded against the FakeGitProvider in the given state.
+
+    The default ``pr_state`` is mergeable + CI passing + not yet merged
+    — the "execute() should call merge_pr" happy path. Tests override
+    when they want to exercise the merged-externally or BLOCKED branches.
+    """
+    if pr_state is None:
+        pr_state = PRState(merged=False, mergeable=True, ci_passing=True)
     repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
     repo.set_ticket_state(ticket.id, "Merging", now=dt.datetime(2026, 6, 13))
@@ -42,10 +66,7 @@ def _ctx_with_pr(pr_number: int = 99) -> tuple[StateContext, InMemoryTicketRepos
         now=dt.datetime(2026, 6, 13),
     )
     git = FakeGitProvider()
-    git.set_pr_state(
-        project="p", pr_number=pr_number,
-        state=PRState(merged=False, mergeable=True, ci_passing=True),
-    )
+    git.set_pr_state(project="p", pr_number=pr_number, state=pr_state)
     ctx = StateContext(
         ticket=repo.get_ticket(ticket.id), instance=instance, repo=repo,
         clock=lambda: dt.datetime(2026, 6, 13),
@@ -54,36 +75,69 @@ def _ctx_with_pr(pr_number: int = 99) -> tuple[StateContext, InMemoryTicketRepos
     return ctx, repo, git
 
 
-def test_first_entry_enqueues_into_merge_queue():
-    ctx, repo, git = _ctx_with_pr(pr_number=99)
-    MergingState().transition(ctx)
-    assert ("p", 99) in git.merge_queue
+def test_merging_state_returns_clean_when_pr_merged_externally():
+    """If the PR is already merged by something outside the daemon
+    (operator click-merge, GitHub's own merge-queue, an earlier daemon
+    instance), execute() returns CLEAN without calling merge_pr again.
 
-
-def test_pending_verdict_routes_back_to_merging():
-    ctx, repo, git = _ctx_with_pr(pr_number=99)
-    git.enqueue_merge_queue(project="p", pr_number=99)  # already pending
-    next_state = MergingState().transition(ctx)
-    assert next_state is not None
-    assert next_state.state_name == "Merging"
-
-
-def test_merged_verdict_routes_to_done():
-    ctx, repo, git = _ctx_with_pr(pr_number=99)
-    git.enqueue_merge_queue(project="p", pr_number=99)
-    git.set_merge_verdict(project="p", pr_number=99, verdict=MergeVerdict.MERGED)
+    The recorder asymmetry is load-bearing: a naive implementation that
+    always calls merge_pr would set merged=True via the fake's state
+    machine and "pass" a merged-state assertion, masking the bug class.
+    """
+    ctx, _repo, git = _ctx_with_pr(
+        pr_number=99,
+        pr_state=PRState(merged=True, mergeable=True, ci_passing=True),
+    )
     next_state = MergingState().transition(ctx)
     assert next_state is not None
     assert next_state.state_name == "Done"
+    # NO merge_pr call — the PR was already merged.
+    assert ("p", 99) not in git.merge_pr_calls
 
 
-def test_rejected_verdict_routes_to_impl_fix():
-    ctx, repo, git = _ctx_with_pr(pr_number=99)
-    git.enqueue_merge_queue(project="p", pr_number=99)
-    git.set_merge_verdict(project="p", pr_number=99, verdict=MergeVerdict.REJECTED)
+def test_merging_state_calls_merge_pr_when_mergeable_and_ci_passing():
+    """The happy path: GitHub reports the PR mergeable + CI green,
+    execute() calls merge_pr and returns CLEAN → Done."""
+    ctx, _repo, git = _ctx_with_pr(
+        pr_number=99,
+        pr_state=PRState(merged=False, mergeable=True, ci_passing=True),
+    )
     next_state = MergingState().transition(ctx)
     assert next_state is not None
-    assert next_state.state_name == "ImplFix"
+    assert next_state.state_name == "Done"
+    assert ("p", 99) in git.merge_pr_calls
+    assert git.get_pr_state(project="p", pr_number=99).merged is True
+
+
+def test_merging_state_returns_blocked_when_ci_pending():
+    """CI hasn't passed yet — execute() returns BLOCKED so the Poller
+    tries again next tick. merge_pr MUST NOT be called: merging while
+    CI is still running would defeat the whole point of the gate."""
+    ctx, _repo, git = _ctx_with_pr(
+        pr_number=99,
+        pr_state=PRState(merged=False, mergeable=True, ci_passing=False),
+    )
+    next_state = MergingState().transition(ctx)
+    assert next_state is not None
+    assert next_state.state_name == "Merging"
+    assert ("p", 99) not in git.merge_pr_calls
+    # And the PR is still un-merged from the daemon's perspective.
+    assert git.get_pr_state(project="p", pr_number=99).merged is False
+
+
+def test_merging_state_returns_blocked_when_not_mergeable():
+    """The PR isn't mergeable (conflict, blocked-by-review, etc.) —
+    execute() returns BLOCKED. Granular dispatch on the underlying
+    cause (rebase needed, review missing, etc.) is foreman#317; this
+    task ships the minimum-shape that lets the happy path reach Done."""
+    ctx, _repo, git = _ctx_with_pr(
+        pr_number=99,
+        pr_state=PRState(merged=False, mergeable=False, ci_passing=True),
+    )
+    next_state = MergingState().transition(ctx)
+    assert next_state is not None
+    assert next_state.state_name == "Merging"
+    assert ("p", 99) not in git.merge_pr_calls
 
 
 def test_missing_git_provider_routes_through_execute_failure():
@@ -101,4 +155,4 @@ def test_missing_git_provider_routes_through_execute_failure():
     )
     MergingState().transition(ctx)
     closed = repo.get_state_instance(instance.id)
-    assert closed.failure_phase in ("enter", "execute")
+    assert closed.failure_phase == "execute"

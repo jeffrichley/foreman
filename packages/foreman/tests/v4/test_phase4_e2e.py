@@ -4,7 +4,7 @@ from __future__ import annotations
 import datetime as dt
 import time
 
-from foreman.v4.git_provider import FakeGitProvider, MergeVerdict, PRState
+from foreman.v4.git_provider import FakeGitProvider, PRState
 from foreman.v4.poller import Poller
 from foreman.v4.queue_manager import QueueManager
 from foreman.v4.role_dispatcher import FakeRoleDispatcher
@@ -35,14 +35,13 @@ def test_three_concurrent_tickets_with_one_dep_blocked():
     git.set_open_issues_with_label(
         project="p", label="foreman:plan", issue_numbers={1, 2, 3},
     )
-    # Each ticket gets its own PR + MergeQueue verdict MERGED
+    # Each ticket gets its own PR; the mergeable + ci_passing seed
+    # state satisfies MergingState's direct-merge gate in one pass.
     for pr in (101, 102, 103):
         git.set_pr_state(
             project="p", pr_number=pr,
             state=PRState(merged=False, mergeable=True, ci_passing=True),
         )
-        git.enqueue_merge_queue(project="p", pr_number=pr)
-        git.set_merge_verdict(project="p", pr_number=pr, verdict=MergeVerdict.MERGED)
 
     # FakeRoleDispatcher: every role+issue tuple returns CLEAN. The PR number
     # per issue is the canonical "100 + issue" so each ticket carries its own.

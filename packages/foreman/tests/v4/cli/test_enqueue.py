@@ -78,9 +78,9 @@ def test_enqueue_creates_queued_ticket_in_sqlite(tmp_path: Path) -> None:
     # New ticket id printed to stdout.
     assert str(tickets[0].id) in result.output
 
-    # GitProvider was not touched (no PRs, no labels, no merge queue).
+    # GitProvider was not touched (no PRs, no labels, no merges).
     assert git._prs == {}
-    assert git.merge_queue == set()
+    assert git.merge_pr_calls == set()
     assert git._labeled_issues == {}
     assert git._issue_labels == {}
 

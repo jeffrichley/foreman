@@ -5,7 +5,6 @@ import pytest
 
 from foreman.v4.git_provider import (
     FakeGitProvider,
-    MergeVerdict,
     PRNotFoundError,
     PRState,
 )
@@ -26,45 +25,26 @@ def test_missing_pr_raises():
         git.get_pr_state(project="p", pr_number=999)
 
 
-def test_enqueue_into_merge_queue_records_call():
+def test_merge_pr_marks_merged_and_records_call():
+    """``merge_pr`` flips the PR state to ``merged=True`` AND records the
+    call on ``merge_pr_calls`` so tests can distinguish "we merged it"
+    from "already merged externally" (where merge_pr must NOT be called).
+    """
     git = FakeGitProvider()
     git.set_pr_state(
         project="p", pr_number=1,
         state=PRState(merged=False, mergeable=True, ci_passing=True),
     )
-    git.enqueue_merge_queue(project="p", pr_number=1)
-    assert ("p", 1) in git.merge_queue
-
-
-def test_merge_verdict_default_is_pending():
-    git = FakeGitProvider()
-    git.set_pr_state(
-        project="p", pr_number=1,
-        state=PRState(merged=False, mergeable=True, ci_passing=True),
-    )
-    git.enqueue_merge_queue(project="p", pr_number=1)
-    assert git.merge_verdict(project="p", pr_number=1) is MergeVerdict.PENDING
-
-
-def test_set_merge_verdict_advances():
-    git = FakeGitProvider()
-    git.set_pr_state(
-        project="p", pr_number=1,
-        state=PRState(merged=False, mergeable=True, ci_passing=True),
-    )
-    git.enqueue_merge_queue(project="p", pr_number=1)
-    git.set_merge_verdict(project="p", pr_number=1, verdict=MergeVerdict.MERGED)
-    assert git.merge_verdict(project="p", pr_number=1) is MergeVerdict.MERGED
-
-
-def test_merge_spec_pr_marks_merged():
-    git = FakeGitProvider()
-    git.set_pr_state(
-        project="p", pr_number=1,
-        state=PRState(merged=False, mergeable=True, ci_passing=True),
-    )
-    git.merge_spec_pr(project="p", pr_number=1)
+    git.merge_pr(project="p", pr_number=1)
     assert git.get_pr_state(project="p", pr_number=1).merged is True
+    assert ("p", 1) in git.merge_pr_calls
+
+
+def test_merge_pr_call_recorder_empty_by_default():
+    """The recorder is empty until ``merge_pr`` is called — load-bearing
+    for assertions that gate on "the state machine did NOT merge"."""
+    git = FakeGitProvider()
+    assert git.merge_pr_calls == set()
 
 
 def test_add_labels_records_call_and_is_queryable():

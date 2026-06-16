@@ -29,7 +29,6 @@ Schema:
                            before this existed. Matches the shape of
                            max_fix_attempts / max_impl_attempts but
                            applies at state-machine granularity.
-    merge_mechanism      - "queue" (default) | "merge" | "squash" | "rebase"
 
   [apps.planner]
     app_id           - GitHub App numeric ID
@@ -73,14 +72,12 @@ Schema:
     dev_base_branch   - alternate base branch for spec worktrees (None → origin/default)
     max_fix_attempts  - max fix cycles before NeedsHelp escalation (default 3)
     max_impl_attempts - max impl cycles before NeedsHelp escalation (default 3)
-    merge_mechanism   - per-project override (None inherits daemon.merge_mechanism)
 """
 
 from __future__ import annotations
 
 import tomllib
 from pathlib import Path
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -119,13 +116,6 @@ class ProjectConfig(BaseModel):
     Matches v3 ProjectConfig.max_impl_attempts default + ge=1 validation
     (a value of 0 would silently skip the cycle and dump to NeedsHelp
     on first dispatch). Read at role runtime by ``foreman.roles.worker``."""
-
-    merge_mechanism: Literal["queue", "merge", "squash", "rebase"] | None = None
-    """Per-project override for the merge mechanism. None inherits the
-    daemon-level ``V4Config.merge_mechanism``. Per-project granularity
-    matters because MergeQueue is enabled at the GitHub repo level —
-    different projects may have it set up at different times. See
-    foreman#158."""
 
 
 class AppCredentials(BaseModel):
@@ -195,7 +185,6 @@ class V4Config(BaseModel):
     granularity (per state per ticket) rather than role-level. ge=1
     because a value of 0 would dump every ticket to NeedsHelp on first
     entry — never a valid configuration."""
-    merge_mechanism: Literal["queue", "merge", "squash", "rebase"] = "queue"
     apps: AppsConfig
     # Task 8.4: orchestrator is REQUIRED (no default). Google-style App
     # installation credentials are the only supported path — there is no

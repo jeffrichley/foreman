@@ -18,8 +18,8 @@ that mints a fresh ``Github`` client (which internally calls
 ``identity.get_role_token(...)``), and rebuilds the cached client when
 it's older than ``refresh_after_seconds`` (default 50 min = 3000s — well
 inside the 1-hour TTL with safety margin). The :class:`Repository`
-handle and PyGithub's name-mangled GraphQL requester both live INSIDE
-each ``Github`` instance, so rebuilding the client invalidates both.
+handle lives INSIDE each ``Github`` instance, so rebuilding the client
+invalidates it too.
 
 Cooperation with V4IdentityRegistry's pre-expiry safety window
 --------------------------------------------------------------
@@ -52,7 +52,7 @@ from typing import TYPE_CHECKING
 
 from github import GithubException
 
-from foreman.v4.git_provider import MergeVerdict, PRNotFoundError, PRState
+from foreman.v4.git_provider import PRNotFoundError, PRState
 
 if TYPE_CHECKING:
     from github import Github
@@ -118,12 +118,10 @@ class PyGithubGitProvider:
         than ``refresh_after_seconds``. Lazy: the factory is NOT
         invoked at construction time — only on first access.
 
-        PyGithub stashes its private GraphQL requester at
-        ``_Github__requester`` on each ``Github`` instance, so any
-        downstream method that re-reads ``self._gh._Github__requester``
-        after a refresh automatically picks up the new requester.
         Callers MUST go through ``self._gh`` for every API access; do
-        not cache a ``Github`` reference outside this property.
+        not cache a ``Github`` reference outside this property — a
+        stashed reference clings to the old client across refresh and
+        silently 401s once its token expires.
         """
         now = self._clock()
         # _cached_github and _cached_at are set together; check _cached_at
@@ -176,54 +174,19 @@ class PyGithubGitProvider:
             ci_passing=(pr.mergeable_state in _CI_PASSING_STATES),
         )
 
-    def merge_spec_pr(self, *, project: str, pr_number: int) -> None:
+    def merge_pr(self, *, project: str, pr_number: int) -> None:
+        """Merge the PR via GitHub's REST API.
+
+        Same mechanism for spec PRs (SpecReviewState) and impl PRs
+        (MergingState). Phase 8d.19 dropped the MergeQueue-based path
+        because most projects don't have MergeQueue configured —
+        ``pr.merge()`` is the universal fallback that works everywhere.
+        Callers (specifically MergingState) gate this call on a
+        ``get_pr_state`` check that confirms the PR is mergeable + CI
+        passing, so the failure modes are limited.
+        """
         pr = self._repo.get_pull(pr_number)
         pr.merge()
-
-    def enqueue_merge_queue(self, *, project: str, pr_number: int) -> None:
-        pr = self._repo.get_pull(pr_number)
-        # GraphQL mutation — REST API doesn't expose MergeQueue operations.
-        mutation = """
-            mutation($prId: ID!) {
-              enqueuePullRequest(input: {pullRequestId: $prId}) {
-                mergeQueueEntry { id }
-              }
-            }
-        """
-        requester = self._gh._Github__requester  # type: ignore[attr-defined]
-        requester.requestJsonAndCheck(
-            "POST", "/graphql",
-            input={"query": mutation, "variables": {"prId": pr.node_id}},
-        )
-
-    def merge_verdict(self, *, project: str, pr_number: int) -> MergeVerdict:
-        pr = self._repo.get_pull(pr_number)
-        if pr.merged:
-            return MergeVerdict.MERGED
-        # GraphQL again: query the mergeQueueEntry for this PR's status.
-        query = """
-            query($prId: ID!) {
-              node(id: $prId) {
-                ... on PullRequest {
-                  mergeQueueEntry { state }
-                }
-              }
-            }
-        """
-        requester = self._gh._Github__requester  # type: ignore[attr-defined]
-        _, payload = requester.requestJsonAndCheck(
-            "POST", "/graphql",
-            input={"query": query, "variables": {"prId": pr.node_id}},
-        )
-        entry = (payload.get("data") or {}).get("node", {}).get("mergeQueueEntry")
-        if entry is None:
-            return MergeVerdict.PENDING  # not in queue yet
-        state = entry.get("state")
-        if state == "MERGED":
-            return MergeVerdict.MERGED
-        if state in ("REJECTED", "FAILED"):
-            return MergeVerdict.REJECTED
-        return MergeVerdict.PENDING
 
     def list_open_issues_with_label(
         self, *, project: str, label: str,

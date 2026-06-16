@@ -8,10 +8,10 @@ PyGithub impl ignores it — it always uses ``self._repo`` resolved from the
 single hardcoded ``repo_full_name``. In a multi-project daemon, the
 bootstrap created one PyGithubGitProvider per project but only the FIRST
 was threaded into the Daemon's cross-project consumers (LabelObservability
-observer + state-machine ``merge_spec_pr`` / ``enqueue_merge_queue`` calls).
-Result: any project ``i > 0`` would have its writes silently routed to
-project[0]'s repo, hitting 404 (best case) or mis-labeling the wrong
-issue (worst case, on issue-number collision).
+observer + state-machine ``merge_pr`` calls). Result: any project ``i > 0``
+would have its writes silently routed to project[0]'s repo, hitting 404
+(best case) or mis-labeling the wrong issue (worst case, on issue-number
+collision).
 
 The fix is to wrap ``dict[project_name, GitProvider]`` in a dispatcher
 that respects the ``project=`` kwarg every call carries. Cross-project
@@ -35,7 +35,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from foreman.v4.git_provider import GitProvider, MergeVerdict, PRState
+from foreman.v4.git_provider import GitProvider, PRState
 
 
 class UnknownProjectError(LookupError):
@@ -93,18 +93,8 @@ class RoutingGitProvider:
             project=project, pr_number=pr_number,
         )
 
-    def merge_spec_pr(self, *, project: str, pr_number: int) -> None:
-        self._resolve(project).merge_spec_pr(
-            project=project, pr_number=pr_number,
-        )
-
-    def enqueue_merge_queue(self, *, project: str, pr_number: int) -> None:
-        self._resolve(project).enqueue_merge_queue(
-            project=project, pr_number=pr_number,
-        )
-
-    def merge_verdict(self, *, project: str, pr_number: int) -> MergeVerdict:
-        return self._resolve(project).merge_verdict(
+    def merge_pr(self, *, project: str, pr_number: int) -> None:
+        self._resolve(project).merge_pr(
             project=project, pr_number=pr_number,
         )
 

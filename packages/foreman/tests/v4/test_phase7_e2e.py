@@ -21,7 +21,7 @@ from unittest.mock import MagicMock
 
 from foreman.v4.bootstrap import bootstrap_cli_context
 from foreman.v4.config import load_config
-from foreman.v4.git_provider import FakeGitProvider, MergeVerdict, PRState
+from foreman.v4.git_provider import FakeGitProvider, PRState
 from foreman.v4.logging_config import reset_logging
 from foreman.v4.role_dispatcher import FakeRoleDispatcher
 
@@ -84,8 +84,6 @@ def test_full_boot_from_toml_to_done(tmp_path: Path, monkeypatch):
         project="p", pr_number=42,
         state=PRState(merged=False, mergeable=True, ci_passing=True),
     )
-    git.enqueue_merge_queue(project="p", pr_number=42)
-    git.set_merge_verdict(project="p", pr_number=42, verdict=MergeVerdict.MERGED)
 
     dispatcher = FakeRoleDispatcher(responses={
         ("planner", "p", 1):       _canned("clean", pr_number=42),
@@ -118,8 +116,10 @@ def test_full_boot_from_toml_to_done(tmp_path: Path, monkeypatch):
 
         # Drive the loop. tick_seconds=0 + serial pool means one tick =
         # one transition; Queued -> Planning -> SpecReview -> Implementing
-        # -> ImplReview -> Merging -> Done is 6 advances + adoption + a
-        # MergingState BLOCKED retry, so 30 ticks is generous.
+        # -> ImplReview -> Merging -> Done is 6 advances + adoption.
+        # Phase 8d.19 dropped the MergeQueue polling so MergingState
+        # advances in one pass when the PR is mergeable + CI green —
+        # 30 ticks is still generous.
         for _ in range(30):
             ctx.daemon.tick_once()
             ticket = ctx.repo.get_ticket_by_issue(project="p", issue_number=1)

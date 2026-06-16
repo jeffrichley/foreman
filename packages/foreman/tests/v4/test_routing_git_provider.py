@@ -4,9 +4,9 @@ The fix for F1 (Phase 8d.16): ``PyGithubGitProvider`` is locked at
 construction to ONE ``repo_full_name`` and ignores the ``project=`` kwarg
 every Protocol method takes. In a multi-project daemon, bootstrap built
 one provider per project but only threaded the FIRST into cross-project
-consumers (LabelObservabilityObserver + state-machine spec-merge /
-merge-queue calls). The router fixes that — every cross-project call gets
-dispatched to the right per-project provider.
+consumers (LabelObservabilityObserver + state-machine ``merge_pr`` calls).
+The router fixes that — every cross-project call gets dispatched to the
+right per-project provider.
 
 These tests verify EVERY method on the :class:`GitProvider` Protocol
 dispatches to the named provider AND not to any other registered
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import pytest
 
-from foreman.v4.git_provider import FakeGitProvider, MergeVerdict, PRState
+from foreman.v4.git_provider import FakeGitProvider, PRState
 from foreman.v4.routing_git_provider import (
     RoutingGitProvider,
     UnknownProjectError,
@@ -55,21 +55,23 @@ def test_dispatches_get_pr_state_to_correct_provider() -> None:
         router.get_pr_state(project="foo", pr_number=99)
 
 
-def test_dispatches_merge_spec_pr_to_correct_provider() -> None:
+def test_dispatches_merge_pr_to_correct_provider() -> None:
     foo, bar, router = _two_provider_router()
     bar.set_pr_state(
         project="bar", pr_number=42,
         state=PRState(merged=False, mergeable=True, ci_passing=True),
     )
 
-    router.merge_spec_pr(project="bar", pr_number=42)
+    router.merge_pr(project="bar", pr_number=42)
 
     assert bar.get_pr_state(project="bar", pr_number=42).merged is True
+    assert ("bar", 42) in bar.merge_pr_calls
     # foo never had PR 42 set — if the router mis-routed, foo would have
     # raised PRNotFoundError; if it broadcast, foo would now have a
-    # merged-PR-42. Neither happened.
+    # merged-PR-42 + recorded call. Neither happened.
     with pytest.raises(LookupError):
         foo.get_pr_state(project="foo", pr_number=42)
+    assert ("bar", 42) not in foo.merge_pr_calls
 
 
 def test_dispatches_add_labels_to_correct_provider() -> None:
@@ -121,39 +123,6 @@ def test_dispatches_list_open_issues_with_label_to_correct_provider() -> None:
     )
 
     assert result == [99]
-
-
-def test_dispatches_enqueue_merge_queue_to_correct_provider() -> None:
-    foo, bar, router = _two_provider_router()
-    bar.set_pr_state(
-        project="bar", pr_number=15,
-        state=PRState(merged=False, mergeable=True, ci_passing=True),
-    )
-
-    router.enqueue_merge_queue(project="bar", pr_number=15)
-
-    assert ("bar", 15) in bar.merge_queue
-    # foo's queue never touched.
-    assert ("foo", 15) not in foo.merge_queue
-    assert ("bar", 15) not in foo.merge_queue
-
-
-def test_dispatches_merge_verdict_to_correct_provider() -> None:
-    foo, bar, router = _two_provider_router()
-    bar.set_pr_state(
-        project="bar", pr_number=20,
-        state=PRState(merged=False, mergeable=True, ci_passing=True),
-    )
-    bar.set_merge_verdict(
-        project="bar", pr_number=20, verdict=MergeVerdict.MERGED,
-    )
-
-    verdict = router.merge_verdict(project="bar", pr_number=20)
-
-    assert verdict is MergeVerdict.MERGED
-    # foo has no verdict registered for (foo, 20) so it returns the
-    # default PENDING — proving the call did NOT cross over to bar.
-    assert foo.merge_verdict(project="foo", pr_number=20) is MergeVerdict.PENDING
 
 
 def test_unknown_project_raises_with_known_list() -> None:

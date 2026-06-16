@@ -1,9 +1,9 @@
 """GitProvider — narrow seam over PyGithub for the v4 state machine.
 
 States that need to look at GitHub artifact state (spec PR mergeable?
-impl PR ready? MergeQueue verdict?) go through this Protocol. The
-PyGithub concrete implementation lands in Phase 4; Phase 3 only needs
-the shape + the fake.
+impl PR ready? impl PR merged?) go through this Protocol. The PyGithub
+concrete implementation lands in Phase 4; Phase 3 only needs the shape
++ the fake.
 
 Label-write surface
 -------------------
@@ -17,12 +17,23 @@ label — a 40-minute dogfood wedge on the morning of 2026-06-15.
 Granular writes preserve the trigger label AND any operator-applied
 labels untouched. The old ``write_labels`` was dropped in Phase 8c.4
 since it had no out-of-tree consumers.
+
+PR-merge surface
+----------------
+:meth:`merge_pr` is the only merge entry point — both ``SpecReviewState``
+(spec PR after Reviewer-on-spec approves) and ``MergingState`` (impl PR
+after Reviewer-on-impl approves AND GitHub reports the PR mergeable +
+CI green) call it. Phase 8d.19 collapsed the previous two paths
+(``merge_spec_pr`` for spec PRs, ``enqueue_merge_queue`` + ``merge_verdict``
+polling for impl PRs) into one direct ``pr.merge()`` call — most projects
+don't have MergeQueue configured, and the polling path looped forever on
+those that didn't. Granular ``mergeable_state`` handling (CI-failed →
+ImplFix, dirty → rebase, etc.) is deferred to foreman#317.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import Protocol
 
 
@@ -37,20 +48,12 @@ class PRState:
     ci_passing: bool
 
 
-class MergeVerdict(StrEnum):
-    PENDING = "pending"     # in MergeQueue, no decision yet
-    MERGED = "merged"       # MergeQueue completed the merge
-    REJECTED = "rejected"   # MergeQueue rejected (CI fail, conflict)
-
-
 class GitProvider(Protocol):
     def list_open_issues_with_label(
         self, *, project: str, label: str,
     ) -> list[int]: ...
     def get_pr_state(self, *, project: str, pr_number: int) -> PRState: ...
-    def merge_spec_pr(self, *, project: str, pr_number: int) -> None: ...
-    def enqueue_merge_queue(self, *, project: str, pr_number: int) -> None: ...
-    def merge_verdict(self, *, project: str, pr_number: int) -> MergeVerdict: ...
+    def merge_pr(self, *, project: str, pr_number: int) -> None: ...
     def add_labels(
         self, *, project: str, issue_number: int, labels: set[str]
     ) -> None:
@@ -82,8 +85,10 @@ class FakeGitProvider:
 
     def __init__(self) -> None:
         self._prs: dict[tuple[str, int], PRState] = {}
-        self.merge_queue: set[tuple[str, int]] = set()
-        self._verdicts: dict[tuple[str, int], MergeVerdict] = {}
+        # Recorder for merge_pr calls. Tests assert on this set instead
+        # of (or in addition to) the PRState transition, since the
+        # CLEAN-when-merged-externally case must NOT call merge_pr at all.
+        self.merge_pr_calls: set[tuple[str, int]] = set()
         self._labeled_issues: dict[tuple[str, str], set[int]] = {}
         # Current label set per (project, issue_number). add_labels
         # unions into this set; remove_labels differences from it.
@@ -109,30 +114,20 @@ class FakeGitProvider:
         except KeyError as exc:
             raise PRNotFoundError(f"{project}#{pr_number}") from exc
 
-    def merge_spec_pr(self, *, project: str, pr_number: int) -> None:
+    def merge_pr(self, *, project: str, pr_number: int) -> None:
+        """Mark the PR merged + record the call for test assertions.
+
+        Mirrors what the real ``pr.merge()`` does observably from the
+        state-machine's vantage point: subsequent ``get_pr_state``
+        sees ``merged=True``. Recording the call separately lets tests
+        distinguish "already-merged externally" (no merge_pr call) from
+        "we merged it" (merge_pr call recorded).
+        """
         existing = self.get_pr_state(project=project, pr_number=pr_number)
         self._prs[(project, pr_number)] = PRState(
             merged=True, mergeable=existing.mergeable, ci_passing=existing.ci_passing,
         )
-
-    def enqueue_merge_queue(self, *, project: str, pr_number: int) -> None:
-        self.get_pr_state(project=project, pr_number=pr_number)  # raise if missing
-        self.merge_queue.add((project, pr_number))
-        self._verdicts.setdefault((project, pr_number), MergeVerdict.PENDING)
-
-    def merge_verdict(self, *, project: str, pr_number: int) -> MergeVerdict:
-        return self._verdicts.get((project, pr_number), MergeVerdict.PENDING)
-
-    def set_merge_verdict(
-        self, *, project: str, pr_number: int, verdict: MergeVerdict,
-    ) -> None:
-        self._verdicts[(project, pr_number)] = verdict
-        if verdict is MergeVerdict.MERGED:
-            existing = self.get_pr_state(project=project, pr_number=pr_number)
-            self._prs[(project, pr_number)] = PRState(
-                merged=True, mergeable=existing.mergeable,
-                ci_passing=existing.ci_passing,
-            )
+        self.merge_pr_calls.add((project, pr_number))
 
     def seed_issue_labels(
         self, *, project: str, issue_number: int, labels: set[str],

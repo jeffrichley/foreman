@@ -1,16 +1,38 @@
-"""MergingState — enqueues impl PR into MergeQueue; polls verdict.
+"""MergingState — direct ``pr.merge()`` on the impl PR.
 
 The only state in v4 whose execute() doesn't dispatch a role. The Worker
-already opened the impl PR; here we wait for GitHub's MergeQueue verdict.
+already opened the impl PR; here we wait for GitHub to report the PR as
+mergeable + CI passing, then call ``pr.merge()`` ourselves.
 
-PENDING  → stay in state (new instance, Poller picks up next tick).
-MERGED   → Done.
-REJECTED → ImplFix (Worker fixes whatever MergeQueue caught).
+Phase 8d.19 collapsed the previous MergeQueue-based path (enqueue → poll
+verdict → MERGED/REJECTED/PENDING) into a single direct merge call.
+Algokit#23's 2026-06-15 dogfood proved MergingState looped on PENDING
+forever because algokit doesn't have MergeQueue configured — most repos
+won't. The minimum-fix design decision: same merge mechanism on every
+project, until granular ``mergeable_state`` handling lands (foreman#317).
+
+Outcomes
+--------
+CLEAN
+    Either the PR is already merged externally OR we just merged it.
+    Routes to Done.
+BLOCKED
+    GitHub says the PR isn't yet mergeable + CI-green. Stay in
+    MergingState; Poller picks it up next tick. Phase 8d.18's
+    BLOCKED-exemption keeps the retry cap from tripping on this
+    legitimate polling.
+
+Granular failure handling (CI failed → ImplFix, dirty → ImplFix, blocked
+by review, etc.) is foreman#317. This task ships the minimum 3-branch
+shape that lets the chain reach Done on the happy path.
+
+The rebase case (PR base advanced while we were in this state) is
+operationally sidestepped by ``max_in_flight = 1`` for now — foreman#316
+tracks the proper fix.
 """
 
 from __future__ import annotations
 
-from foreman.v4.git_provider import MergeVerdict
 from foreman.v4.outcome import (
     Outcome,
     OutcomeArtifacts,
@@ -33,42 +55,43 @@ class MergingState(TicketState):
             )
         return pr
 
-    def enter(self, ctx: StateContext) -> None:
-        if ctx.git is None:
-            raise RuntimeError("MergingState requires git in StateContext")
-        pr_number = self._pr_number_for(ctx)
-        ctx.git.enqueue_merge_queue(project=ctx.ticket.project, pr_number=pr_number)
-
     def execute(self, ctx: StateContext) -> Outcome:
         if ctx.git is None:
             raise RuntimeError("MergingState requires git in StateContext")
         pr_number = self._pr_number_for(ctx)
-        verdict = ctx.git.merge_verdict(project=ctx.ticket.project, pr_number=pr_number)
-        if verdict is MergeVerdict.MERGED:
+        state = ctx.git.get_pr_state(
+            project=ctx.ticket.project, pr_number=pr_number,
+        )
+        if state.merged:
             return Outcome(
                 kind=OutcomeKind.CLEAN, confidence=OutcomeConfidence.HIGH,
-                summary="merge queue merged",
+                summary="impl PR already merged",
                 artifacts=OutcomeArtifacts(pr_number=pr_number),
             )
-        if verdict is MergeVerdict.REJECTED:
+        if state.mergeable and state.ci_passing:
+            ctx.git.merge_pr(
+                project=ctx.ticket.project, pr_number=pr_number,
+            )
             return Outcome(
-                kind=OutcomeKind.NEEDS_FIX, confidence=OutcomeConfidence.HIGH,
-                summary="merge queue rejected — CI or conflict",
+                kind=OutcomeKind.CLEAN, confidence=OutcomeConfidence.HIGH,
+                summary="impl PR merged",
                 artifacts=OutcomeArtifacts(pr_number=pr_number),
             )
         return Outcome(
             kind=OutcomeKind.BLOCKED, confidence=OutcomeConfidence.HIGH,
-            summary="merge queue pending verdict",
+            summary="impl PR not yet mergeable (CI pending or merge conflict)",
             artifacts=OutcomeArtifacts(pr_number=pr_number),
         )
 
     def next_state(self, outcome: Outcome) -> TicketState | None:
-        from foreman.v4.states.impl_fix import ImplFixState
-        from foreman.v4.states.terminal import DoneState, FailedState
+        from foreman.v4.states.terminal import DoneState, NeedsHelpState
         if outcome.kind == OutcomeKind.CLEAN:
             return DoneState()
-        if outcome.kind == OutcomeKind.NEEDS_FIX:
-            return ImplFixState()
         if outcome.kind == OutcomeKind.BLOCKED:
             return MergingState()
-        return FailedState()
+        # Defensive fall-through: execute() only ever returns CLEAN or
+        # BLOCKED today, but any other outcome kind from a future
+        # refactor (or a misbehaving subclass) should route to
+        # NeedsHelp so an operator can sort it out — never silently
+        # land on Failed.
+        return NeedsHelpState()

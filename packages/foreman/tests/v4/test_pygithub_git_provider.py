@@ -77,28 +77,18 @@ def test_list_open_issues_with_label(mock_github, mock_repo):
     assert issues == [1, 2]
 
 
-def test_merge_spec_pr_calls_merge(mock_github, mock_repo):
+def test_merge_pr_calls_merge(mock_github, mock_repo):
+    """``merge_pr`` calls ``pr.merge()`` via the REST endpoint —
+    same shape for spec PRs (SpecReviewState) and impl PRs
+    (MergingState). Phase 8d.19 dropped the MergeQueue GraphQL path
+    so this is the only merge entry point now."""
     mock_pr = MagicMock()
     mock_repo.get_pull.return_value = mock_pr
     provider = PyGithubGitProvider(
         github_factory=lambda: mock_github, repo_full_name="owner/p",
     )
-    provider.merge_spec_pr(project="p", pr_number=5)
+    provider.merge_pr(project="p", pr_number=5)
     mock_pr.merge.assert_called_once()
-
-
-def test_enqueue_merge_queue_looks_up_pr(mock_github, mock_repo):
-    """MergeQueue enqueue uses GitHub's GraphQL API. The Protocol contract
-    is just 'PR has been requested to enter the merge queue.' We assert the
-    PR was looked up; the GraphQL call surface is an implementation detail."""
-    mock_pr = MagicMock()
-    mock_pr.node_id = "PR_node_abc"
-    mock_repo.get_pull.return_value = mock_pr
-    provider = PyGithubGitProvider(
-        github_factory=lambda: mock_github, repo_full_name="owner/p",
-    )
-    provider.enqueue_merge_queue(project="p", pr_number=11)
-    mock_repo.get_pull.assert_called_with(11)
 
 
 def test_add_labels_calls_add_to_labels_with_sorted_names(mock_github, mock_repo):

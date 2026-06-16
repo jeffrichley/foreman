@@ -48,6 +48,27 @@ def test_clean_outcome_merges_spec_pr_and_advances_to_implementing():
     assert repo.get_ticket(ctx.ticket.id).current_state == "Implementing"
 
 
+def test_specreview_state_calls_renamed_merge_pr():
+    """Phase 8d.19 rename: ``merge_spec_pr`` → ``merge_pr``. The
+    SpecReviewState verify() hook calls the renamed method on the same
+    code path. The recorder on FakeGitProvider proves the call landed
+    on the new entry point (the old one no longer exists)."""
+    git = FakeGitProvider()
+    git.set_pr_state(
+        project="p", pr_number=42,
+        state=PRState(merged=False, mergeable=True, ci_passing=True),
+    )
+    ctx, repo = _ctx(
+        response_stdout=(
+            'FOREMAN_OUTCOME:{"kind":"clean","confidence":"high",'
+            '"summary":"approved","artifacts":{"pr_number":42}}'
+        ),
+        git=git,
+    )
+    SpecReviewState().transition(ctx)
+    assert ("p", 42) in git.merge_pr_calls
+
+
 def test_needs_fix_routes_to_spec_fix_without_merge():
     git = FakeGitProvider()
     git.set_pr_state(

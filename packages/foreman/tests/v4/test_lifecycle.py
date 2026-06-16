@@ -9,7 +9,7 @@ from __future__ import annotations
 import datetime as dt
 
 from foreman.v4.event_bus import EventBus
-from foreman.v4.git_provider import FakeGitProvider, MergeVerdict, PRState
+from foreman.v4.git_provider import FakeGitProvider, PRState
 from foreman.v4.observers.event_archive import EventArchiveObserver
 from foreman.v4.observers.structured_log import StructuredLogObserver
 from foreman.v4.role_dispatcher import FakeRoleDispatcher
@@ -85,16 +85,17 @@ def test_happy_path_queued_to_done():
     bus.subscribe(EventArchiveObserver(conn=repo._conn))
     bus.subscribe(StructuredLogObserver())
 
-    # Drive the ticket. MergingState's first transition issues BLOCKED;
-    # set the verdict to MERGED so the second pass advances to Done.
-    git.enqueue_merge_queue(project="p", pr_number=42)
-    git.set_merge_verdict(project="p", pr_number=42, verdict=MergeVerdict.MERGED)
-
+    # Drive the ticket. MergingState now calls pr.merge() directly
+    # when GitHub reports the PR mergeable + CI green — no MergeQueue
+    # polling. The seeded PRState satisfies the merge gate immediately.
     final = _run_until_terminal(repo, ticket.id, dispatcher=dispatcher, git=git, bus=bus)
     assert final.current_state == "Done"
 
-    # Spec PR was merged by SpecReviewState.verify()
+    # PR #42 ended merged. SpecReviewState.verify() merged the spec PR
+    # AND MergingState merged the impl PR — both via the same merge_pr
+    # call. Phase 8d.19 collapsed those two paths into one.
     assert git.get_pr_state(project="p", pr_number=42).merged is True
+    assert ("p", 42) in git.merge_pr_calls
 
     # Journal records every state transition in order:
     rows = repo._conn.execute(
@@ -150,20 +151,14 @@ def test_needs_fix_loop_spec_review_to_spec_fix_back():
                 return _canned("clean", pr_number=7)
             raise AssertionError(f"unexpected role {role}")
 
-    # MergingState needs the PR in merge queue with a MERGED verdict to advance.
-    git.enqueue_merge_queue(project="p", pr_number=7)
-    git.set_merge_verdict(project="p", pr_number=7, verdict=MergeVerdict.MERGED)
-
-    # _run_until_terminal monkey-patches MergingState._pr_number_for to 42,
-    # but this test's PR is #7 — override the helper's hardcoded patch by
-    # pre-registering pr_number 42 too, OR by re-doing the patch in this scope.
-    # Simpler: register PR #42 in the fake git as well.
+    # MergingState now calls pr.merge() directly when the PR is
+    # mergeable + CI green; the seed PRState already satisfies that
+    # gate. _run_until_terminal monkey-patches MergingState._pr_number_for
+    # to 42, so register PR #42 in the fake git too.
     git.set_pr_state(
         project="p", pr_number=42,
         state=PRState(merged=False, mergeable=True, ci_passing=True),
     )
-    git.enqueue_merge_queue(project="p", pr_number=42)
-    git.set_merge_verdict(project="p", pr_number=42, verdict=MergeVerdict.MERGED)
 
     final = _run_until_terminal(
         repo, ticket.id, dispatcher=_ScriptedDispatcher(), git=git, bus=EventBus(),

@@ -587,7 +587,6 @@ tick_seconds = 30.0
 max_in_flight = 1
 role_timeout_seconds = 600
 max_state_attempts = 3
-merge_mechanism = "queue"
 
 [apps.planner]
 app_id = 0

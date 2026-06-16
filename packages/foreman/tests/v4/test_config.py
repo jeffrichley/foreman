@@ -1,4 +1,4 @@
-"""V4Config — TOML-loaded settings with MergeQueue default."""
+"""V4Config — TOML-loaded settings."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -13,8 +13,8 @@ from foreman.v4.config import ProjectConfig, load_config
 # `orchestrator` REQUIRED too (pivoted from env-var PAT to App
 # installation credentials — same shape as the per-role apps).
 # Concatenating this helper into each test's TOML keeps the existing
-# assertions focused on what they're actually testing (merge_mechanism,
-# projects, etc.) instead of rewriting every TOML string inline.
+# assertions focused on what they're actually testing (projects, etc.)
+# instead of rewriting every TOML string inline.
 _APPS_TOML = (
     '[apps.planner]\n'
     'app_id = 12345\n'
@@ -34,7 +34,10 @@ _APPS_TOML = (
 )
 
 
-def test_defaults_set_merge_mechanism_to_queue(tmp_path: Path):
+def test_daemon_defaults(tmp_path: Path):
+    """Phase 8d.19 dropped merge_mechanism — daemon now uses direct
+    pr.merge() for both spec and impl PRs, same on every project. The
+    other daemon-level defaults stay."""
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         '[daemon]\n'
@@ -47,43 +50,8 @@ def test_defaults_set_merge_mechanism_to_queue(tmp_path: Path):
         'local_clone_path = "/tmp/voice"\n'
     )
     config = load_config(config_path)
-    assert config.merge_mechanism == "queue"
     assert config.tick_seconds > 0
     assert config.max_in_flight > 0
-
-
-def test_explicit_merge_mechanism_override(tmp_path: Path):
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        '[daemon]\n'
-        'db_path = "/tmp/foreman.db"\n'
-        'log_dir = "/tmp/foreman-logs"\n'
-        'merge_mechanism = "merge"\n'
-        + _APPS_TOML +
-        '[[projects]]\n'
-        'name = "voice"\n'
-        'repo = "jeffrichley/voice"\n'
-        'local_clone_path = "/tmp/voice"\n'
-    )
-    config = load_config(config_path)
-    assert config.merge_mechanism == "merge"
-
-
-def test_invalid_merge_mechanism_raises(tmp_path: Path):
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        '[daemon]\n'
-        'db_path = "/tmp/foreman.db"\n'
-        'log_dir = "/tmp/foreman-logs"\n'
-        'merge_mechanism = "not-a-thing"\n'
-        + _APPS_TOML +
-        '[[projects]]\n'
-        'name = "voice"\n'
-        'repo = "jeffrichley/voice"\n'
-        'local_clone_path = "/tmp/voice"\n'
-    )
-    with pytest.raises(ValidationError):
-        load_config(config_path)
 
 
 def test_projects_round_trip(tmp_path: Path):
@@ -351,7 +319,6 @@ def test_project_minimal_still_parses(tmp_path: Path):
     assert proj.dev_base_branch is None
     assert proj.max_fix_attempts == 3
     assert proj.max_impl_attempts == 3
-    assert proj.merge_mechanism is None
 
 
 def test_project_check_command_override(tmp_path: Path):
@@ -466,46 +433,6 @@ def test_project_attempt_caps_reject_zero(tmp_path: Path):
         )
         with pytest.raises(ValidationError):
             load_config(config_path)
-
-
-def test_project_merge_mechanism_override(tmp_path: Path):
-    """Phase 8b.2: per-project ``merge_mechanism`` flows through.
-
-    Default None inherits daemon-level config.merge_mechanism. Valid
-    overrides are the same 4-value Literal as V4Config.merge_mechanism;
-    an invalid value raises ValidationError at load time.
-    """
-    # Valid override.
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        '[daemon]\n'
-        'db_path = "/tmp/foreman.db"\n'
-        'log_dir = "/tmp/foreman-logs"\n'
-        + _APPS_TOML +
-        '[[projects]]\n'
-        'name = "voice"\n'
-        'repo = "jeffrichley/voice"\n'
-        'local_clone_path = "/tmp/voice"\n'
-        'merge_mechanism = "rebase"\n'
-    )
-    config = load_config(config_path)
-    assert config.projects[0].merge_mechanism == "rebase"
-
-    # Invalid value raises.
-    bad_path = tmp_path / "bad.toml"
-    bad_path.write_text(
-        '[daemon]\n'
-        'db_path = "/tmp/foreman.db"\n'
-        'log_dir = "/tmp/foreman-logs"\n'
-        + _APPS_TOML +
-        '[[projects]]\n'
-        'name = "voice"\n'
-        'repo = "jeffrichley/voice"\n'
-        'local_clone_path = "/tmp/voice"\n'
-        'merge_mechanism = "bogus"\n'
-    )
-    with pytest.raises(ValidationError):
-        load_config(bad_path)
 
 
 def test_missing_orchestrator_raises(tmp_path: Path):

@@ -27,7 +27,7 @@ class SpecReviewState(RoleDispatchState):
             )
         if ctx.git is None:
             raise RuntimeError("SpecReview.verify requires git in StateContext")
-        ctx.git.merge_spec_pr(project=ctx.ticket.project, pr_number=pr_number)
+        ctx.git.merge_pr(project=ctx.ticket.project, pr_number=pr_number)
 
     def next_state_for(self, outcome: Outcome) -> TicketState | None:
         from foreman.v4.states.implementing import ImplementingState
