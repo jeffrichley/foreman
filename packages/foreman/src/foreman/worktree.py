@@ -35,6 +35,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from foreman._env_filter import filtered_subprocess_env
 from foreman.branches import impl_branch, spec_branch
@@ -488,22 +489,56 @@ class WorktreeManager:
         ticket_id: int,
         *,
         repo_url: str | None = None,
+        target: Literal["spec_pr", "impl_pr"] = "spec_pr",
     ) -> Path:
-        """Attach a worktree to an existing ``foreman/issue-<N>`` branch.
+        """Attach a worktree to an existing role branch.
 
         Used by downstream roles (Reviewer / Fixer / Worker) that should NOT
-        create a new branch — the Planner already opened ``foreman/issue-N``
-        and pushed it. Idempotent: if the worktree path already exists, it
-        is returned untouched.
+        create a new branch — the upstream role (Planner for spec, Worker
+        for impl) already opened the branch and pushed it. Idempotent: if
+        the worktree path already exists, it is returned untouched.
 
-        Falls back to a tracking-branch fetch if the local branch does not
-        yet exist (the Reviewer may run on a clone where the branch only
-        lives on the remote).
+        The ``target`` kwarg selects which branch convention the attach
+        targets:
 
-        Like :meth:`create`, this best-effort syncs the worktree's ``.venv``
-        afterward so the target repo's pre-push hook can ``uv run --no-sync``
-        without exploding.
+        - ``"spec_pr"`` (default — back-compat for every existing caller):
+          attach to ``foreman/issue-<N>`` in the worktree at
+          ``<root>/<repo_slug>/issue-<N>/``. The Planner opened the
+          branch.
+        - ``"impl_pr"``: attach to ``foreman/impl-<N>`` in the worktree at
+          ``<root>/<repo_slug>/impl-<N>/`` (a sibling of ``issue-<N>/``).
+          The Worker opened the branch — this is the path the impl-side
+          Fixer must take so its edits + commits land on the impl PR's
+          branch. Pre-Phase 8d.23 the Fixer hardcoded the spec path even
+          when called with ``target='impl_pr'`` — the algokit#21 dogfood
+          surfaced the bug: the Fixer fetched the impl PR (8d.21 made
+          PR-lookup target-aware) but committed to ``foreman/issue-21``,
+          missing the impl PR entirely. This kwarg is the missing other
+          half of the 8d.21 fix.
+
+        For both targets we fall back to a tracking-branch fetch if the
+        local branch does not yet exist (the role may run on a clone
+        where the branch only lives on the remote — common after
+        container restart).
+
+        Like :meth:`create`, this best-effort syncs the worktree's
+        ``.venv`` afterward so the target repo's pre-push hook can
+        ``uv run --no-sync`` without exploding.
+
+        The impl path delegates to :meth:`attach_impl`, which already
+        encapsulates the existing-branch attach semantics for the impl
+        case (introduced in foreman#41 for the Reviewer-on-impl flow).
+        Callers may continue invoking :meth:`attach_impl` directly — both
+        entry points are supported.
         """
+        if target == "impl_pr":
+            return self.attach_impl(
+                clone_path=clone_path,
+                repo_slug=repo_slug,
+                ticket_id=ticket_id,
+                repo_url=repo_url,
+            )
+
         # Container first-run bootstrap — handles the edge case of a
         # post-`down -v` restart where the foreman-repos volume is empty
         # but the daemon's first observed state of this ticket is already

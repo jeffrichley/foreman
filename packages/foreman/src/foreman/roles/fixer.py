@@ -590,11 +590,19 @@ async def run_fixer(
         # Same anti-leak motivation as the Stage 3e role-module subprocess
         # fix; WorktreeManager was scoped out at the time as a follow-up.
         wt_mgr = WorktreeManager(worktrees_root=worktrees_root, role_token=fixer_token)
+        # Phase 8d.23: pass ``target`` so the impl-side Fixer's worktree
+        # checks out ``foreman/impl-<N>`` (the Worker's branch) instead of
+        # ``foreman/issue-<N>`` (the Planner's spec branch). Without this,
+        # Phase 8d.21's PR-lookup fix found the right impl PR but the
+        # Fixer then edited + committed against the spec branch — the
+        # algokit#21 dogfood surfaced this on 2026-06-16. The
+        # ``target='spec_pr'`` path is unchanged from before.
         wt_path = wt_mgr.attach(
             clone_path=Path(project.local_clone_path),
             repo_slug=repo_name,
             ticket_id=issue_number,
             repo_url=f"https://github.com/{project.repo}.git",
+            target=target_literal,
         )
 
         # Recover the Reviewer's structured findings from the marker-fenced

@@ -333,6 +333,51 @@ def _seed_clone_with_spec_branch(clone: Path, issue_number: int) -> str:
     return head_sha
 
 
+def _seed_clone_with_impl_branch(clone: Path, issue_number: int) -> str:
+    """Init a minimal git repo with both ``foreman/issue-N`` (Planner)
+    and ``foreman/impl-N`` (Worker) branches.
+
+    Phase 8d.23 made the Fixer's worktree attach target-aware, so impl-
+    target tests must seed the impl branch too — otherwise
+    ``WorktreeManager.attach(..., target='impl_pr')`` cannot resolve
+    the branch and crashes with a confusing rc=128 from
+    ``git worktree add``. Returns the impl head SHA so callers can pin
+    the fake PR's ``head_sha`` consistently.
+    """
+    spec_head = _seed_clone_with_spec_branch(clone, issue_number=issue_number)
+    spec_branch_name = f"foreman/issue-{issue_number}"
+    impl_branch_name = f"foreman/impl-{issue_number}"
+    subprocess.run(
+        ["git", "checkout", "-b", impl_branch_name, spec_branch_name],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    # Add an impl commit so the impl branch tip differs from the spec
+    # tip — this is what the Worker would push.
+    (clone / "src").mkdir(parents=True, exist_ok=True)
+    (clone / "src" / "impl_stub.py").write_text(f"# impl stub for #{issue_number}\n")
+    subprocess.run(["git", "add", "."], cwd=clone, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "feat: impl stub"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    impl_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "checkout", "main"], cwd=clone, check=True, capture_output=True)
+    assert impl_head != spec_head, (
+        "test setup: impl branch must carry a commit beyond the spec tip"
+    )
+    return impl_head
+
+
 def _make_config(clone: Path) -> V4Config:
     return V4Config(
         db_path="/tmp/v4.db",
@@ -901,9 +946,14 @@ async def test_run_fixer_locates_impl_pr_when_target_is_impl_pr(
     ``foreman/impl-<N>`` head. Before this fix, ``run_fixer``
     ignored ``target`` for the PR lookup and always used the spec
     branch — so the impl PR was never found and the role raised
-    even when the impl PR existed."""
+    even when the impl PR existed.
+
+    Phase 8d.23 update: seed the impl branch too, because the worktree
+    attach is now target-aware. Without seeding, the attach crashes
+    at ``git worktree add foreman/impl-42`` with rc=128.
+    """
     clone = tmp_path / "clone"
-    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    head_sha = _seed_clone_with_impl_branch(clone, issue_number=42)
     monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
     monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
 
