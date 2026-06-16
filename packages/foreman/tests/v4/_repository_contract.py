@@ -314,6 +314,89 @@ class RepositoryContract:
             ticket_id=t.id, state="SpecReview"
         ) == 1
 
+    def test_count_consecutive_same_state_skips_blocked_outcomes(
+        self, repo: TicketRepository
+    ):
+        """Phase 8d.18: rows whose ``outcome_kind == 'blocked'`` record a
+        legitimate async-polling self-loop (e.g. MergingState polling a
+        pending merge verdict; ImplementingState polling impl-PR CI).
+        They MUST NOT count toward the runaway-defense consecutive-
+        failures cap — the state RAN, emitted "still waiting", and asked
+        to be re-tried. Without this skip, a few polling cycles trip the
+        cap and escalate to NeedsHelp (defeating the polling intent).
+        """
+        t = repo.create_ticket(project="p", issue_number=1, now=_now())
+        # 5 polling-loop rows: each ran execute() and emitted BLOCKED.
+        for seq in range(1, 6):
+            inst = repo.open_state_instance(
+                ticket_id=t.id, state_name="Merging", sequence=seq,
+                now=_now(),
+            )
+            repo.mark_execute_completed(
+                inst.id, now=_now(),
+                outcome_kind=OutcomeKind.BLOCKED,
+                outcome_payload={"summary": "still polling"},
+                next_state="Merging",
+            )
+            repo.close_state_instance(inst.id, now=_now())
+        # All 5 are async-polling re-entries — none are runaway-defense
+        # signal.
+        assert repo.count_consecutive_same_state(
+            ticket_id=t.id, state="Merging"
+        ) == 0
+
+    def test_count_consecutive_same_state_counts_after_one_execute_failure(
+        self, repo: TicketRepository
+    ):
+        """Phase 8d.18: BLOCKED rows are skipped; a real execute-phase
+        failure between them still counts. Sequence: 2 BLOCKED → 1 execute
+        failure → 2 BLOCKED. Walking back, the BLOCKED rows are skipped
+        (and don't break the run), the execute-failure row counts (=1),
+        and the search continues past it — but the next non-BLOCKED row
+        does not exist, so the final count is 1.
+        """
+        t = repo.create_ticket(project="p", issue_number=1, now=_now())
+        # 2 BLOCKED polling rows.
+        for seq in (1, 2):
+            inst = repo.open_state_instance(
+                ticket_id=t.id, state_name="Merging", sequence=seq,
+                now=_now(),
+            )
+            repo.mark_execute_completed(
+                inst.id, now=_now(),
+                outcome_kind=OutcomeKind.BLOCKED,
+                outcome_payload={"summary": "polling"},
+                next_state="Merging",
+            )
+            repo.close_state_instance(inst.id, now=_now())
+        # 1 real execute-phase failure.
+        inst = repo.open_state_instance(
+            ticket_id=t.id, state_name="Merging", sequence=3, now=_now(),
+        )
+        repo.record_failure(
+            inst.id, now=_now(), failure_phase="execute",
+            failure_reason="something blew up",
+        )
+        repo.close_state_instance(inst.id, now=_now())
+        # 2 more BLOCKED polling rows after the failure.
+        for seq in (4, 5):
+            inst = repo.open_state_instance(
+                ticket_id=t.id, state_name="Merging", sequence=seq,
+                now=_now(),
+            )
+            repo.mark_execute_completed(
+                inst.id, now=_now(),
+                outcome_kind=OutcomeKind.BLOCKED,
+                outcome_payload={"summary": "polling"},
+                next_state="Merging",
+            )
+            repo.close_state_instance(inst.id, now=_now())
+        # Only the real execute-failure row contributes — the BLOCKED
+        # rows on both sides are skipped.
+        assert repo.count_consecutive_same_state(
+            ticket_id=t.id, state="Merging"
+        ) == 1
+
     def test_set_and_get_dependencies(self, repo: TicketRepository):
         a = repo.create_ticket(project="p", issue_number=1, now=_now())
         b = repo.create_ticket(project="p", issue_number=2, now=_now())

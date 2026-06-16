@@ -88,13 +88,24 @@ class TicketRepository(Protocol):
         back from the latest sequence. Stops at the first row whose
         ``state_name`` doesn't match.
 
-        Rows whose ``failure_phase == 'can_run'`` are skipped (they
-        neither count toward the run nor break it). Those rows record
-        "the ticket was held and the state never actually executed" —
-        they are not runaway-defense signal. Without this skip, holding
-        a ticket for cap+ polls accumulated cap+ can_run-failed rows and
-        immediately tripped the cap on operator-resume, escalating the
-        resumed ticket to NeedsHelp (Phase 8d.15 Bug F4).
+        Two row kinds are skipped (they neither count toward the run nor
+        break it):
+
+        * Rows whose ``failure_phase == 'can_run'`` (Phase 8d.15 Bug F4):
+          these record "the ticket was held and the state never actually
+          executed" — they are not runaway-defense signal. Without this
+          skip, holding a ticket for cap+ polls accumulated cap+
+          can_run-failed rows and immediately tripped the cap on
+          operator-resume, escalating the resumed ticket to NeedsHelp.
+
+        * Rows whose ``outcome_kind == 'blocked'`` (Phase 8d.18): these
+          record a legitimate async-polling self-loop (e.g. MergingState
+          polling a pending merge verdict; ImplementingState polling
+          impl-PR CI). The state RAN, emitted "still waiting", and
+          asked to be re-tried via ``next_state()`` returning a fresh
+          instance of itself. Without this skip, 3 polling cycles trip
+          the default cap and escalate to NeedsHelp — defeating the
+          polling intent.
 
         Used by the state machine (Phase 8c.2) to detect a runaway loop
         on a single state before the daemon burns more cycles. Returns
@@ -311,6 +322,15 @@ class InMemoryTicketRepository:
             # nor break the run) so a held-then-resumed ticket doesn't
             # immediately escalate to NeedsHelp.
             if inst.failure_phase == "can_run":
+                continue
+            # Phase 8d.18: BLOCKED-outcome rows record a legitimate
+            # async-polling self-loop (MergingState polling a pending
+            # merge verdict; ImplementingState polling impl-PR CI). The
+            # state ran, emitted "still waiting", and asked to be re-
+            # tried via next_state() → self. They are not runaway-
+            # defense signal. Skip them entirely so a few polling cycles
+            # don't trip the cap and escalate the ticket to NeedsHelp.
+            if inst.outcome_kind == OutcomeKind.BLOCKED:
                 continue
             if inst.state_name == state:
                 count += 1

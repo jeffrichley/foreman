@@ -428,3 +428,93 @@ def test_held_ticket_closes_state_instance_and_clears_in_flight() -> None:
     fetched = repo.get_state_instance(instance.id)
     assert not fetched.is_in_flight
     assert repo.list_in_flight_state_instances() == []
+
+
+# --- Phase 8d.18: BLOCKED outcomes exempt from retry cap ---
+
+
+class _BlockedPollingState(TicketState):
+    """Mirrors the MergingState / ImplementingState self-loop shape:
+    execute() emits ``Outcome(kind=BLOCKED, ...)`` and ``next_state()``
+    returns ``self``-equivalent. Each call constructs and returns a fresh
+    instance of the same class — the same shape real states use to re-
+    enter while polling an external resource.
+    """
+
+    state_name = "Polling"
+
+    def execute(self, ctx: StateContext) -> Outcome:
+        return Outcome(
+            kind=OutcomeKind.BLOCKED, confidence=OutcomeConfidence.HIGH,
+            summary="still waiting",
+        )
+
+    def next_state(self, outcome: Outcome) -> TicketState | None:
+        # Self-loop on BLOCKED — same shape as MergingState.next_state
+        # and ImplementingState.next_state.
+        if outcome.kind == OutcomeKind.BLOCKED:
+            return _BlockedPollingState()
+        return None
+
+
+def test_blocked_loop_does_not_trip_retry_cap() -> None:
+    """Phase 8d.18 (this commit): a state that legitimately re-enters
+    itself on BLOCKED (async-polling pattern used by MergingState and
+    ImplementingState) MUST NOT trip the runaway-defense retry cap.
+
+    Pre-fix, ``count_consecutive_same_state`` counted every BLOCKED self-
+    loop row as a "consecutive same-state failure", so 3 polling cycles
+    tripped the default cap and escalated the ticket to NeedsHelp —
+    defeating the polling intent.
+
+    The fix: ``count_consecutive_same_state`` skips rows whose
+    ``outcome_kind == 'blocked'`` when walking back, because those rows
+    record "state ran, emitted still-polling, asked to be re-tried" —
+    they are not runaway-defense signal.
+    """
+    from foreman.v4.event_bus import EventBus
+    from foreman.v4.events import StateFailedEvent
+
+    repo = InMemoryTicketRepository()
+    now = dt.datetime(2026, 6, 15, 12, 0, 0)
+    ticket = repo.create_ticket(project="p", issue_number=1, now=now)
+    # Set the ticket state to Polling so the WorkerPool-mimic loop opens
+    # rows for the same state on every iteration.
+    repo.set_ticket_state(ticket.id, "Polling", now=now)
+
+    received: list[object] = []
+    bus = EventBus()
+    bus.subscribe(received.append)
+
+    # 5 poll cycles — well past the default cap of 3. Each cycle opens
+    # a fresh state_instance for "Polling" (mirroring WorkerPool) and
+    # runs transition(). The state always returns BLOCKED.
+    for seq in range(1, 6):
+        instance = repo.open_state_instance(
+            ticket_id=ticket.id, state_name="Polling", sequence=seq,
+            now=now,
+        )
+        fresh_ticket = repo.get_ticket(ticket.id)
+        ctx = StateContext(
+            ticket=fresh_ticket, instance=instance, repo=repo,
+            clock=lambda: now, bus=bus, max_state_attempts=3,
+        )
+        result = _BlockedPollingState().transition(ctx)
+        # Each cycle should return a fresh Polling state (self-loop) —
+        # NOT NeedsHelp.
+        assert result is not None
+        assert result.state_name == "Polling", (
+            f"cycle {seq}: expected Polling self-loop, got {result.state_name}"
+        )
+
+    # Ticket state stayed on Polling — the runaway defense never tripped.
+    assert repo.get_ticket(ticket.id).current_state == "Polling"
+
+    # NO StateFailedEvent with failure_phase=='retry_cap' was published.
+    retry_cap_events = [
+        e for e in received
+        if isinstance(e, StateFailedEvent) and e.failure_phase == "retry_cap"
+    ]
+    assert retry_cap_events == [], (
+        f"expected no retry_cap events; got {retry_cap_events}"
+    )

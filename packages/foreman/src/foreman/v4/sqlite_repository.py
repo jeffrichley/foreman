@@ -354,7 +354,8 @@ class SqliteTicketRepository:
     ) -> int:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT state_name, failure_phase FROM state_instances "
+                "SELECT state_name, failure_phase, outcome_kind "
+                "FROM state_instances "
                 "WHERE ticket_id = ? "
                 "ORDER BY sequence DESC",
                 (ticket_id,),
@@ -368,6 +369,16 @@ class SqliteTicketRepository:
                 # resumed ticket doesn't immediately escalate to
                 # NeedsHelp.
                 if row["failure_phase"] == "can_run":
+                    continue
+                # Phase 8d.18: BLOCKED-outcome rows record a legitimate
+                # async-polling self-loop (MergingState polling a
+                # pending merge verdict; ImplementingState polling
+                # impl-PR CI). The state ran, emitted "still waiting",
+                # and asked to be re-tried via next_state() → self.
+                # They are not runaway-defense signal. Skip them
+                # entirely so a few polling cycles don't trip the cap
+                # and escalate the ticket to NeedsHelp.
+                if row["outcome_kind"] == OutcomeKind.BLOCKED.value:
                     continue
                 if row["state_name"] == state:
                     count += 1
