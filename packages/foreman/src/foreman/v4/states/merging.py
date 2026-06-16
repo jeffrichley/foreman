@@ -15,12 +15,17 @@ Outcomes
 --------
 CLEAN
     Either the PR is already merged externally OR we just merged it.
-    Routes to Done.
+    In BOTH sub-branches the originating GitHub issue is also closed
+    (Phase 8d.20) so the loop's terminal state propagates back to the
+    issue tracker — without that, algokit#23's 2026-06-16 dogfood
+    reached Done via pr.merge() but left the issue OPEN. Routes to Done.
 BLOCKED
     GitHub says the PR isn't yet mergeable + CI-green. Stay in
     MergingState; Poller picks it up next tick. Phase 8d.18's
     BLOCKED-exemption keeps the retry cap from tripping on this
-    legitimate polling.
+    legitimate polling. ``close_issue`` is NOT called on this branch —
+    closing on every poll tick would prematurely close issues whose
+    impl PR isn't actually merged yet.
 
 Granular failure handling (CI failed → ImplFix, dirty → ImplFix, blocked
 by review, etc.) is foreman#317. This task ships the minimum 3-branch
@@ -63,18 +68,33 @@ class MergingState(TicketState):
             project=ctx.ticket.project, pr_number=pr_number,
         )
         if state.merged:
+            # Already-merged branch: close the originating issue too.
+            # Idempotent at the REST API level — if an external merge
+            # also closed the issue, this is a no-op.
+            ctx.git.close_issue(
+                project=ctx.ticket.project,
+                issue_number=ctx.ticket.issue_number,
+            )
             return Outcome(
                 kind=OutcomeKind.CLEAN, confidence=OutcomeConfidence.HIGH,
-                summary="impl PR already merged",
+                summary="impl PR already merged; issue closed",
                 artifacts=OutcomeArtifacts(pr_number=pr_number),
             )
         if state.mergeable and state.ci_passing:
             ctx.git.merge_pr(
                 project=ctx.ticket.project, pr_number=pr_number,
             )
+            # Close issue AFTER the merge confirms — never before. A
+            # premature close on a still-unmerged PR would orphan the
+            # issue from its work; this ordering ties the close to the
+            # merge succeeding.
+            ctx.git.close_issue(
+                project=ctx.ticket.project,
+                issue_number=ctx.ticket.issue_number,
+            )
             return Outcome(
                 kind=OutcomeKind.CLEAN, confidence=OutcomeConfidence.HIGH,
-                summary="impl PR merged",
+                summary="impl PR merged; issue closed",
                 artifacts=OutcomeArtifacts(pr_number=pr_number),
             )
         return Outcome(

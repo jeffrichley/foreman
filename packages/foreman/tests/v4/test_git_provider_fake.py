@@ -120,3 +120,26 @@ def test_remove_labels_on_unseen_issue_is_no_op():
 def test_get_issue_labels_unseen_defaults_to_empty_set():
     git = FakeGitProvider()
     assert git.get_issue_labels(project="p", issue_number=999) == set()
+
+
+def test_fake_close_issue_records_call():
+    """``close_issue`` adds ``(project, issue_number)`` to ``closed_issues``.
+
+    Phase 8d.20: MergingState calls close_issue after a successful merge so
+    the originating GitHub issue closes. The recorder lets MergingState
+    tests assert the close happened (and only in the merged branches —
+    the BLOCKED branch must NOT call it).
+    """
+    git = FakeGitProvider()
+    git.close_issue(project="p", issue_number=42)
+    assert ("p", 42) in git.closed_issues
+
+
+def test_fake_close_issue_idempotent():
+    """Calling ``close_issue`` twice doesn't raise and the recorder set
+    still has one entry — GitHub's REST API treats closing an
+    already-closed issue as a no-op, and the Fake mirrors that contract."""
+    git = FakeGitProvider()
+    git.close_issue(project="p", issue_number=42)
+    git.close_issue(project="p", issue_number=42)
+    assert git.closed_issues == {("p", 42)}

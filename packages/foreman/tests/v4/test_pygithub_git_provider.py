@@ -179,6 +179,43 @@ def test_remove_labels_empty_set_is_no_op(mock_github, mock_repo):
     mock_issue.remove_from_labels.assert_not_called()
 
 
+def test_close_issue_calls_edit_when_open(mock_github, mock_repo):
+    """When the issue is still open, ``close_issue`` calls
+    ``issue.edit(state="closed")`` — the PyGithub idiom for closing.
+
+    Phase 8d.20: MergingState closes the originating GitHub issue after
+    a successful impl-PR merge so the loop's terminal state propagates
+    back to the issue tracker.
+    """
+    mock_issue = MagicMock()
+    mock_issue.state = "open"
+    mock_repo.get_issue.return_value = mock_issue
+    provider = PyGithubGitProvider(
+        github_factory=lambda: mock_github, repo_full_name="owner/p",
+    )
+    provider.close_issue(project="p", issue_number=23)
+    mock_repo.get_issue.assert_called_once_with(23)
+    mock_issue.edit.assert_called_once_with(state="closed")
+
+
+def test_close_issue_skips_edit_when_already_closed(mock_github, mock_repo):
+    """When the issue is already closed, ``close_issue`` does NOT call
+    ``edit`` — the guard avoids wasting a PATCH request and side-steps
+    the (small) race-window risk where a fresh edit could reopen a
+    just-closed issue. GitHub's API treats already-closed as a no-op,
+    so the contract is "idempotent at the caller level too."
+    """
+    mock_issue = MagicMock()
+    mock_issue.state = "closed"
+    mock_repo.get_issue.return_value = mock_issue
+    provider = PyGithubGitProvider(
+        github_factory=lambda: mock_github, repo_full_name="owner/p",
+    )
+    provider.close_issue(project="p", issue_number=23)
+    mock_repo.get_issue.assert_called_once_with(23)
+    mock_issue.edit.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Token-refresh behavior (Phase 8c.3)
 #

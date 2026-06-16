@@ -109,6 +109,21 @@ def test_dispatches_remove_labels_to_correct_provider() -> None:
     }
 
 
+def test_dispatches_close_issue_to_correct_provider() -> None:
+    """Phase 8d.20: ``close_issue`` is the newest method on the Protocol;
+    same routing contract as ``merge_pr`` and the label methods.
+    Mis-routing here would close the wrong issue in a multi-project
+    daemon — directly user-visible bug in a no-undo space."""
+    foo, bar, router = _two_provider_router()
+
+    router.close_issue(project="bar", issue_number=7)
+
+    assert ("bar", 7) in bar.closed_issues
+    # The non-target provider must not see the call.
+    assert ("bar", 7) not in foo.closed_issues
+    assert ("foo", 7) not in foo.closed_issues
+
+
 def test_dispatches_list_open_issues_with_label_to_correct_provider() -> None:
     foo, bar, router = _two_provider_router()
     foo.set_open_issues_with_label(

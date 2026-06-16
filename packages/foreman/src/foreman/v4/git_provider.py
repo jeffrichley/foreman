@@ -79,6 +79,16 @@ class GitProvider(Protocol):
         """
         ...
 
+    def close_issue(self, *, project: str, issue_number: int) -> None:
+        """Close the GitHub issue.
+
+        Called by MergingState after the impl PR merges. Idempotent at
+        GitHub's REST API level — closing an already-closed issue is a
+        no-op rather than an error, so this method must not raise on the
+        already-closed case.
+        """
+        ...
+
 
 class FakeGitProvider:
     """In-memory GitProvider for unit + lifecycle tests."""
@@ -94,6 +104,12 @@ class FakeGitProvider:
         # unions into this set; remove_labels differences from it.
         # get_issue_labels returns this set (or empty if untouched).
         self._issue_labels: dict[tuple[str, int], set[str]] = {}
+        # Recorder for close_issue calls. MergingState (Phase 8d.20) closes
+        # the originating GitHub issue after a successful impl-PR merge;
+        # tests assert on this set to confirm close happened on the
+        # merged-externally + just-merged branches and did NOT happen
+        # on the BLOCKED branch. Set semantics give idempotency for free.
+        self.closed_issues: set[tuple[str, int]] = set()
 
     def set_open_issues_with_label(
         self, *, project: str, label: str, issue_numbers: set[int],
@@ -166,3 +182,11 @@ class FakeGitProvider:
     ) -> set[str]:
         """Return the current label set on this issue."""
         return self._issue_labels.get((project, issue_number), set())
+
+    def close_issue(self, *, project: str, issue_number: int) -> None:
+        """Record that the issue was closed.
+
+        Set-add is naturally idempotent, mirroring the real REST API's
+        already-closed-is-no-op behavior.
+        """
+        self.closed_issues.add((project, issue_number))

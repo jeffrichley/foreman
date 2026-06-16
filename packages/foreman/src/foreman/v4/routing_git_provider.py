@@ -111,3 +111,8 @@ class RoutingGitProvider:
         self._resolve(project).remove_labels(
             project=project, issue_number=issue_number, labels=labels,
         )
+
+    def close_issue(self, *, project: str, issue_number: int) -> None:
+        self._resolve(project).close_issue(
+            project=project, issue_number=issue_number,
+        )

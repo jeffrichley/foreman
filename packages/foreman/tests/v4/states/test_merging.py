@@ -83,6 +83,10 @@ def test_merging_state_returns_clean_when_pr_merged_externally():
     The recorder asymmetry is load-bearing: a naive implementation that
     always calls merge_pr would set merged=True via the fake's state
     machine and "pass" a merged-state assertion, masking the bug class.
+
+    Phase 8d.20 extension: the originating issue must STILL get closed
+    on the already-merged branch — otherwise an operator click-merge
+    leaves the issue OPEN forever despite the loop reaching Done.
     """
     ctx, _repo, git = _ctx_with_pr(
         pr_number=99,
@@ -93,11 +97,17 @@ def test_merging_state_returns_clean_when_pr_merged_externally():
     assert next_state.state_name == "Done"
     # NO merge_pr call — the PR was already merged.
     assert ("p", 99) not in git.merge_pr_calls
+    # But the issue MUST still be closed (Phase 8d.20).
+    assert ("p", 1) in git.closed_issues
 
 
 def test_merging_state_calls_merge_pr_when_mergeable_and_ci_passing():
     """The happy path: GitHub reports the PR mergeable + CI green,
-    execute() calls merge_pr and returns CLEAN → Done."""
+    execute() calls merge_pr and returns CLEAN → Done.
+
+    Phase 8d.20 extension: the originating issue is also closed after
+    the merge — same call-site, gated on the same CLEAN outcome.
+    """
     ctx, _repo, git = _ctx_with_pr(
         pr_number=99,
         pr_state=PRState(merged=False, mergeable=True, ci_passing=True),
@@ -107,6 +117,8 @@ def test_merging_state_calls_merge_pr_when_mergeable_and_ci_passing():
     assert next_state.state_name == "Done"
     assert ("p", 99) in git.merge_pr_calls
     assert git.get_pr_state(project="p", pr_number=99).merged is True
+    # Phase 8d.20: the originating issue is closed after the merge.
+    assert ("p", 1) in git.closed_issues
 
 
 def test_merging_state_returns_blocked_when_ci_pending():
@@ -138,6 +150,23 @@ def test_merging_state_returns_blocked_when_not_mergeable():
     assert next_state is not None
     assert next_state.state_name == "Merging"
     assert ("p", 99) not in git.merge_pr_calls
+
+
+def test_merging_state_blocked_does_not_close_issue():
+    """BLOCKED branch (CI pending OR not mergeable) MUST NOT close the
+    issue. Closing on every poll tick would prematurely close issues
+    whose impl PR isn't actually merged yet — directly user-visible.
+    """
+    ctx, _repo, git = _ctx_with_pr(
+        pr_number=99,
+        pr_state=PRState(merged=False, mergeable=False, ci_passing=False),
+    )
+    next_state = MergingState().transition(ctx)
+    assert next_state is not None
+    assert next_state.state_name == "Merging"
+    assert ("p", 99) not in git.merge_pr_calls
+    # Crucial: BLOCKED leaves the issue OPEN.
+    assert git.closed_issues == set()
 
 
 def test_missing_git_provider_routes_through_execute_failure():

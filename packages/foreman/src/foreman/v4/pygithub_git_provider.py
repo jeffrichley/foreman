@@ -213,6 +213,30 @@ class PyGithubGitProvider:
         issue = self._repo.get_issue(issue_number)
         issue.add_to_labels(*sorted(labels))
 
+    def close_issue(self, *, project: str, issue_number: int) -> None:
+        """Close the GitHub issue, idempotently.
+
+        Called by MergingState after the impl PR merges so the
+        originating issue reaches "closed" alongside the PR's "merged"
+        — the algokit#23 dogfood at 17:00 UTC 2026-06-16 reached Done
+        via pr.merge() but left the issue OPEN; this method is the
+        v4 plumbing that closes that loop.
+
+        ``project`` is accepted for Protocol-shape symmetry (every
+        method on :class:`GitProvider` takes it for ``RoutingGitProvider``)
+        but unused here — this provider is locked to one repo at
+        construction. Same pattern as ``merge_pr``.
+
+        The ``state == "closed"`` guard makes the call idempotent at the
+        caller level too: PyGithub's ``edit(state="closed")`` on an
+        already-closed issue would still send a PATCH (wasting a
+        request and creating a tiny reopen race window). The guard
+        sidesteps both.
+        """
+        issue = self._repo.get_issue(issue_number)
+        if issue.state != "closed":
+            issue.edit(state="closed")
+
     def remove_labels(
         self, *, project: str, issue_number: int, labels: set[str],
     ) -> None:
