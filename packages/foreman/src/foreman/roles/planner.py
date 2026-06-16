@@ -37,6 +37,9 @@ import re
 import time
 from pathlib import Path
 
+from foreman.auto_close import (
+    strip_auto_close_keywords as _strip_auto_close_keywords,
+)
 from foreman.branches import spec_branch
 from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
 from foreman.git_host import GitHostProvider, IssueRef
@@ -117,30 +120,11 @@ def _spec_doc_relpath(issue_number: int) -> str:
 # a merged PR's body contains one of the nine "closing keywords" + a
 # ``#N`` or ``owner/repo#N`` reference. The Planner produces spec PR
 # bodies; issue closure must route through ``daemon_runners.merge_impl_pr``
-# instead (which fires only after the Reviewer-on-impl approves). This
-# regex matches the verb + optional ``:`` separator + whitespace, with a
-# lookahead that preserves the bare issue reference so the body still
-# reads cleanly after substitution.
-_AUTO_CLOSE_KEYWORDS_RE = re.compile(
-    r"(?i)\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\b\s*:?\s+"
-    r"(?=(?:[\w.-]+/[\w.-]+)?#\d+)"
-)
-
-
-def _strip_auto_close_keywords(body: str) -> str:
-    """Remove GitHub auto-close keyword+separator prefixes from ``body``.
-
-    GitHub auto-closes the originating issue when a merged PR's body
-    contains any of nine "closing keywords" (close/closes/closed,
-    fix/fixes/fixed, resolve/resolves/resolved) followed by a ``#N`` or
-    ``owner/repo#N`` reference. The Planner produces spec PR bodies;
-    issue closure must route through ``daemon_runners.merge_impl_pr``
-    (foreman#63). This helper strips the verb+separator while
-    preserving the bare ``#N`` reference so the body still reads
-    cleanly. The helper is idempotent and a no-op on bodies that
-    contain no auto-close keywords.
-    """
-    return _AUTO_CLOSE_KEYWORDS_RE.sub("", body)
+# instead (which fires only after the Reviewer-on-impl approves). The
+# regex + helper live in :mod:`foreman.auto_close` so the Worker (which
+# scrubs commit bodies on the impl branch) can share the same pattern.
+# The module-level alias above preserves the historical name for
+# existing tests + call sites.
 
 
 # v4-PHASE-8-KILL: legacy planner entry-point used by the `plan` CLI command (cli.py); emits via label-writing tail. Replaced by run_planner_cli (below) + plan-v4 CLI command. Remove this function and the legacy label-writing tail in Phase 8.

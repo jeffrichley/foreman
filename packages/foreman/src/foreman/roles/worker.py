@@ -58,6 +58,10 @@ from github.Issue import Issue
 from github.PullRequest import PullRequest
 from github.Repository import Repository
 
+from foreman.auto_close import (
+    contains_auto_close_keyword,
+    strip_auto_close_keywords,
+)
 from foreman.branches import impl_branch, spec_branch
 from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
 from foreman.git_host import GitHostProvider
@@ -184,6 +188,122 @@ def _run_check_command(
     combined = (result.stdout or "") + (result.stderr or "")
     failing = {m.group("test_id") for m in _PYTEST_FAILED_RE.finditer(combined)}
     return result.returncode, failing, combined
+
+
+def _sanitize_head_commit_auto_close(
+    *,
+    worktree_path: Path,
+    commits_made_count: int,
+    role_token: str,
+) -> bool:
+    """Strip auto-close keywords from the HEAD commit's message via amend.
+
+    foreman#63 + Phase 8d.22 runtime defense. Mirrors the Planner's
+    PR-body strip but operates on the Worker's local impl branch BEFORE
+    Python pushes. The prompt-level guardrail in ``worker.md``'s
+    ``<commit_message_guardrails>`` section is the primary defense; this
+    helper catches the slip case the Reviewer-on-impl previously
+    dead-ended on (the ``algokit#21`` dogfood: a Worker landed
+    ``docs(readme): add Build & Serve... \\n\\nCloses #21``, the Reviewer
+    flagged it correctly, the Fixer couldn't address it because v1
+    doesn't do git history surgery, and the loop dead-ended at
+    NeedsHelp).
+
+    Scope constraint (multi-commit safety):
+
+    * If ``commits_made_count == 1`` we amend HEAD's message. Safe and
+      isomorphic to the Planner's PR-body strip.
+    * If ``commits_made_count > 1`` we log a warning and SKIP the
+      amend. Rewriting non-HEAD commits requires ``git rebase`` or
+      ``git filter-branch`` / ``git-filter-repo`` — too destructive
+      for a backstop. The prompt is the primary defense in this
+      shape; the Reviewer-on-impl is the last line.
+    * If ``commits_made_count == 0`` the Worker landed no commits
+      (incomplete / spec_invalid path); there is nothing to amend.
+
+    No-op cost on the clean path: we read HEAD's message first and
+    short-circuit via :func:`contains_auto_close_keyword` BEFORE
+    shelling out to ``git commit --amend``. Reading the message is one
+    cheap ``git log`` invocation.
+
+    Args:
+        worktree_path: The impl branch worktree directory.
+        commits_made_count: Length of ``WorkerOutput.commits_made``.
+            The Worker LLM populates this from its own commit count.
+        role_token: Worker bot's installation token. Injected into
+            ``GH_TOKEN`` for any git credential helper invoked by the
+            amend (the local commit doesn't talk to origin but the
+            env filter still scrubs venv noise, etc.).
+
+    Returns:
+        ``True`` if a HEAD amend happened, ``False`` otherwise
+        (multi-commit skip, zero-commit skip, or clean HEAD).
+    """
+    from foreman._env_filter import filtered_subprocess_env
+
+    if commits_made_count == 0:
+        return False
+    if commits_made_count > 1:
+        _log.warning(
+            "Worker landed %d commits on the impl branch; runtime auto-close "
+            "strip is limited to the single-commit case to avoid destructive "
+            "rebases. The Worker prompt's commit_message_guardrails is the "
+            "primary defense in the multi-commit shape; the Reviewer-on-impl "
+            "is the backstop.",
+            commits_made_count,
+        )
+        return False
+
+    # Read HEAD's full commit message (subject + body, separated by a
+    # blank line — git's ``%B`` placeholder).
+    show = subprocess.run(
+        ["git", "log", "-1", "--pretty=%B"],
+        cwd=worktree_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=filtered_subprocess_env(role_token=role_token),
+    )
+    if show.returncode != 0:
+        _log.warning(
+            "Worker auto-close strip: ``git log -1 --pretty=%%B`` failed "
+            "(rc=%d, stderr=%s); skipping amend.",
+            show.returncode,
+            (show.stderr or "").strip(),
+        )
+        return False
+
+    original_message = show.stdout
+    if not contains_auto_close_keyword(original_message):
+        # Clean path — no-op. No subprocess cost beyond the cheap
+        # ``git log`` we already ran.
+        return False
+
+    sanitized = strip_auto_close_keywords(original_message)
+    _log.warning(
+        "Worker commit body contained an auto-close keyword + issue "
+        "reference; amending HEAD to strip it before push (foreman#63 "
+        "runtime defense). Original subject: %r",
+        original_message.splitlines()[0] if original_message else "",
+    )
+    amend = subprocess.run(
+        ["git", "commit", "--amend", "-m", sanitized],
+        cwd=worktree_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=filtered_subprocess_env(role_token=role_token),
+    )
+    if amend.returncode != 0:
+        _log.error(
+            "Worker auto-close strip: ``git commit --amend`` failed "
+            "(rc=%d, stderr=%s). Leaving HEAD as-is; the Reviewer-on-impl "
+            "will flag the slip.",
+            amend.returncode,
+            (amend.stderr or "").strip(),
+        )
+        return False
+    return True
 
 
 def _read_spec_doc_from_branch(
@@ -898,6 +1018,21 @@ async def run_worker(
             # `implemented` → `incomplete`, never the reverse.
             assert llm_output.pr_title is not None
             assert llm_output.pr_body is not None
+            # foreman#63 runtime defense (Phase 8d.22): scrub the HEAD
+            # commit message of any GitHub auto-close keyword + issue
+            # reference BEFORE Python pushes the branch. If a Worker
+            # commit body contains ``Closes #N``, merging the impl PR
+            # auto-closes the issue via the commit-body route, bypassing
+            # the v4 state machine's close-out gate. The prompt is the
+            # primary defense; this is the backstop. Limited to the
+            # single-commit case (the default per ``<commit_discipline>``);
+            # multi-commit runs log a warning and skip the amend to
+            # avoid destructive rebases on shared history.
+            _sanitize_head_commit_auto_close(
+                worktree_path=wt_path,
+                commits_made_count=len(llm_output.commits_made),
+                role_token=worker_token,
+            )
             # foreman#222: deterministically push the impl branch from
             # Python via host.push_branch (tokenized URL using the
             # worker installation token). Previously this was delegated

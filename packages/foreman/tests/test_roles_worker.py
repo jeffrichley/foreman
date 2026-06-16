@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from github.GithubException import GithubException
 
+from foreman.prompts import load_role_prompt
 from foreman.provider import UsageInfo
 from foreman.roles import worker as _worker_mod
 from foreman.roles.worker import (
@@ -30,6 +31,7 @@ from foreman.roles.worker import (
     _create_pull_with_base_fallback,
     _is_invalid_base_422,
     _resolve_check_command,
+    _sanitize_head_commit_auto_close,
     parse_issue_url,
     run_worker,
 )
@@ -2281,3 +2283,242 @@ async def test_run_worker_logs_exception_with_safe_defaults_when_create_impl_rai
     assert row["new_failures_count"] == 0
     # provider.run_agent was never called.
     fake_provider.run_agent.assert_not_called()
+
+
+# ----------------------------------------------------------------------
+# foreman#63 + Phase 8d.22 — runtime auto-close strip on Worker HEAD commit
+#
+# Prompt-level guardrail teaches the Worker LLM not to write
+# ``Closes #N`` in commit messages; this runtime helper is the
+# backstop that catches the slip case before Python pushes the impl
+# branch. Limited to the single-commit shape (the default per
+# ``<commit_discipline>``) to avoid destructive rebases on shared
+# history; multi-commit runs log a warning and rely on the prompt +
+# Reviewer-on-impl.
+# ----------------------------------------------------------------------
+
+
+def _seed_worktree_with_commit(
+    worktree: Path, *, subject: str, body: str = ""
+) -> str:
+    """Init a fresh git repo with a single commit whose message is
+    ``subject`` + (optional) ``body``.
+
+    Returns the new commit's SHA. Mirrors the shape of an impl branch
+    after the Worker LLM finished (one bundled commit). The Worker
+    pushes from here; the runtime strip runs against this HEAD.
+    """
+    worktree.mkdir()
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=worktree, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "worker-bot@example.com"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Worker Bot"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    (worktree / "README.md").write_text("seed\n")
+    subprocess.run(
+        ["git", "add", "README.md"], cwd=worktree, check=True, capture_output=True
+    )
+    message = subject if not body else f"{subject}\n\n{body}"
+    subprocess.run(
+        ["git", "commit", "-m", message],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return sha
+
+
+def _read_head_message(worktree: Path) -> str:
+    """Return HEAD's full commit message (``%B``)."""
+    return subprocess.run(
+        ["git", "log", "-1", "--pretty=%B"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+def test_worker_runtime_strip_amends_single_commit_when_close_keyword_present(
+    tmp_path: Path,
+) -> None:
+    """Phase 8d.22 RED→GREEN: a single Worker commit whose body contains
+    ``Closes #21`` must be amended to remove the keyword before Python
+    pushes the impl branch. Verifies the helper performs the strip and
+    that the resulting HEAD message no longer matches the auto-close
+    regex.
+    """
+    wt = tmp_path / "wt"
+    original_sha = _seed_worktree_with_commit(
+        wt,
+        subject="docs(readme): add Build & Serve the Docs Site Locally section",
+        body="Adds quickstart docs for local docs preview.\n\nCloses #21",
+    )
+
+    amended = _sanitize_head_commit_auto_close(
+        worktree_path=wt, commits_made_count=1, role_token="ghs_worker_token"
+    )
+
+    assert amended is True
+    new_message = _read_head_message(wt)
+    assert "Closes #21" not in new_message
+    # Bare reference preserved
+    assert "#21" in new_message
+    # SHA changed (amend creates a new commit object)
+    new_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=wt,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert new_sha != original_sha
+
+
+def test_worker_runtime_strip_handles_subject_line_close_keyword(
+    tmp_path: Path,
+) -> None:
+    """Adversarial case: ``fix(foo): closes #21`` in the SUBJECT line
+    must also be stripped — the regex covers both subject and body.
+    """
+    wt = tmp_path / "wt"
+    _seed_worktree_with_commit(wt, subject="fix(foo): closes #21")
+
+    amended = _sanitize_head_commit_auto_close(
+        worktree_path=wt, commits_made_count=1, role_token="ghs_worker_token"
+    )
+
+    assert amended is True
+    new_message = _read_head_message(wt)
+    assert "closes #21" not in new_message.lower()
+    assert "#21" in new_message
+    # Conventional-commit prefix survives
+    assert "fix(foo):" in new_message
+
+
+def test_worker_runtime_strip_skips_multi_commit_run_with_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Phase 8d.22 safety constraint: multi-commit runs MUST skip the
+    runtime amend (rewriting non-HEAD commits requires destructive
+    rebase) AND emit a warning log so the Reviewer-on-impl sees the
+    slip. The prompt is the primary defense in this shape.
+    """
+    wt = tmp_path / "wt"
+    original_sha = _seed_worktree_with_commit(
+        wt,
+        subject="feat(foo): part one",
+        body="Implements sub-request 1.\n\nCloses #21",
+    )
+
+    with caplog.at_level("WARNING", logger="foreman.roles.worker"):
+        amended = _sanitize_head_commit_auto_close(
+            worktree_path=wt, commits_made_count=3, role_token="ghs_worker_token"
+        )
+
+    assert amended is False
+    # HEAD unchanged
+    head_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=wt,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert head_sha == original_sha
+    # HEAD message still contains the offending keyword
+    assert "Closes #21" in _read_head_message(wt)
+    # Warning emitted naming the multi-commit constraint
+    warning_messages = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("commits on the impl branch" in m for m in warning_messages), warning_messages
+
+
+def test_worker_runtime_strip_no_op_on_clean_single_commit(tmp_path: Path) -> None:
+    """No auto-close keyword in HEAD → no amend, no SHA change.
+    The cheap path must not pay the ``git commit --amend`` cost.
+    """
+    wt = tmp_path / "wt"
+    original_sha = _seed_worktree_with_commit(
+        wt,
+        subject="feat(foo): add X per spec",
+        body="Implements sub-request 1 of #42.\n\nSee #42 for context.",
+    )
+
+    amended = _sanitize_head_commit_auto_close(
+        worktree_path=wt, commits_made_count=1, role_token="ghs_worker_token"
+    )
+
+    assert amended is False
+    head_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=wt,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert head_sha == original_sha
+
+
+def test_worker_runtime_strip_no_op_on_zero_commits(tmp_path: Path) -> None:
+    """The incomplete / spec_invalid path lands no commits;
+    ``commits_made_count == 0`` must short-circuit without shelling out.
+    """
+    wt = tmp_path / "wt"
+    _seed_worktree_with_commit(wt, subject="seed only")
+
+    amended = _sanitize_head_commit_auto_close(
+        worktree_path=wt, commits_made_count=0, role_token="ghs_worker_token"
+    )
+
+    assert amended is False
+
+
+# ----------------------------------------------------------------------
+# Worker prompt MUST forbid auto-close keywords in commit messages
+# (subject + body). This is the prompt-level guardrail; the runtime
+# strip above is defense-in-depth.
+# ----------------------------------------------------------------------
+
+
+def test_worker_prompt_forbids_auto_close_keywords_in_commit_message() -> None:
+    """Phase 8d.22 prompt guardrail: the Worker system prompt MUST
+    explicitly forbid GitHub auto-close keywords in commit message
+    subject AND body.
+
+    Without this guardrail the LLM writes ``Closes #N`` in commit
+    bodies (algokit#21 dogfood). Merging the impl PR then auto-closes
+    the issue via the commit-body route, bypassing the v4 state
+    machine's close-out gate (foreman#63).
+    """
+    prompt = load_role_prompt("worker")
+    # Section header present
+    assert "commit_message_guardrails" in prompt
+    # All three keyword families named so the LLM can generalize
+    assert "Closes" in prompt
+    assert "Fixes" in prompt
+    assert "Resolves" in prompt
+    # Subject vs body coverage explicit
+    lowered = prompt.lower()
+    assert "subject" in lowered
+    assert "body" in lowered
+    # Rationale cites the close-out gate
+    assert "close_issue" in prompt or "close-out gate" in prompt
+    # foreman#63 rationale anchor present
+    assert "#63" in prompt
