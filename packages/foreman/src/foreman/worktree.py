@@ -640,6 +640,49 @@ class WorktreeManager:
         _maybe_sync_worktree_deps(wt_path, role_token=self._role_token)
         return wt_path
 
+    def prune(
+        self,
+        *,
+        project: str,
+        issue_number: int,
+    ) -> list[Path]:
+        """Remove both ``issue-<N>`` and ``impl-<N>`` worktrees for this ticket.
+
+        For each target path:
+
+        1. If the path is a registered git worktree, try
+           ``git worktree remove --force <path>``.
+        2. If that fails (non-zero exit, or path isn't a registered
+           worktree), fall back to ``shutil.rmtree(path, ignore_errors=False)``.
+        3. If the path doesn't exist, silently skip it.
+
+        Returns the list of paths that were actually removed. Used by
+        ``foreman reset`` to wipe local debris for a stuck ticket.
+        """
+        project_root = self.worktrees_root / project
+        candidates = [
+            project_root / f"issue-{issue_number}",
+            project_root / f"impl-{issue_number}",
+        ]
+        removed: list[Path] = []
+        for path in candidates:
+            if not path.exists():
+                continue
+            try:
+                subprocess.run(
+                    ["git", "worktree", "remove", "--force", str(path)],
+                    check=True,
+                    capture_output=True,
+                    env=self._env(),
+                )
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                # Either git rejected (not a registered worktree) or git
+                # isn't on PATH. Fall back to rmtree.
+                if path.exists():
+                    shutil.rmtree(path, ignore_errors=False)
+            removed.append(path)
+        return removed
+
 
 def _resolve_default_branch(clone_path: Path, *, role_token: str | None = None) -> str:
     """Return the clone's default branch name (e.g. ``"main"``, ``"master"``).
