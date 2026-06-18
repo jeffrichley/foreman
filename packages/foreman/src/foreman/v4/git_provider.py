@@ -89,6 +89,17 @@ class GitProvider(Protocol):
         """
         ...
 
+    def delete_branch(
+        self, *, project: str, branch_name: str,
+    ) -> None:
+        """Delete a remote branch.
+
+        Idempotent: if the branch doesn't exist (404 / 422), this is a
+        no-op rather than an error. Used by ``foreman reset`` to clear
+        stale ``foreman/issue-N`` / ``foreman/impl-N`` debris.
+        """
+        ...
+
 
 class FakeGitProvider:
     """In-memory GitProvider for unit + lifecycle tests."""
@@ -110,6 +121,11 @@ class FakeGitProvider:
         # merged-externally + just-merged branches and did NOT happen
         # on the BLOCKED branch. Set semantics give idempotency for free.
         self.closed_issues: set[tuple[str, int]] = set()
+        # Recorder for delete_branch calls (mirrors closed_issues shape).
+        self.deleted_branches: set[tuple[str, str]] = set()
+        # Current branches per project. seed_branch populates; delete_branch
+        # removes. Missing-branch delete records the call but is otherwise a no-op.
+        self._branches: dict[str, set[str]] = {}
 
     def set_open_issues_with_label(
         self, *, project: str, label: str, issue_numbers: set[int],
@@ -190,3 +206,20 @@ class FakeGitProvider:
         already-closed-is-no-op behavior.
         """
         self.closed_issues.add((project, issue_number))
+
+    def seed_branch(self, *, project: str, branch_name: str) -> None:
+        """Test helper: seed a branch into the fake's branch set."""
+        self._branches.setdefault(project, set()).add(branch_name)
+
+    def get_branches(self, *, project: str) -> set[str]:
+        """Test helper: return the current branch set for a project."""
+        return set(self._branches.get(project, set()))
+
+    def delete_branch(
+        self, *, project: str, branch_name: str,
+    ) -> None:
+        """Drop the branch from this fake's branch set + record the call."""
+        self.deleted_branches.add((project, branch_name))
+        current = self._branches.get(project)
+        if current is not None:
+            current.discard(branch_name)

@@ -143,3 +143,18 @@ def test_fake_close_issue_idempotent():
     git.close_issue(project="p", issue_number=42)
     git.close_issue(project="p", issue_number=42)
     assert git.closed_issues == {("p", 42)}
+
+
+def test_delete_branch_records_deletion():
+    fake = FakeGitProvider()
+    fake.seed_branch(project="p", branch_name="foreman/issue-1")
+    fake.delete_branch(project="p", branch_name="foreman/issue-1")
+    assert ("p", "foreman/issue-1") in fake.deleted_branches
+    assert "foreman/issue-1" not in fake.get_branches(project="p")
+
+
+def test_delete_branch_missing_is_noop():
+    fake = FakeGitProvider()
+    # No seed — branch doesn't exist. Must NOT raise.
+    fake.delete_branch(project="p", branch_name="foreman/issue-99")
+    assert ("p", "foreman/issue-99") in fake.deleted_branches
