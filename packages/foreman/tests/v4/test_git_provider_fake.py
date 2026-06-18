@@ -160,18 +160,29 @@ def test_delete_branch_missing_is_noop():
     assert ("p", "foreman/issue-99") in fake.deleted_branches
 
 
-def test_close_pr_records_close_and_marks_pr_closed():
+def test_close_pr_records_call_and_preserves_merged_state():
+    """close_pr records the call. PRState.merged is preserved either way:
+    closed-without-merge stays False; close on an already-merged PR does
+    NOT undo the merge.
+    """
     fake = FakeGitProvider()
+    # Branch A: close-without-merge — merged stays False.
     fake.set_pr_state(
         project="p", pr_number=19,
         state=PRState(merged=False, mergeable=True, ci_passing=True),
     )
     fake.close_pr(project="p", pr_number=19)
     assert ("p", 19) in fake.closed_prs
-    # PR state should reflect closed-not-merged so subsequent get_pr_state
-    # doesn't claim mergeable.
-    state = fake.get_pr_state(project="p", pr_number=19)
-    assert state.merged is False
+    assert fake.get_pr_state(project="p", pr_number=19).merged is False
+
+    # Branch B: close on an already-merged PR — merged stays True.
+    fake.set_pr_state(
+        project="p", pr_number=20,
+        state=PRState(merged=True, mergeable=True, ci_passing=True),
+    )
+    fake.close_pr(project="p", pr_number=20)
+    assert ("p", 20) in fake.closed_prs
+    assert fake.get_pr_state(project="p", pr_number=20).merged is True
 
 
 def test_close_pr_idempotent_on_already_closed():

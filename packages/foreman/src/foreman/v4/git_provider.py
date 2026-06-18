@@ -237,11 +237,12 @@ class FakeGitProvider:
             current.discard(branch_name)
 
     def close_pr(self, *, project: str, pr_number: int) -> None:
-        """Record the close + ensure subsequent get_pr_state shows it
-        as not merged. Idempotent on repeat calls.
+        """Record the close on ``closed_prs``. Idempotent.
+
+        Does NOT mutate :class:`PRState` — there is no ``closed`` field, and
+        ``merged`` is preserved either way (close-without-merge stays False;
+        close on an already-merged PR does NOT undo the merge). The recorder
+        is the sole observable side-effect; consumers that need "did we
+        attempt to close" assert on ``closed_prs``.
         """
         self.closed_prs.add((project, pr_number))
-        # Best-effort: if the PR is in our state map, leave merged as-is
-        # (closed-without-merge stays merged=False; already-merged stays
-        # merged=True — close on a merged PR shouldn't undo the merge).
-        # No state mutation needed beyond the recorder.
