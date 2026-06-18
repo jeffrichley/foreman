@@ -45,6 +45,7 @@ class TicketRepository(Protocol):
     def set_ticket_state(self, ticket_id: int, new_state: str, *, now: dt.datetime) -> None: ...
     def hold_ticket(self, ticket_id: int, *, held_by: str, reason: str, now: dt.datetime) -> None: ...
     def resume_ticket(self, ticket_id: int, *, now: dt.datetime) -> None: ...
+    def delete_ticket(self, ticket_id: int) -> None: ...
 
     # --- State-instance journal ---
 
@@ -204,6 +205,16 @@ class InMemoryTicketRepository:
             held_reason=None,
             updated_at=now,
         )
+
+    def delete_ticket(self, ticket_id: int) -> None:
+        existing = self.get_ticket(ticket_id)  # raises TicketNotFoundError
+        del self._tickets[ticket_id]
+        del self._by_issue[(existing.project, existing.issue_number)]
+        # Cascade — drop every state-instance row tied to this ticket.
+        self._instances = {
+            iid: inst for iid, inst in self._instances.items()
+            if inst.ticket_id != ticket_id
+        }
 
     # --- State-instance journal ---
 

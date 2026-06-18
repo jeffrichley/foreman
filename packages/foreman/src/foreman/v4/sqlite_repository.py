@@ -222,6 +222,21 @@ class SqliteTicketRepository:
             )
             self._conn.commit()
 
+    def delete_ticket(self, ticket_id: int) -> None:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "SELECT 1 FROM tickets WHERE id = ?", (ticket_id,),
+            )
+            if cur.fetchone() is None:
+                raise TicketNotFoundError(str(ticket_id))
+            self._conn.execute(
+                "DELETE FROM state_instances WHERE ticket_id = ?",
+                (ticket_id,),
+            )
+            self._conn.execute(
+                "DELETE FROM tickets WHERE id = ?", (ticket_id,),
+            )
+
     # --- State-instance journal ---
 
     def open_state_instance(

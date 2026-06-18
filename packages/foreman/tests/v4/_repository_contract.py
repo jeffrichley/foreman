@@ -476,3 +476,35 @@ class RepositoryContract:
     def test_list_state_instances_for_ticket_empty_for_no_journal(self, repo: TicketRepository):
         t = repo.create_ticket(project="p", issue_number=1, now=_now())
         assert repo.list_state_instances_for_ticket(t.id) == []
+
+    def test_delete_ticket_removes_row(self, repo: TicketRepository) -> None:
+        t = repo.create_ticket(project="p", issue_number=1, now=_now())
+        repo.delete_ticket(t.id)
+        with pytest.raises(TicketNotFoundError):
+            repo.get_ticket(t.id)
+
+    def test_delete_ticket_clears_by_issue_lookup(self, repo: TicketRepository) -> None:
+        t = repo.create_ticket(project="p", issue_number=42, now=_now())
+        repo.delete_ticket(t.id)
+        with pytest.raises(TicketNotFoundError):
+            repo.get_ticket_by_issue(project="p", issue_number=42)
+        # After delete, the (project, issue_number) slot is free again.
+        recreated = repo.create_ticket(project="p", issue_number=42, now=_now())
+        assert recreated.issue_number == 42
+
+    def test_delete_ticket_cascades_state_instances(
+        self, repo: TicketRepository,
+    ) -> None:
+        t = repo.create_ticket(project="p", issue_number=1, now=_now())
+        repo.open_state_instance(
+            ticket_id=t.id, state_name="Planning", sequence=1, now=_now(),
+        )
+        repo.open_state_instance(
+            ticket_id=t.id, state_name="SpecReview", sequence=2, now=_now(),
+        )
+        repo.delete_ticket(t.id)
+        assert repo.list_state_instances_for_ticket(t.id) == []
+
+    def test_delete_ticket_missing_raises(self, repo: TicketRepository) -> None:
+        with pytest.raises(TicketNotFoundError):
+            repo.delete_ticket(9999)
