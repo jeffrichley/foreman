@@ -181,3 +181,53 @@ def test_constructor_takes_immutable_snapshot() -> None:
 
     with pytest.raises(UnknownProjectError):
         router.get_pr_state(project="bar", pr_number=1)
+
+
+def test_delete_branch_dispatches_to_per_project_provider():
+    a = FakeGitProvider()
+    b = FakeGitProvider()
+    router = RoutingGitProvider(providers={"a": a, "b": b})
+    router.delete_branch(project="b", branch_name="foreman/issue-1")
+    assert ("b", "foreman/issue-1") in b.deleted_branches
+    assert a.deleted_branches == set()
+
+
+def test_close_pr_dispatches_to_per_project_provider():
+    a = FakeGitProvider()
+    b = FakeGitProvider()
+    a.set_pr_state(
+        project="a", pr_number=5,
+        state=PRState(merged=False, mergeable=True, ci_passing=True),
+    )
+    router = RoutingGitProvider(providers={"a": a, "b": b})
+    router.close_pr(project="a", pr_number=5)
+    assert ("a", 5) in a.closed_prs
+    assert b.closed_prs == set()
+
+
+def test_find_open_pr_by_head_branch_dispatches_to_per_project_provider():
+    a = FakeGitProvider()
+    b = FakeGitProvider()
+    b.set_pr_state(
+        project="b", pr_number=42,
+        state=PRState(merged=False, mergeable=True, ci_passing=True),
+    )
+    b.set_pr_head_branch(
+        project="b", pr_number=42, branch_name="foreman/issue-180",
+    )
+    router = RoutingGitProvider(providers={"a": a, "b": b})
+    found = router.find_open_pr_by_head_branch(
+        project="b", branch_name="foreman/issue-180",
+    )
+    assert found == 42
+    # Same branch name on project "a" must NOT match — project routing
+    # is the whole point.
+    assert router.find_open_pr_by_head_branch(
+        project="a", branch_name="foreman/issue-180",
+    ) is None
+
+
+def test_delete_branch_unknown_project_raises():
+    router = RoutingGitProvider(providers={"a": FakeGitProvider()})
+    with pytest.raises(UnknownProjectError):
+        router.delete_branch(project="nope", branch_name="x")

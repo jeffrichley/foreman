@@ -116,3 +116,22 @@ class RoutingGitProvider:
         self._resolve(project).close_issue(
             project=project, issue_number=issue_number,
         )
+
+    def delete_branch(
+        self, *, project: str, branch_name: str,
+    ) -> None:
+        self._resolve(project).delete_branch(
+            project=project, branch_name=branch_name,
+        )
+
+    def close_pr(self, *, project: str, pr_number: int) -> None:
+        self._resolve(project).close_pr(
+            project=project, pr_number=pr_number,
+        )
+
+    def find_open_pr_by_head_branch(
+        self, *, project: str, branch_name: str,
+    ) -> int | None:
+        return self._resolve(project).find_open_pr_by_head_branch(
+            project=project, branch_name=branch_name,
+        )
