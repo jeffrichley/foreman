@@ -496,3 +496,25 @@ def test_find_open_pr_by_head_branch_returns_none_on_empty(
     assert provider.find_open_pr_by_head_branch(
         project="ignored", branch_name="foreman/issue-180",
     ) is None
+
+
+def test_get_issue_labels_returns_label_names(mock_github, mock_repo):
+    """``get_issue_labels`` reads the names off the issue's label objects.
+
+    Reset CLI's discovery phase uses this to enumerate ``foreman:*``
+    labels currently on the issue. PyGithub returns label objects
+    (each with a ``.name``); the provider unpacks them into a set.
+    """
+    fake_label_a = MagicMock()
+    fake_label_a.name = "foreman:state-failed"
+    fake_label_b = MagicMock()
+    fake_label_b.name = "bug"
+    fake_issue = MagicMock(labels=[fake_label_a, fake_label_b])
+    mock_repo.get_issue.return_value = fake_issue
+    provider = PyGithubGitProvider(
+        github_factory=lambda: mock_github,
+        repo_full_name="org/repo",
+    )
+    labels = provider.get_issue_labels(project="ignored", issue_number=180)
+    assert labels == {"foreman:state-failed", "bug"}
+    mock_repo.get_issue.assert_called_once_with(180)

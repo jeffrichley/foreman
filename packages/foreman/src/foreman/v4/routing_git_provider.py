@@ -135,3 +135,10 @@ class RoutingGitProvider:
         return self._resolve(project).find_open_pr_by_head_branch(
             project=project, branch_name=branch_name,
         )
+
+    def get_issue_labels(
+        self, *, project: str, issue_number: int,
+    ) -> set[str]:
+        return self._resolve(project).get_issue_labels(
+            project=project, issue_number=issue_number,
+        )

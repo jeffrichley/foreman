@@ -231,3 +231,13 @@ def test_delete_branch_unknown_project_raises():
     router = RoutingGitProvider(providers={"a": FakeGitProvider()})
     with pytest.raises(UnknownProjectError):
         router.delete_branch(project="nope", branch_name="x")
+
+
+def test_get_issue_labels_dispatches_to_per_project_provider():
+    a = FakeGitProvider()
+    b = FakeGitProvider()
+    b.seed_issue_labels(
+        project="b", issue_number=1, labels={"foreman:plan"},
+    )
+    router = RoutingGitProvider(providers={"a": a, "b": b})
+    assert router.get_issue_labels(project="b", issue_number=1) == {"foreman:plan"}

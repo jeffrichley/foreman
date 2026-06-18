@@ -124,6 +124,17 @@ class GitProvider(Protocol):
         """
         ...
 
+    def get_issue_labels(
+        self, *, project: str, issue_number: int,
+    ) -> set[str]:
+        """Return the current label set on this issue.
+
+        Used by ``foreman reset`` to discover which ``foreman:*`` labels
+        are currently on the issue (so the operator-facing plan can
+        enumerate them by name).
+        """
+        ...
+
 
 class FakeGitProvider:
     """In-memory GitProvider for unit + lifecycle tests."""

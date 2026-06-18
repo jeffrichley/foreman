@@ -319,3 +319,17 @@ class PyGithubGitProvider:
         for pr in repo.get_pulls(state="open", head=head_filter):
             return pr.number
         return None
+
+    def get_issue_labels(
+        self, *, project: str, issue_number: int,
+    ) -> set[str]:
+        """Return the set of label names currently on the issue.
+
+        Reset CLI's discovery phase uses this to enumerate which
+        ``foreman:*`` labels are on the issue so the operator-facing
+        plan can name them explicitly. ``project`` is accepted for
+        Protocol-shape symmetry but unused — this provider is locked
+        to one repo at construction, same pattern as ``merge_pr``.
+        """
+        issue = self._repo.get_issue(issue_number)
+        return {label.name for label in issue.labels}

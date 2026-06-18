@@ -10,15 +10,89 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+from dataclasses import dataclass
 
 import typer
 
+from foreman.v4.git_provider import GitProvider
 from foreman.v4.repository import (
     TicketAlreadyExistsError,
     TicketNotFoundError,
 )
 from foreman.v4.states.registry import STATE_REGISTRY
 from foreman.v4.work import WorkItem
+
+
+@dataclass(frozen=True, slots=True)
+class ResetPlan:
+    """What ``foreman reset`` will do, decided in the discovery phase.
+
+    Built read-only from current GitHub + SQLite + filesystem state by
+    :func:`_discover`. Walked destructively by :func:`_execute`. Steps
+    that are off — no PR matched, no row in SQLite, ``--keep-pr`` set —
+    are encoded as ``None`` / empty / False so the renderer + executor
+    can skip them uniformly.
+    """
+    project: str
+    issue_number: int
+    spec_pr: int | None
+    impl_pr: int | None
+    delete_branches: list[str]
+    prune_worktrees: bool
+    strip_labels: set[str]
+    delete_ticket_id: int | None
+    apply_plan_label: bool
+
+
+def _discover(
+    *,
+    git: GitProvider,
+    repo,
+    project: str,
+    issue_number: int,
+    keep_pr: bool,
+    keep_worktree: bool,
+    retrigger: bool,
+) -> ResetPlan:
+    """Read-only scan of current state. No mutations."""
+    if keep_pr:
+        spec_pr = None
+        impl_pr = None
+    else:
+        spec_pr = git.find_open_pr_by_head_branch(
+            project=project, branch_name=f"foreman/issue-{issue_number}",
+        )
+        impl_pr = git.find_open_pr_by_head_branch(
+            project=project, branch_name=f"foreman/impl-{issue_number}",
+        )
+    # Branches: always include both candidates. delete_branch is idempotent
+    # on missing, so listing them unconditionally is fine.
+    delete_branches = [
+        f"foreman/issue-{issue_number}",
+        f"foreman/impl-{issue_number}",
+    ]
+    labels_on_issue = git.get_issue_labels(
+        project=project, issue_number=issue_number,
+    )
+    strip = {lbl for lbl in labels_on_issue if lbl.startswith("foreman:")}
+    try:
+        ticket = repo.get_ticket_by_issue(
+            project=project, issue_number=issue_number,
+        )
+        delete_ticket_id = ticket.id
+    except TicketNotFoundError:
+        delete_ticket_id = None
+    return ResetPlan(
+        project=project,
+        issue_number=issue_number,
+        spec_pr=spec_pr,
+        impl_pr=impl_pr,
+        delete_branches=delete_branches,
+        prune_worktrees=not keep_worktree,
+        strip_labels=strip,
+        delete_ticket_id=delete_ticket_id,
+        apply_plan_label=retrigger,
+    )
 
 
 def _resolve(ctx: typer.Context, ticket_id: int):
