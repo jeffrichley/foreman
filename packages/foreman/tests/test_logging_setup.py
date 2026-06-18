@@ -199,3 +199,138 @@ def test_configure_daemon_logging_disk_and_stdout_payloads_match(
     disk_record = json.loads(disk_line)
     stdout_record = json.loads(stdout_line)
     assert disk_record == stdout_record
+
+
+# foreman#323: harden the JSON-lines writer against the "silent stop"
+# failure class described in the issue. The literal v4 source pointers
+# do not exist in this repo (see the spec's Open questions); these
+# three tests lock in the equivalent behavior of the stdlib
+# FileHandler + _JsonLinesFormatter pipeline in logging_setup.py.
+def test_logger_info_writes_to_disk_without_explicit_flush(tmp_path: Path) -> None:
+    """foreman#323 regression guard: a single ``logger.info(...)`` call
+    must be visible on disk WITHOUT the caller calling
+    ``handler.flush()`` first. ``logging.StreamHandler.emit()`` (which
+    ``FileHandler`` inherits) flushes after every write; this test
+    pins that behavior so a future refactor that swaps in a buffered
+    handler cannot silently regress the operator's ``tail -F`` UX.
+    """
+    foreman_logger = logging.getLogger("foreman")
+    foreman_logger.handlers.clear()
+    try:
+        log_path = tmp_path / "daemon.log"
+        configure_daemon_logging(log_path=log_path, level="INFO", console=False)
+
+        logger = logging.getLogger("foreman.daemon.test_no_flush")
+        logger.info("no-flush", extra={"ticket": 323})
+
+        # DELIBERATELY do NOT call handler.flush(). The whole point of
+        # this regression guard is that per-record flush already
+        # happens inside FileHandler.emit().
+        contents = log_path.read_text()
+        assert contents != "", (
+            "logger.info did not produce any disk write before an explicit "
+            "flush — FileHandler.emit() is no longer flushing per-record"
+        )
+        line = contents.strip().splitlines()[-1]
+        record = json.loads(line)
+        assert record["message"] == "no-flush"
+        assert record["ticket"] == 323
+    finally:
+        foreman_logger.handlers.clear()
+
+
+def test_non_json_extra_does_not_disable_handler(tmp_path: Path) -> None:
+    """foreman#323 regression guard: a non-JSON-serializable value
+    passed via ``extra={...}`` must not silently disable the foreman
+    logger's file handler. The offending record may be dropped or
+    rendered via ``_JsonLinesFormatter``'s ``default=str`` fallback;
+    the load-bearing assertion is that the NEXT record after the bad
+    one still lands on disk and the handler is still attached.
+
+    This is the in-codebase analog of the issue's path (b) — "an
+    exception inside emit() triggered handleError() which silently
+    swallowed and disabled the handler".
+    """
+    foreman_logger = logging.getLogger("foreman")
+    foreman_logger.handlers.clear()
+    try:
+        log_path = tmp_path / "daemon.log"
+        configure_daemon_logging(log_path=log_path, level="INFO", console=False)
+
+        logger = logging.getLogger("foreman.daemon.test_non_json")
+        # A set of bytes — neither set nor bytes is JSON-native. The
+        # formatter's ``default=str`` should render this without
+        # raising; even if it did raise, the handler must survive.
+        logger.info("first", extra={"obj": {b"a", b"b"}})
+        logger.info("second", extra={"ticket": 1})
+
+        for handler in logging.getLogger("foreman").handlers:
+            handler.flush()
+
+        # Load-bearing: the file handler is still attached after the
+        # exotic record.
+        file_handlers = [
+            h for h in foreman_logger.handlers if isinstance(h, logging.FileHandler)
+        ]
+        assert len(file_handlers) == 1, (
+            f"non-JSON extra disabled or detached the file handler; "
+            f"found {len(file_handlers)} FileHandler(s) on the foreman logger"
+        )
+
+        # Load-bearing: the NEXT record after the exotic one lands on
+        # disk. (Whether the exotic record itself made it is not
+        # asserted — default=str makes it likely but not contractual.)
+        lines = log_path.read_text().strip().splitlines()
+        last = json.loads(lines[-1])
+        assert last["message"] == "second", (
+            f"record after non-JSON extra did not land on disk; "
+            f"last record was: {last!r}"
+        )
+        assert last["ticket"] == 1
+    finally:
+        foreman_logger.handlers.clear()
+
+
+def test_re_entry_does_not_strand_writes(tmp_path: Path) -> None:
+    """foreman#323 regression guard: re-entering
+    ``configure_daemon_logging`` with the same ``log_path`` must not
+    strand the file descriptor for prior writes. Records emitted
+    before AND after re-entry must both appear in the log file.
+
+    This is the in-codebase analog of the issue's SIGHUP-reset
+    scenario. (This repo has no SIGHUP handler — see ``cli.py:1080``
+    and ``docs/superpowers/specs/foreman-issue-100-spec.md`` — so
+    re-entry of ``configure_daemon_logging`` is the closest analog.)
+    """
+    foreman_logger = logging.getLogger("foreman")
+    foreman_logger.handlers.clear()
+    try:
+        log_path = tmp_path / "daemon.log"
+
+        configure_daemon_logging(log_path=log_path, level="INFO", console=False)
+        logger = logging.getLogger("foreman.daemon.test_reentry")
+        logger.info("before-reentry", extra={"ticket": 323})
+
+        # Re-entry: same log_path. Must replace the old handler
+        # without losing the prior write or stranding the FD.
+        configure_daemon_logging(log_path=log_path, level="INFO", console=False)
+        logger.info("after-reentry", extra={"ticket": 323})
+
+        for handler in logging.getLogger("foreman").handlers:
+            handler.flush()
+
+        records = [
+            json.loads(line)
+            for line in log_path.read_text().strip().splitlines()
+        ]
+        messages = [r["message"] for r in records]
+        assert "before-reentry" in messages, (
+            f"re-entry of configure_daemon_logging stranded the prior "
+            f"FD; 'before-reentry' is missing. Got: {messages}"
+        )
+        assert "after-reentry" in messages, (
+            f"writes after re-entry are not landing on disk. "
+            f"Got: {messages}"
+        )
+    finally:
+        foreman_logger.handlers.clear()
