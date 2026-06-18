@@ -645,6 +645,7 @@ class WorktreeManager:
         *,
         project: str,
         issue_number: int,
+        clone_path: Path,
     ) -> list[Path]:
         """Remove both ``issue-<N>`` and ``impl-<N>`` worktrees for this ticket.
 
@@ -658,6 +659,18 @@ class WorktreeManager:
 
         Returns the list of paths that were actually removed. Used by
         ``foreman reset`` to wipe local debris for a stuck ticket.
+
+        Args:
+            project: Project slug; selects the ``<worktrees_root>/<project>/``
+                subdirectory whose ``issue-<N>``/``impl-<N>`` siblings
+                are candidates for removal.
+            issue_number: Ticket number whose two sibling worktrees should
+                be pruned.
+            clone_path: The local clone whose registry tracks these worktrees.
+                Required so ``git worktree remove`` consults the right
+                ``.git/worktrees/`` entries — without this, git either errors
+                (cwd isn't a repo) or hits the wrong registry. Comes from
+                ``V4Config.projects[*].local_clone_path`` in production.
         """
         project_root = self.worktrees_root / project
         candidates = [
@@ -674,13 +687,30 @@ class WorktreeManager:
                     check=True,
                     capture_output=True,
                     env=self._env(),
+                    cwd=clone_path,
                 )
             except (subprocess.CalledProcessError, FileNotFoundError):
                 # Either git rejected (not a registered worktree) or git
                 # isn't on PATH. Fall back to rmtree.
                 if path.exists():
-                    shutil.rmtree(path, ignore_errors=False)
-            removed.append(path)
+                    try:
+                        shutil.rmtree(path, ignore_errors=False)
+                    except OSError as exc:
+                        # Windows: daemon's open file handles or antivirus
+                        # can keep files locked. Soft-fail so reset doesn't
+                        # crash on the operator — they can retry once the
+                        # locking process releases.
+                        print(
+                            f"warning: could not remove {path}: {exc}",
+                            file=sys.stderr,
+                        )
+                        continue
+            # Only count it as removed if the path is actually gone.
+            # Guards against future changes (e.g. ignore_errors=True on
+            # rmtree, or catching OSError above without continue) that
+            # would otherwise falsely report removal.
+            if not path.exists():
+                removed.append(path)
         return removed
 
 
