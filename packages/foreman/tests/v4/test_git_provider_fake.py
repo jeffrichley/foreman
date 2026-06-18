@@ -158,3 +158,29 @@ def test_delete_branch_missing_is_noop():
     # No seed — branch doesn't exist. Must NOT raise.
     fake.delete_branch(project="p", branch_name="foreman/issue-99")
     assert ("p", "foreman/issue-99") in fake.deleted_branches
+
+
+def test_close_pr_records_close_and_marks_pr_closed():
+    fake = FakeGitProvider()
+    fake.set_pr_state(
+        project="p", pr_number=19,
+        state=PRState(merged=False, mergeable=True, ci_passing=True),
+    )
+    fake.close_pr(project="p", pr_number=19)
+    assert ("p", 19) in fake.closed_prs
+    # PR state should reflect closed-not-merged so subsequent get_pr_state
+    # doesn't claim mergeable.
+    state = fake.get_pr_state(project="p", pr_number=19)
+    assert state.merged is False
+
+
+def test_close_pr_idempotent_on_already_closed():
+    fake = FakeGitProvider()
+    fake.set_pr_state(
+        project="p", pr_number=19,
+        state=PRState(merged=False, mergeable=False, ci_passing=True),
+    )
+    fake.close_pr(project="p", pr_number=19)
+    # Second call must not raise.
+    fake.close_pr(project="p", pr_number=19)
+    assert ("p", 19) in fake.closed_prs

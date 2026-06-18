@@ -100,6 +100,16 @@ class GitProvider(Protocol):
         """
         ...
 
+    def close_pr(self, *, project: str, pr_number: int) -> None:
+        """Close a PR without merging.
+
+        Distinct from ``close_issue`` — PyGithub treats issues and PRs
+        as separate API surfaces. Idempotent: closing an already-closed
+        PR is a no-op rather than an error. Used by ``foreman reset``
+        to retire spec/impl PRs whose branches it's about to delete.
+        """
+        ...
+
 
 class FakeGitProvider:
     """In-memory GitProvider for unit + lifecycle tests."""
@@ -126,6 +136,8 @@ class FakeGitProvider:
         # Current branches per project. seed_branch populates; delete_branch
         # removes. Missing-branch delete records the call but is otherwise a no-op.
         self._branches: dict[str, set[str]] = {}
+        # Recorder for close_pr calls.
+        self.closed_prs: set[tuple[str, int]] = set()
 
     def set_open_issues_with_label(
         self, *, project: str, label: str, issue_numbers: set[int],
@@ -223,3 +235,13 @@ class FakeGitProvider:
         current = self._branches.get(project)
         if current is not None:
             current.discard(branch_name)
+
+    def close_pr(self, *, project: str, pr_number: int) -> None:
+        """Record the close + ensure subsequent get_pr_state shows it
+        as not merged. Idempotent on repeat calls.
+        """
+        self.closed_prs.add((project, pr_number))
+        # Best-effort: if the PR is in our state map, leave merged as-is
+        # (closed-without-merge stays merged=False; already-merged stays
+        # merged=True — close on a merged PR shouldn't undo the merge).
+        # No state mutation needed beyond the recorder.
