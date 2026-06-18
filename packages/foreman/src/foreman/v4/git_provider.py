@@ -110,6 +110,20 @@ class GitProvider(Protocol):
         """
         ...
 
+    def find_open_pr_by_head_branch(
+        self, *, project: str, branch_name: str,
+    ) -> int | None:
+        """Find an OPEN PR whose head branch matches ``branch_name``.
+
+        Returns the PR number, or None if no open PR matches. Used by
+        ``foreman reset`` to discover spec/impl PRs without depending
+        on the SQLite ticket row (which may have already been deleted
+        manually). PRs that are closed or merged are NOT returned —
+        the discovery phase only cares about live debris that needs
+        closing.
+        """
+        ...
+
 
 class FakeGitProvider:
     """In-memory GitProvider for unit + lifecycle tests."""
@@ -138,6 +152,9 @@ class FakeGitProvider:
         self._branches: dict[str, set[str]] = {}
         # Recorder for close_pr calls.
         self.closed_prs: set[tuple[str, int]] = set()
+        # Map of (project, pr_number) → head branch name. set_pr_head_branch
+        # populates; find_open_pr_by_head_branch reverse-scans it.
+        self._pr_head_branches: dict[tuple[str, int], str] = {}
 
     def set_open_issues_with_label(
         self, *, project: str, label: str, issue_numbers: set[int],
@@ -246,3 +263,28 @@ class FakeGitProvider:
         attempt to close" assert on ``closed_prs``.
         """
         self.closed_prs.add((project, pr_number))
+
+    def set_pr_head_branch(
+        self, *, project: str, pr_number: int, branch_name: str,
+    ) -> None:
+        """Test helper: seed the head branch for a PR."""
+        self._pr_head_branches[(project, pr_number)] = branch_name
+
+    def find_open_pr_by_head_branch(
+        self, *, project: str, branch_name: str,
+    ) -> int | None:
+        """Linear-scan the PR head-branch map for an open PR on this branch."""
+        for (proj, pr_num), head in self._pr_head_branches.items():
+            if proj != project or head != branch_name:
+                continue
+            if (project, pr_num) in self.closed_prs:
+                continue
+            # An already-merged PR isn't "open" either; skip it.
+            try:
+                state = self.get_pr_state(project=project, pr_number=pr_num)
+            except PRNotFoundError:
+                continue
+            if state.merged:
+                continue
+            return pr_num
+        return None

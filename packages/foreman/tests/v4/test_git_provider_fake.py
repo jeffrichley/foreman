@@ -195,3 +195,42 @@ def test_close_pr_idempotent_on_already_closed():
     # Second call must not raise.
     fake.close_pr(project="p", pr_number=19)
     assert ("p", 19) in fake.closed_prs
+
+
+def test_find_open_pr_by_head_branch_returns_pr_number():
+    fake = FakeGitProvider()
+    fake.set_pr_state(
+        project="p", pr_number=19,
+        state=PRState(merged=False, mergeable=True, ci_passing=True),
+    )
+    fake.set_pr_head_branch(
+        project="p", pr_number=19, branch_name="foreman/issue-180",
+    )
+    found = fake.find_open_pr_by_head_branch(
+        project="p", branch_name="foreman/issue-180",
+    )
+    assert found == 19
+
+
+def test_find_open_pr_by_head_branch_no_match_returns_none():
+    fake = FakeGitProvider()
+    found = fake.find_open_pr_by_head_branch(
+        project="p", branch_name="foreman/issue-999",
+    )
+    assert found is None
+
+
+def test_find_open_pr_by_head_branch_skips_closed_prs():
+    fake = FakeGitProvider()
+    fake.set_pr_state(
+        project="p", pr_number=19,
+        state=PRState(merged=False, mergeable=True, ci_passing=True),
+    )
+    fake.set_pr_head_branch(
+        project="p", pr_number=19, branch_name="foreman/issue-180",
+    )
+    fake.close_pr(project="p", pr_number=19)
+    found = fake.find_open_pr_by_head_branch(
+        project="p", branch_name="foreman/issue-180",
+    )
+    assert found is None
