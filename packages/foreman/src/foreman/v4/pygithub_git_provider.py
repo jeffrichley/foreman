@@ -262,3 +262,60 @@ class PyGithubGitProvider:
             except UnknownObjectException:
                 # Label not on the issue — idempotent no-op.
                 continue
+
+    def delete_branch(
+        self, *, project: str, branch_name: str,
+    ) -> None:
+        """Delete the branch, idempotently.
+
+        Reset CLI calls this to scrub foreman/issue-N branches on a
+        ticket reset. The Protocol contract is idempotent — if the ref
+        is already gone, that's the success state.
+
+        GitHub returns 404 when the ref doesn't exist; some races
+        surface 422 instead (ref gone but cached). Both translate to
+        "already absent" from reset's perspective, so we swallow them.
+        Any other GithubException re-raises.
+        """
+        try:
+            ref = self._repo.get_git_ref(f"heads/{branch_name}")
+            ref.delete()
+        except GithubException as exc:
+            if exc.status in (404, 422):
+                return
+            raise
+
+    def close_pr(self, *, project: str, pr_number: int) -> None:
+        """Close the PR without merging, idempotently.
+
+        Reset CLI calls this to drop in-flight PRs on a ticket reset.
+        PyGithub raises ``GithubException`` with status 422
+        ("Validation Failed") when ``edit(state="closed")`` is called
+        on an already-closed PR, and 404 if the PR doesn't exist —
+        both map to "already gone" for reset, so we swallow them.
+        Any other GithubException re-raises.
+        """
+        try:
+            pr = self._repo.get_pull(pr_number)
+            pr.edit(state="closed")
+        except GithubException as exc:
+            if exc.status in (404, 422):
+                return
+            raise
+
+    def find_open_pr_by_head_branch(
+        self, *, project: str, branch_name: str,
+    ) -> int | None:
+        """Return the number of the open PR with the given head branch.
+
+        Reset CLI calls this to discover the impl PR attached to a
+        foreman/issue-N branch (no separate ticket record links them).
+        GitHub's PR search wants ``head`` as ``"owner:branch"`` — bare
+        branch names silently match nothing. Returns the first match's
+        number, or ``None`` when no open PR has that head.
+        """
+        repo = self._repo
+        head_filter = f"{repo.owner.login}:{branch_name}"
+        for pr in repo.get_pulls(state="open", head=head_filter):
+            return pr.number
+        return None

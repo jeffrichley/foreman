@@ -395,3 +395,104 @@ def test_repo_access_alone_triggers_gh_rebuild_past_window():
     )
     assert rebuilt_repo is fresh_repos[1]
     assert rebuilt_repo is not first_repo
+
+
+# ---------------------------------------------------------------------------
+# Reset-CLI methods (Task 5)
+#
+# delete_branch, close_pr, find_open_pr_by_head_branch back the foreman
+# reset CLI command. delete_branch and close_pr swallow 404/422 because
+# reset is idempotent — "already gone" is the success state.
+# ---------------------------------------------------------------------------
+
+
+def test_delete_branch_calls_git_ref_delete(mock_github, mock_repo):
+    """delete_branch resolves heads/<name> then calls .delete()."""
+    fake_ref = MagicMock()
+    mock_repo.get_git_ref.return_value = fake_ref
+    provider = PyGithubGitProvider(
+        github_factory=lambda: mock_github,
+        repo_full_name="org/repo",
+    )
+    provider.delete_branch(project="ignored", branch_name="foreman/issue-1")
+    mock_repo.get_git_ref.assert_called_once_with("heads/foreman/issue-1")
+    fake_ref.delete.assert_called_once()
+
+
+def test_delete_branch_swallows_404(mock_github, mock_repo):
+    """A 404 (ref doesn't exist) must not raise — reset relies on this."""
+    from github import GithubException  # type: ignore[import-not-found]
+
+    mock_repo.get_git_ref.side_effect = GithubException(
+        status=404, data={"message": "Not Found"}, headers={},
+    )
+    provider = PyGithubGitProvider(
+        github_factory=lambda: mock_github,
+        repo_full_name="org/repo",
+    )
+    # Must NOT raise.
+    provider.delete_branch(project="ignored", branch_name="foreman/issue-1")
+
+
+def test_close_pr_calls_pull_edit_state_closed(mock_github, mock_repo):
+    fake_pr = MagicMock()
+    mock_repo.get_pull.return_value = fake_pr
+    provider = PyGithubGitProvider(
+        github_factory=lambda: mock_github,
+        repo_full_name="org/repo",
+    )
+    provider.close_pr(project="ignored", pr_number=19)
+    mock_repo.get_pull.assert_called_once_with(19)
+    fake_pr.edit.assert_called_once_with(state="closed")
+
+
+def test_close_pr_swallows_already_closed(mock_github, mock_repo):
+    """422 (PR already closed) must not raise."""
+    from github import GithubException  # type: ignore[import-not-found]
+
+    fake_pr = MagicMock()
+    fake_pr.edit.side_effect = GithubException(
+        status=422,
+        data={"message": "Validation Failed", "errors": [
+            {"resource": "PullRequest", "code": "invalid"}]},
+        headers={},
+    )
+    mock_repo.get_pull.return_value = fake_pr
+    provider = PyGithubGitProvider(
+        github_factory=lambda: mock_github,
+        repo_full_name="org/repo",
+    )
+    provider.close_pr(project="ignored", pr_number=19)
+
+
+def test_find_open_pr_by_head_branch_uses_get_pulls_with_head_filter(
+    mock_github, mock_repo,
+):
+    fake_pr = MagicMock(number=19)
+    mock_repo.owner.login = "org"
+    mock_repo.get_pulls.return_value = [fake_pr]
+    provider = PyGithubGitProvider(
+        github_factory=lambda: mock_github,
+        repo_full_name="org/repo",
+    )
+    result = provider.find_open_pr_by_head_branch(
+        project="ignored", branch_name="foreman/issue-180",
+    )
+    assert result == 19
+    mock_repo.get_pulls.assert_called_once_with(
+        state="open", head="org:foreman/issue-180",
+    )
+
+
+def test_find_open_pr_by_head_branch_returns_none_on_empty(
+    mock_github, mock_repo,
+):
+    mock_repo.owner.login = "org"
+    mock_repo.get_pulls.return_value = []
+    provider = PyGithubGitProvider(
+        github_factory=lambda: mock_github,
+        repo_full_name="org/repo",
+    )
+    assert provider.find_open_pr_by_head_branch(
+        project="ignored", branch_name="foreman/issue-180",
+    ) is None
