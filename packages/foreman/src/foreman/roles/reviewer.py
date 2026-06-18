@@ -46,11 +46,16 @@ from github.Repository import Repository
 
 from foreman.config import Config
 from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
+from foreman.git_host import CommentRef
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
 from foreman.providers import ProviderError
 from foreman.roles import TERMINAL_BLOCKING_LABEL, handle_unhandled_role_exception
+from foreman.roles._prompt_helpers import (
+    filter_bot_self_comments,
+    format_comments_section,
+)
 from foreman.schemas.reviewer import Finding, ReviewerOutput, ReviewerRunResult
 from foreman.stats import log_reviewer_run
 from foreman.worktree import WorktreeManager
@@ -237,6 +242,7 @@ def _build_user_prompt(
     spec_doc_content: str | None,
     pr_diff: str,
     instructions: str | None,
+    comments: list[CommentRef],
 ) -> str:
     """Compose the per-run user prompt.
 
@@ -250,10 +256,16 @@ def _build_user_prompt(
     the section is emitted near the top so project-specific conventions
     (PR title rules, branch conventions, etc.) frame the review. When
     ``None`` the section is omitted entirely.
+
+    ``comments`` is the originating issue's comment stream (foreman#328),
+    used only by the spec-side Reviewer. ``run_reviewer`` passes ``[]``
+    for impl-side reviews to keep the impl prompt byte-identical to
+    pre-#328 behavior. Empty list → no ``## Comments`` section.
     """
     instructions_section = (
         f"## Project-specific instructions\n\n{instructions}\n\n" if instructions else ""
     )
+    comments_section = format_comments_section(comments)
     spec_section = (
         f"## Spec doc (committed in this PR)\n{spec_doc_content}\n\n"
         if spec_doc_content
@@ -268,6 +280,7 @@ def _build_user_prompt(
         f"## Originating issue\nTitle: {issue_title}\n\n{issue_body}\n\n"
         f"## PR title\n{pr_title}\n\n"
         f"## PR body\n{pr_body}\n\n"
+        f"{comments_section}"
         f"{spec_section}"
         f"## PR diff (head vs base)\n```\n{pr_diff}\n```\n\n"
         "Follow the steps in your system prompt. Return your structured "
@@ -588,6 +601,26 @@ async def run_reviewer(
         spec_doc_content = _read_spec_doc(wt_path, issue_number)
         instructions = load_project_instructions(Path(project.local_clone_path))
 
+        # foreman#328: comments belong only on the issue→spec contract.
+        # Fetch them only for spec_pr; impl_pr passes ``[]`` so the
+        # composed prompt stays byte-identical to pre-#328 behavior.
+        # Branching at the FETCH site (not inside the composer) means
+        # ``issue.get_comments()`` is never called on the impl path —
+        # the regression test asserts on the call counter.
+        comments: list[CommentRef]
+        if target == "spec_pr":
+            comments = [
+                CommentRef(
+                    author_login=c.user.login,
+                    posted_at=c.created_at,
+                    body=c.body or "",
+                )
+                for c in issue.get_comments()
+            ]
+            comments = filter_bot_self_comments(comments, registry.get_role_bot_logins())
+        else:
+            comments = []
+
         system_prompt = _load_reviewer_prompt(target=target)
         user_prompt = _build_user_prompt(
             issue_title=issue_title,
@@ -597,6 +630,7 @@ async def run_reviewer(
             spec_doc_content=spec_doc_content,
             pr_diff=pr_diff,
             instructions=instructions,
+            comments=comments,
         )
 
         llm_output, run_usage = await provider.run_agent(

@@ -40,12 +40,17 @@ from pathlib import Path
 from foreman.branches import spec_branch
 from foreman.config import Config
 from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
-from foreman.git_host import GitHostProvider, IssueRef
+from foreman.git_host import CommentRef, GitHostProvider, IssueRef
 from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
 from foreman.providers import ProviderError
 from foreman.roles import TERMINAL_BLOCKING_LABEL, handle_unhandled_role_exception
+from foreman.roles._prompt_helpers import (
+    filter_bot_self_comments,
+    format_comments_section,
+    format_labels_section,
+)
 from foreman.schemas.planner import PlannerOutput, PlannerRunResult
 from foreman.stats import log_planner_run
 from foreman.worktree import WorktreeManager
@@ -83,7 +88,13 @@ def _load_planner_prompt() -> str:
     return compose_role_prompt(role="planner", superpowers=["writing-plans"])
 
 
-def _build_user_prompt(*, issue: IssueRef, instructions: str | None) -> str:
+def _build_user_prompt(
+    *,
+    issue: IssueRef,
+    instructions: str | None,
+    comments: list[CommentRef],
+    labels: set[str],
+) -> str:
     """Compose the per-run user prompt.
 
     ``instructions`` carries the verbatim contents of the project's
@@ -92,15 +103,28 @@ def _build_user_prompt(*, issue: IssueRef, instructions: str | None) -> str:
     conventions, etc.) frame everything that follows. When ``None`` the
     section is omitted entirely — empty headers would be a distracting
     no-op the LLM would have to mentally skip.
+
+    ``comments`` is the originating issue's comment stream (foreman#328),
+    already filtered to exclude foreman role-bot self-comments and
+    ordered chronologically (oldest first). Empty list → no ``## Comments``
+    section is emitted.
+
+    ``labels`` is the issue's label set (foreman#328) — informs the
+    Planner whether to treat the issue as a bug / feat / epic. Empty
+    set → no ``## Labels`` section is emitted.
     """
     instructions_section = (
         f"## Project-specific instructions\n\n{instructions}\n\n" if instructions else ""
     )
+    comments_section = format_comments_section(comments)
+    labels_section = format_labels_section(labels)
     return (
         f"You are processing GitHub issue #{issue.number}.\n\n"
         f"{instructions_section}"
         f"## Title\n{issue.title}\n\n"
         f"## Body\n{issue.body}\n\n"
+        f"{comments_section}"
+        f"{labels_section}"
         f"Follow the steps in your system prompt. Return your structured "
         f"output when done."
     )
@@ -317,6 +341,15 @@ async def run_planner(
         issue = host.get_issue(actual_repo_slug, issue_number)
         default_branch = host.get_default_branch(actual_repo_slug)
 
+        # foreman#328: pull in the originating issue's comments + labels so
+        # the Planner sees operator-supplied post-filing context. The
+        # raw comment stream goes through ``filter_bot_self_comments`` so
+        # the foreman role bots' own previous postings don't feed back
+        # into subsequent Planner runs (the exact failure mode that
+        # motivated this ticket — see agent_core#180).
+        raw_comments = host.get_issue_comments(actual_repo_slug, issue_number)
+        comments = filter_bot_self_comments(raw_comments, registry.get_role_bot_logins())
+
         # WorktreeManager's git subprocesses (fetch / worktree add) must
         # authenticate as the planner bot — without the explicit token they
         # inherit the daemon's parent ``GH_TOKEN`` (CI runner, dev shell)
@@ -341,7 +374,12 @@ async def run_planner(
         instructions = load_project_instructions(Path(project.local_clone_path))
 
         system_prompt = _load_planner_prompt()
-        user_prompt = _build_user_prompt(issue=issue, instructions=instructions)
+        user_prompt = _build_user_prompt(
+            issue=issue,
+            instructions=instructions,
+            comments=comments,
+            labels=set(issue.labels),
+        )
 
         llm_output, run_usage = await provider.run_agent(
             system_prompt=system_prompt,

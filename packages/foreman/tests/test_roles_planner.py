@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -18,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from foreman.config import AppsConfig, Config, ProjectConfig
-from foreman.git_host import GitHostProvider, IssueRef, PRRef
+from foreman.git_host import CommentRef, GitHostProvider, IssueRef, PRRef
 from foreman.prompts import load_role_prompt
 from foreman.provider import UsageInfo
 from foreman.roles.planner import (
@@ -28,6 +29,13 @@ from foreman.roles.planner import (
     run_planner,
 )
 from foreman.schemas.planner import PlannerOutput
+
+_DEFAULT_ROLE_BOT_LOGINS = {
+    "foreman-planner[bot]",
+    "foreman-reviewer[bot]",
+    "foreman-fixer[bot]",
+    "foreman-worker[bot]",
+}
 
 
 def _with_usage(output: Any) -> tuple[Any, UsageInfo]:
@@ -148,6 +156,11 @@ class _FakeHostProvider(GitHostProvider):
             repo_slug="jeffrichley/voice",
         )
         self.default_branch = "main"
+        # foreman#328: ``get_issue_comments`` seam. Default empty list
+        # so all existing tests carry no comments; the new tests below
+        # populate this directly.
+        self.comments_to_return: list[CommentRef] = []
+        self.get_issue_comments_calls: int = 0
         self.committed_files: dict[str, str] | None = None
         self.commit_message: str | None = None
         self.pushed_branch: str | None = None
@@ -171,6 +184,12 @@ class _FakeHostProvider(GitHostProvider):
 
     def get_default_branch(self, repo_slug: str) -> str:
         return self.default_branch
+
+    def get_issue_comments(self, repo_slug: str, issue_number: int) -> list[CommentRef]:
+        # foreman#328: provider seam for the new comment-injection wire.
+        # Returns a copy so callers can't mutate the seed list.
+        self.get_issue_comments_calls += 1
+        return list(self.comments_to_return)
 
     def commit_files_to_worktree(
         self, worktree_path: Path, files: dict[str, str], message: str
@@ -318,6 +337,11 @@ async def test_run_planner_dispatches_and_advances_label(
     # Mock object that subprocess rejects with "environment can only
     # contain strings", so pin it to a string.
     fake_registry.get_planner_token.return_value = "fake-planner-token"
+    # foreman#328: registry seam for the bot-login filter. Fresh-magic-mock
+    # ``get_role_bot_logins`` would return a ``MagicMock`` object that
+    # ``filter_bot_self_comments`` can't ``in``-test against, so pin a
+    # real set here.
+    fake_registry.get_role_bot_logins.return_value = set(_DEFAULT_ROLE_BOT_LOGINS)
 
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_llm_output()))
@@ -407,6 +431,11 @@ async def test_run_planner_does_not_attempt_legacy_plan_label_removal_on_fresh_v
     # Mock object that subprocess rejects with "environment can only
     # contain strings", so pin it to a string.
     fake_registry.get_planner_token.return_value = "fake-planner-token"
+    # foreman#328: registry seam for the bot-login filter. Fresh-magic-mock
+    # ``get_role_bot_logins`` would return a ``MagicMock`` object that
+    # ``filter_bot_self_comments`` can't ``in``-test against, so pin a
+    # real set here.
+    fake_registry.get_role_bot_logins.return_value = set(_DEFAULT_ROLE_BOT_LOGINS)
 
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_llm_output()))
@@ -464,6 +493,11 @@ async def test_run_planner_strips_auto_close_keywords_from_pr_body(
     # Mock object that subprocess rejects with "environment can only
     # contain strings", so pin it to a string.
     fake_registry.get_planner_token.return_value = "fake-planner-token"
+    # foreman#328: registry seam for the bot-login filter. Fresh-magic-mock
+    # ``get_role_bot_logins`` would return a ``MagicMock`` object that
+    # ``filter_bot_self_comments`` can't ``in``-test against, so pin a
+    # real set here.
+    fake_registry.get_role_bot_logins.return_value = set(_DEFAULT_ROLE_BOT_LOGINS)
 
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(
@@ -522,6 +556,11 @@ async def test_run_planner_does_not_inject_env_into_provider(
     # Mock object that subprocess rejects with "environment can only
     # contain strings", so pin it to a string.
     fake_registry.get_planner_token.return_value = "fake-planner-token"
+    # foreman#328: registry seam for the bot-login filter. Fresh-magic-mock
+    # ``get_role_bot_logins`` would return a ``MagicMock`` object that
+    # ``filter_bot_self_comments`` can't ``in``-test against, so pin a
+    # real set here.
+    fake_registry.get_role_bot_logins.return_value = set(_DEFAULT_ROLE_BOT_LOGINS)
 
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_llm_output()))
@@ -575,6 +614,11 @@ async def test_run_planner_embeds_project_instructions_in_user_prompt(
     # Mock object that subprocess rejects with "environment can only
     # contain strings", so pin it to a string.
     fake_registry.get_planner_token.return_value = "fake-planner-token"
+    # foreman#328: registry seam for the bot-login filter. Fresh-magic-mock
+    # ``get_role_bot_logins`` would return a ``MagicMock`` object that
+    # ``filter_bot_self_comments`` can't ``in``-test against, so pin a
+    # real set here.
+    fake_registry.get_role_bot_logins.return_value = set(_DEFAULT_ROLE_BOT_LOGINS)
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_llm_output()))
 
@@ -618,6 +662,11 @@ async def test_run_planner_omits_instructions_section_when_file_absent(
     # Mock object that subprocess rejects with "environment can only
     # contain strings", so pin it to a string.
     fake_registry.get_planner_token.return_value = "fake-planner-token"
+    # foreman#328: registry seam for the bot-login filter. Fresh-magic-mock
+    # ``get_role_bot_logins`` would return a ``MagicMock`` object that
+    # ``filter_bot_self_comments`` can't ``in``-test against, so pin a
+    # real set here.
+    fake_registry.get_role_bot_logins.return_value = set(_DEFAULT_ROLE_BOT_LOGINS)
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_llm_output()))
 
@@ -649,6 +698,11 @@ async def test_run_planner_rejects_url_pointing_at_wrong_project(
     # Mock object that subprocess rejects with "environment can only
     # contain strings", so pin it to a string.
     fake_registry.get_planner_token.return_value = "fake-planner-token"
+    # foreman#328: registry seam for the bot-login filter. Fresh-magic-mock
+    # ``get_role_bot_logins`` would return a ``MagicMock`` object that
+    # ``filter_bot_self_comments`` can't ``in``-test against, so pin a
+    # real set here.
+    fake_registry.get_role_bot_logins.return_value = set(_DEFAULT_ROLE_BOT_LOGINS)
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_llm_output()))
 
@@ -709,6 +763,11 @@ async def test_run_planner_threads_dev_base_branch_when_set(
     # Mock object that subprocess rejects with "environment can only
     # contain strings", so pin it to a string.
     fake_registry.get_planner_token.return_value = "fake-planner-token"
+    # foreman#328: registry seam for the bot-login filter. Fresh-magic-mock
+    # ``get_role_bot_logins`` would return a ``MagicMock`` object that
+    # ``filter_bot_self_comments`` can't ``in``-test against, so pin a
+    # real set here.
+    fake_registry.get_role_bot_logins.return_value = set(_DEFAULT_ROLE_BOT_LOGINS)
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_llm_output()))
 
@@ -765,6 +824,11 @@ async def test_run_planner_passes_none_when_dev_base_branch_unset(
     # Mock object that subprocess rejects with "environment can only
     # contain strings", so pin it to a string.
     fake_registry.get_planner_token.return_value = "fake-planner-token"
+    # foreman#328: registry seam for the bot-login filter. Fresh-magic-mock
+    # ``get_role_bot_logins`` would return a ``MagicMock`` object that
+    # ``filter_bot_self_comments`` can't ``in``-test against, so pin a
+    # real set here.
+    fake_registry.get_role_bot_logins.return_value = set(_DEFAULT_ROLE_BOT_LOGINS)
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_llm_output()))
 
@@ -836,6 +900,11 @@ async def test_run_planner_returns_authoritative_final_labels(
     # Mock object that subprocess rejects with "environment can only
     # contain strings", so pin it to a string.
     fake_registry.get_planner_token.return_value = "fake-planner-token"
+    # foreman#328: registry seam for the bot-login filter. Fresh-magic-mock
+    # ``get_role_bot_logins`` would return a ``MagicMock`` object that
+    # ``filter_bot_self_comments`` can't ``in``-test against, so pin a
+    # real set here.
+    fake_registry.get_role_bot_logins.return_value = set(_DEFAULT_ROLE_BOT_LOGINS)
 
     fake_provider = MagicMock()
     fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_llm_output()))
@@ -914,6 +983,11 @@ async def test_run_planner_logs_exception_with_partial_usage_when_open_pr_raises
     fake_registry = MagicMock()
     fake_registry.get_host_provider.return_value = fake_host
     fake_registry.get_planner_token.return_value = "fake-planner-token"
+    # foreman#328: registry seam for the bot-login filter. Fresh-magic-mock
+    # ``get_role_bot_logins`` would return a ``MagicMock`` object that
+    # ``filter_bot_self_comments`` can't ``in``-test against, so pin a
+    # real set here.
+    fake_registry.get_role_bot_logins.return_value = set(_DEFAULT_ROLE_BOT_LOGINS)
 
     # UsageInfo with non-zero token counts so we can prove the partial
     # capture actually carries the prior run_agent's values (vs the
@@ -990,6 +1064,11 @@ async def test_run_planner_logs_exception_with_safe_defaults_when_run_agent_rais
     fake_registry = MagicMock()
     fake_registry.get_host_provider.return_value = fake_host
     fake_registry.get_planner_token.return_value = "fake-planner-token"
+    # foreman#328: registry seam for the bot-login filter. Fresh-magic-mock
+    # ``get_role_bot_logins`` would return a ``MagicMock`` object that
+    # ``filter_bot_self_comments`` can't ``in``-test against, so pin a
+    # real set here.
+    fake_registry.get_role_bot_logins.return_value = set(_DEFAULT_ROLE_BOT_LOGINS)
 
     class _RunAgentBoom(RuntimeError):
         pass
@@ -1053,6 +1132,11 @@ async def test_run_planner_emits_recorder_dispatch_complete_on_success(
     fake_registry = MagicMock()
     fake_registry.get_host_provider.return_value = fake_host
     fake_registry.get_planner_token.return_value = "fake-planner-token"
+    # foreman#328: registry seam for the bot-login filter. Fresh-magic-mock
+    # ``get_role_bot_logins`` would return a ``MagicMock`` object that
+    # ``filter_bot_self_comments`` can't ``in``-test against, so pin a
+    # real set here.
+    fake_registry.get_role_bot_logins.return_value = set(_DEFAULT_ROLE_BOT_LOGINS)
 
     populated_usage = UsageInfo(
         input_tokens=4321,
@@ -1121,3 +1205,187 @@ async def test_run_planner_emits_recorder_dispatch_complete_on_success(
         assert r["input_tokens"] == 4321
         assert r["output_tokens"] == 765
         assert r["total_cost_usd"] == pytest.approx(0.31)
+
+
+# ----------------------------------------------------------------------
+# foreman#328 — issue comments + labels in the Planner's user prompt
+#
+# Operator follow-up comments on the issue and the issue's labels both
+# inform the Planner's spec shape. Pre-#328 only title + body were
+# injected; post-#328 the spec-side roles see comments too, and the
+# Planner additionally sees labels. The three tests below pin:
+#   - human comments appear, foreman role-bot self-comments don't
+#   - labels are sorted alphabetically into the section
+#   - chronological order (oldest first) is preserved
+#   - empty inputs → sections absent (no empty headers)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_planner_injects_human_comments_and_labels_and_filters_bot_self(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """foreman#328: the Planner's user prompt must include human
+    comments AND the issue's labels, AND must filter out role-bot
+    self-comments so the bot's prior postings don't feed back into
+    subsequent runs (the failure mode that motivated this ticket —
+    agent_core#180 / Planner missed broader scope on rerun).
+    """
+    clone = tmp_path / "clone"
+    _seed_clone(clone, origin_path=tmp_path / "origin.git")
+    monkeypatch.setenv("FOREMAN_PLANNER_APP_ID", "123456")
+
+    cfg = _make_config(clone)
+    fake_host = _FakeHostProvider()
+    # Issue carries two labels (operator metadata) — Planner only.
+    fake_host.issue_to_return = IssueRef(
+        number=42,
+        title="SSML",
+        body="Add SSML support.",
+        labels=["foreman:planning", "priority:high"],
+        repo_slug="jeffrichley/voice",
+    )
+    # Two comments: one from a human, one from the foreman-planner bot.
+    # Filter must drop the bot self-comment.
+    fake_host.comments_to_return = [
+        CommentRef(
+            author_login="foreman-planner[bot]",
+            posted_at=datetime(2026, 6, 17, 19, 0, tzinfo=UTC),
+            body="Previous Planner self-comment (must be filtered).",
+        ),
+        CommentRef(
+            author_login="alice",
+            posted_at=datetime(2026, 6, 17, 20, 0, tzinfo=UTC),
+            body="Also handle case X.",
+        ),
+    ]
+    fake_registry = MagicMock()
+    fake_registry.get_host_provider.return_value = fake_host
+    fake_registry.get_planner_token.return_value = "fake-planner-token"
+    fake_registry.get_role_bot_logins.return_value = set(_DEFAULT_ROLE_BOT_LOGINS)
+
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_llm_output()))
+
+    await run_planner(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=fake_registry,
+    )
+
+    user_prompt = fake_provider.run_agent.call_args.kwargs["user_prompt"]
+
+    # Human comment appears with its block header.
+    assert "## Comments" in user_prompt
+    assert "### @alice" in user_prompt
+    assert "Also handle case X." in user_prompt
+
+    # Bot self-comment was filtered out.
+    assert "### @foreman-planner[bot]" not in user_prompt
+    assert "must be filtered" not in user_prompt
+
+    # Labels appear in the dedicated section, sorted alphabetically.
+    assert "## Labels\nforeman:planning, priority:high" in user_prompt
+
+    # Provider seam was exercised exactly once.
+    assert fake_host.get_issue_comments_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_run_planner_preserves_chronological_order_in_comments_section(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """foreman#328: comments render oldest-first so the LLM reads them
+    in the same order the operator left them. The provider returns
+    them chronologically; the role filter preserves the order. This
+    test pins the end-to-end ordering through the prompt composer.
+    """
+    clone = tmp_path / "clone"
+    _seed_clone(clone, origin_path=tmp_path / "origin.git")
+    monkeypatch.setenv("FOREMAN_PLANNER_APP_ID", "123456")
+
+    cfg = _make_config(clone)
+    fake_host = _FakeHostProvider()
+    fake_host.comments_to_return = [
+        CommentRef(
+            author_login="alice",
+            posted_at=datetime(2026, 6, 17, 20, 0, tzinfo=UTC),
+            body="FIRST comment body.",
+        ),
+        CommentRef(
+            author_login="bob",
+            posted_at=datetime(2026, 6, 17, 22, 0, tzinfo=UTC),
+            body="SECOND comment body.",
+        ),
+    ]
+    fake_registry = MagicMock()
+    fake_registry.get_host_provider.return_value = fake_host
+    fake_registry.get_planner_token.return_value = "fake-planner-token"
+    fake_registry.get_role_bot_logins.return_value = set(_DEFAULT_ROLE_BOT_LOGINS)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_llm_output()))
+
+    await run_planner(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=fake_registry,
+    )
+
+    user_prompt = fake_provider.run_agent.call_args.kwargs["user_prompt"]
+    first_idx = user_prompt.index("FIRST comment body.")
+    second_idx = user_prompt.index("SECOND comment body.")
+    assert first_idx < second_idx, (
+        "older comment must appear before newer one in the rendered "
+        "## Comments section"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_planner_omits_comments_and_labels_sections_when_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """foreman#328: an issue with no comments AND no labels produces a
+    user prompt with neither ``## Comments`` nor ``## Labels`` — empty
+    headers would be a distracting no-op the LLM would have to mentally
+    skip.
+    """
+    clone = tmp_path / "clone"
+    _seed_clone(clone, origin_path=tmp_path / "origin.git")
+    monkeypatch.setenv("FOREMAN_PLANNER_APP_ID", "123456")
+
+    cfg = _make_config(clone)
+    fake_host = _FakeHostProvider()
+    # No comments, no labels.
+    fake_host.issue_to_return = IssueRef(
+        number=42,
+        title="SSML",
+        body="Add SSML support.",
+        labels=[],
+        repo_slug="jeffrichley/voice",
+    )
+    fake_host.comments_to_return = []
+    fake_registry = MagicMock()
+    fake_registry.get_host_provider.return_value = fake_host
+    fake_registry.get_planner_token.return_value = "fake-planner-token"
+    fake_registry.get_role_bot_logins.return_value = set(_DEFAULT_ROLE_BOT_LOGINS)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_make_llm_output()))
+
+    await run_planner(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=fake_registry,
+    )
+
+    user_prompt = fake_provider.run_agent.call_args.kwargs["user_prompt"]
+    assert "## Comments" not in user_prompt
+    assert "## Labels" not in user_prompt

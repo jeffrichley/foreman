@@ -12,6 +12,7 @@ import re
 import subprocess
 import traceback
 from collections.abc import Callable
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -97,6 +98,63 @@ def test_get_issue_tolerates_none_body_and_title() -> None:
     ref = provider.get_issue("o/r", 1)
     assert ref.body == ""
     assert ref.title == ""
+
+
+def test_get_issue_comments_returns_chronological_comment_refs() -> None:
+    """foreman#328: walk PyGithub's IssueComment iterable into CommentRef
+    items in chronological order (oldest first). The provider sorts
+    defensively even when the upstream returns chronological by default.
+    """
+    from datetime import datetime
+
+    # Two PyGithub-shape mock comments — intentionally out-of-order to
+    # prove the provider's defense-in-depth sort.
+    newer = MagicMock()
+    newer.user.login = "bob"
+    newer.created_at = datetime(2026, 6, 17, 22, 0, tzinfo=UTC)
+    newer.body = "second"
+
+    older = MagicMock()
+    older.user.login = "alice"
+    older.created_at = datetime(2026, 6, 17, 20, 0, tzinfo=UTC)
+    older.body = "first"
+
+    fake_issue = MagicMock()
+    fake_issue.get_comments.return_value = [newer, older]
+    fake_repo = MagicMock()
+    fake_repo.get_issue.return_value = fake_issue
+    fake_client = MagicMock()
+    fake_client.get_repo.return_value = fake_repo
+
+    provider = GitHubProvider(identity=_identity(), client=fake_client)
+    refs = provider.get_issue_comments("o/r", 42)
+
+    assert [r.author_login for r in refs] == ["alice", "bob"]
+    assert [r.body for r in refs] == ["first", "second"]
+    fake_repo.get_issue.assert_called_once_with(42)
+
+
+def test_get_issue_comments_tolerates_none_body() -> None:
+    """foreman#328: PyGithub may yield ``IssueComment.body is None``
+    on an empty comment; the provider coerces to empty string for the
+    role-side ``CommentRef``."""
+    from datetime import datetime
+
+    fake_comment = MagicMock()
+    fake_comment.user.login = "alice"
+    fake_comment.created_at = datetime(2026, 6, 17, 20, 0, tzinfo=UTC)
+    fake_comment.body = None
+
+    fake_issue = MagicMock()
+    fake_issue.get_comments.return_value = [fake_comment]
+    fake_repo = MagicMock()
+    fake_repo.get_issue.return_value = fake_issue
+    fake_client = MagicMock()
+    fake_client.get_repo.return_value = fake_repo
+
+    provider = GitHubProvider(identity=_identity(), client=fake_client)
+    refs = provider.get_issue_comments("o/r", 42)
+    assert refs[0].body == ""
 
 
 def test_get_default_branch_returns_repo_default() -> None:
