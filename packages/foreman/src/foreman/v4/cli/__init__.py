@@ -33,6 +33,7 @@ from foreman.v4.cli.mutations import (
     cmd_drop,
     cmd_enqueue,
     cmd_hold,
+    cmd_reset,
     cmd_resume,
     cmd_retry,
     cmd_set_state,
@@ -81,6 +82,7 @@ app.command("skip")(cmd_skip)
 app.command("drop")(cmd_drop)
 app.command("set-state")(cmd_set_state)
 app.command("enqueue")(cmd_enqueue)
+app.command("reset")(cmd_reset)
 
 
 daemon_app = typer.Typer(name="daemon", help="Daemon lifecycle")

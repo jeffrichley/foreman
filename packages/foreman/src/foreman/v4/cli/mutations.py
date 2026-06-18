@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime as dt
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 import typer
 
@@ -18,9 +19,11 @@ from foreman.v4.git_provider import GitProvider
 from foreman.v4.repository import (
     TicketAlreadyExistsError,
     TicketNotFoundError,
+    TicketRepository,
 )
 from foreman.v4.states.registry import STATE_REGISTRY
 from foreman.v4.work import WorkItem
+from foreman.worktree import WorktreeManager
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +50,7 @@ class ResetPlan:
 def _discover(
     *,
     git: GitProvider,
-    repo,
+    repo: TicketRepository,
     project: str,
     issue_number: int,
     keep_pr: bool,
@@ -92,6 +95,200 @@ def _discover(
         strip_labels=strip,
         delete_ticket_id=delete_ticket_id,
         apply_plan_label=retrigger,
+    )
+
+
+def _plan_steps(plan: ResetPlan) -> list[tuple[str, str]]:
+    """Return ordered (label, kind) tuples for the plan's actionable steps.
+
+    ``kind`` is a stable token the executor dispatches on. Steps that
+    are off (no PR found, no row, --keep-* set) are filtered here so the
+    renderer + executor walk the same list.
+    """
+    steps: list[tuple[str, str]] = []
+    if plan.spec_pr is not None:
+        steps.append((f"Close PR #{plan.spec_pr} (spec)", "close_spec_pr"))
+    if plan.impl_pr is not None:
+        steps.append((f"Close PR #{plan.impl_pr} (impl)", "close_impl_pr"))
+    for branch in plan.delete_branches:
+        steps.append((f"Delete remote branch {branch}", f"delete_branch:{branch}"))
+    if plan.prune_worktrees:
+        steps.append((
+            f"Prune local worktree {plan.project}/issue-{plan.issue_number}/",
+            "prune_worktrees",
+        ))
+    if plan.strip_labels:
+        steps.append((
+            f"Strip {len(plan.strip_labels)} foreman:* labels "
+            f"({', '.join(sorted(plan.strip_labels))})",
+            "strip_labels",
+        ))
+    if plan.delete_ticket_id is not None:
+        steps.append((
+            f"Delete ticket row id={plan.delete_ticket_id} from state.db",
+            "delete_ticket",
+        ))
+    if plan.apply_plan_label:
+        steps.append(("Apply foreman:plan label", "apply_plan_label"))
+    return steps
+
+
+def _render_plan(plan: ResetPlan, steps: list[tuple[str, str]]) -> str:
+    """Format the discovery plan for the operator. Pure string-builder."""
+    if not steps:
+        return f"Nothing to do for {plan.project}#{plan.issue_number}.\n"
+    lines = [f"Resetting {plan.project}#{plan.issue_number}:", ""]
+    for n, (label, _) in enumerate(steps, 1):
+        lines.append(f"  {n}. {label}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _execute(
+    plan: ResetPlan,
+    steps: list[tuple[str, str]],
+    *,
+    git: GitProvider,
+    repo: TicketRepository,
+    wt: WorktreeManager,
+    clone_path: Path,
+) -> int:
+    """Walk the plan, printing per-step status. Returns count of failures.
+
+    ``clone_path`` is required by :meth:`WorktreeManager.prune` so
+    ``git worktree remove`` consults the right ``.git/worktrees/``
+    registry — without it, git either errors (cwd isn't a repo) or
+    hits the wrong registry. Comes from
+    :attr:`ProjectConfig.local_clone_path` in production; tests seed
+    a tmp_path dir.
+    """
+    failures = 0
+    total = len(steps)
+    for n, (label, kind) in enumerate(steps, 1):
+        prefix = f"  [{n}/{total}] {label}"
+        try:
+            if kind == "close_spec_pr":
+                assert plan.spec_pr is not None
+                git.close_pr(project=plan.project, pr_number=plan.spec_pr)
+            elif kind == "close_impl_pr":
+                assert plan.impl_pr is not None
+                git.close_pr(project=plan.project, pr_number=plan.impl_pr)
+            elif kind.startswith("delete_branch:"):
+                branch = kind.split(":", 1)[1]
+                git.delete_branch(project=plan.project, branch_name=branch)
+            elif kind == "prune_worktrees":
+                wt.prune(
+                    project=plan.project,
+                    issue_number=plan.issue_number,
+                    clone_path=clone_path,
+                )
+            elif kind == "strip_labels":
+                git.remove_labels(
+                    project=plan.project,
+                    issue_number=plan.issue_number,
+                    labels=plan.strip_labels,
+                )
+            elif kind == "delete_ticket":
+                assert plan.delete_ticket_id is not None
+                repo.delete_ticket(plan.delete_ticket_id)
+            elif kind == "apply_plan_label":
+                git.add_labels(
+                    project=plan.project,
+                    issue_number=plan.issue_number,
+                    labels={"foreman:plan"},
+                )
+            else:
+                raise AssertionError(f"unknown step kind: {kind}")
+            typer.echo(f"{prefix} ... ok")
+        except Exception as exc:
+            # Operator-facing tool: every step's failure must be
+            # visible without aborting the rest.
+            failures += 1
+            typer.echo(f"{prefix} ... fail: {exc}")
+    return failures
+
+
+def _default_worktrees_root() -> Path:
+    """Resolve the default worktrees root at call-time (avoids B008)."""
+    return Path.home() / ".foreman" / "worktrees"
+
+
+def cmd_reset(
+    ctx: typer.Context,
+    project: str = typer.Option(..., "--project"),
+    issue_number: int = typer.Option(..., "--issue-number", min=1),
+    keep_pr: bool = typer.Option(
+        False, "--keep-pr", help="Don't close open spec/impl PRs.",
+    ),
+    keep_worktree: bool = typer.Option(
+        False, "--keep-worktree", help="Don't rmtree local worktrees.",
+    ),
+    no_retrigger: bool = typer.Option(
+        False, "--no-retrigger", help="Don't re-apply foreman:plan at end.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print plan, exit. No prompt, no execution.",
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", help="Skip the interactive confirmation.",
+    ),
+    worktrees_root: str | None = typer.Option(
+        None,
+        "--worktrees-root",
+        help="Override worktree root path (test seam + alt-install support).",
+    ),
+) -> None:
+    """Fully reset a foreman ticket: labels + branches + PRs + worktrees + row."""
+    wt_root_path = (
+        Path(worktrees_root) if worktrees_root else _default_worktrees_root()
+    )
+    repo = ctx.obj.repo
+    git = ctx.obj.git
+    config = ctx.obj.config
+    if git is None:
+        typer.echo("reset requires a GitProvider in the CLI context", err=True)
+        raise typer.Exit(code=1)
+    if config is None:
+        typer.echo("reset requires V4Config", err=True)
+        raise typer.Exit(code=1)
+    project_config = next(
+        (p for p in config.projects if p.name == project), None,
+    )
+    if project_config is None:
+        typer.echo(
+            f"unknown project: {project!r}. "
+            f"Configured: {[p.name for p in config.projects]}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    # ProjectConfig.local_clone_path is a str (TOML-loaded); coerce to
+    # Path so WorktreeManager.prune sees the type it expects.
+    clone_path = Path(project_config.local_clone_path)
+    wt = WorktreeManager(worktrees_root=wt_root_path)
+    plan = _discover(
+        git=git, repo=repo,
+        project=project, issue_number=issue_number,
+        keep_pr=keep_pr, keep_worktree=keep_worktree,
+        retrigger=not no_retrigger,
+    )
+    steps = _plan_steps(plan)
+    typer.echo(_render_plan(plan, steps))
+    if dry_run:
+        return
+    if not yes and steps:
+        typer.confirm("Proceed?", abort=True)
+    failures = _execute(
+        plan, steps, git=git, repo=repo, wt=wt, clone_path=clone_path,
+    )
+    total = len(steps)
+    if failures:
+        typer.echo(
+            f"\ncompleted {total - failures}/{total} steps; {failures} failed",
+        )
+        raise typer.Exit(code=1)
+    typer.echo(
+        f"\nDone. {project}#{issue_number} reset. "
+        f"Daemon will pick up on next poll.",
     )
 
 
