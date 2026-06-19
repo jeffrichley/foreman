@@ -52,18 +52,35 @@ dispatched the run instead. Tracks
     skips (mirrors `_sanitize_head_commit_auto_close`'s multi-commit
     safety guard). The prompt-side instruction is the primary defense
     in that shape; the Reviewer-on-impl is the backstop.
-- [ ] `foreman.roles.fixer.run_fixer` (the impl-side path, since
-  Fixer-on-spec doesn't touch commits) gets the same env injection +
-  post-amend helper application as the Worker, so Fixer-on-impl
-  commits also carry the trailer. (The Fixer-on-spec path doesn't
-  commit; it edits the spec branch via the Planner-style API. Wire
-  the trailer through whatever Python-side commit call it uses, if
-  any — see Approach §3 for the read-the-code-first step.)
+- [ ] `foreman.roles.fixer.run_fixer` gets the same env injection +
+  post-amend helper application as the Worker on BOTH commit paths
+  (`spec_pr` AND `impl_pr`), so every Fixer commit — regardless of
+  target — carries the trailer. Both Fixer targets commit via the
+  LLM's Bash invocations (the `fixer.md` and `fixer_impl.md` prompts
+  both instruct `git commit` + `git push` from inside the worktree);
+  neither path calls `commit_files_to_worktree`. There is a single
+  shared `provider.run_agent` call site at
+  `packages/foreman/src/foreman/roles/fixer.py:647-653` that handles
+  both targets, so one env-dict extension covers both. After the LLM
+  returns, `_ensure_signoff_trailer` runs against the worktree on
+  whichever branch the Fixer target writes to. The contract is:
+  every Fixer commit ships with the operator's `Signed-off-by:`
+  trailer, regardless of target.
 - [ ] `packages/foreman/src/foreman/prompts/worker.md` gains a new
   `<dco_signoff>` section (sibling of `<commit_message_guardrails>`)
   that documents the `--trailer "Signed-off-by: $FOREMAN_OPERATOR_NAME
   <$FOREMAN_OPERATOR_EMAIL>"` pattern as the prompt-side primary
-  defense. Equivalent section added to `fixer.md` (impl-side).
+  defense. Equivalent sections added to BOTH
+  `packages/foreman/src/foreman/prompts/fixer.md` (the spec-side
+  Fixer body — `fixer.md` IS the `spec_pr` prompt per
+  `roles/fixer.py:123-128`; place the section near
+  `<commit_discipline>` around line 171) AND
+  `packages/foreman/src/foreman/prompts/fixer_impl.md` (the impl-side
+  Fixer body). `fixer_impl.md` has no `<commit_discipline>` anchor —
+  the Worker MUST read the file first and pick the right adjacent
+  block (e.g., near the commit-instruction lines around 73-82). The
+  goal is the same in all three prompts: instruct the LLM to write
+  the trailer correctly so the runtime amend never has to fire.
 - [ ] `docker/foreman/config.toml.template` gains an `[operator]`
   block immediately before `[[projects]]`, with
   `name = "${FOREMAN_OPERATOR_NAME}"` and
@@ -175,31 +192,64 @@ the order would mean the auto-close strip's amend overwrites the
 trailer the previous amend just added. Both helpers no-op on the
 clean path.
 
-**Fixer (§3, cont.).** The Fixer-on-impl follows the same shape as
-the Worker — read `packages/foreman/src/foreman/roles/fixer.py` to
-locate its `provider.run_agent` call and the corresponding env-dict
-construction, then apply the same env-injection + post-amend helper.
-The Fixer-on-spec runs against the spec branch and uses
-`commit_files_to_worktree`-style Python commits where applicable —
-the same Planner-style `signoff_trailer` parameter pass-through
-covers it. The Worker reads the file before drafting because the
-v4 Fixer dispatcher details may differ from the Worker's shape; the
-spec authorizes "mirror the Worker pattern using whichever commit
-surface the Fixer actually uses" rather than prescribing exact line
-numbers.
+**Fixer (§3, cont.).** Both Fixer targets (`spec_pr` AND `impl_pr`)
+follow the same shape as the Worker — both commit via LLM-driven
+Bash inside the worktree (`fixer.md:186` instructs the spec-side
+LLM to `git push origin foreman/issue-<N>` after committing; the
+impl-side `fixer_impl.md` has equivalent commit-then-push
+instructions in its commit-discipline area). Neither path calls
+`commit_files_to_worktree` — `roles/fixer.py` never imports or
+invokes that API on either target. The "Planner-style API
+pass-through" framing of an earlier spec draft was wrong; both
+Fixer paths are Worker-shaped, not Planner-shaped.
+
+Two coordinated changes mirror the Worker pattern:
+
+1. *Plumbing.* `packages/foreman/src/foreman/roles/fixer.py` has a
+   single shared `provider.run_agent` call site at lines 647-653
+   that both targets flow through. Extend the `env` dict there to
+   include `FOREMAN_OPERATOR_NAME` and `FOREMAN_OPERATOR_EMAIL`,
+   sourced from `resolve_operator(project, config)` (with `config`
+   plumbed through if not already in scope — read the function
+   signature first). One env-dict edit covers both targets.
+2. *Belt-and-suspenders.* Run `_ensure_signoff_trailer` against the
+   worktree on BOTH branches after the LLM returns. Mirror the
+   Worker's helper structure: zero-commit no-op, single-commit
+   amend-if-missing, multi-commit warn+skip. Factor the helper into
+   a shared module so the Worker and both Fixer paths share one
+   implementation (preferred), or duplicate per existing role
+   conventions if the Worker stage hits an import-graph wall — both
+   options satisfy the AC tests pinning trailer presence on every
+   commit. The helper amends HEAD locally; the Worker stage MUST
+   decide how to reconcile that amend with the LLM's existing
+   `git push` (options include: updating the Fixer prompts to
+   commit-but-not-push and adding a Python `host.push_branch` after
+   the amend — matching the Worker's `host.push_branch` flow added
+   in foreman#222 — OR amending before the LLM's push lands by
+   sequencing the helper inside the same role-run boundary the
+   LLM's Bash terminated on). The prompt-side `<dco_signoff>` guard
+   is the primary defense — in the clean path the LLM writes the
+   trailer correctly and the helper no-ops without amending, so the
+   push-flow question becomes moot.
 
 **Prompts (§6).** Add a `<dco_signoff>` section to
 `packages/foreman/src/foreman/prompts/worker.md` (next to the existing
 `<commit_message_guardrails>` block around line 274) instructing the
 LLM to always pass
 `--trailer "Signed-off-by: $FOREMAN_OPERATOR_NAME <$FOREMAN_OPERATOR_EMAIL>"`
-to every `git commit` call. Equivalent section added to
-`packages/foreman/src/foreman/prompts/fixer.md` (the impl-side body,
-near its `<commit_discipline>` block around line 171). Frame both as:
-"Python amends HEAD with the trailer after you return if missing; this
-prompt instruction is the primary defense — the runtime amend is the
-backstop." Mirrors the auto-close prompt+runtime layering already in
-place.
+to every `git commit` call. Equivalent sections added to BOTH
+`packages/foreman/src/foreman/prompts/fixer.md` (the spec-side Fixer
+body — `fixer.md` IS the `spec_pr` prompt per
+`roles/fixer.py:123-128`, with `<commit_discipline>` at line 171 as
+the right adjacent anchor) AND
+`packages/foreman/src/foreman/prompts/fixer_impl.md` (the impl-side
+Fixer body). `fixer_impl.md` does NOT contain a `<commit_discipline>`
+anchor; the Worker MUST read `fixer_impl.md` first and pick the
+right adjacent block (e.g., near the commit-instruction lines around
+73-82). Frame all three sections as: "Python amends HEAD with the
+trailer after you return if missing; this prompt instruction is the
+primary defense — the runtime amend is the backstop." Mirrors the
+auto-close prompt+runtime layering already in place.
 
 **Container template (§7).** Add an `[operator]` block to
 `docker/foreman/config.toml.template` between `[orchestrator]` (line
@@ -288,10 +338,21 @@ follows.
     `_sanitize_head_commit_auto_close` test structure in
     `packages/foreman/tests/test_worker.py` (or whichever test file
     covers the existing helper — read first).
-15. Mirror the env injection + helper for the Fixer-on-impl path:
-    read `packages/foreman/src/foreman/roles/fixer.py`, locate the
-    `provider.run_agent` env construction + the commit pathway, and
-    apply the same two-layer plumbing (env vars + post-amend).
+15. Mirror the env injection + helper for BOTH Fixer targets
+    (`spec_pr` AND `impl_pr`). In
+    `packages/foreman/src/foreman/roles/fixer.py`, the shared
+    `provider.run_agent` call at lines 647-653 covers both targets,
+    so one env-dict extension (adding `FOREMAN_OPERATOR_NAME` and
+    `FOREMAN_OPERATOR_EMAIL` from
+    `resolve_operator(project, config)`) threads through both. After
+    the LLM returns, run `_ensure_signoff_trailer` against the
+    worktree on whichever branch the Fixer target writes to. Both
+    paths commit via LLM-driven Bash (per `fixer.md:186` and the
+    equivalent commit-then-push lines in `fixer_impl.md`), so the
+    post-amend helper applies identically on both. Factor the helper
+    into a shared module so the Worker and both Fixer paths share
+    one implementation (preferred), or duplicate per existing role
+    conventions — both leave the contract the AC tests pin.
 16. Add `<dco_signoff>` section to
     `packages/foreman/src/foreman/prompts/worker.md` (next to
     `<commit_message_guardrails>` around line 274). Documents the
@@ -301,8 +362,15 @@ follows.
     still write the trailer correctly; the runtime amend is a
     backstop, not a license to be sloppy."
 17. Add the equivalent `<dco_signoff>` section to
-    `packages/foreman/src/foreman/prompts/fixer.md` (impl-side
-    body), near `<commit_discipline>` around line 171.
+    `packages/foreman/src/foreman/prompts/fixer.md` (the **spec-side**
+    Fixer body — `fixer.md` IS the `spec_pr` prompt per
+    `roles/fixer.py:123-128`), near `<commit_discipline>` around
+    line 171. ALSO add the same `<dco_signoff>` section to
+    `packages/foreman/src/foreman/prompts/fixer_impl.md` (the
+    **impl-side** Fixer body). `fixer_impl.md` has no
+    `<commit_discipline>` anchor — read the file first and pick the
+    right adjacent block (e.g., near the commit-instruction lines
+    around 73-82).
 18. Add the `[operator]` block to
     `docker/foreman/config.toml.template` between `[orchestrator]`
     (line 32-34) and the first `[[projects]]` block (line 36+).
@@ -328,10 +396,11 @@ follows.
 | `packages/foreman/src/foreman/git_hosts/github.py` | Implement the new parameter — splice `--trailer "Signed-off-by: ..."` into the `git commit` invocation when set. |
 | `packages/foreman/src/foreman/roles/planner.py` | Resolve operator and pass `signoff_trailer=...` to `commit_files_to_worktree`. |
 | `packages/foreman/src/foreman/roles/worker.py` | Add `_ensure_signoff_trailer` helper; call it on the `implemented` branch BEFORE `_sanitize_head_commit_auto_close`; plumb operator env vars into the `provider.run_agent` env dict. |
-| `packages/foreman/src/foreman/roles/fixer.py` | Mirror the Worker's env plumbing + post-amend on the Fixer-on-impl path. |
+| `packages/foreman/src/foreman/roles/fixer.py` | Mirror the Worker's env plumbing + post-amend on BOTH Fixer targets (`spec_pr` AND `impl_pr`). One env-dict extension at the shared `provider.run_agent` call site (lines 647-653) covers both targets; the post-amend helper runs on each branch after the LLM returns. |
 | `packages/foreman/tests/test_worker.py` (or wherever the existing `_sanitize_head_commit_auto_close` tests live) | New tests for `_ensure_signoff_trailer` covering zero/one/multi-commit cases. |
 | `packages/foreman/src/foreman/prompts/worker.md` | New `<dco_signoff>` section documenting the `--trailer` pattern + the runtime amend as backstop. |
-| `packages/foreman/src/foreman/prompts/fixer.md` | Same `<dco_signoff>` section for the impl-side body. |
+| `packages/foreman/src/foreman/prompts/fixer.md` | New `<dco_signoff>` section for the **spec-side** Fixer body, near `<commit_discipline>` around line 171. (`fixer.md` is the `spec_pr` prompt per `roles/fixer.py:123-128`.) |
+| `packages/foreman/src/foreman/prompts/fixer_impl.md` | New `<dco_signoff>` section for the **impl-side** Fixer body. This file has no `<commit_discipline>` anchor — read the file first and pick the right adjacent block (e.g., near the commit-instruction lines around 73-82). |
 | `docker/foreman/config.toml.template` | Add `[operator]` block with `${FOREMAN_OPERATOR_NAME}` / `${FOREMAN_OPERATOR_EMAIL}` placeholders between `[orchestrator]` and `[[projects]]`. |
 | `docs/RUNBOOK.md` | New "Operator identity (DCO sign-off)" section. |
 
