@@ -18,7 +18,7 @@ Before cutover:
    ```powershell
    foreman daemon stop
    # OR if the lock file is stale, find + kill manually:
-   wmic process where "name='python.exe'" get processid,commandline | findstr "foreman daemon v3-start"
+   wmic process where "name='python.exe'" get processid,commandline | findstr "foreman daemon start"
    ```
 
 2. **Sweep every registered project's worktrees for dirty trees**:
@@ -46,6 +46,78 @@ Before cutover:
 This ritual happens once. Day-to-day, the container manages its own
 worktrees inside the `foreman-repos` volume; the host's scattered
 worktrees won't be touched again post-cutover.
+
+---
+
+## v3 → v4 substrate cutover (one-shot, 2026-06-19)
+
+The Phase 9 PR replaces the v3 reconciler-rules state engine with the
+v4 state-machine + EventBus + observers substrate. There is no in-place
+migration of in-flight tickets; the cutover is a stop-old / rebuild /
+start-new sequence.
+
+Why no migration: ticket state in v3 lived in the reconciler's SQLite
+tables; v4 state lives in a different SQLite schema owned by
+`foreman.v4.sqlite_repository`. The schemas don't overlap. Rather than
+write a translation layer for a one-shot cutover, the v4 daemon
+re-discovers in-flight tickets by polling GitHub on startup —
+`foreman:*` labels on issues + open PRs by head-branch are the
+source-of-truth the Poller reads. Any ticket mid-pipeline keeps its
+labels through the cutover and gets re-picked-up by v4.
+
+Sequence:
+
+1. **Stop the running v3 container** (preserves volumes — important):
+   ```bash
+   docker compose stop foreman-daemon
+   ```
+
+2. **Verify no host-side daemon is running.** A rogue host daemon
+   competes with the container for the same GitHub repos. PowerShell
+   one-liner to confirm absence:
+   ```powershell
+   Get-CimInstance Win32_Process | Where-Object {
+     $_.CommandLine -match 'foreman daemon start' -and
+     $_.CommandLine -notmatch 'foreman-repos'
+   } | Measure-Object | Select-Object -ExpandProperty Count
+   # Must print 0.
+   ```
+   If non-zero, find the parent (usually a stray ``uv run foreman
+   daemon start`` from a Bash invocation) and `Stop-Process -Id <pid>
+   -Force`.
+
+3. **Rebuild the container image against the v4 code:**
+   ```bash
+   ./scripts/build-docker.sh
+   ```
+
+4. **Start the v4 container daemon:**
+   ```bash
+   docker compose up -d foreman-daemon
+   ```
+
+5. **Verify it boots cleanly** — the JSONL log should start emitting
+   `state_entered` records as the Poller re-discovers in-flight tickets:
+   ```bash
+   docker compose logs -f foreman-daemon | head -40
+   docker exec foreman-daemon foreman daemon status
+   docker exec foreman-daemon foreman ps
+   ```
+
+6. **Spot-check** any ticket that was in flight at cutover time:
+   ```bash
+   docker exec foreman-daemon foreman show <ticket-id>
+   ```
+   v4's state machine should report a recognized state name (Queued /
+   Planning / SpecReview / ImplFix / etc.). If the label set on GitHub
+   doesn't map to a v4 state, the Poller skips the ticket — surface
+   it manually with `foreman reset` or by relabeling.
+
+If anything goes wrong, the rollback is to redeploy the previous image:
+the `feat/foreman-v4-substrate` Git tag `pre-phase-9-cutover` marks the
+last v3-compatible commit. `git checkout pre-phase-9-cutover` then
+`./scripts/build-docker.sh && docker compose up -d foreman-daemon`
+restores the v3 daemon against the unchanged state volumes.
 
 ---
 
@@ -79,7 +151,7 @@ docker compose logs -f daemon
 
 ```bash
 docker exec foreman-daemon ls /foreman/state
-docker exec foreman-daemon cat /foreman/state/v3-daemon.log | tail -50
+docker exec foreman-daemon cat /foreman/state/transitions.jsonl | tail -50
 docker exec foreman-daemon ls /foreman/logs/planner
 ```
 
@@ -131,7 +203,7 @@ intentionally skipped.
 1. Check the daemon-log file directly (no need for the container to be
    alive — the named volume persists):
    ```bash
-   docker run --rm -v foreman-state:/state alpine cat /state/v3-daemon.log | tail -30
+   docker run --rm -v foreman-state:/state alpine cat /state/transitions.jsonl | tail -30
    ```
 2. Check container exit reason:
    ```bash
