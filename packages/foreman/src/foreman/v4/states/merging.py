@@ -38,6 +38,8 @@ tracks the proper fix.
 
 from __future__ import annotations
 
+import logging
+
 from foreman.v4.outcome import (
     Outcome,
     OutcomeArtifacts,
@@ -46,6 +48,21 @@ from foreman.v4.outcome import (
 )
 from foreman.v4.repository import MissingPRNumberError
 from foreman.v4.state import StateContext, TicketState
+
+logger = logging.getLogger(__name__)
+
+#: Fallback base branch when a :class:`~foreman.v4.config.ProjectConfig`
+#: has ``dev_base_branch=None``. The Worker resolves ``None`` to the
+#: origin's actual default branch via ``git symbolic-ref`` in
+#: ``worktree._resolve_default_branch``; ``MergingState`` has no clone
+#: to probe and replicating the resolution would require a new
+#: GitProvider Protocol method (which foreman#357 explicitly forbids).
+#: ``"main"`` matches the de-facto default on every project this
+#: orchestrator currently runs against. Operators on non-``main``
+#: defaults MUST set ``dev_base_branch`` explicitly in
+#: ``ProjectConfig`` — otherwise this fallback will refuse to merge
+#: their PRs as the wrong base.
+DEFAULT_DEV_BASE_BRANCH = "main"
 
 
 class MergingState(TicketState):
@@ -67,6 +84,52 @@ class MergingState(TicketState):
         state = ctx.git.get_pr_state(
             project=ctx.ticket.project, pr_number=pr_number,
         )
+        # foreman#357: defense-in-depth gate. Before either the already-
+        # merged short-circuit or the merge call, verify the PR's base
+        # ref matches the project's configured dev_base_branch. The
+        # Worker is supposed to open the impl PR against
+        # dev_base_branch; foreman#341 (logic bug) and foreman#347
+        # (stale binary) both produced wrong-base impl PRs that
+        # MergingState happily merged into the spec branch. The check
+        # runs BEFORE the merged short-circuit so an externally-merged
+        # PR with the wrong base also surfaces as NEEDS_HELP — the rare
+        # "operator click-merged through the UI" case shouldn't be
+        # silently accepted either. When the project_configs map is
+        # empty or doesn't contain this ticket's project (legacy tests;
+        # misconfigured production), the guard logs a warning and
+        # skips — additive over the existing behavior.
+        project_config = ctx.project_configs.get(ctx.ticket.project)
+        if project_config is not None:
+            expected_base = (
+                project_config.dev_base_branch or DEFAULT_DEV_BASE_BRANCH
+            )
+            actual_base = state.base_ref
+            if (
+                not actual_base
+                or actual_base.casefold() != expected_base.casefold()
+            ):
+                return Outcome(
+                    kind=OutcomeKind.NEEDS_HELP,
+                    confidence=OutcomeConfidence.HIGH,
+                    summary=(
+                        f"impl PR base {actual_base!r} does not match "
+                        f"configured dev_base_branch {expected_base!r}; "
+                        f"refusing to merge"
+                    ),
+                    artifacts=OutcomeArtifacts(pr_number=pr_number),
+                    details={
+                        "actual_base": actual_base,
+                        "expected_base": expected_base,
+                        "pr_number": pr_number,
+                        "ticket_issue_number": ctx.ticket.issue_number,
+                    },
+                )
+        else:
+            logger.warning(
+                "MergingState: no project_config for project=%s; "
+                "skipping base-ref guard for ticket=%d pr=%d",
+                ctx.ticket.project, ctx.ticket.id, pr_number,
+            )
         if state.merged:
             # Already-merged branch: close the originating issue too.
             # Idempotent at the REST API level — if an external merge
@@ -109,9 +172,16 @@ class MergingState(TicketState):
             return DoneState()
         if outcome.kind == OutcomeKind.BLOCKED:
             return MergingState()
-        # Defensive fall-through: execute() only ever returns CLEAN or
-        # BLOCKED today, but any other outcome kind from a future
-        # refactor (or a misbehaving subclass) should route to
+        # foreman#357: explicit NEEDS_HELP branch — the base-ref guard
+        # emits this when the impl PR's base doesn't match the project's
+        # configured dev_base_branch. Made explicit (rather than relying
+        # on the fall-through below) so the routing intent is grep-able
+        # from the new test names.
+        if outcome.kind == OutcomeKind.NEEDS_HELP:
+            return NeedsHelpState()
+        # Defensive fall-through: execute() only ever returns CLEAN,
+        # BLOCKED, or NEEDS_HELP today, but any other outcome kind from
+        # a future refactor (or a misbehaving subclass) should route to
         # NeedsHelp so an operator can sort it out — never silently
         # land on Failed.
         return NeedsHelpState()

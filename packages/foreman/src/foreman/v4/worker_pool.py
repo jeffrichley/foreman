@@ -23,6 +23,7 @@ import concurrent.futures
 import datetime as dt
 import logging
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from foreman.v4.event_bus import EventBus
 from foreman.v4.git_provider import GitProvider
@@ -32,6 +33,9 @@ from foreman.v4.role_dispatcher import RoleDispatcher
 from foreman.v4.state import StateContext
 from foreman.v4.states.registry import build_state
 from foreman.v4.work import WorkItem
+
+if TYPE_CHECKING:
+    from foreman.v4.config import ProjectConfig
 
 _LOG = logging.getLogger(__name__)
 
@@ -47,6 +51,7 @@ class WorkerPool:
         bus: EventBus | None,
         clock: Callable[[], dt.datetime],
         max_state_attempts: int = 3,
+        project_configs: dict[str, ProjectConfig] | None = None,
     ) -> None:
         self._repo = repo
         self._qm = qm
@@ -58,6 +63,12 @@ class WorkerPool:
         # the state machine can enforce the runaway-defense cap (Phase
         # 8c.2). Daemon plumbs DaemonConfig.max_state_attempts here.
         self._max_state_attempts = max_state_attempts
+        # foreman#357: per-project ProjectConfig map keyed by name.
+        # MergingState's base-ref guard reads ``dev_base_branch`` from
+        # the entry for ``ticket.project``. Default empty dict so direct
+        # ``WorkerPool(...)`` constructions in tests keep working — the
+        # guard short-circuits with a warning when the map is empty.
+        self._project_configs: dict[str, ProjectConfig] = project_configs or {}
         # Single concurrency knob: the pool size = the QM's in-flight cap.
         # Splitting them would let pool < QM silently throttle, or pool > QM
         # waste OS threads. Operators dial ONE number in V4Config.
@@ -127,6 +138,7 @@ class WorkerPool:
             role_dispatcher=self._dispatcher,
             git=self._git,
             max_state_attempts=self._max_state_attempts,
+            project_configs=self._project_configs,
         )
         state.transition(ctx)
 

@@ -172,6 +172,7 @@ class PyGithubGitProvider:
             merged=bool(pr.merged),
             mergeable=bool(pr.mergeable),
             ci_passing=(pr.mergeable_state in _CI_PASSING_STATES),
+            base_ref=pr.base.ref,
         )
 
     def merge_pr(self, *, project: str, pr_number: int) -> None:

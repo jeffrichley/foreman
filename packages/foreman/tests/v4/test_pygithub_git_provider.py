@@ -37,12 +37,18 @@ def test_get_pr_state_returns_mapped_fields(mock_github, mock_repo):
     mock_pr.merged = False
     mock_pr.mergeable = True
     mock_pr.mergeable_state = "clean"
+    # foreman#357: PyGithub's pr.base is a GitRef object; .ref is the
+    # branch name. MergingState's base-ref guard compares this against
+    # ProjectConfig.dev_base_branch before merging.
+    mock_pr.base.ref = "main"
     mock_repo.get_pull.return_value = mock_pr
     provider = PyGithubGitProvider(
         github_factory=lambda: mock_github, repo_full_name="owner/p",
     )
     state = provider.get_pr_state(project="p", pr_number=7)
-    assert state == PRState(merged=False, mergeable=True, ci_passing=True)
+    assert state == PRState(
+        merged=False, mergeable=True, ci_passing=True, base_ref="main",
+    )
     mock_repo.get_pull.assert_called_once_with(7)
 
 
