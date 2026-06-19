@@ -130,6 +130,8 @@ class GitHubProvider(GitHostProvider):
         worktree_path: Path,
         files: dict[str, str],
         message: str,
+        *,
+        provenance_trailers: list[str] | None = None,
     ) -> str:
         for relpath, content in files.items():
             target = worktree_path / relpath
@@ -155,7 +157,22 @@ class GitHubProvider(GitHostProvider):
         if diff_check.returncode == 0:
             head = self._git(worktree_path, "rev-parse", "HEAD")
             return head.stdout.strip()
-        self._git(worktree_path, "commit", "-m", message, env_extra=self._identity_env())
+        # Issue #347: splice ``--trailer "<value>"`` per entry. Order is
+        # preserved so the commit body carries the same trailer order
+        # the caller specified (Supervised-by: then Signed-off-by: per
+        # the Planner / Worker / Fixer wire-up).
+        trailer_args: list[str] = []
+        if provenance_trailers:
+            for value in provenance_trailers:
+                trailer_args.extend(["--trailer", value])
+        self._git(
+            worktree_path,
+            "commit",
+            "-m",
+            message,
+            *trailer_args,
+            env_extra=self._identity_env(),
+        )
         result = self._git(worktree_path, "rev-parse", "HEAD")
         return result.stdout.strip()
 

@@ -183,14 +183,62 @@ orthogonal (e.g., a critical content fix in one section and a minor
 typo in an unrelated section). Splitting "because it looks cleaner"
 when the changes share a theme is gold-plating.
 
-After committing, `git push origin foreman/issue-<N>` so the PR branch
-reflects your work. Record each commit's SHA in `commits_made`.
+Do NOT run `git push`. Foreman core pushes the spec branch
+deterministically after you return using the fixer bot's
+installation token (the only credential that authenticates in the
+container — see foreman#222). Commit cleanly and stop; Python
+handles the push.
 
-If `git push` fails (e.g., the remote has diverged), do NOT attempt
-`--force` — surface the failure in `fix_comment` and set
-`outcome: incomplete` with rationale "push failed, manual intervention
-required".
+Record each commit's SHA in `commits_made`.
+
+If you somehow attempt `git push` from Bash and it fails (e.g., the
+remote has diverged), do NOT attempt `--force` — surface the failure
+in `fix_comment` and set `outcome: incomplete` with rationale "push
+failed, manual intervention required". The Python-side deterministic
+push that Foreman runs after you return is not subject to this rail
+(it operates on a bot-owned branch with bot-only history).
 </commit_discipline>
+
+<provenance_trailers>
+Every commit you make MUST carry two operator-identity trailers in
+the commit body — one identifying the human who actively supervised
+this dispatch and one carrying the human DCO sign-off. These come
+from four env vars Foreman exports into your shell for this run:
+
+- `$FOREMAN_OPERATOR_SUPERVISOR_NAME`
+- `$FOREMAN_OPERATOR_SUPERVISOR_EMAIL`
+- `$FOREMAN_OPERATOR_SIGNER_NAME`
+- `$FOREMAN_OPERATOR_SIGNER_EMAIL`
+
+When you commit, append BOTH trailers via `--trailer` flags:
+
+```bash
+git commit -m "fix: address Reviewer findings on spec <N>
+
+- ..." \
+  --trailer "Supervised-by: $FOREMAN_OPERATOR_SUPERVISOR_NAME <$FOREMAN_OPERATOR_SUPERVISOR_EMAIL>" \
+  --trailer "Signed-off-by: $FOREMAN_OPERATOR_SIGNER_NAME <$FOREMAN_OPERATOR_SIGNER_EMAIL>"
+```
+
+The trailer order in the body is fixed: `Supervised-by:` first,
+then `Signed-off-by:`. Both must be present on every commit you
+make.
+
+Rationale:
+- `Supervised-by:` names the human who orchestrated this run.
+- `Signed-off-by:` is the legal DCO attestation by the named
+  human. The DCO CI gate validates this trailer on every commit
+  on every PR; missing it makes the PR fail CI.
+
+The Foreman runtime additionally amends HEAD with the missing
+trailer(s) after you return before pushing — issue #347
+belt-and-suspenders. That backstop is limited to the
+single-commit case (the default per `<commit_discipline>`); if
+you split into multiple commits AND any of them is missing a
+trailer, the runtime will log a warning and the Reviewer will
+flag the slip. Either way, you should still write both trailers
+correctly — the amend is a backstop, not a license to be sloppy.
+</provenance_trailers>
 
 <outcome_derivation>
 Apply mechanically, not by feel:

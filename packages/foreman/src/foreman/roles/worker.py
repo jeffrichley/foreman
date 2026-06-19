@@ -78,7 +78,7 @@ from foreman.roles import (
 )
 from foreman.schemas.worker import WorkerOutput, WorkerRunResult
 from foreman.stats import log_worker_run
-from foreman.v4.config import V4Config
+from foreman.v4.config import OperatorConfig, V4Config, resolve_operator
 from foreman.v4.identity import V4IdentityRegistry
 from foreman.worktree import WorktreeManager
 
@@ -192,6 +192,141 @@ def _run_check_command(
     combined = (result.stdout or "") + (result.stderr or "")
     failing = {m.group("test_id") for m in _PYTEST_FAILED_RE.finditer(combined)}
     return result.returncode, failing, combined
+
+
+def _supervised_by_line(operator: OperatorConfig) -> str:
+    """Render the ``Supervised-by: <name> <<email>>`` trailer string."""
+    return f"Supervised-by: {operator.supervisor.name} <{operator.supervisor.email}>"
+
+
+def _signed_off_by_line(operator: OperatorConfig) -> str:
+    """Render the ``Signed-off-by: <name> <<email>>`` trailer string."""
+    return f"Signed-off-by: {operator.signer.name} <{operator.signer.email}>"
+
+
+def _ensure_provenance_trailers(
+    *,
+    worktree_path: Path,
+    operator: OperatorConfig,
+    commits_made_count: int,
+    role_token: str,
+) -> bool:
+    """Ensure HEAD's commit body carries the operator-identity trailers.
+
+    Issue #347: every role-bot commit on a branch the DCO gate checks
+    must carry BOTH a ``Supervised-by:`` (orchestration attribution)
+    and a ``Signed-off-by:`` (DCO legal attestation) trailer matching
+    the resolved :class:`OperatorConfig`. The prompt-side
+    ``<provenance_trailers>`` section is the primary defense; this
+    helper is the runtime backstop that catches the slip case.
+
+    Scope mirrors :func:`_sanitize_head_commit_auto_close`:
+
+    * ``commits_made_count == 0`` — no commits to amend; no-op,
+      returns ``False``.
+    * ``commits_made_count == 1`` — read HEAD's message; if EITHER
+      trailer is missing, amend HEAD via
+      ``git commit --amend --no-edit --trailer "..." [--trailer "..."]``
+      with one ``--trailer`` flag per *missing* trailer (skip trailers
+      already present in the body for cleanliness; git's ``--trailer``
+      handling deduplicates by full value, so re-emitting is safe but
+      noisy). Returns ``True`` if amended, ``False`` if both present.
+    * ``commits_made_count > 1`` — log a warning and SKIP. Rewriting
+      non-HEAD commits requires destructive history surgery; the
+      prompt + the Reviewer-on-impl handle this shape.
+
+    The amend uses ``--no-edit`` (NOT ``-m '<orig>'``): git reuses the
+    original message and appends the new trailer lines to the body.
+    Ordering against :func:`_sanitize_head_commit_auto_close` matters
+    — this helper runs FIRST so the auto-close strip's diff is
+    computed against the message that already has both trailers.
+    Reversing the order would mean the auto-close strip's amend
+    (``--amend -m <sanitized>``, fully overwrites the body) wipes the
+    trailers this helper just added.
+
+    Args:
+        worktree_path: Worktree to amend HEAD on.
+        operator: Resolved operator (with both ``supervisor`` and
+            ``signer`` identities populated by
+            :func:`foreman.v4.config.resolve_operator`).
+        commits_made_count: Length of ``WorkerOutput.commits_made``.
+        role_token: Worker bot's installation token. Injected via the
+            env filter for the git invocation.
+
+    Returns:
+        ``True`` iff the helper amended HEAD; ``False`` in every
+        no-op shape (multi-commit skip, zero-commit skip, clean HEAD).
+    """
+    from foreman._env_filter import filtered_subprocess_env
+
+    if commits_made_count == 0:
+        return False
+    if commits_made_count > 1:
+        _log.warning(
+            "Role landed %d commits; runtime provenance-trailer amend is "
+            "limited to the single-commit case to avoid destructive "
+            "rebases. The prompt's <provenance_trailers> section is the "
+            "primary defense in the multi-commit shape; the Reviewer is "
+            "the backstop.",
+            commits_made_count,
+        )
+        return False
+
+    show = subprocess.run(
+        ["git", "log", "-1", "--pretty=%B"],
+        cwd=worktree_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=filtered_subprocess_env(role_token=role_token),
+    )
+    if show.returncode != 0:
+        _log.warning(
+            "Provenance-trailer amend: ``git log -1 --pretty=%%B`` failed "
+            "(rc=%d, stderr=%s); skipping amend.",
+            show.returncode,
+            (show.stderr or "").strip(),
+        )
+        return False
+
+    body = show.stdout
+    supervised_line = _supervised_by_line(operator)
+    signed_line = _signed_off_by_line(operator)
+    missing: list[str] = []
+    if supervised_line not in body:
+        missing.append(supervised_line)
+    if signed_line not in body:
+        missing.append(signed_line)
+    if not missing:
+        return False
+
+    trailer_args: list[str] = []
+    for value in missing:
+        trailer_args.extend(["--trailer", value])
+    _log.warning(
+        "Role HEAD commit was missing %d provenance trailer(s); amending "
+        "HEAD to add them (issue #347 runtime defense). Missing: %s",
+        len(missing),
+        missing,
+    )
+    amend = subprocess.run(
+        ["git", "commit", "--amend", "--no-edit", *trailer_args],
+        cwd=worktree_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=filtered_subprocess_env(role_token=role_token),
+    )
+    if amend.returncode != 0:
+        _log.error(
+            "Provenance-trailer amend: ``git commit --amend`` failed "
+            "(rc=%d, stderr=%s). Leaving HEAD as-is; the Reviewer-on-impl "
+            "will flag the slip.",
+            amend.returncode,
+            (amend.stderr or "").strip(),
+        )
+        return False
+    return True
 
 
 def _sanitize_head_commit_auto_close(
@@ -680,14 +815,11 @@ async def _run_worker_core(
     try:
         owner, repo_name, issue_number = parse_issue_url(issue_url)
         _setup_issue_number = issue_number
-        project = next(
-            (p for p in config.projects if p.name == project_name), None
-        )
+        project = next((p for p in config.projects if p.name == project_name), None)
         if project is None:
             known = [p.name for p in config.projects]
             raise ValueError(
-                f"project {project_name!r} not found in V4Config. "
-                f"Known projects: {known}"
+                f"project {project_name!r} not found in V4Config. Known projects: {known}"
             )
         expected_repo_slug = project.repo
         actual_repo_slug = f"{owner}/{repo_name}"
@@ -886,6 +1018,13 @@ async def _run_worker_core(
         # IMMEDIATELY on success so a failure in any later step
         # (push_branch, create_pull) still records the per-call token
         # cost in the worker_failed row.
+        # Issue #347: resolve the operator identities once at the top of
+        # the Worker body so both the env-injection (LLM-side primary
+        # defense via prompt) and the post-LLM ``_ensure_provenance_trailers``
+        # call (Python-side backstop) draw from the same resolved
+        # OperatorConfig. Resolver returns both identities populated;
+        # the top-level ``[operator]`` block is required at config load.
+        operator = resolve_operator(project, config)
         try:
             llm_output, run_usage = await provider.run_agent(
                 system_prompt=system_prompt,
@@ -893,7 +1032,20 @@ async def _run_worker_core(
                 allowed_tools=WORKER_ALLOWED_TOOLS,
                 output_model=WorkerOutput,
                 cwd=wt_path,
-                env={**os.environ, "GH_TOKEN": worker_token},
+                env={
+                    **os.environ,
+                    "GH_TOKEN": worker_token,
+                    # Issue #347: the LLM's <provenance_trailers> prompt
+                    # section consumes these four env vars to splice
+                    # ``--trailer "Supervised-by: ..."`` and
+                    # ``--trailer "Signed-off-by: ..."`` into every
+                    # ``git commit`` it runs. ``_ensure_provenance_trailers``
+                    # below is the runtime backstop for the slip case.
+                    "FOREMAN_OPERATOR_SUPERVISOR_NAME": operator.supervisor.name,
+                    "FOREMAN_OPERATOR_SUPERVISOR_EMAIL": operator.supervisor.email,
+                    "FOREMAN_OPERATOR_SIGNER_NAME": operator.signer.name,
+                    "FOREMAN_OPERATOR_SIGNER_EMAIL": operator.signer.email,
+                },
             )
             usage = run_usage
         except ProviderError as exc:
@@ -1005,6 +1157,19 @@ async def _run_worker_core(
             # `implemented` → `incomplete`, never the reverse.
             assert llm_output.pr_title is not None
             assert llm_output.pr_body is not None
+            # Issue #347 runtime defense: ensure HEAD's commit body
+            # carries BOTH the ``Supervised-by:`` and ``Signed-off-by:``
+            # trailers. Runs BEFORE ``_sanitize_head_commit_auto_close``
+            # so the auto-close strip's amend (which fully overwrites
+            # the message body with ``-m <sanitized>``) operates on the
+            # final-shape message that already has both trailers. The
+            # prompt is the primary defense; this is the backstop.
+            _ensure_provenance_trailers(
+                worktree_path=wt_path,
+                operator=operator,
+                commits_made_count=len(llm_output.commits_made),
+                role_token=worker_token,
+            )
             # foreman#63 runtime defense (Phase 8d.22): scrub the HEAD
             # commit message of any GitHub auto-close keyword + issue
             # reference BEFORE Python pushes the branch. If a Worker
@@ -1238,8 +1403,7 @@ def _run_worker_for_v4(*, project: str, issue_number: int) -> _V4WorkerResult:
     if project_cfg is None:
         known = [p.name for p in cfg.projects]
         raise ValueError(
-            f"project {project!r} not found in V4Config at {cfg_path}. "
-            f"Known projects: {known}"
+            f"project {project!r} not found in V4Config at {cfg_path}. Known projects: {known}"
         )
 
     # The core takes an issue URL — v4's SubprocessRoleDispatcher only
@@ -1321,13 +1485,14 @@ def _run_worker_for_v4(*, project: str, issue_number: int) -> _V4WorkerResult:
         "implemented_sub_requests": [
             s.model_dump(mode="json") for s in llm.implemented_sub_requests
         ],
-        "skipped_sub_requests": [
-            s.model_dump(mode="json") for s in llm.skipped_sub_requests
-        ],
+        "skipped_sub_requests": [s.model_dump(mode="json") for s in llm.skipped_sub_requests],
     }
 
     return _V4WorkerResult(
-        status=status, pr_number=pr_number, summary=summary, details=details,
+        status=status,
+        pr_number=pr_number,
+        summary=summary,
+        details=details,
     )
 
 

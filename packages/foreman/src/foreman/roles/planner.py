@@ -56,7 +56,7 @@ from foreman.roles._prompt_helpers import (
 )
 from foreman.schemas.planner import PlannerOutput, PlannerRunResult
 from foreman.stats import log_planner_run
-from foreman.v4.config import V4Config
+from foreman.v4.config import V4Config, resolve_operator
 from foreman.v4.identity import V4IdentityRegistry
 from foreman.worktree import WorktreeManager
 
@@ -289,14 +289,11 @@ async def _run_planner_core(
 
     try:
         owner, repo_name, issue_number = parse_issue_url(issue_url)
-        project = next(
-            (p for p in config.projects if p.name == project_name), None
-        )
+        project = next((p for p in config.projects if p.name == project_name), None)
         if project is None:
             known = [p.name for p in config.projects]
             raise ValueError(
-                f"project {project_name!r} not found in V4Config. "
-                f"Known projects: {known}"
+                f"project {project_name!r} not found in V4Config. Known projects: {known}"
             )
         expected_repo_slug = project.repo  # e.g. "jeffrichley/voice"
         actual_repo_slug = f"{owner}/{repo_name}"
@@ -369,10 +366,20 @@ async def _run_planner_core(
         usage = run_usage
 
         branch = spec_branch(issue_number)
+        # Issue #347: layer the operator-identity trailers on top of the
+        # bot's authorial attribution. Resolver returns a fresh
+        # OperatorConfig with both identities populated — the top-level
+        # block is required at config load, so this never raises.
+        op = resolve_operator(project, config)
+        provenance_trailers = [
+            f"Supervised-by: {op.supervisor.name} <{op.supervisor.email}>",
+            f"Signed-off-by: {op.signer.name} <{op.signer.email}>",
+        ]
         host.commit_files_to_worktree(
             worktree_path=wt_path,
             files={_spec_doc_relpath(issue_number): llm_output.spec_doc_content},
             message=llm_output.pr_title,
+            provenance_trailers=provenance_trailers,
         )
         host.push_branch(worktree_path=wt_path, branch=branch)
         # foreman#63: strip GitHub auto-close keywords (Closes / Fixes /
@@ -503,8 +510,7 @@ def _run_planner_for_v4(*, project: str, issue_number: int) -> _V4PlannerResult:
     if project_cfg is None:
         known = [p.name for p in cfg.projects]
         raise ValueError(
-            f"project {project!r} not found in V4Config at {cfg_path}. "
-            f"Known projects: {known}"
+            f"project {project!r} not found in V4Config at {cfg_path}. Known projects: {known}"
         )
     issue_url = f"https://github.com/{project_cfg.repo}/issues/{issue_number}"
 

@@ -19,6 +19,8 @@ from foreman.v4.cli import app
 from foreman.v4.config import (
     AppCredentials,
     AppsConfig,
+    OperatorConfig,
+    OperatorIdentity,
     OrchestratorConfig,
     ProjectConfig,
     V4Config,
@@ -34,6 +36,13 @@ def _apps_config() -> AppsConfig:
 def _orchestrator_config() -> OrchestratorConfig:
     return OrchestratorConfig(
         app_id=99999, private_key_path="/tmp/fake-orch.pem",
+    )
+
+
+def _operator_config() -> OperatorConfig:
+    return OperatorConfig(
+        supervisor=OperatorIdentity(name="Test Sup", email="sup@example.com"),
+        signer=OperatorIdentity(name="Test Sign", email="sign@example.com"),
     )
 
 
@@ -74,6 +83,14 @@ private_key_path = "/tmp/fake.pem"
 [orchestrator]
 app_id = 99999
 private_key_path = "/tmp/fake-orch.pem"
+
+[operator.supervisor]
+name = "Test Supervisor"
+email = "sup@example.com"
+
+[operator.signer]
+name = "Test Signer"
+email = "sign@example.com"
 
 {project_blocks}
 """
@@ -289,6 +306,7 @@ def test_init_uses_v4_config_apps_and_orchestrator():
         log_dir="/tmp/logs",
         apps=_apps_config(),
         orchestrator=_orchestrator_config(),
+        operator=_operator_config(),
         projects=[
             ProjectConfig(
                 name="algokit",

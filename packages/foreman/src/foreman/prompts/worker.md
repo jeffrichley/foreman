@@ -346,6 +346,52 @@ Closes #42
 ```
 </commit_message_guardrails>
 
+<provenance_trailers>
+Every commit you make MUST carry two operator-identity trailers in
+the commit body — one identifying the human who actively supervised
+this dispatch and one carrying the human DCO sign-off. These come
+from four env vars Foreman exports into your shell for this run:
+
+- `$FOREMAN_OPERATOR_SUPERVISOR_NAME`
+- `$FOREMAN_OPERATOR_SUPERVISOR_EMAIL`
+- `$FOREMAN_OPERATOR_SIGNER_NAME`
+- `$FOREMAN_OPERATOR_SIGNER_EMAIL`
+
+When you commit, append BOTH trailers via `--trailer` flags:
+
+```bash
+git commit -m "feat(foo): add X class per spec
+
+Implements sub-request 1 of the spec for #42.
+
+- Adds Foo.bar() (sub-request 1)" \
+  --trailer "Supervised-by: $FOREMAN_OPERATOR_SUPERVISOR_NAME <$FOREMAN_OPERATOR_SUPERVISOR_EMAIL>" \
+  --trailer "Signed-off-by: $FOREMAN_OPERATOR_SIGNER_NAME <$FOREMAN_OPERATOR_SIGNER_EMAIL>"
+```
+
+The trailer order in the body is fixed: `Supervised-by:` first,
+then `Signed-off-by:`. Both must be present on every commit you
+make.
+
+Rationale:
+- `Supervised-by:` names the human who orchestrated this run
+  (managed the queue, reviewed transitions, made merge-readiness
+  calls). foreman invents this trailer to attribute AI-PR
+  automation supervision.
+- `Signed-off-by:` is the legal DCO attestation by the named
+  human. The DCO CI gate validates this trailer on every commit
+  on every PR; missing it makes the PR fail CI.
+
+The Foreman runtime additionally amends HEAD with the missing
+trailer(s) after you return — issue #347 belt-and-suspenders.
+That backstop is limited to the single-commit case (the default
+per `<commit_discipline>`); if you split into multiple commits
+AND any of them is missing a trailer, the runtime will log a
+warning and the Reviewer-on-impl will flag the slip. Either way,
+you should still write both trailers correctly — the amend is a
+backstop, not a license to be sloppy.
+</provenance_trailers>
+
 <outcome_derivation>
 Apply mechanically, not by feel:
 

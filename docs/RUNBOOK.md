@@ -265,6 +265,102 @@ intentionally skipped.
 
 ---
 
+## Operator identities (DCO sign-off + supervision attribution)
+
+Issue #347 added a required top-level `[operator]` block to
+`V4Config` carrying two operator-identity sub-tables — one for the
+human who actively orchestrated the run, and one for the human who
+legally attests the DCO sign-off. The daemon refuses to boot
+without it. Every role-bot commit (Planner spec doc, Worker impl,
+Fixer on either target) carries BOTH a `Supervised-by:` and a
+`Signed-off-by:` trailer in the commit body.
+
+### Schema
+
+```toml
+[operator.supervisor]
+name = "Wren Richley"
+email = "wren@example.com"
+
+[operator.signer]
+name = "Jeff Richley"
+email = "jeff@example.com"
+```
+
+In the common single-operator case the same person fills both
+roles — the schema does not enforce uniqueness; set both blocks
+to the same values.
+
+### Per-project override
+
+A `[[projects]]` block MAY override either identity independently
+via `[[projects.operator.supervisor]]` and/or
+`[[projects.operator.signer]]`. Unset fields inherit from the
+top-level block.
+
+```toml
+[[projects]]
+name = "external-project"
+repo = "other-org/external-project"
+local_clone_path = "/foreman/repos/external-project"
+
+  [[projects.operator.signer]]
+  name = "External Maintainer"
+  email = "ext@example.com"
+```
+
+The resolver in `foreman.v4.config.resolve_operator` returns a
+fresh `OperatorConfig` per project with both identities resolved
+independently — project-side `supervisor` (if set) plus top-level
+`signer`, etc.
+
+### Environment variables
+
+The container template
+(`docker/foreman/config.toml.template`) consumes four envsubst
+placeholders at container start:
+
+- `FOREMAN_OPERATOR_SUPERVISOR_NAME`
+- `FOREMAN_OPERATOR_SUPERVISOR_EMAIL`
+- `FOREMAN_OPERATOR_SIGNER_NAME`
+- `FOREMAN_OPERATOR_SIGNER_EMAIL`
+
+Set them in the same `.env` that carries
+`FOREMAN_PLANNER_APP_ID` etc. The same env-var quadruple is also
+exported into the Worker / Fixer LLM subprocess environment so
+the LLM's `<provenance_trailers>` prompt instruction can splice
+the trailers via `--trailer "Supervised-by: $FOREMAN_OPERATOR_SUPERVISOR_NAME <$FOREMAN_OPERATOR_SUPERVISOR_EMAIL>"`
+etc.
+
+### Trailer policy
+
+Every Foreman bot commit emits up to four trailers:
+
+| Trailer | Source | DCO-enforced? |
+|---|---|---|
+| `Co-Authored-By: foreman-<role>[bot] <...>` | role-bot identity | no |
+| `Co-Authored-By: <model> <noreply@<provider>>` | model attribution | no |
+| `Supervised-by: <name> <<email>>` | resolved operator supervisor | no |
+| `Signed-off-by: <name> <<email>>` | resolved operator signer | yes |
+
+Only `Signed-off-by:` is enforced by the DCO CI gate (validated
+in non-blocking mode in PR #346). The other three are recommended
+but not required.
+
+### Rationale
+
+- See [PR #346](https://github.com/jeffrichley/foreman/pull/346) —
+  the DCO CI test PR that validated the gate works.
+- See the [2026-06-19T17:17:36 @wrenrichley comment on issue
+  #347](https://github.com/jeffrichley/foreman/issues/347) — the
+  authoritative direction for the two-identity / two-trailer
+  shape this section documents.
+- See the [Linux kernel coding-assistants policy](https://docs.kernel.org/process/coding-assistants.html)
+  — the canonical AI-disclosure-via-trailer pattern Foreman is
+  adopting.
+
+---
+
 ## Pre-commit hooks (one-time setup per clone)
 
 The repo uses the `pre-commit` framework (config: `.pre-commit-config.yaml`).

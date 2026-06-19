@@ -33,6 +33,8 @@ from foreman.schemas.worker import CommitMade, WorkerOutput
 from foreman.v4.config import (
     AppCredentials,
     AppsConfig,
+    OperatorConfig,
+    OperatorIdentity,
     OrchestratorConfig,
     ProjectConfig,
     V4Config,
@@ -59,6 +61,10 @@ def _build_v4_config(*, project_repo: str, local_clone_path: str) -> V4Config:
             worker=placeholder_app,
         ),
         orchestrator=OrchestratorConfig(app_id=1, private_key_path="/dev/null"),
+        operator=OperatorConfig(
+            supervisor=OperatorIdentity(name="Test Supervisor", email="sup@example.com"),
+            signer=OperatorIdentity(name="Test Signer", email="sign@example.com"),
+        ),
         projects=[
             ProjectConfig(
                 name="p",
