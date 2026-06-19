@@ -75,27 +75,23 @@ class ImplWorktreeResult:
     """Outcome of :meth:`WorktreeManager.create_impl`.
 
     Carries both the worktree filesystem path and the branch the impl
-    PR should target as its base. The latter encodes the decision
-    ``create_impl`` made between two paths:
+    PR should target as its base.
 
-    - **Stacked path** (D1 in the build brief): ``origin/foreman/issue-<N>``
-      exists, so the impl worktree is branched off it and the impl PR
-      stacks on the spec PR. ``base_branch == "foreman/issue-<N>"``.
-    - **Fallback path** (issue #48): ``origin/foreman/issue-<N>`` is gone
-      (spec PR was merged with ``--delete-branch``, the repo has
-      "automatically delete head branches" on, or an operator deleted
-      it manually), but the spec doc demonstrably landed on the
-      default branch. The impl worktree is branched off
-      ``origin/<default>`` and the impl PR opens with
-      ``base=<default>`` from the start — no stacking, no retarget
-      step needed. ``base_branch == <default-branch-name>``.
+    Pre-foreman#341 ``base_branch`` could be ``"foreman/issue-<N>"``
+    when the impl PR stacked on the spec PR (a vestigial design from
+    before the v4 ``SpecReviewState`` merged the spec PR into ``main``
+    before transitioning to ``ImplementingState``). After foreman#341,
+    by the time the Worker runs the spec doc is already on ``main``,
+    so the impl PR targets ``main`` (or the project's configured
+    ``dev_base_branch``) directly. ``base_branch`` is therefore always
+    the project's resolved dev base — never the spec branch.
 
     On idempotent re-call (the impl worktree path already exists),
-    ``base_branch`` is recomputed from current origin state — the
-    same probe sequence a fresh call would run. The result is NOT
-    cached against the worktree directory, so crash-recovery resolves
-    the base from "what origin looks like now". Callers should not
-    rely on a stable per-worktree ``base_branch`` over time.
+    ``base_branch`` is recomputed from the same input
+    (``dev_base_branch`` if provided, otherwise the clone's default
+    branch). Callers should not rely on a stable per-worktree
+    ``base_branch`` across calls if ``dev_base_branch`` changes
+    between them.
     """
 
     path: Path
@@ -283,6 +279,7 @@ class WorktreeManager:
         repo_slug: str,
         ticket_id: int,
         *,
+        dev_base_branch: str | None = None,
         repo_url: str | None = None,
     ) -> ImplWorktreeResult:
         """Create a fresh worktree for the Worker's impl branch.
@@ -296,54 +293,35 @@ class WorktreeManager:
         Sharing one worktree would force the Worker to git stash / reset
         every time it inherited a Fixer's WIP state.
 
-        Branch: ``foreman/impl-<N>``. Base is chosen by probing origin
-        state at call time, in two cases:
+        Branch: ``foreman/impl-<N>``, based on ``origin/<dev_base_branch>``
+        (or ``origin/<default-branch>`` when ``dev_base_branch`` is
+        ``None``).
 
-        - **Stacked path** (D1): if ``origin/foreman/issue-<N>`` exists,
-          the new impl branch is based on it. The returned
-          ``base_branch`` is ``"foreman/issue-<N>"``, so the impl PR
-          opens stacked on the spec PR — the spec PR remains
-          independently reviewable + mergeable.
-        - **Fallback path** (issue #48): if ``origin/foreman/issue-<N>``
-          is MISSING but the spec doc
-          (``docs/superpowers/specs/foreman-issue-<N>-spec.md``) is
-          present on ``origin/<default-branch>``, the new impl branch
-          is based on ``origin/<default>``. The returned
-          ``base_branch`` is the default branch name. The impl PR
-          opens with ``base=<default>`` from the start; no retarget
-          step is needed because there is no stacking. This covers
-          spec-PR-merged-with-``--delete-branch``, "Automatically
-          delete head branches", and the manual-operator-deleted-the-
-          branch cases. The fallback fires ONLY when the spec content
-          demonstrably exists on default — it is not a silent
-          reach-around for "spec was never produced".
-
-        If BOTH probes fail (spec branch gone AND spec doc absent from
-        default), raises :class:`RuntimeError` naming the missing
-        branch, the default branch checked, the expected spec doc
-        path, and referencing issue #48 — strictly more actionable
-        than the deep ``CalledProcessError`` the bare ``git worktree
-        add`` would have raised.
+        foreman#341: pre-v4 this method probed for the spec branch and
+        the spec doc on default, stacking the impl branch on
+        ``origin/foreman/issue-<N>`` when present so the impl PR could
+        stack on the spec PR. That design pre-dated v4's
+        ``SpecReviewState``, which merges the spec PR into the dev base
+        BEFORE transitioning to ``ImplementingState``. By the time the
+        Worker runs, the spec is on the dev base already, so the impl
+        PR should target the dev base directly. Stacking the impl PR
+        on the (orphan) spec branch caused PR #339 — merging the impl
+        PR through the GitHub UI landed changes on the spec branch
+        instead of ``main``. The probe / fallback logic is now gone;
+        the base is read from ``dev_base_branch`` (or the default
+        branch) like :meth:`create` already does for spec worktrees.
 
         Idempotent: if ``impl-<N>/`` already exists we return an
         :class:`ImplWorktreeResult` for it without re-running ``git
         worktree add`` or ``uv sync``. The ``base_branch`` on the
-        idempotent return is RECOMPUTED from current origin state
-        (same probe sequence as a fresh run) — so crash-recovery
-        resolves the base from "what origin looks like now", not from
-        any cached metadata file. Callers should not assume a stable
-        per-worktree ``base_branch`` across calls.
+        idempotent return is recomputed the same way as the fresh
+        path — read from the ``dev_base_branch`` argument when
+        provided, otherwise resolved from the clone's default branch.
 
         Same fetch + uv-sync best-effort discipline as :meth:`create`.
-        The fetch targets ``foreman/issue-<N>`` so the local origin ref
-        is current — without this the probe would see a stale ref.
-        The fallback path also fetches the default branch before
-        probing the spec doc.
 
         Callers (notably ``run_worker``) must pass the returned
-        ``base_branch`` as the impl PR's ``base`` — never hard-code
-        ``foreman/issue-<N>`` at the call site, because that's only
-        correct on the stacked path.
+        ``base_branch`` as the impl PR's ``base``.
         """
         # Container first-run bootstrap: see WorktreeManager.create()
         # docstring for the contract. ensure_clone is a no-op when the
@@ -353,34 +331,27 @@ class WorktreeManager:
             ensure_clone(repo_url=repo_url, clone_path=clone_path)
 
         impl_branch_name = impl_branch(ticket_id)
-        spec_branch_name = spec_branch(ticket_id)
-        default_branch = _resolve_default_branch(clone_path, role_token=self._role_token)
+        base_branch = dev_base_branch or _resolve_default_branch(
+            clone_path, role_token=self._role_token
+        )
 
         wt_path = self.worktrees_root / repo_slug / f"impl-{ticket_id}"
         if wt_path.exists():
-            # Idempotent re-call: recompute base_branch from current
-            # origin state. Cheap (two local git probes, one
-            # best-effort fetch each) and avoids stale-cached-answer
-            # surprises across crash-recovery boundaries.
-            base_branch_for_pr = self._resolve_impl_base_branch(
-                clone_path=clone_path,
-                ticket_id=ticket_id,
-                spec_branch_name=spec_branch_name,
-                default_branch=default_branch,
-            )
-            return ImplWorktreeResult(path=wt_path, base_branch=base_branch_for_pr)
+            # Idempotent re-call: recompute base_branch from the same
+            # input as a fresh call (``dev_base_branch`` arg or default
+            # branch resolution). No probing of the spec branch — the
+            # impl PR's base is determined entirely by project config.
+            return ImplWorktreeResult(path=wt_path, base_branch=base_branch)
 
         wt_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Resolve the right base ref + the base_branch the impl PR
-        # should target. The decision is centralized so the idempotent
-        # branch above can reuse it.
-        base_ref, base_branch_for_pr = self._resolve_impl_base_ref_and_branch(
-            clone_path=clone_path,
-            ticket_id=ticket_id,
-            spec_branch_name=spec_branch_name,
-            default_branch=default_branch,
-        )
+        # Best-effort fetch the base branch so the local origin ref is
+        # current before we branch off it. Same discipline as
+        # :meth:`create` uses for the spec worktree (see
+        # ``_fetch_origin_branch`` for the foreman#122 self-heal that
+        # also fires here if the configured base branch was deleted
+        # upstream).
+        _fetch_origin_branch(clone_path, base_branch, role_token=self._role_token)
 
         # foreman#220: clear orphan branch + stale worktree metadata
         # left over from a prior container generation (ephemeral
@@ -397,7 +368,7 @@ class WorktreeManager:
                 "-b",
                 impl_branch_name,
                 str(wt_path),
-                base_ref,
+                f"origin/{base_branch}",
             ],
             cwd=clone_path,
             check=True,
@@ -406,81 +377,7 @@ class WorktreeManager:
             env=self._env(),
         )
         _maybe_sync_worktree_deps(wt_path, role_token=self._role_token)
-        return ImplWorktreeResult(path=wt_path, base_branch=base_branch_for_pr)
-
-    def _resolve_impl_base_ref_and_branch(
-        self,
-        *,
-        clone_path: Path,
-        ticket_id: int,
-        spec_branch_name: str,
-        default_branch: str,
-    ) -> tuple[str, str]:
-        """Decide what ref to branch the impl worktree from and what
-        branch the impl PR should target.
-
-        Returns ``(base_ref, base_branch_for_pr)`` — ``base_ref`` is the
-        ref name passed to ``git worktree add`` (e.g.
-        ``"origin/foreman/issue-42"`` or ``"origin/main"``);
-        ``base_branch_for_pr`` is the bare branch name the impl PR's
-        ``base`` should be set to.
-
-        Decision order:
-
-        1. Refresh ``origin/<spec-branch>`` (best-effort). Probe — if
-           the ref now resolves, take the stacked path.
-        2. Else refresh ``origin/<default>`` (best-effort). Probe the
-           spec doc on default — if present, take the fallback path.
-        3. Else raise :class:`RuntimeError` per the contract documented
-           on :meth:`create_impl`.
-        """
-        # Refresh the spec branch from origin so the probe sees the
-        # Planner's latest push, not a stale ref. Best-effort — same
-        # rationale as ``create``'s default-branch fetch.
-        _fetch_origin_branch(clone_path, spec_branch_name, role_token=self._role_token)
-
-        if _origin_branch_exists(clone_path, spec_branch_name, role_token=self._role_token):
-            return f"origin/{spec_branch_name}", spec_branch_name
-
-        # Spec branch is missing. Refresh the default branch and check
-        # whether the spec doc landed on it.
-        _fetch_origin_branch(clone_path, default_branch, role_token=self._role_token)
-        if _spec_doc_on_origin_default(
-            clone_path, default_branch, ticket_id, role_token=self._role_token
-        ):
-            return f"origin/{default_branch}", default_branch
-
-        spec_doc_path = f"docs/superpowers/specs/foreman-issue-{ticket_id}-spec.md"
-        raise RuntimeError(
-            f"Cannot create impl worktree for issue #{ticket_id}: "
-            f"origin/{spec_branch_name} is missing AND the spec doc "
-            f"{spec_doc_path} is not present on origin/{default_branch}. "
-            f"The spec PR may not have been opened, or it was closed "
-            f"without merging. See issue #48 for the design rationale "
-            f"on this fallback path."
-        )
-
-    def _resolve_impl_base_branch(
-        self,
-        *,
-        clone_path: Path,
-        ticket_id: int,
-        spec_branch_name: str,
-        default_branch: str,
-    ) -> str:
-        """Idempotent-call variant of
-        :meth:`_resolve_impl_base_ref_and_branch` that returns only the
-        ``base_branch_for_pr`` — used when the worktree already exists
-        and we just need to recompute the impl PR base from current
-        origin state.
-        """
-        _, base_branch_for_pr = self._resolve_impl_base_ref_and_branch(
-            clone_path=clone_path,
-            ticket_id=ticket_id,
-            spec_branch_name=spec_branch_name,
-            default_branch=default_branch,
-        )
-        return base_branch_for_pr
+        return ImplWorktreeResult(path=wt_path, base_branch=base_branch)
 
     def attach(
         self,
@@ -920,39 +817,6 @@ def _origin_branch_exists(
     """
     result = subprocess.run(
         ["git", "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}"],
-        cwd=clone_path,
-        check=False,
-        capture_output=True,
-        text=True,
-        env=filtered_subprocess_env(role_token=role_token),
-    )
-    return result.returncode == 0
-
-
-def _spec_doc_on_origin_default(
-    clone_path: Path,
-    default_branch: str,
-    ticket_id: int,
-    *,
-    role_token: str | None = None,
-) -> bool:
-    """Return True if the spec doc for ``ticket_id`` exists on
-    ``origin/<default_branch>``.
-
-    Uses ``git cat-file -e origin/<default>:<spec_doc_path>`` — exits 0
-    iff the path exists in that tree. No checkout, no working-tree
-    mutation, no network round-trip. Stronger evidence for "the spec
-    content is on the branch we'd be branching off" than the PyGithub
-    "was the PR merged?" API call would be (a PR merged into the wrong
-    base, hand-edited target, or closed without merging would all fool
-    the API check while this local probe gives the right answer).
-
-    The spec doc path matches what the Planner writes
-    (``docs/superpowers/specs/foreman-issue-<N>-spec.md``).
-    """
-    spec_doc_path = f"docs/superpowers/specs/foreman-issue-{ticket_id}-spec.md"
-    result = subprocess.run(
-        ["git", "cat-file", "-e", f"origin/{default_branch}:{spec_doc_path}"],
         cwd=clone_path,
         check=False,
         capture_output=True,
