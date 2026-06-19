@@ -63,7 +63,6 @@ from foreman.auto_close import (
     strip_auto_close_keywords,
 )
 from foreman.branches import impl_branch, spec_branch
-from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
 from foreman.git_host import GitHostProvider
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
@@ -403,7 +402,7 @@ def _verify_impl_branch_remote_state(
     runs.
 
     Worker pushes the impl branch from Python via ``host.push_branch``
-    (the authenticated tokenized-URL path) in :func:`run_worker` after
+    (the authenticated tokenized-URL path) in :func:`_run_worker_core` after
     the Claude subprocess returns. If that primary push somehow
     didn't land (race condition, partial network failure between
     push completion and verify, or a future regression where the
@@ -625,8 +624,7 @@ def _skipped_by_reason_histogram(output: WorkerOutput) -> dict[str, int]:
     return hist
 
 
-# v4-PHASE-8-KILL: legacy worker entry-point used by the `implement` CLI command (cli.py); emits via label-writing tail. Replaced by run_worker_cli (below) + implement-v4 CLI command. Remove this function and the legacy label-writing tail in Phase 8.
-async def run_worker(
+async def _run_worker_core(
     *,
     issue_url: str,
     config: V4Config,
@@ -634,8 +632,6 @@ async def run_worker(
     worktrees_root: Path,
     provider: ProviderFacade,
     identity_registry: V4IdentityRegistry,
-    dispatch_recorder: DispatchRecorder | None = None,
-    dispatch_trace_id: int | None = None,
 ) -> WorkerRunResult:
     """Run the Worker role end-to-end on one spec-ready issue.
 
@@ -752,8 +748,7 @@ async def run_worker(
         ``Exception`` catch arms (foreman#266 — type-narrowing split).
 
         Closes over ``start_time`` / ``usage`` / ``actual_repo_slug``
-        / ``issue_number`` / ``attempt`` / ``project_name`` /
-        ``dispatch_recorder`` / ``dispatch_trace_id`` / ``issue``.
+        / ``issue_number`` / ``attempt`` / ``project_name`` / ``issue``.
         The bare ``raise`` that re-propagates the original exception
         lives in each ``except`` arm after calling this helper.
         """
@@ -794,31 +789,6 @@ async def run_worker(
                 "original exception will still propagate to the dispatcher",
                 issue_number,
             )
-        # foreman#251 (Phase 1): mirror the failure-path dual-write.
-        emit_recorder_complete(
-            dispatch_recorder=dispatch_recorder,
-            dispatch_trace_id=dispatch_trace_id,
-            role="worker",
-            repo_slug=actual_repo_slug,
-            ticket_id=f"{actual_repo_slug}#{issue_number}",
-            project=project_name,
-            issue_number=issue_number,
-            pr_number=None,
-            outcome="exception",
-            usage=usage if usage is not None else UsageInfo(),
-            role_data={
-                "attempt": attempt,
-                "total_sub_requests": 0,
-                "implemented_count": 0,
-                "skipped_count": 0,
-                "skipped_by_reason": {},
-                "did_check_pass": False,
-                "confidence": "low",
-                "baseline_failures_count": 0,
-                "new_failures_count": 0,
-            },
-            duration_seconds=duration_seconds,
-        )
         # foreman#229: runaway-burn defense. Under v4 the state machine
         # transitions to ``NeedsHelp`` when the role subprocess reports
         # failure, and :class:`LabelObservabilityObserver` writes
@@ -1135,38 +1105,6 @@ async def run_worker(
             duration_ms=usage.duration_ms,
             num_turns=usage.num_turns,
         )
-        # foreman#251 (Phase 1): dual-write through the Recorder.
-        # ``role_data`` carries the Worker-specific JSONL fields so
-        # :class:`RoleStatsSubscriber` can fan out to
-        # ``log_worker_run`` with matching values. The success-path
-        # ``log_worker_run`` above stays for Phase 1 (see ticket
-        # acceptance criterion); Phase 2 will collapse it.
-        emit_recorder_complete(
-            dispatch_recorder=dispatch_recorder,
-            dispatch_trace_id=dispatch_trace_id,
-            role="worker",
-            repo_slug=actual_repo_slug,
-            ticket_id=f"{actual_repo_slug}#{issue_number}",
-            project=project_name,
-            issue_number=issue_number,
-            pr_number=impl_pr_number,
-            outcome=final_outcome,
-            usage=usage,
-            role_data={
-                "attempt": attempt,
-                "total_sub_requests": (
-                    len(llm_output.implemented_sub_requests) + len(llm_output.skipped_sub_requests)
-                ),
-                "implemented_count": len(llm_output.implemented_sub_requests),
-                "skipped_count": len(llm_output.skipped_sub_requests),
-                "skipped_by_reason": skipped_hist,
-                "did_check_pass": final_did_check_pass,
-                "confidence": llm_output.confidence,
-                "baseline_failures_count": len(baseline_failures),
-                "new_failures_count": len(new_failures),
-            },
-            duration_seconds=duration_seconds,
-        )
         # Discard the combined-output buffer from the post-check run so it
         # doesn't sit in memory across the rest of the lifetime of the
         # async result (the orchestrator returns to its caller after this).
@@ -1193,20 +1131,14 @@ async def run_worker(
         raise
 
 
-# ============================================================
-# v4 emit path — additive alongside the legacy label-writing entry-point.
-# The legacy code path (above) stays running through Phase 7. Phase 8
-# deletes the legacy entry-point + everything tagged with v4-PHASE-8-KILL
-# and removes this banner.
-#
 # Worker is the LAST role in the pipeline and the ONLY role that emits
 # BLOCKED. BLOCKED semantics: the v4 state machine's
 # ``ImplementingState.next_state`` returns a fresh ``ImplementingState()``
 # on BLOCKED so the Worker gets re-dispatched on the next tick.
 # Worker is also NOT target-aware — the impl PR is unambiguous from the
 # issue number, so ``run_worker_cli`` has no ``target`` kwarg.
-# ============================================================
-import asyncio  # noqa: E402  (kept here so legacy import block above stays untouched)
+
+import asyncio  # noqa: E402
 
 from foreman.providers import make_provider  # noqa: E402
 from foreman.v4.config import load_config as load_v4_config  # noqa: E402
@@ -1273,12 +1205,11 @@ class _V4WorkerResult:
 def _run_worker_for_v4(*, project: str, issue_number: int) -> _V4WorkerResult:
     """Run the worker end-to-end for a v4 caller.
 
-    Wraps ``run_worker`` (worktree create → LLM dispatch → check
-    rerun → impl PR open) and flattens its result into the v4 shape
-    consumed by ``run_worker_cli``. The v4 state machine drives off
-    the FOREMAN_OUTCOME emitted below, not off GitHub labels —
-    ``LabelObservabilityObserver`` owns ``foreman:*`` writes off
-    state-machine transitions.
+    Wraps :func:`_run_worker_core` (worktree create → LLM dispatch →
+    check rerun → impl PR open, formerly ``run_worker``) and flattens
+    its result into the v4 shape consumed by ``run_worker_cli``. The v4
+    state machine drives off the FOREMAN_OUTCOME emitted below, not off
+    GitHub labels.
 
     Worker is NOT target-aware (unlike Reviewer/Fixer): the impl PR is
     unambiguous from the issue number — only one impl branch per
@@ -1294,9 +1225,9 @@ def _run_worker_for_v4(*, project: str, issue_number: int) -> _V4WorkerResult:
             f"Known projects: {known}"
         )
 
-    # The legacy ``run_worker`` takes an issue URL — v4's
-    # SubprocessRoleDispatcher only knows the issue number. Construct
-    # the URL from the project's configured repo slug.
+    # The core takes an issue URL — v4's SubprocessRoleDispatcher only
+    # knows the issue number. Construct the URL from the project's
+    # configured repo slug.
     issue_url = f"https://github.com/{project_cfg.repo}/issues/{issue_number}"
 
     worktrees_root = Path(
@@ -1311,8 +1242,8 @@ def _run_worker_for_v4(*, project: str, issue_number: int) -> _V4WorkerResult:
         orchestrator=cfg.orchestrator,
         installation_repo=project_cfg.repo,
     )
-    legacy_result = asyncio.run(
-        run_worker(
+    core_result = asyncio.run(
+        _run_worker_core(
             issue_url=issue_url,
             config=cfg,
             project_name=project,
@@ -1331,8 +1262,8 @@ def _run_worker_for_v4(*, project: str, issue_number: int) -> _V4WorkerResult:
     # - ``implemented`` + ``pr_url`` but check did NOT pass → CI still
     #   in flight (rare — see _V4WorkerResult docstring)
     # - anything else (``incomplete`` / ``spec_invalid``) → give-up
-    llm = legacy_result.llm_output
-    pr_url = legacy_result.pr_url
+    llm = core_result.llm_output
+    pr_url = core_result.pr_url
     pr_number: int | None = None
     if pr_url:
         try:
@@ -1341,7 +1272,7 @@ def _run_worker_for_v4(*, project: str, issue_number: int) -> _V4WorkerResult:
             pr_number = None
 
     if llm.outcome == "implemented" and pr_url is not None:
-        if legacy_result.final_did_check_pass:
+        if core_result.final_did_check_pass:
             status = "ci_passing"
             summary = "impl PR open, check passed"
         else:
@@ -1349,7 +1280,7 @@ def _run_worker_for_v4(*, project: str, issue_number: int) -> _V4WorkerResult:
             summary = "impl PR open, check still in flight"
     else:
         status = "give_up"
-        summary = f"{llm.outcome} (attempt {legacy_result.attempt})"
+        summary = f"{llm.outcome} (attempt {core_result.attempt})"
 
     # Phase 8d.17 / foreman#315: preserve WorkerOutput's diagnostic
     # detail by lifting onto the v4 Outcome. Before this, NEEDS_HELP
@@ -1364,11 +1295,11 @@ def _run_worker_for_v4(*, project: str, issue_number: int) -> _V4WorkerResult:
     # ``model_dump_json`` cleanly.
     details: dict[str, object] = {
         "work_comment": llm.work_comment,
-        "did_check_pass": legacy_result.final_did_check_pass,
+        "did_check_pass": core_result.final_did_check_pass,
         "check_output_summary": llm.check_output_summary,
         "confidence": llm.confidence,
         "outcome": llm.outcome,
-        "attempt": legacy_result.attempt,
+        "attempt": core_result.attempt,
         "commits_made": [c.model_dump(mode="json") for c in llm.commits_made],
         "implemented_sub_requests": [
             s.model_dump(mode="json") for s in llm.implemented_sub_requests
@@ -1392,9 +1323,6 @@ def run_worker_cli(*, project: str, issue_number: int) -> int:
     - ``ci_in_flight`` → BLOCKED with ``pr_number`` (state machine re-polls)
     - ``give_up`` → NEEDS_HELP (operator triage)
     - exception → ERROR (exit 1)
-
-    Legacy ``implement`` command + label-writing tail in this module
-    are tagged ``v4-PHASE-8-KILL`` and deleted together in Phase 8.
     """
     if os.environ.get("FOREMAN_DRY_RUN") == "1":
         # Short-circuit for the Task 8.6 real-fork integration test. Emits

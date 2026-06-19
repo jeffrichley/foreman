@@ -196,21 +196,6 @@ forbidden_modules = [
     "foreman.ps",
     "foreman.v3_bus_endpoint",
 ]
-# Transitive carve-outs for the Phase 9 transition window. The survival
-# roles still import foreman.dispatch_recorder inside their legacy
-# entry-points (each tagged v4-PHASE-8-KILL). Both the role-side import
-# AND dispatch_recorder.py itself die in Phase 9 (see
-# docs/superpowers/plans/v4-phases/2026-06-13-foreman-v4-phase-9-deletion-cutover.md).
-# When the cutover PR lands, the role→dispatch_recorder edges vanish
-# and these ignore lines can be deleted along with the target module.
-# Until then, ignore the four chains so R2 enforces every NEW v4→v3
-# direct or roles-mediated import while tolerating the known-doomed ones.
-ignore_imports = [
-    "foreman.roles.planner -> foreman.dispatch_recorder",
-    "foreman.roles.reviewer -> foreman.dispatch_recorder",
-    "foreman.roles.fixer -> foreman.dispatch_recorder",
-    "foreman.roles.worker -> foreman.dispatch_recorder",
-]
 
 [tool.pytest.ini_options]
 testpaths = [

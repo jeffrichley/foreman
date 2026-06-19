@@ -39,7 +39,6 @@ from typing import Literal
 from github.Issue import Issue
 from github.Repository import Repository
 
-from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
 from foreman.providers import ProviderError
@@ -337,8 +336,7 @@ def _read_spec_doc(worktree_path: Path, issue_number: int) -> str | None:
         return None
 
 
-# v4-PHASE-8-KILL: legacy reviewer entry-point used by the `review` CLI command (cli.py); emits via label-writing tail. Replaced by run_reviewer_cli (below) + review-v4 CLI command. Remove this function and the legacy label-writing tail in Phase 8.
-async def run_reviewer(
+async def _run_reviewer_core(
     *,
     pr_url: str,
     config: V4Config,
@@ -346,8 +344,6 @@ async def run_reviewer(
     worktrees_root: Path,
     provider: ProviderFacade,
     identity_registry: V4IdentityRegistry,
-    dispatch_recorder: DispatchRecorder | None = None,
-    dispatch_trace_id: int | None = None,
 ) -> ReviewerRunResult:
     """Run the Reviewer role end-to-end on one spec or impl PR.
 
@@ -408,8 +404,7 @@ async def run_reviewer(
         catch arms (foreman#266 — type-narrowing split). Closes over
         ``start_time`` / ``usage`` / ``pr_number`` /
         ``actual_repo_slug`` / ``issue_number`` / ``target`` /
-        ``issue`` / ``project_name`` / ``dispatch_recorder`` /
-        ``dispatch_trace_id``. The bare ``raise`` that re-propagates
+        ``issue`` / ``project_name``. The bare ``raise`` that re-propagates
         the original exception lives in each ``except`` arm after
         calling this helper.
         """
@@ -443,21 +438,6 @@ async def run_reviewer(
                 # dispatcher sees the ORIGINAL exception, not whatever
                 # the stats writer raised.
                 pass
-            # foreman#251 (Phase 1): mirror the failure-path dual-write.
-            emit_recorder_complete(
-                dispatch_recorder=dispatch_recorder,
-                dispatch_trace_id=dispatch_trace_id,
-                role="reviewer",
-                repo_slug=actual_repo_slug,
-                ticket_id=f"{actual_repo_slug}#{issue_number}",
-                project=project_name,
-                issue_number=issue_number,
-                pr_number=pr_number,
-                outcome="exception",
-                usage=usage if usage is not None else UsageInfo(),
-                role_data={"target": target},
-                duration_seconds=duration_seconds,
-            )
         # foreman#229: runaway-burn defense. Phase 8d.7 dropped the
         # role-side ``foreman:needs-help`` write — the v4 state machine
         # transitions to ``NeedsHelp`` when the role subprocess reports
@@ -614,25 +594,6 @@ async def run_reviewer(
             duration_ms=usage.duration_ms,
             num_turns=usage.num_turns,
         )
-        # foreman#251 (Phase 1): dual-write through the Recorder.
-        # ``target`` lands in ``role_data`` because it's reviewer-
-        # specific JSONL — :class:`RoleStatsSubscriber` reads it back
-        # when fanning out to ``log_reviewer_run``.
-        emit_recorder_complete(
-            dispatch_recorder=dispatch_recorder,
-            dispatch_trace_id=dispatch_trace_id,
-            role="reviewer",
-            repo_slug=actual_repo_slug,
-            ticket_id=f"{actual_repo_slug}#{issue_number}",
-            project=project_name,
-            issue_number=issue_number,
-            pr_number=pr_number,
-            outcome=llm_output.outcome,
-            usage=usage,
-            role_data={"target": target},
-            duration_seconds=duration_seconds,
-        )
-
         # The Reviewer does not mutate labels under v4; ``final_labels``
         # is the pre-call snapshot returned for the daemon's audit
         # trail. ``LabelObservabilityObserver`` owns ``foreman:*`` writes
@@ -652,13 +613,7 @@ async def run_reviewer(
         raise
 
 
-# ============================================================
-# v4 emit path — additive alongside the legacy label-writing entry-point.
-# The legacy code path (above) stays running through Phase 7. Phase 8
-# deletes the legacy entry-point + everything tagged with v4-PHASE-8-KILL
-# and removes this banner.
-# ============================================================
-import asyncio  # noqa: E402  (kept here so legacy import block above stays untouched)
+import asyncio  # noqa: E402
 
 from foreman.providers import make_provider  # noqa: E402
 from foreman.v4.config import load_config as load_v4_config  # noqa: E402
@@ -731,20 +686,13 @@ def _run_reviewer_for_v4(
     """Run the reviewer the same way the legacy ``review`` command does,
     but without label-writing on top.
 
-    Option B per the Phase 5.2 plan: duplicate the reviewer-invocation
-    sequence rather than refactor the legacy ``run_reviewer`` body.
-    The legacy ``run_reviewer`` is re-used here — it already contains
-    the full worktree → diff → LLM → review-post sequence, and v3's
-    label-writing behavior is benign for v4 callers (the v4 state
-    machine drives off the FOREMAN_OUTCOME emitted below, not off
-    GitHub labels). The label-writing tail goes away in Phase 8.
+    Calls :func:`_run_reviewer_core` (worktree → diff → LLM → review-post,
+    formerly ``run_reviewer``) and unpacks the flat-shape result the v4
+    state machine consumes via ``FOREMAN_OUTCOME``.
 
-    ``target`` arrives in v4 vocabulary ("spec" / "impl"); the legacy
-    ``run_reviewer`` infers spec vs impl from the PR's head branch on
-    its own, so we only need ``target`` here to locate the right open
-    PR before handing off. Translation to legacy "spec_pr" / "impl_pr"
-    is consumed inside ``run_reviewer`` itself — no kwarg is plumbed
-    through from v4.
+    ``target`` arrives in v4 vocabulary ("spec" / "impl"); the core infers
+    spec vs impl from the PR's head branch on its own, so ``target`` is
+    used only to locate the right open PR before handing off.
     """
     cfg_path = Path(os.environ.get("FOREMAN_V4_CONFIG", _DEFAULT_V4_CONFIG))
     cfg = load_v4_config(cfg_path)
@@ -793,8 +741,8 @@ def _run_reviewer_for_v4(
         )
     )
     provider = make_provider()
-    legacy_result = asyncio.run(
-        run_reviewer(
+    core_result = asyncio.run(
+        _run_reviewer_core(
             pr_url=pr_url,
             config=cfg,
             project_name=project,
@@ -811,7 +759,7 @@ def _run_reviewer_for_v4(
     # ``target`` → ``location`` (both name "where in the artifact")
     # and join ``issue`` + ``needed`` into ``description`` so the
     # Fixer downstream still has both halves of the prose.
-    llm = legacy_result.llm_output
+    llm = core_result.llm_output
     v4_findings: list[V4Finding] = [
         V4Finding(
             severity=f.severity,
@@ -845,9 +793,7 @@ def run_reviewer_cli(*, project: str, issue_number: int, target: str) -> int:
 
     ``target`` is the v4 vocab ("spec" / "impl"). The
     SubprocessRoleDispatcher (Task 5.6) forks ``foreman review-v4
-    --target spec|impl`` which calls this. Legacy ``review`` command +
-    label-writing tail in this module are tagged ``v4-PHASE-8-KILL``
-    and deleted together in Phase 8.
+    --target spec|impl`` which calls this.
     """
     if os.environ.get("FOREMAN_DRY_RUN") == "1":
         # Short-circuit for the Task 8.6 real-fork integration test. Emits

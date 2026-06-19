@@ -41,7 +41,6 @@ from foreman.auto_close import (
     strip_auto_close_keywords as _strip_auto_close_keywords,
 )
 from foreman.branches import spec_branch
-from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
 from foreman.git_host import GitHostProvider, IssueRef
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
@@ -127,8 +126,7 @@ def _spec_doc_relpath(issue_number: int) -> str:
 # existing tests + call sites.
 
 
-# v4-PHASE-8-KILL: legacy planner entry-point used by the `plan` CLI command (cli.py); emits via label-writing tail. Replaced by run_planner_cli (below) + plan-v4 CLI command. Remove this function and the legacy label-writing tail in Phase 8.
-async def run_planner(
+async def _run_planner_core(
     *,
     issue_url: str,
     config: V4Config,
@@ -136,8 +134,6 @@ async def run_planner(
     worktrees_root: Path,
     provider: ProviderFacade,
     identity_registry: V4IdentityRegistry,
-    dispatch_recorder: DispatchRecorder | None = None,
-    dispatch_trace_id: int | None = None,
 ) -> PlannerRunResult:
     """Run the Planner role end-to-end on one issue.
 
@@ -190,8 +186,7 @@ async def run_planner(
 
         Closes over ``start_time`` / ``usage`` / ``pr_number`` /
         ``actual_repo_slug`` / ``issue_number`` / ``host`` /
-        ``project_name`` / ``dispatch_recorder`` /
-        ``dispatch_trace_id`` from the enclosing scope. The bare
+        ``project_name`` from the enclosing scope. The bare
         ``raise`` that re-propagates the original exception lives in
         each ``except`` arm AFTER calling this helper — keeps the
         re-raise inside its own arm where Python's exception context
@@ -247,25 +242,6 @@ async def run_planner(
                 # failure here would mask the actual Planner failure
                 # that triggered this branch.
                 pass
-            # foreman#251 (Phase 1): mirror the dual-write on the failure
-            # path. ``usage`` may be None (if ``provider.run_agent`` never
-            # returned) — the helper fills zeros via a default UsageInfo
-            # so the Recorder's cost columns stay populated with explicit
-            # zeros rather than NULL, matching the existing JSONL shape.
-            emit_recorder_complete(
-                dispatch_recorder=dispatch_recorder,
-                dispatch_trace_id=dispatch_trace_id,
-                role="planner",
-                repo_slug=actual_repo_slug,
-                ticket_id=f"{actual_repo_slug}#{issue_number}",
-                project=project_name,
-                issue_number=issue_number,
-                pr_number=pr_number,
-                outcome="exception",
-                usage=usage if usage is not None else UsageInfo(),
-                role_data={},
-                duration_seconds=duration_seconds,
-            )
         # foreman#229: runaway-burn defense. Post the traceback as a
         # comment on the originating issue so the operator sees the
         # crash without spelunking daemon logs. Under v4 the
@@ -410,27 +386,6 @@ async def run_planner(
             duration_ms=usage.duration_ms,
             num_turns=usage.num_turns,
         )
-        # foreman#251 (Phase 1): dual-write via the DispatchRecorder.
-        # When the daemon dispatched this run it constructed a
-        # Recorder + propagated the trace_id via env; the CLI entry
-        # point unpacks both and forwards them here. The existing
-        # ``log_planner_run`` call above stays in place — Phase 2 will
-        # collapse it.
-        emit_recorder_complete(
-            dispatch_recorder=dispatch_recorder,
-            dispatch_trace_id=dispatch_trace_id,
-            role="planner",
-            repo_slug=actual_repo_slug,
-            ticket_id=f"{actual_repo_slug}#{issue_number}",
-            project=project_name,
-            issue_number=issue_number,
-            pr_number=pr_number,
-            outcome="spec_written",
-            usage=usage,
-            role_data={},
-            duration_seconds=duration_seconds,
-        )
-
         return PlannerRunResult(llm_output=llm_output, pr=pr, final_labels=final_labels)
     except ProviderError as exc:
         # foreman#266: typed catch for the documented provider-boundary
@@ -451,13 +406,7 @@ async def run_planner(
         raise
 
 
-# ============================================================
-# v4 emit path — additive alongside the legacy label-writing entry-point.
-# The legacy code path (above) stays running through Phase 7. Phase 8
-# deletes the legacy entry-point + everything tagged with v4-PHASE-8-KILL
-# and removes this banner.
-# ============================================================
-import asyncio  # noqa: E402  (kept here so legacy import block above stays untouched)
+import asyncio  # noqa: E402
 import os  # noqa: E402
 
 from foreman.providers import make_provider  # noqa: E402
@@ -498,16 +447,12 @@ class _V4PlannerResult:
 
 
 def _run_planner_for_v4(*, project: str, issue_number: int) -> _V4PlannerResult:
-    """Run the planner the same way the legacy ``plan`` command does, but
-    without label-writing on top.
+    """Run the planner core and adapt its result for the v4 CLI entry point.
 
-    Option B per the Phase 5.2 plan: duplicate the planner-invocation
-    sequence rather than refactor the legacy ``run_planner`` body.
-    The legacy ``run_planner`` is intentionally re-used here — it already
-    contains the full worktree → LLM → commit → push → open-PR sequence,
-    and v3's label-writing behavior is benign for v4 callers (the v4
-    state machine drives off the FOREMAN_OUTCOME emitted below, not off
-    GitHub labels). The label-writing tail goes away in Phase 8.
+    Calls :func:`_run_planner_core` (the worktree → LLM → commit → push →
+    open-PR sequence formerly known as ``run_planner``) and unpacks the
+    pieces ``run_planner_cli`` reports via ``FOREMAN_OUTCOME``. The v4
+    state machine drives off that outcome — not off GitHub labels.
 
     The legacy entry-point takes ``issue_url``; v4's SubprocessRoleDispatcher
     passes ``--issue-number``. Synthesize the URL from the project's
@@ -537,8 +482,8 @@ def _run_planner_for_v4(*, project: str, issue_number: int) -> _V4PlannerResult:
         orchestrator=cfg.orchestrator,
         installation_repo=project_cfg.repo,
     )
-    legacy_result = asyncio.run(
-        run_planner(
+    core_result = asyncio.run(
+        _run_planner_core(
             issue_url=issue_url,
             config=cfg,
             project_name=project,
@@ -548,10 +493,10 @@ def _run_planner_for_v4(*, project: str, issue_number: int) -> _V4PlannerResult:
         )
     )
     return _V4PlannerResult(
-        pr_url=legacy_result.pr.url,
-        pr_number=legacy_result.pr.number,
-        summary=legacy_result.llm_output.summary,
-        confidence=legacy_result.llm_output.confidence,
+        pr_url=core_result.pr.url,
+        pr_number=core_result.pr.number,
+        summary=core_result.llm_output.summary,
+        confidence=core_result.llm_output.confidence,
     )
 
 

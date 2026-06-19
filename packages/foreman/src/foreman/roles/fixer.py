@@ -44,7 +44,6 @@ from github.Repository import Repository
 from pydantic import ValidationError
 
 from foreman.branches import impl_branch, spec_branch
-from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
 from foreman.providers import ProviderError
@@ -366,8 +365,7 @@ def _unaddressed_by_reason_histogram(output: FixerOutput) -> dict[str, int]:
     return hist
 
 
-# v4-PHASE-8-KILL: legacy fixer entry-point used by the `fix` CLI command (cli.py); emits via label-writing tail. Replaced by run_fixer_cli (below) + fix-v4 CLI command. Remove this function and the legacy label-writing tail in Phase 8.
-async def run_fixer(
+async def _run_fixer_core(
     *,
     issue_url: str,
     config: V4Config,
@@ -376,8 +374,6 @@ async def run_fixer(
     provider: ProviderFacade,
     identity_registry: V4IdentityRegistry,
     target: str = "spec_pr",
-    dispatch_recorder: DispatchRecorder | None = None,
-    dispatch_trace_id: int | None = None,
 ) -> FixerRunResult:
     """Run the Fixer role end-to-end on one issue.
 
@@ -487,8 +483,7 @@ async def run_fixer(
         arms (foreman#266 — type-narrowing split). Closes over
         ``start_time`` / ``usage`` / ``pr_number`` /
         ``actual_repo_slug`` / ``issue_number`` / ``attempt`` /
-        ``project_name`` / ``dispatch_recorder`` /
-        ``dispatch_trace_id`` / ``issue``. The bare ``raise`` that
+        ``project_name`` / ``issue``. The bare ``raise`` that
         re-propagates the original exception lives in each ``except``
         arm after calling this helper.
         """
@@ -524,29 +519,6 @@ async def run_fixer(
             # Best-effort telemetry — swallow so the daemon dispatcher
             # sees the ORIGINAL exception, not the stats writer's.
             pass
-        # foreman#251 (Phase 1): mirror the failure-path dual-write.
-        emit_recorder_complete(
-            dispatch_recorder=dispatch_recorder,
-            dispatch_trace_id=dispatch_trace_id,
-            role="fixer",
-            repo_slug=actual_repo_slug,
-            ticket_id=f"{actual_repo_slug}#{issue_number}",
-            project=project_name,
-            issue_number=issue_number,
-            pr_number=pr_number,
-            outcome="exception",
-            usage=usage if usage is not None else UsageInfo(),
-            role_data={
-                "attempt": attempt,
-                "total_findings": 0,
-                "addressed_count": 0,
-                "unaddressed_count": 0,
-                "unaddressed_by_reason": {},
-                "disagreed_count": 0,
-                "confidence": "low",
-            },
-            duration_seconds=duration_seconds,
-        )
         # foreman#229: runaway-burn defense. Post the traceback as a
         # comment on the originating issue. Under v4 the state machine
         # owns the NeedsHelp transition + ``foreman:state-needs-help``
@@ -692,31 +664,6 @@ async def run_fixer(
             duration_ms=usage.duration_ms,
             num_turns=usage.num_turns,
         )
-        # foreman#251 (Phase 1): dual-write through the Recorder.
-        emit_recorder_complete(
-            dispatch_recorder=dispatch_recorder,
-            dispatch_trace_id=dispatch_trace_id,
-            role="fixer",
-            repo_slug=actual_repo_slug,
-            ticket_id=f"{actual_repo_slug}#{issue_number}",
-            project=project_name,
-            issue_number=issue_number,
-            pr_number=pr_number,
-            outcome=llm_output.outcome,
-            usage=usage,
-            role_data={
-                "attempt": attempt,
-                "total_findings": (
-                    len(llm_output.addressed_findings) + len(llm_output.unaddressed_findings)
-                ),
-                "addressed_count": len(llm_output.addressed_findings),
-                "unaddressed_count": len(llm_output.unaddressed_findings),
-                "unaddressed_by_reason": unaddressed_hist,
-                "disagreed_count": disagreed_count,
-                "confidence": llm_output.confidence,
-            },
-            duration_seconds=duration_seconds,
-        )
 
         return FixerRunResult(
             llm_output=llm_output,
@@ -737,13 +684,7 @@ async def run_fixer(
         raise
 
 
-# ============================================================
-# v4 emit path — additive alongside the legacy label-writing entry-point.
-# The legacy code path (above) stays running through Phase 7. Phase 8
-# deletes the legacy entry-point + everything tagged with v4-PHASE-8-KILL
-# and removes this banner.
-# ============================================================
-import asyncio  # noqa: E402  (kept here so legacy import block above stays untouched)
+import asyncio  # noqa: E402
 
 from foreman.providers import make_provider  # noqa: E402
 from foreman.v4.config import load_config as load_v4_config  # noqa: E402
@@ -818,16 +759,15 @@ def _run_fixer_for_v4(
 ) -> _V4FixerResult:
     """Run the fixer end-to-end for a v4 caller.
 
-    Wraps the role's ``run_fixer`` (worktree attach → LLM dispatch →
-    commit/push → PR comment post) and flattens its result into the
-    v4 shape consumed by ``run_fixer_cli``. The v4 state machine
-    drives off the FOREMAN_OUTCOME emitted below, not off GitHub
-    labels — ``LabelObservabilityObserver`` owns ``foreman:*`` writes
-    off state-machine transitions.
+    Wraps :func:`_run_fixer_core` (worktree attach → LLM dispatch →
+    commit/push → PR comment post, formerly ``run_fixer``) and flattens
+    its result into the v4 shape consumed by ``run_fixer_cli``. The v4
+    state machine drives off the FOREMAN_OUTCOME emitted below, not off
+    GitHub labels.
 
-    ``target`` arrives in v4 vocabulary ("spec" / "impl"); the role's
-    ``run_fixer`` takes the "spec_pr" / "impl_pr" form for prompt
-    selection. Translation happens at the boundary.
+    ``target`` arrives in v4 vocabulary ("spec" / "impl"); the core takes
+    the "spec_pr" / "impl_pr" form for prompt selection. Translation
+    happens at the boundary.
 
     Escalation: a "soft" incomplete (LLM returned
     ``outcome="incomplete"``) maps to NEEDS_HELP — the v4 state
@@ -892,8 +832,8 @@ def _run_fixer_for_v4(
     )
     provider = make_provider()
     legacy_target = _V4_TARGET_TO_LEGACY[target]
-    legacy_result = asyncio.run(
-        run_fixer(
+    core_result = asyncio.run(
+        _run_fixer_core(
             issue_url=issue_url,
             config=cfg,
             project_name=project,
@@ -910,12 +850,12 @@ def _run_fixer_for_v4(
     # short of "fixed" is treated as needing human help. Retry budget
     # lives in the v4 state machine (foreman#8c.2); the role no longer
     # caps attempts itself.
-    llm = legacy_result.llm_output
+    llm = core_result.llm_output
     pushed = llm.outcome == "fixed"
     summary = (
         llm.fix_comment[:500]
         if llm.fix_comment
-        else f"{llm.outcome} (attempt {legacy_result.attempt})"
+        else f"{llm.outcome} (attempt {core_result.attempt})"
     )
     # Phase 8d.17 / foreman#315: preserve FixerOutput diagnostic
     # detail by lifting onto Outcome.details. The fixer's full
@@ -928,7 +868,7 @@ def _run_fixer_for_v4(
         "outcome": llm.outcome,
         "fix_comment": llm.fix_comment,
         "confidence": llm.confidence,
-        "attempt": legacy_result.attempt,
+        "attempt": core_result.attempt,
         "commits_made": [c.model_dump(mode="json") for c in llm.commits_made],
         "addressed_findings": [
             f.model_dump(mode="json") for f in llm.addressed_findings
@@ -951,9 +891,7 @@ def run_fixer_cli(*, project: str, issue_number: int, target: str) -> int:
 
     ``target`` is the v4 vocab ("spec" / "impl"). The
     SubprocessRoleDispatcher (Task 5.6) forks ``foreman fix-v4
-    --target spec|impl`` which calls this. Legacy ``fix`` command +
-    label-writing tail in this module are tagged ``v4-PHASE-8-KILL``
-    and deleted together in Phase 8.
+    --target spec|impl`` which calls this.
     """
     if os.environ.get("FOREMAN_DRY_RUN") == "1":
         # Short-circuit for the Task 8.6 real-fork integration test. Emits
