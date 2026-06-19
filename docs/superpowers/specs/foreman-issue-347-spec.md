@@ -55,17 +55,31 @@ dispatched the run instead. Tracks
 - [ ] `foreman.roles.fixer.run_fixer` gets the same env injection +
   post-amend helper application as the Worker on BOTH commit paths
   (`spec_pr` AND `impl_pr`), so every Fixer commit — regardless of
-  target — carries the trailer. Both Fixer targets commit via the
-  LLM's Bash invocations (the `fixer.md` and `fixer_impl.md` prompts
-  both instruct `git commit` + `git push` from inside the worktree);
-  neither path calls `commit_files_to_worktree`. There is a single
-  shared `provider.run_agent` call site at
+  target — carries the trailer on the REMOTE branch the DCO gate
+  checks. The contract requires three coupled changes:
+  (a) the LLM-side `git push` instruction is removed from
+  `fixer.md` (line 186) so the spec-side LLM commits but does NOT
+  push; `fixer_impl.md` already has no explicit push instruction,
+  so no prompt-side push edit is needed there;
+  (b) after the LLM returns, `_ensure_signoff_trailer` runs against
+  the worktree on whichever branch the Fixer target writes to,
+  then `fixer.py` calls `host.push_branch(worktree_path=...,
+  branch=...)` to deterministic-push the (possibly amended) HEAD
+  to the remote — mirroring the Worker's foreman#222 flow at
+  `worker.py:1032`;
+  (c) `fixer.md`'s no-force-push wording (lines 189-192) is
+  narrowed to scope only LLM-side pushes the LLM might attempt; the
+  Python-side `host.push_branch` on a bot-owned branch is not
+  subject to the same rail.
+  Both Fixer targets commit via the LLM's Bash invocations (per
+  `fixer.md:186` for the spec-side and the implicit-push expectation
+  in the `fixer.py` docstring at line 24 for the impl-side); neither
+  path calls `commit_files_to_worktree`. There is a single shared
+  `provider.run_agent` call site at
   `packages/foreman/src/foreman/roles/fixer.py:647-653` that handles
-  both targets, so one env-dict extension covers both. After the LLM
-  returns, `_ensure_signoff_trailer` runs against the worktree on
-  whichever branch the Fixer target writes to. The contract is:
-  every Fixer commit ships with the operator's `Signed-off-by:`
-  trailer, regardless of target.
+  both targets, so one env-dict extension covers both. The contract
+  is: every Fixer commit ships with the operator's `Signed-off-by:`
+  trailer on the REMOTE branch, regardless of target.
 - [ ] `packages/foreman/src/foreman/prompts/worker.md` gains a new
   `<dco_signoff>` section (sibling of `<commit_message_guardrails>`)
   that documents the `--trailer "Signed-off-by: $FOREMAN_OPERATOR_NAME
@@ -88,16 +102,19 @@ dispatched the run instead. Tracks
   per-project override in the shipped template — projects opt in.
 - [ ] Unit tests cover: top-level operator parse round-trip, missing
   operator raises ValidationError, missing `name` raises, missing
-  `email` raises, malformed `email` raises, per-project override
-  parses, `resolve_operator` returns project override when set,
-  `resolve_operator` returns top-level when project override unset,
-  `commit_files_to_worktree` adds trailer when `signoff_trailer` set
-  (subprocess invocation pinned via `subprocess.run` mock or a real
-  `git` invocation inside `tmp_path`), Worker
-  `_ensure_signoff_trailer` no-ops at 0 commits, amends at 1 commit
-  if missing, no-ops at 1 commit if already present, warn+skip at
-  multi-commit. End-to-end test verifies a Planner spec commit on a
-  real `tmp_path` worktree carries the `Signed-off-by:` trailer.
+  `email` raises, whitespace-only `name` raises (e.g., `name = " "`
+  raises ValidationError — pins AC bullet 1's "non-empty after
+  `.strip()`" invariant against `Field(..., min_length=1)` drift),
+  whitespace-only `email` raises, malformed `email` raises, per-project
+  override parses, `resolve_operator` returns project override when
+  set, `resolve_operator` returns top-level when project override
+  unset, `commit_files_to_worktree` adds trailer when
+  `signoff_trailer` set (subprocess invocation pinned via
+  `subprocess.run` mock or a real `git` invocation inside `tmp_path`),
+  Worker `_ensure_signoff_trailer` no-ops at 0 commits, amends at 1
+  commit if missing, no-ops at 1 commit if already present, warn+skip
+  at multi-commit. End-to-end test verifies a Planner spec commit on
+  a real `tmp_path` worktree carries the `Signed-off-by:` trailer.
 - [ ] `docs/RUNBOOK.md` gains a new "Operator identity (DCO sign-off)"
   section documenting the `[operator]` block, the per-project override
   shape, the `FOREMAN_OPERATOR_NAME` / `FOREMAN_OPERATOR_EMAIL` env
@@ -122,17 +139,22 @@ side.
 **Schema (§1).** Add `OperatorConfig(BaseModel)` next to the existing
 `ProjectConfig` / `AppCredentials` / `AppsConfig` blocks in
 `packages/foreman/src/foreman/v4/config.py`. Required fields
-`name: str` and `email: str`; both validated with `Field(...,
-min_length=1)` and the email field constrained by a `field_validator`
-matching the basic shape `[^@\s]+@[^@\s]+\.[^@\s]+`. `extra="forbid"`
-matches the rest of the schema. Hang `operator: OperatorConfig` (no
-default — required) on `V4Config`. Add optional `operator:
-OperatorConfig | None = None` on `ProjectConfig`. Extend `load_config`
-to forward `operator` from the parsed TOML the same way it forwards
-`apps` / `orchestrator` today (only include the key in the payload if
-it's present in the raw TOML, so the validation error names the
-missing field cleanly instead of running an empty-dict against the
-required-field schema).
+`name: str` and `email: str`; both validated with an explicit
+`field_validator('name', 'email', mode='before')` that calls `.strip()`
+on the input and raises `ValueError` if the result is empty. This is
+the canonical pydantic shape for "non-empty after `.strip()`" per
+AC bullet 1 — `Field(..., min_length=1)` counts pre-strip characters
+and would accept `" "`, which AC bullet 1 explicitly forbids and the
+test list below explicitly pins. The email field is further constrained
+by a second `field_validator('email')` matching the basic shape
+`[^@\s]+@[^@\s]+\.[^@\s]+`. `extra="forbid"` matches the rest of the
+schema. Hang `operator: OperatorConfig` (no default — required) on
+`V4Config`. Add optional `operator: OperatorConfig | None = None` on
+`ProjectConfig`. Extend `load_config` to forward `operator` from the
+parsed TOML the same way it forwards `apps` / `orchestrator` today
+(only include the key in the payload if it's present in the raw TOML,
+so the validation error names the missing field cleanly instead of
+running an empty-dict against the required-field schema).
 
 Add a module-level pure function
 `resolve_operator(project: ProjectConfig, config: V4Config) -> OperatorConfig`
@@ -194,12 +216,22 @@ clean path.
 
 **Fixer (§3, cont.).** Both Fixer targets (`spec_pr` AND `impl_pr`)
 follow the same shape as the Worker — both commit via LLM-driven
-Bash inside the worktree (`fixer.md:186` instructs the spec-side
-LLM to `git push origin foreman/issue-<N>` after committing; the
-impl-side `fixer_impl.md` has equivalent commit-then-push
-instructions in its commit-discipline area). Neither path calls
-`commit_files_to_worktree` — `roles/fixer.py` never imports or
-invokes that API on either target. The "Planner-style API
+Bash inside the worktree. The spec-side `fixer.md:186` instructs the
+LLM to `git push origin foreman/issue-<N>` after committing. The
+impl-side `fixer_impl.md` has NO explicit `git push` instruction and
+NO `<commit_discipline>` anchor; the commit/push behavior is implicit
+via the `fixer.py` docstring at line 24, which names "`git add` +
+`git commit` + `git push` directly" as the expected flow for both
+targets. (This means the impl-side prompt edit for the
+`<dco_signoff>` addition is a pure addition near the "Hard rules"
+block at lines 73-82 — option (a) of the two prompt-edit shapes
+named in the Prompts section below: sibling-add the `<dco_signoff>`
+section and leave the implicit-commit-and-push pattern intact; do
+NOT add a new `<commit_discipline>` block mirroring `fixer.md`'s
+shape because option (b)'s push instruction becomes obsolete under
+the push-flow reconciliation mandate in part 2 below.) Neither path
+calls `commit_files_to_worktree` — `roles/fixer.py` never imports
+or invokes that API on either target. The "Planner-style API
 pass-through" framing of an earlier spec draft was wrong; both
 Fixer paths are Worker-shaped, not Planner-shaped.
 
@@ -220,17 +252,53 @@ Two coordinated changes mirror the Worker pattern:
    implementation (preferred), or duplicate per existing role
    conventions if the Worker stage hits an import-graph wall — both
    options satisfy the AC tests pinning trailer presence on every
-   commit. The helper amends HEAD locally; the Worker stage MUST
-   decide how to reconcile that amend with the LLM's existing
-   `git push` (options include: updating the Fixer prompts to
-   commit-but-not-push and adding a Python `host.push_branch` after
-   the amend — matching the Worker's `host.push_branch` flow added
-   in foreman#222 — OR amending before the LLM's push lands by
-   sequencing the helper inside the same role-run boundary the
-   LLM's Bash terminated on). The prompt-side `<dco_signoff>` guard
-   is the primary defense — in the clean path the LLM writes the
-   trailer correctly and the helper no-ops without amending, so the
-   push-flow question becomes moot.
+   commit.
+
+   **Push-flow reconciliation (mandated).** The runtime amend only
+   rewrites local HEAD; the DCO gate from PR #346 checks REMOTE
+   commits. Today the LLM pushes from inside its Bash session
+   (`fixer.md:186` for the spec-side and implicitly via the
+   `fixer.py` docstring at line 24 for the impl-side), so by the
+   time Python regains control to run `_ensure_signoff_trailer`,
+   an un-amended commit is already on the remote and the local
+   amend is invisible to CI. "Amending before the LLM's push lands
+   by sequencing the helper inside the same role-run boundary" is
+   mechanically impossible — Python regains control only after the
+   LLM's Bash session ends. The Worker stage MUST therefore:
+
+   (a) Remove the LLM-side push instruction from `fixer.md` (line
+       186 — delete the "After committing, `git push origin
+       foreman/issue-<N>`" sentence) so the spec-side LLM commits
+       but does NOT push. `fixer_impl.md` has no explicit
+       `git push` instruction to remove (per the framing above);
+       the implicit-push expectation from `fixer.py` docstring
+       line 24 is what changes, not a prompt edit.
+   (b) Add a Python-side `host.push_branch(worktree_path=...,
+       branch=...)` call in `fixer.py` AFTER
+       `_ensure_signoff_trailer` runs and BEFORE control returns
+       to Foreman core — mirroring the Worker's foreman#222 flow
+       at `worker.py:1032`. The branch is `foreman/issue-<N>` on
+       the `spec_pr` target and `foreman/impl-<N>` on the
+       `impl_pr` target; both are bot-owned and safe to
+       deterministic-push.
+   (c) Narrow `fixer.md`'s no-force-push wording (lines 189-192,
+       the "If `git push` fails… do NOT attempt `--force`"
+       paragraph) so it explicitly scopes to LLM-side pushes the
+       LLM might attempt — the Python-side `host.push_branch` of
+       an amended commit on a bot-owned branch is a non-issue
+       (the branch only has bot history) and `host.push_branch`
+       is deterministic, not LLM-driven, so the existing safety
+       rail still applies wherever it matters.
+
+   This mandate makes the runtime amend a real backstop: even
+   when the LLM forgets the trailer, Python's amend lands on
+   local HEAD and Python's subsequent `host.push_branch` carries
+   that amended HEAD to the remote, where the DCO gate sees it.
+   The prompt-side `<dco_signoff>` guard is still the primary
+   defense — in the clean path the LLM writes the trailer
+   correctly and the helper no-ops without amending — but unlike
+   the earlier "in the clean path it's moot" framing, the
+   not-clean path also produces a DCO-passing remote commit.
 
 **Prompts (§6).** Add a `<dco_signoff>` section to
 `packages/foreman/src/foreman/prompts/worker.md` (next to the existing
@@ -292,7 +360,10 @@ follows.
    `project.operator or config.operator`.
 6. Add unit tests in `packages/foreman/tests/v4/test_config.py`:
    top-level operator parse, missing operator raises, missing `name`
-   raises, missing `email` raises, malformed `email` raises (e.g.,
+   raises, missing `email` raises, whitespace-only `name` raises
+   (e.g., `name = " "` raises ValidationError — pins the
+   "non-empty after `.strip()`" invariant from AC bullet 1),
+   whitespace-only `email` raises, malformed `email` raises (e.g.,
    `"not-an-email"`), per-project override parses, resolver returns
    override when set, resolver returns top-level when unset. Extend
    the existing `_APPS_TOML` shared fixture with an `_OPERATOR_TOML`
@@ -346,13 +417,21 @@ follows.
     `FOREMAN_OPERATOR_EMAIL` from
     `resolve_operator(project, config)`) threads through both. After
     the LLM returns, run `_ensure_signoff_trailer` against the
-    worktree on whichever branch the Fixer target writes to. Both
-    paths commit via LLM-driven Bash (per `fixer.md:186` and the
-    equivalent commit-then-push lines in `fixer_impl.md`), so the
-    post-amend helper applies identically on both. Factor the helper
-    into a shared module so the Worker and both Fixer paths share
-    one implementation (preferred), or duplicate per existing role
-    conventions — both leave the contract the AC tests pin.
+    worktree on whichever branch the Fixer target writes to, then
+    immediately call `host.push_branch(worktree_path=...,
+    branch=...)` to deterministic-push the (possibly amended) HEAD
+    to the remote — mirroring the Worker's foreman#222 flow at
+    `worker.py:1032`. The branch is `foreman/issue-<N>` on the
+    `spec_pr` target and `foreman/impl-<N>` on the `impl_pr`
+    target. Both paths commit via LLM-driven Bash (per
+    `fixer.md:186` for the spec-side and the implicit-push
+    expectation in the `fixer.py` docstring at line 24 for the
+    impl-side); the LLM-side push instruction in `fixer.md:186` is
+    removed in sub-request 17 so Python owns the push for both
+    targets. Factor the helper into a shared module so the Worker
+    and both Fixer paths share one implementation (preferred), or
+    duplicate per existing role conventions — both leave the
+    contract the AC tests pin.
 16. Add `<dco_signoff>` section to
     `packages/foreman/src/foreman/prompts/worker.md` (next to
     `<commit_message_guardrails>` around line 274). Documents the
@@ -365,12 +444,31 @@ follows.
     `packages/foreman/src/foreman/prompts/fixer.md` (the **spec-side**
     Fixer body — `fixer.md` IS the `spec_pr` prompt per
     `roles/fixer.py:123-128`), near `<commit_discipline>` around
-    line 171. ALSO add the same `<dco_signoff>` section to
+    line 171. In the SAME edit pass on `fixer.md`:
+    (a) delete the "After committing, `git push origin
+    foreman/issue-<N>` so the PR branch reflects your work"
+    sentence at line 186 — Python now owns the push via
+    `host.push_branch` (sub-request 15); the LLM must commit but
+    not push;
+    (b) narrow the `<commit_discipline>` no-force-push paragraph at
+    lines 189-192 so its scope is explicitly limited to LLM-side
+    push attempts (e.g., reframe as "If you somehow attempt a
+    `git push` and it fails…"), since the Python-side
+    `host.push_branch` of an amended commit on a bot-owned branch
+    is not subject to the same rail.
+    ALSO add the same `<dco_signoff>` section to
     `packages/foreman/src/foreman/prompts/fixer_impl.md` (the
     **impl-side** Fixer body). `fixer_impl.md` has no
-    `<commit_discipline>` anchor — read the file first and pick the
-    right adjacent block (e.g., near the commit-instruction lines
-    around 73-82).
+    `<commit_discipline>` anchor and no explicit `git push`
+    instruction (so there is no prompt-side push to delete on the
+    impl-side — Python's push handles both targets). Pick option
+    (a) of the two shapes named in the Approach Fixer (§3, cont.)
+    paragraph: sibling-add ONLY a new `<dco_signoff>` section near
+    the commit-instruction lines around 73-82, leaving the
+    implicit-commit-and-push pattern in the existing "Hard rules"
+    intact. Do NOT add a new `<commit_discipline>` block mirroring
+    `fixer.md`'s shape, because Python now owns the push and the
+    LLM-side push instruction is intentionally absent.
 18. Add the `[operator]` block to
     `docker/foreman/config.toml.template` between `[orchestrator]`
     (line 32-34) and the first `[[projects]]` block (line 36+).
@@ -396,11 +494,11 @@ follows.
 | `packages/foreman/src/foreman/git_hosts/github.py` | Implement the new parameter — splice `--trailer "Signed-off-by: ..."` into the `git commit` invocation when set. |
 | `packages/foreman/src/foreman/roles/planner.py` | Resolve operator and pass `signoff_trailer=...` to `commit_files_to_worktree`. |
 | `packages/foreman/src/foreman/roles/worker.py` | Add `_ensure_signoff_trailer` helper; call it on the `implemented` branch BEFORE `_sanitize_head_commit_auto_close`; plumb operator env vars into the `provider.run_agent` env dict. |
-| `packages/foreman/src/foreman/roles/fixer.py` | Mirror the Worker's env plumbing + post-amend on BOTH Fixer targets (`spec_pr` AND `impl_pr`). One env-dict extension at the shared `provider.run_agent` call site (lines 647-653) covers both targets; the post-amend helper runs on each branch after the LLM returns. |
+| `packages/foreman/src/foreman/roles/fixer.py` | Mirror the Worker's env plumbing + post-amend on BOTH Fixer targets (`spec_pr` AND `impl_pr`). One env-dict extension at the shared `provider.run_agent` call site (lines 647-653) covers both targets; the post-amend helper runs on each branch after the LLM returns, then `host.push_branch` is called immediately after (mirroring `worker.py:1032`) so the amended HEAD lands on the remote where the DCO gate checks. |
 | `packages/foreman/tests/test_worker.py` (or wherever the existing `_sanitize_head_commit_auto_close` tests live) | New tests for `_ensure_signoff_trailer` covering zero/one/multi-commit cases. |
 | `packages/foreman/src/foreman/prompts/worker.md` | New `<dco_signoff>` section documenting the `--trailer` pattern + the runtime amend as backstop. |
-| `packages/foreman/src/foreman/prompts/fixer.md` | New `<dco_signoff>` section for the **spec-side** Fixer body, near `<commit_discipline>` around line 171. (`fixer.md` is the `spec_pr` prompt per `roles/fixer.py:123-128`.) |
-| `packages/foreman/src/foreman/prompts/fixer_impl.md` | New `<dco_signoff>` section for the **impl-side** Fixer body. This file has no `<commit_discipline>` anchor — read the file first and pick the right adjacent block (e.g., near the commit-instruction lines around 73-82). |
+| `packages/foreman/src/foreman/prompts/fixer.md` | New `<dco_signoff>` section for the **spec-side** Fixer body, near `<commit_discipline>` around line 171. Also: (a) delete the "After committing, `git push origin foreman/issue-<N>`" sentence at line 186 (Python now owns the push via `host.push_branch`); (b) narrow the no-force-push paragraph at lines 189-192 so its scope explicitly limits to LLM-side push attempts. (`fixer.md` is the `spec_pr` prompt per `roles/fixer.py:123-128`.) |
+| `packages/foreman/src/foreman/prompts/fixer_impl.md` | New `<dco_signoff>` section for the **impl-side** Fixer body. This file has no `<commit_discipline>` anchor and no explicit `git push` instruction (commit/push behavior is implicit via the `fixer.py` docstring at line 24); the edit is a pure addition — read the file first and pick the right adjacent block (e.g., near the commit-instruction lines around 73-82). No prompt-side `git push` to remove, since Python now owns the push for both targets (sub-request 15). Pick option (a): sibling-add only `<dco_signoff>`; do NOT add a new `<commit_discipline>` block. |
 | `docker/foreman/config.toml.template` | Add `[operator]` block with `${FOREMAN_OPERATOR_NAME}` / `${FOREMAN_OPERATOR_EMAIL}` placeholders between `[orchestrator]` and `[[projects]]`. |
 | `docs/RUNBOOK.md` | New "Operator identity (DCO sign-off)" section. |
 
