@@ -13,12 +13,18 @@ default:
     @just --list
 
 # Composite gate (recommended before push)
-check: lint typecheck import-lint test
+check: lock-check lint typecheck import-lint test
 
 # Developer convenience: apply lint auto-fixes + formatter
 fix:
     uv run --no-sync ruff check --fix packages/foreman
     uv run --no-sync ruff format packages/foreman
+
+# Validate uv.lock parses cleanly and is up-to-date with pyproject.toml.
+# Cheap fail-fast gate so a malformed lockfile (e.g. duplicate package
+# blocks from a stitched merge) is rejected pre-push instead of in CI.
+lock-check:
+    uv lock --check
 
 # Lint
 lint:
