@@ -1,8 +1,9 @@
 """Worker role dispatcher — 4th pipeline node, the implementer stage.
 
 The Worker LLM consumes a plan-approved issue + spec doc and implements the
-described code change. It commits + pushes to a stacked impl branch
-(``foreman/impl-<N>``, based on ``foreman/issue-<N>``) and returns a
+described code change. It commits + pushes to an impl branch
+(``foreman/impl-<N>``, based on the project's ``dev_base_branch`` —
+default ``main``) and returns a
 :class:`~foreman.schemas.worker.WorkerOutput`. Foreman core then:
 
   1. Re-runs ``check_command`` independently after the Worker returns,
@@ -12,9 +13,13 @@ described code change. It commits + pushes to a stacked impl branch
   2. Branches on the (post-verification) outcome:
 
      - ``implemented`` → opens the impl PR via PyGithub with
-       ``base=wt_result.base_branch`` — either the spec branch (D1,
-       stacked PR) or the default branch (fallback when the spec
-       branch is gone, issue #48).
+       ``base=wt_result.base_branch`` — the project's resolved
+       ``dev_base_branch`` (defaulting to the clone's default
+       branch). foreman#341: pre-v4 ``create_impl`` reported the
+       spec branch as base for the stacked-PR design; v4's
+       ``SpecReviewState`` merges the spec into the dev base before
+       dispatching the Worker, so targeting the dev base directly
+       is what we always want.
      - ``incomplete`` → no impl PR opened. The Worker's commits +
        push are kept for audit + future-Fixer resume.
      - ``spec_invalid`` → no impl PR opened. Posts the LLM's
@@ -812,13 +817,20 @@ async def _run_worker_core(
         # Resolve check_command per D2: project override or default.
         check_command = _resolve_check_command(project.check_command)
 
-        # Create the Worker's stacked impl worktree. NOT ``create`` (would
-        # branch from main) and NOT ``attach`` (would reuse the spec-side
-        # ``issue-<N>/`` worktree and inherit any Fixer WIP state).
-        # ``create_impl`` returns the worktree path AND the branch the impl
-        # PR should target — usually the spec branch (D1 stacked PR), or
-        # the default branch when the spec branch is gone (issue #48
-        # fallback).
+        # Create the Worker's impl worktree. NOT ``create`` (which
+        # creates the spec-side ``foreman/issue-<N>`` branch) and NOT
+        # ``attach`` (which would reuse the spec-side ``issue-<N>/``
+        # worktree and inherit any Fixer WIP state).
+        #
+        # foreman#341: ``create_impl`` branches the new
+        # ``foreman/impl-<N>`` worktree off ``origin/<dev_base_branch>``
+        # (or the default branch when ``dev_base_branch`` is None). By
+        # the time the Worker runs, v4's ``SpecReviewState`` has
+        # already merged the spec PR into the dev base, so the impl
+        # PR opens with ``base=<dev_base_branch>`` from the start.
+        # Pre-#341 the method stacked the impl branch on the (orphan)
+        # spec branch, causing the impl PR to merge into the spec
+        # branch rather than the dev base (PR #339).
         # WorktreeManager's git subprocesses (fetch / worktree add) must
         # authenticate as the worker bot — without the explicit token they
         # inherit the daemon's parent ``GH_TOKEN`` (CI runner, dev shell)
@@ -830,6 +842,7 @@ async def _run_worker_core(
             clone_path=Path(project.local_clone_path),
             repo_slug=repo_name,
             ticket_id=issue_number,
+            dev_base_branch=project.dev_base_branch,
             repo_url=f"https://github.com/{project.repo}.git",
         )
         wt_path = wt_result.path
@@ -981,8 +994,12 @@ async def _run_worker_core(
         # advance the ticket.
         pr_url: str | None = None
         if final_outcome == "implemented":
-            # Open the impl PR, stacked on the spec branch (D1). The
-            # PyGithub call gives us the new PR's html_url to return.
+            # Open the impl PR targeting the project's dev base
+            # (``wt_result.base_branch``). foreman#341: pre-v4 this was
+            # ``foreman/issue-<N>`` (stacked-PR design); v4's
+            # ``SpecReviewState`` has already merged the spec into the
+            # dev base by the time we get here.
+            # The PyGithub call gives us the new PR's html_url to return.
             # ``pr_title`` and ``pr_body`` are guaranteed non-None by the
             # WorkerOutput validator; the override path above only flips
             # `implemented` → `incomplete`, never the reverse.
