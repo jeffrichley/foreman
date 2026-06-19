@@ -19,7 +19,17 @@ dev = [
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-asyncio", specifier = ">=0.23" },
     { name = "ruff", specifier = ">=0.14" },
+    { name = "types-pyyaml", specifier = ">=6,<7" },
     { name = "vulture", specifier = ">=2.13" },
+]
+
+[[package]]
+name = "annotated-doc"
+version = "0.0.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/57/ba/046ceea27344560984e26a590f90bc7f4a75b06701f653222458922b558c/annotated_doc-0.0.4.tar.gz", hash = "sha256:fbcda96e87e9c92ad167c2e53839e57503ecfda18804ea28102353485033faa4", size = 7288, upload-time = "2025-11-10T22:07:42.062Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1e/d3/26bf1008eb3d2daa8ef4cacc7f3bfdc11818d111f7e2d0201bc6e3b49d45/annotated_doc-0.0.4-py3-none-any.whl", hash = "sha256:571ac1dc6991c450b25a9c2d84a3705e2ae7a53467b5d111c24fa8baabbed320", size = 5303, upload-time = "2025-11-10T22:07:40.673Z" },
 ]
 
 [[package]]
@@ -360,8 +370,10 @@ dependencies = [
     { name = "pydantic" },
     { name = "pygithub" },
     { name = "pyjwt", extra = ["crypto"] },
+    { name = "pyyaml" },
     { name = "requests" },
     { name = "rich" },
+    { name = "typer" },
 ]
 
 [package.metadata]
@@ -371,8 +383,10 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.5,<3" },
     { name = "pygithub", specifier = ">=2.0,<3" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8,<3" },
+    { name = "pyyaml", specifier = ">=6,<7" },
     { name = "requests", specifier = ">=2.31,<3" },
     { name = "rich", specifier = ">=13,<15" },
+    { name = "typer", specifier = ">=0.12,<1" },
 ]
 
 [[package]]
@@ -1266,6 +1280,15 @@ wheels = [
 ]
 
 [[package]]
+name = "shellingham"
+version = "1.5.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/58/15/8b3609fd3830ef7b27b655beb4b4e9c62313a4e8da8c676e142cc210d58e/shellingham-1.5.4.tar.gz", hash = "sha256:8dbca0739d487e5bd35ab3ca4b36e11c4078f3a234bfce294b0a0291363404de", size = 10310, upload-time = "2023-10-24T04:13:40.426Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e0/f9/0595336914c5619e5f28a1fb793285925a8cd4b432c9da0a987836c7f822/shellingham-1.5.4-py2.py3-none-any.whl", hash = "sha256:7ecfff8f2fd72616f7481040475a65b2bf8af90a56c89140852d1120324e8686", size = 9755, upload-time = "2023-10-24T04:13:38.866Z" },
+]
+
+[[package]]
 name = "sniffio"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1298,6 +1321,30 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/eb/e3/7c1dc7381d9f8ab7d854328ebfa884e62cb3f3d8549ddfd37c7814f42afa/starlette-1.3.1.tar.gz", hash = "sha256:05d0213193f2fbaae60e2ecb593b4add4262ad4e46536b54abe36f11a71724e0", size = 2703240, upload-time = "2026-06-12T09:23:11.602Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ec/bb/2799cc2ede3ed41131f8975621e7213dfc7ef4acbbaadfa440f32500c370/starlette-1.3.1-py3-none-any.whl", hash = "sha256:c7372aae11c3c3f26a42df7bd626cec2f47d03483d261d369516a615a53714c6", size = 73632, upload-time = "2026-06-12T09:23:10.017Z" },
+]
+
+[[package]]
+name = "typer"
+version = "0.26.7"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "annotated-doc" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "rich" },
+    { name = "shellingham" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5e/ed/ef06584ccdd5c410df0837951ecd7e15d9a6144ea1bd4c73cecab1a89891/typer-0.26.7.tar.gz", hash = "sha256:e314a34c617e419c091b2830dda3ea1f257134ff593061a8f5b9717ab8dddb3a", size = 201709, upload-time = "2026-06-03T07:18:06.843Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/24/25/2201973529af2c954de0bb725323c3aaed6d7f0ceee8f550dec9185df013/typer-0.26.7-py3-none-any.whl", hash = "sha256:5c87cfbc5d34491c5346ebf49c23e18d56ccb863268d3a8d592b26087c2f5e58", size = 122456, upload-time = "2026-06-03T07:18:05.732Z" },
+]
+
+[[package]]
+name = "types-pyyaml"
+version = "6.0.12.20260518"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b8/83/4a1afc3fbfcf5b8d46fc390cd95ed6b0dc9010a265f4e9f46314efffa37a/types_pyyaml-6.0.12.20260518.tar.gz", hash = "sha256:d917f83fb38462550338c1297faedd860b3ec83912b96b1e3d73255f7473e466", size = 17850, upload-time = "2026-05-18T06:01:58.675Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/06/a2/c01db32be2ae7d6a1689972f3c492b149ee4e164b12fdfd9f64b50888215/types_pyyaml-6.0.12.20260518-py3-none-any.whl", hash = "sha256:d2150f75a231c9fe9c7463bd29487d93e60bac90400287351384bc2284eba7cd", size = 20312, upload-time = "2026-05-18T06:01:57.368Z" },
 ]
 
 [[package]]

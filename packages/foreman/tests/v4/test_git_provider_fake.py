@@ -1,0 +1,236 @@
+"""FakeGitProvider — in-memory implementation of the v4 GitProvider Protocol."""
+from __future__ import annotations
+
+import pytest
+
+from foreman.v4.git_provider import (
+    FakeGitProvider,
+    PRNotFoundError,
+    PRState,
+)
+
+
+def test_set_and_get_pr_state():
+    git = FakeGitProvider()
+    git.set_pr_state(
+        project="p", pr_number=1,
+        state=PRState(merged=False, mergeable=True, ci_passing=True),
+    )
+    assert git.get_pr_state(project="p", pr_number=1).mergeable is True
+
+
+def test_missing_pr_raises():
+    git = FakeGitProvider()
+    with pytest.raises(PRNotFoundError):
+        git.get_pr_state(project="p", pr_number=999)
+
+
+def test_merge_pr_marks_merged_and_records_call():
+    """``merge_pr`` flips the PR state to ``merged=True`` AND records the
+    call on ``merge_pr_calls`` so tests can distinguish "we merged it"
+    from "already merged externally" (where merge_pr must NOT be called).
+    """
+    git = FakeGitProvider()
+    git.set_pr_state(
+        project="p", pr_number=1,
+        state=PRState(merged=False, mergeable=True, ci_passing=True),
+    )
+    git.merge_pr(project="p", pr_number=1)
+    assert git.get_pr_state(project="p", pr_number=1).merged is True
+    assert ("p", 1) in git.merge_pr_calls
+
+
+def test_merge_pr_call_recorder_empty_by_default():
+    """The recorder is empty until ``merge_pr`` is called — load-bearing
+    for assertions that gate on "the state machine did NOT merge"."""
+    git = FakeGitProvider()
+    assert git.merge_pr_calls == set()
+
+
+def test_add_labels_records_call_and_is_queryable():
+    """A single add_labels call's labels are queryable via get_issue_labels."""
+    git = FakeGitProvider()
+    git.add_labels(project="p", issue_number=42, labels={"foreman:state-planning"})
+    assert git.get_issue_labels(project="p", issue_number=42) == {
+        "foreman:state-planning",
+    }
+
+
+def test_add_labels_preserves_existing_labels():
+    """The defining preservation case: adding a state label MUST NOT
+    drop the trigger label or operator-applied labels. This is the
+    Phase 8c.4 fix — the morning dogfood wedged for ~40min because
+    write_labels REPLACED the entire set, stripping foreman:plan."""
+    git = FakeGitProvider()
+    git.seed_issue_labels(
+        project="p", issue_number=42, labels={"foreman:plan", "custom"},
+    )
+    git.add_labels(
+        project="p", issue_number=42, labels={"foreman:state-planning"},
+    )
+    assert git.get_issue_labels(project="p", issue_number=42) == {
+        "foreman:plan", "custom", "foreman:state-planning",
+    }
+
+
+def test_remove_labels_only_touches_specified():
+    """Symmetric to add: removing a state label leaves trigger +
+    operator labels intact."""
+    git = FakeGitProvider()
+    git.seed_issue_labels(
+        project="p", issue_number=42,
+        labels={"foreman:plan", "custom", "foreman:state-planning"},
+    )
+    git.remove_labels(
+        project="p", issue_number=42, labels={"foreman:state-planning"},
+    )
+    assert git.get_issue_labels(project="p", issue_number=42) == {
+        "foreman:plan", "custom",
+    }
+
+
+def test_remove_labels_idempotent_on_missing():
+    """Removing a label that isn't on the issue is a silent no-op —
+    matches the Protocol contract and the PyGithub impl's 404
+    swallowing. Other labels unchanged."""
+    git = FakeGitProvider()
+    git.seed_issue_labels(
+        project="p", issue_number=42, labels={"foreman:plan"},
+    )
+    # remove_labels with a never-applied label — must not raise.
+    git.remove_labels(
+        project="p", issue_number=42, labels={"foreman:state-nonexistent"},
+    )
+    assert git.get_issue_labels(project="p", issue_number=42) == {
+        "foreman:plan",
+    }
+
+
+def test_remove_labels_on_unseen_issue_is_no_op():
+    """Even when the FakeGitProvider has no entry for this issue
+    (i.e., seed_issue_labels was never called), remove_labels must
+    not raise."""
+    git = FakeGitProvider()
+    git.remove_labels(
+        project="p", issue_number=999, labels={"foreman:state-planning"},
+    )
+    assert git.get_issue_labels(project="p", issue_number=999) == set()
+
+
+def test_get_issue_labels_unseen_defaults_to_empty_set():
+    git = FakeGitProvider()
+    assert git.get_issue_labels(project="p", issue_number=999) == set()
+
+
+def test_fake_close_issue_records_call():
+    """``close_issue`` adds ``(project, issue_number)`` to ``closed_issues``.
+
+    Phase 8d.20: MergingState calls close_issue after a successful merge so
+    the originating GitHub issue closes. The recorder lets MergingState
+    tests assert the close happened (and only in the merged branches —
+    the BLOCKED branch must NOT call it).
+    """
+    git = FakeGitProvider()
+    git.close_issue(project="p", issue_number=42)
+    assert ("p", 42) in git.closed_issues
+
+
+def test_fake_close_issue_idempotent():
+    """Calling ``close_issue`` twice doesn't raise and the recorder set
+    still has one entry — GitHub's REST API treats closing an
+    already-closed issue as a no-op, and the Fake mirrors that contract."""
+    git = FakeGitProvider()
+    git.close_issue(project="p", issue_number=42)
+    git.close_issue(project="p", issue_number=42)
+    assert git.closed_issues == {("p", 42)}
+
+
+def test_delete_branch_records_deletion():
+    fake = FakeGitProvider()
+    fake.seed_branch(project="p", branch_name="foreman/issue-1")
+    fake.delete_branch(project="p", branch_name="foreman/issue-1")
+    assert ("p", "foreman/issue-1") in fake.deleted_branches
+    assert "foreman/issue-1" not in fake.get_branches(project="p")
+
+
+def test_delete_branch_missing_is_noop():
+    fake = FakeGitProvider()
+    # No seed — branch doesn't exist. Must NOT raise.
+    fake.delete_branch(project="p", branch_name="foreman/issue-99")
+    assert ("p", "foreman/issue-99") in fake.deleted_branches
+
+
+def test_close_pr_records_call_and_preserves_merged_state():
+    """close_pr records the call. PRState.merged is preserved either way:
+    closed-without-merge stays False; close on an already-merged PR does
+    NOT undo the merge.
+    """
+    fake = FakeGitProvider()
+    # Branch A: close-without-merge — merged stays False.
+    fake.set_pr_state(
+        project="p", pr_number=19,
+        state=PRState(merged=False, mergeable=True, ci_passing=True),
+    )
+    fake.close_pr(project="p", pr_number=19)
+    assert ("p", 19) in fake.closed_prs
+    assert fake.get_pr_state(project="p", pr_number=19).merged is False
+
+    # Branch B: close on an already-merged PR — merged stays True.
+    fake.set_pr_state(
+        project="p", pr_number=20,
+        state=PRState(merged=True, mergeable=True, ci_passing=True),
+    )
+    fake.close_pr(project="p", pr_number=20)
+    assert ("p", 20) in fake.closed_prs
+    assert fake.get_pr_state(project="p", pr_number=20).merged is True
+
+
+def test_close_pr_idempotent_on_already_closed():
+    fake = FakeGitProvider()
+    fake.set_pr_state(
+        project="p", pr_number=19,
+        state=PRState(merged=False, mergeable=False, ci_passing=True),
+    )
+    fake.close_pr(project="p", pr_number=19)
+    # Second call must not raise.
+    fake.close_pr(project="p", pr_number=19)
+    assert ("p", 19) in fake.closed_prs
+
+
+def test_find_open_pr_by_head_branch_returns_pr_number():
+    fake = FakeGitProvider()
+    fake.set_pr_state(
+        project="p", pr_number=19,
+        state=PRState(merged=False, mergeable=True, ci_passing=True),
+    )
+    fake.set_pr_head_branch(
+        project="p", pr_number=19, branch_name="foreman/issue-180",
+    )
+    found = fake.find_open_pr_by_head_branch(
+        project="p", branch_name="foreman/issue-180",
+    )
+    assert found == 19
+
+
+def test_find_open_pr_by_head_branch_no_match_returns_none():
+    fake = FakeGitProvider()
+    found = fake.find_open_pr_by_head_branch(
+        project="p", branch_name="foreman/issue-999",
+    )
+    assert found is None
+
+
+def test_find_open_pr_by_head_branch_skips_closed_prs():
+    fake = FakeGitProvider()
+    fake.set_pr_state(
+        project="p", pr_number=19,
+        state=PRState(merged=False, mergeable=True, ci_passing=True),
+    )
+    fake.set_pr_head_branch(
+        project="p", pr_number=19, branch_name="foreman/issue-180",
+    )
+    fake.close_pr(project="p", pr_number=19)
+    found = fake.find_open_pr_by_head_branch(
+        project="p", branch_name="foreman/issue-180",
+    )
+    assert found is None

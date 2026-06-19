@@ -1,32 +1,28 @@
 """Reviewer role dispatcher.
 
-The Reviewer LLM reads an already-open spec PR (the Planner's output) and
-returns a :class:`~foreman.schemas.reviewer.ReviewerOutput`. Foreman core
-then:
+The Reviewer LLM reads an already-open spec or impl PR and returns a
+:class:`~foreman.schemas.reviewer.ReviewerOutput`. Foreman core then:
 
   1. Posts the ``review_comment`` as a PR review (``event="COMMENT"``)
-  2. Advances the **issue's** label deterministically:
-     - ``clean``     → ``foreman:planning`` → ``foreman:plan-approved``
-     - ``needs_fix`` → ``foreman:planning`` → ``foreman:spec-fix``
+  2. Emits FOREMAN_OUTCOME so the v4 state machine can advance the ticket
   3. Returns :class:`~foreman.schemas.reviewer.ReviewerOutput` to the caller
      for display / persistence
 
-The label transition is on the originating ISSUE, not the PR — same
-pattern the Planner uses. The Reviewer derives the issue number and
-the review target (spec PR vs impl PR) from the PR's head branch:
-- ``foreman/issue-<N>`` → spec PR (label ``foreman:planning``)
-- ``foreman/impl-<N>``  → impl PR (label ``foreman:impl-review``)
+The Reviewer derives the issue number and the review target (spec PR vs
+impl PR) from the PR's head branch:
+- ``foreman/issue-<N>`` → spec PR review
+- ``foreman/impl-<N>``  → impl PR review
 
-Pre-flight guard: if the source issue does not carry the
-target-appropriate review label, the orchestrator raises before
-doing any work — we will not silently advance a PR whose source
-issue was not queued for review.
+Under v4, ``LabelObservabilityObserver`` owns every ``foreman:*`` label
+write off state-machine transitions; the Reviewer itself no longer reads
+or writes labels. SQLite is the source of truth — labels are write-only
+observability.
 
 The Reviewer LLM is read-only on the filesystem (Read / Glob / Grep) plus
 Bash for shell-level recon (e.g., ``gh pr view`` if it needs more context).
-All host mutations (review post, label advance) happen in core via the
-PyGithub client. This mirrors the Planner's "LLM is host-agnostic; core is
-deterministic" split.
+All host mutations (review post) happen in core via the PyGithub client.
+This mirrors the Planner's "LLM is host-agnostic; core is deterministic"
+split.
 """
 
 from __future__ import annotations
@@ -40,24 +36,25 @@ import time
 from pathlib import Path
 from typing import Literal
 
-from github import Github
 from github.Issue import Issue
 from github.Repository import Repository
 
-from foreman.config import Config
-from foreman.dispatch_recorder import DispatchRecorder, emit_recorder_complete
 from foreman.git_host import CommentRef
-from foreman.identity import IdentityRegistry
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
 from foreman.providers import ProviderError
-from foreman.roles import TERMINAL_BLOCKING_LABEL, handle_unhandled_role_exception
+from foreman.roles import (
+    build_role_resources,
+    handle_unhandled_role_exception,
+)
 from foreman.roles._prompt_helpers import (
     filter_bot_self_comments,
     format_comments_section,
 )
 from foreman.schemas.reviewer import Finding, ReviewerOutput, ReviewerRunResult
 from foreman.stats import log_reviewer_run
+from foreman.v4.config import V4Config
+from foreman.v4.identity import V4IdentityRegistry
 from foreman.worktree import WorktreeManager
 
 _LOG = logging.getLogger(__name__)
@@ -69,50 +66,18 @@ _BRANCH_ISSUE_RE = re.compile(r"^foreman/issue-(?P<number>\d+)$")
 _BRANCH_IMPL_RE = re.compile(r"^foreman/impl-(?P<number>\d+)$")
 
 
-class _ReviewerPreflightRefusal(RuntimeError):
-    """Reviewer refused to proceed because the source issue lacks the
-    expected entry label (``foreman:planning`` for spec PRs,
-    ``foreman:impl-review`` for impl PRs).
-
-    Subclass of :class:`RuntimeError` so existing callers' ``except
-    RuntimeError`` clauses and ``pytest.raises(RuntimeError, match=...)``
-    test patterns continue to work unchanged. The distinguishing
-    purpose is to tell the runaway-burn defense (#229 helper invocation)
-    to SKIP firing: a label-mismatch is operator intent (the label was
-    removed deliberately or never set), not a "broken system" runaway
-    signal. Firing the helper would override the operator's removal by
-    re-adding ``foreman:needs-help``.
-    """
-
-
 # Tool capabilities matrix for the Reviewer. Read-only on the filesystem;
 # Bash is allowed for read-only recon (e.g., ``gh pr view``, ``git log``).
 # Pinning this here prevents accidental ``Edit`` / ``Write`` reintroduction.
 REVIEWER_ALLOWED_TOOLS = ["Read", "Grep", "Glob", "Bash"]
 
-# Labels the Reviewer touches on the originating issue. The spec-PR labels
-# and impl-PR labels form parallel triples; ``run_reviewer`` picks one
-# triple based on the PR's head-branch shape.
-_LABEL_SPEC_REVIEW = "foreman:planning"
-_LABEL_SPEC_READY = "foreman:plan-approved"
-_LABEL_SPEC_FIX = "foreman:spec-fix"
-_LABEL_IMPL_REVIEW = "foreman:impl-review"
-_LABEL_READY_FOR_MERGE = "foreman:impl-approved"
-_LABEL_IMPL_FIX = "foreman:impl-fix"
-
-# foreman#78: per-target routing for the Reviewer. The role accepts
-# a ``target`` kwarg (added by foreman#41) that distinguishes spec
-# PRs (``foreman/issue-<N>``) from impl PRs (``foreman/impl-<N>``).
-# Each target gets its own entry-label precondition and its own
-# prompt composition. The mappings are intentionally explicit
-# rather than computed — adding a new target later (``docs_pr``,
-# ``release_pr``) requires updating the mappings deliberately, not
-# silently falling back to spec behavior.
-_REVIEWER_ENTRY_LABEL_BY_TARGET: dict[str, str] = {
-    "spec_pr": _LABEL_SPEC_REVIEW,
-    "impl_pr": _LABEL_IMPL_REVIEW,
-}
-
+# foreman#78: per-target prompt-composition routing for the Reviewer.
+# The role accepts a ``target`` kwarg that distinguishes spec PRs
+# (``foreman/issue-<N>``) from impl PRs (``foreman/impl-<N>``). Each
+# target gets its own prompt composition. The mapping is intentionally
+# explicit rather than computed — adding a new target later
+# (``docs_pr``, ``release_pr``) requires updating the mapping
+# deliberately, not silently falling back to spec behavior.
 _REVIEWER_SUPERPOWERS_BY_TARGET: dict[str, list[str]] = {
     # Spec-side: today's discipline — empirical code review.
     "spec_pr": ["requesting-code-review"],
@@ -384,66 +349,61 @@ def _read_spec_doc(worktree_path: Path, issue_number: int) -> str | None:
         return None
 
 
-async def run_reviewer(
+async def _run_reviewer_core(
     *,
     pr_url: str,
-    config: Config,
+    config: V4Config,
     project_name: str,
     worktrees_root: Path,
     provider: ProviderFacade,
-    identity_registry: IdentityRegistry | None = None,
-    dispatch_recorder: DispatchRecorder | None = None,
-    dispatch_trace_id: int | None = None,
+    identity_registry: V4IdentityRegistry,
 ) -> ReviewerRunResult:
-    """Run the Reviewer role end-to-end on one spec PR.
+    """Run the Reviewer role end-to-end on one spec or impl PR.
 
     Args:
         pr_url: Full GitHub PR URL
             (``https://github.com/owner/repo/pull/N``).
-        config: Loaded foreman config.
-        project_name: Key into ``config.projects``.
+        config: Loaded foreman v4 config.
+        project_name: Selects which ``V4Config.projects`` entry to use.
         worktrees_root: Root directory under which per-ticket worktrees live.
         provider: Agent provider facade (e.g., AnthropicSDKProvider).
-        identity_registry: Optional pre-built registry; defaults to a fresh
-            :class:`~foreman.identity.IdentityRegistry` for the project.
-            Tests inject a fake registry to bypass real App auth.
+        identity_registry: Pre-built v4 registry. Tests may inject a
+            ``MagicMock`` exposing the production
+            ``get_role_token(role)`` shape — see
+            :func:`foreman.roles.build_role_resources` for the test
+            seam.
 
     Returns:
         A :class:`~foreman.schemas.reviewer.ReviewerRunResult` bundling
         the LLM's :class:`~foreman.schemas.reviewer.ReviewerOutput` and
-        the deterministic post-transition label set
-        (``final_labels``). The CLI surfaces ``outcome`` / ``findings``
-        / ``confidence`` for human inspection by reading
-        ``result.llm_output``.
+        the pre-call label snapshot for the daemon's audit trail
+        (``final_labels``). Under v4 the Reviewer no longer mutates
+        labels — ``LabelObservabilityObserver`` owns ``foreman:*``
+        writes off state-machine transitions. The CLI surfaces
+        ``outcome`` / ``findings`` / ``confidence`` for human inspection
+        by reading ``result.llm_output``.
 
     Raises:
         ValueError: PR URL malformed, repo mismatch, or PR head branch is
             not a Foreman review branch (``foreman/issue-<N>`` or
             ``foreman/impl-<N>``).
-        RuntimeError: Source issue is missing the target-appropriate
-            review label (``foreman:planning`` for spec PRs,
-            ``foreman:impl-review`` for impl PRs) — we refuse to advance
-            PRs whose source issue was not queued for review.
     """
     # foreman#237: stamp ``start_time`` BEFORE the body wrap and
     # initialize ``usage`` to ``None`` so the except branch below can
     # log partial state regardless of where in the pipeline a failure
     # surfaces. ``WorktreeManager.attach`` / ``attach_impl``,
-    # ``_get_pr_diff``, ``provider.run_agent``, ``pr.create_review``,
-    # ``issue.update`` / ``set_labels`` are all inside the wrap; pre-#237
-    # any of those raising silently dropped the run's cost telemetry
-    # because the success-path ``log_reviewer_run`` call below never
-    # executed (same shape as the Planner bug fixed in foreman#235 /
-    # PR #236).
+    # ``_get_pr_diff``, ``provider.run_agent``, ``pr.create_review`` are
+    # all inside the wrap; pre-#237 any of those raising silently dropped
+    # the run's cost telemetry because the success-path
+    # ``log_reviewer_run`` call below never executed (same shape as the
+    # Planner bug fixed in foreman#235 / PR #236).
     #
     # Post-adversarial-review: extend the wrap to ALSO cover URL parse,
-    # project lookup, identity setup, ``repo.get_pull`` /
-    # ``repo.get_issue``, and the in-review-label refusal check. Any of
-    # those raising used to crash the role subprocess WITHOUT
-    # transitioning the in-flight label; the dispatcher then
-    # re-dispatched until #228's rate-limit caught the loop at N=3.
-    # Now the FIRST such failure fires the helper (assuming the issue
-    # was resolvable — see the None guards in the except branch).
+    # project lookup, identity setup, and ``repo.get_pull`` /
+    # ``repo.get_issue``. Any of those raising used to crash the role
+    # subprocess; under v4 the runaway-burn defense fires the helper on
+    # the FIRST such failure (assuming the issue was resolvable — see
+    # the None guards in the except branch).
     start_time = time.monotonic()
     usage: UsageInfo | None = None
     actual_repo_slug: str | None = None
@@ -457,8 +417,7 @@ async def run_reviewer(
         catch arms (foreman#266 — type-narrowing split). Closes over
         ``start_time`` / ``usage`` / ``pr_number`` /
         ``actual_repo_slug`` / ``issue_number`` / ``target`` /
-        ``issue`` / ``project_name`` / ``dispatch_recorder`` /
-        ``dispatch_trace_id``. The bare ``raise`` that re-propagates
+        ``issue`` / ``project_name``. The bare ``raise`` that re-propagates
         the original exception lives in each ``except`` arm after
         calling this helper.
         """
@@ -492,40 +451,32 @@ async def run_reviewer(
                 # dispatcher sees the ORIGINAL exception, not whatever
                 # the stats writer raised.
                 pass
-            # foreman#251 (Phase 1): mirror the failure-path dual-write.
-            emit_recorder_complete(
-                dispatch_recorder=dispatch_recorder,
-                dispatch_trace_id=dispatch_trace_id,
-                role="reviewer",
-                repo_slug=actual_repo_slug,
-                ticket_id=f"{actual_repo_slug}#{issue_number}",
-                project=project_name,
-                issue_number=issue_number,
-                pr_number=pr_number,
-                outcome="exception",
-                usage=usage if usage is not None else UsageInfo(),
-                role_data={"target": target},
-                duration_seconds=duration_seconds,
-            )
-        # foreman#229: runaway-burn defense. Skip for
-        # ``_ReviewerPreflightRefusal`` — that's intentional.
-        if (
-            not isinstance(exc, _ReviewerPreflightRefusal)
-            and issue is not None
-            and issue_number is not None
-        ):
+        # foreman#229: runaway-burn defense. Phase 8d.7 dropped the
+        # role-side ``foreman:needs-help`` write — the v4 state machine
+        # transitions to ``NeedsHelp`` when the role subprocess reports
+        # failure, and :class:`LabelObservabilityObserver` writes
+        # ``foreman:state-needs-help``. The role-side helper only posts
+        # the diagnostic comment now.
+        if issue is not None and issue_number is not None:
             bound_issue = issue
             handle_unhandled_role_exception(
                 role="reviewer",
                 issue_number=issue_number,
                 exc=exc,
                 post_comment=lambda body: bound_issue.create_comment(body),
-                set_needs_help_label=lambda: bound_issue.add_to_labels(TERMINAL_BLOCKING_LABEL),
             )
 
     try:
         owner, repo_name, pr_number = parse_pr_url(pr_url)
-        project = config.projects[project_name]
+        project = next(
+            (p for p in config.projects if p.name == project_name), None
+        )
+        if project is None:
+            known = [p.name for p in config.projects]
+            raise ValueError(
+                f"project {project_name!r} not found in V4Config. "
+                f"Known projects: {known}"
+            )
         expected_repo_slug = project.repo
         actual_repo_slug = f"{owner}/{repo_name}"
         if expected_repo_slug != actual_repo_slug:
@@ -534,9 +485,12 @@ async def run_reviewer(
                 f"{project_name!r} configured repo {expected_repo_slug!r}"
             )
 
-        registry = identity_registry if identity_registry is not None else IdentityRegistry(project)
-        reviewer_client: Github = registry.get_reviewer_client()
-        reviewer_token: str = registry.get_reviewer_token()
+        _host, reviewer_token, reviewer_client = build_role_resources(
+            registry=identity_registry,
+            role="reviewer",
+            app_id=config.apps.reviewer.app_id,
+            private_key_path=config.apps.reviewer.private_key_path,
+        )
 
         repo: Repository = reviewer_client.get_repo(actual_repo_slug)
         pr = repo.get_pull(pr_number)
@@ -546,29 +500,7 @@ async def run_reviewer(
         base_branch = pr.base.ref
         issue_number, target = _parse_review_branch(head_branch)
 
-        in_review_label = _REVIEWER_ENTRY_LABEL_BY_TARGET[target]
-        if target == "impl_pr":
-            clean_label = _LABEL_READY_FOR_MERGE
-            fix_label = _LABEL_IMPL_FIX
-        else:
-            clean_label = _LABEL_SPEC_READY
-            fix_label = _LABEL_SPEC_FIX
-
         issue = repo.get_issue(issue_number)
-        issue_labels = {label.name for label in issue.labels}
-        if in_review_label not in issue_labels:
-            # Graceful refusal, NOT a runaway-burn signal. The operator
-            # may have removed the label deliberately (to abort an
-            # in-flight review, or because the ticket was retargeted).
-            # Use the marker subclass so the except branch below skips
-            # the helper and lets the original intent survive.
-            raise _ReviewerPreflightRefusal(
-                f"Issue #{issue_number} (source of PR #{pr_number}) does not carry "
-                f"the {in_review_label!r} label (labels: "
-                + ", ".join(sorted(issue_labels) or ["<none>"])
-                + "). The Reviewer only acts on issues queued via the Planner."
-            )
-
         issue_title = issue.title or ""
         issue_body = issue.body or ""
 
@@ -617,7 +549,7 @@ async def run_reviewer(
                 )
                 for c in issue.get_comments()
             ]
-            comments = filter_bot_self_comments(comments, registry.get_role_bot_logins())
+            comments = filter_bot_self_comments(comments, identity_registry.get_role_bot_logins())
         else:
             comments = []
 
@@ -642,9 +574,8 @@ async def run_reviewer(
             env={**os.environ, "GH_TOKEN": reviewer_token},
         )
         # foreman#237: hoist ``usage`` to the outer scope IMMEDIATELY
-        # so a failure in any later step (review post, label
-        # transition) still records the per-call token cost in the
-        # review_failed row.
+        # so a failure in any later step (review post) still records the
+        # per-call token cost in the review_failed row.
         usage = run_usage
 
         # Post the review comment as the reviewer bot. ``event="COMMENT"``
@@ -663,49 +594,11 @@ async def run_reviewer(
         enriched_body = f"{llm_output.review_comment}\n\n{findings_block}"
         pr.create_review(body=enriched_body, event="COMMENT")
 
-        # Advance the originating ISSUE's label (not the PR's) — same pattern
-        # the Planner uses.
-        if llm_output.outcome == "clean":
-            add_label = clean_label
-        else:
-            add_label = fix_label
-
-        # Atomic label transition (foreman#? — adversarial review MEDIUM #12):
-        # use ``issue.set_labels(...)`` (single PUT /issues/{N}/labels) instead
-        # of sequential ``remove_from_labels`` + ``add_to_labels``. A subprocess
-        # crash between the two PyGithub calls leaves the issue with neither
-        # the entry label nor the outcome label — it then falls out of the v3
-        # observer's GraphQL ``filterBy.labels`` filter and the reconciler
-        # never sees it again (silent stall). ``set_labels`` replaces the full
-        # label set in one API call, so the transition is either fully applied
-        # or not applied at all.
-        #
-        # Namespace-scoped merge (Pass 2 HIGH): ``set_labels`` REPLACES the
-        # full label set on GitHub, so we must preserve every label the role
-        # is not actively touching. Re-read labels NOW (not from the pre-LLM
-        # snapshot) to minimize the race window for operator-added labels —
-        # the LLM call took minutes, but the re-read → API call window is
-        # only the round-trip (~hundreds of ms). The role declares the
-        # foreman labels it is removing (``removed_foreman``) and adding
-        # (``added_foreman``); everything else — non-foreman labels like
-        # ``priority:high`` AND foreman labels the role isn't touching like
-        # ``foreman:hold`` — passes through.
-        #
-        # Pass 3 CRITICAL: PyGithub's ``Issue.labels`` is a cached property
-        # — ``_completeIfNotSet(self._labels)`` only fetches on FIRST access
-        # (see ``.venv/Lib/site-packages/github/Issue.py:266`` +
-        # ``GithubObject.py:618``). Subsequent reads return the same snapshot
-        # taken at the top of ``run_reviewer`` — operator-added labels during
-        # the LLM call would be silently dropped. ``issue.update()`` issues a
-        # conditional GET and re-stores the attributes (see
-        # ``GithubObject.py:638``), invalidating the cache so the next
-        # ``issue.labels`` access reflects the real remote state.
-        removed_foreman = {in_review_label}
-        added_foreman = {add_label}
-        issue.update()
-        current_label_names = {label.name for label in issue.labels}
-        final_labels = sorted((current_label_names - removed_foreman) | added_foreman)
-        issue.set_labels(*final_labels)
+        # The Reviewer does not mutate labels. Under v4,
+        # ``LabelObservabilityObserver`` owns every ``foreman:*`` write off
+        # state transitions; ``final_labels`` here is just the pre-call
+        # snapshot returned for the daemon's audit trail.
+        final_labels = sorted({label.name for label in issue.labels})
 
         duration_seconds = time.monotonic() - start_time
 
@@ -735,30 +628,10 @@ async def run_reviewer(
             duration_ms=usage.duration_ms,
             num_turns=usage.num_turns,
         )
-        # foreman#251 (Phase 1): dual-write through the Recorder.
-        # ``target`` lands in ``role_data`` because it's reviewer-
-        # specific JSONL — :class:`RoleStatsSubscriber` reads it back
-        # when fanning out to ``log_reviewer_run``.
-        emit_recorder_complete(
-            dispatch_recorder=dispatch_recorder,
-            dispatch_trace_id=dispatch_trace_id,
-            role="reviewer",
-            repo_slug=actual_repo_slug,
-            ticket_id=f"{actual_repo_slug}#{issue_number}",
-            project=project_name,
-            issue_number=issue_number,
-            pr_number=pr_number,
-            outcome=llm_output.outcome,
-            usage=usage,
-            role_data={"target": target},
-            duration_seconds=duration_seconds,
-        )
-
-        # foreman#91: ``final_labels`` is the authoritative post-transition
-        # set, computed in-process from the pre-mutation snapshot + the role's
-        # known transitions — not via a post-mutation host re-read (which
-        # raced its own write and produced stale-snapshot dispatches at the
-        # next worker iteration).
+        # The Reviewer does not mutate labels under v4; ``final_labels``
+        # is the pre-call snapshot returned for the daemon's audit
+        # trail. ``LabelObservabilityObserver`` owns ``foreman:*`` writes
+        # off state-machine transitions.
         return ReviewerRunResult(llm_output=llm_output, final_labels=final_labels)
     except ProviderError as exc:
         # foreman#266: typed catch for the documented provider-boundary
@@ -772,3 +645,262 @@ async def run_reviewer(
         # non-provider failures (worktree ops, host I/O, GitHub 5xx).
         _on_failure(exc)
         raise
+
+
+import asyncio  # noqa: E402
+
+from foreman.providers import make_provider  # noqa: E402
+from foreman.v4.config import load_config as load_v4_config  # noqa: E402
+from foreman.v4.emit import emit_outcome  # noqa: E402
+from foreman.v4.outcome import Finding as V4Finding  # noqa: E402
+from foreman.v4.outcome import (  # noqa: E402
+    Outcome,
+    OutcomeArtifacts,
+    OutcomeConfidence,
+    OutcomeKind,
+)
+
+_DEFAULT_V4_CONFIG = Path.home() / ".foreman" / "v4" / "config.toml"
+
+# v4 RoleDispatcher uses "spec" / "impl"; the legacy Reviewer internals
+# (branch parsing, label triples, prompt loader) speak "spec_pr" /
+# "impl_pr". Translation lives only at the v4 boundary so legacy paths
+# keep their existing vocabulary verbatim.
+_V4_TARGET_TO_LEGACY: dict[str, Literal["spec_pr", "impl_pr"]] = {
+    "spec": "spec_pr",
+    "impl": "impl_pr",
+}
+
+# Head-branch shape per target — used to locate the open PR the v4
+# Reviewer is about to review.
+_V4_TARGET_TO_BRANCH_PREFIX: dict[str, str] = {
+    "spec": "foreman/issue-",
+    "impl": "foreman/impl-",
+}
+
+
+class _V4ReviewerResult:
+    """Flat-shape result for the v4 emit path.
+
+    The legacy ``ReviewerRunResult`` nests outcome under
+    ``llm_output.outcome`` ("clean" / "needs_fix") with findings whose
+    fields are ``severity`` / ``target`` / ``issue`` / ``needed``. The
+    v4 emit path consumes the boolean ``approved`` + a flat
+    ``findings`` list whose entries already carry v4-Finding fields
+    (``severity`` / ``location`` / ``description``) so
+    ``run_reviewer_cli`` can build :class:`OutcomeArtifacts` /
+    :class:`Finding` without re-interpreting legacy shape. Both this
+    class and the helper that builds instances disappear in Phase 8.
+    """
+
+    def __init__(
+        self,
+        *,
+        approved: bool,
+        pr_number: int | None,
+        summary: str,
+        findings: list[V4Finding],
+        details: dict[str, object] | None = None,
+    ) -> None:
+        self.approved = approved
+        self.pr_number = pr_number
+        self.summary = summary
+        self.findings = findings
+        # Phase 8d.17 / foreman#315: ReviewerOutput diagnostic detail
+        # forwarded to Outcome.details on emit. Populated by
+        # ``_run_reviewer_for_v4`` from the LLM fields (pr_review_comment,
+        # outcome, confidence) that would otherwise be dropped at the
+        # v3→v4 flatten point.
+        self.details: dict[str, object] = details if details is not None else {}
+
+
+def _run_reviewer_for_v4(
+    *, project: str, issue_number: int, target: str
+) -> _V4ReviewerResult:
+    """Run the reviewer the same way the legacy ``review`` command does,
+    but without label-writing on top.
+
+    Calls :func:`_run_reviewer_core` (worktree → diff → LLM → review-post,
+    formerly ``run_reviewer``) and unpacks the flat-shape result the v4
+    state machine consumes via ``FOREMAN_OUTCOME``.
+
+    ``target`` arrives in v4 vocabulary ("spec" / "impl"); the core infers
+    spec vs impl from the PR's head branch on its own, so ``target`` is
+    used only to locate the right open PR before handing off.
+    """
+    cfg_path = Path(os.environ.get("FOREMAN_V4_CONFIG", _DEFAULT_V4_CONFIG))
+    cfg = load_v4_config(cfg_path)
+    project_cfg = next((p for p in cfg.projects if p.name == project), None)
+    if project_cfg is None:
+        known = [p.name for p in cfg.projects]
+        raise ValueError(
+            f"project {project!r} not found in V4Config at {cfg_path}. "
+            f"Known projects: {known}"
+        )
+
+    # Locate the open PR for this issue. The Reviewer's legacy entry-
+    # point takes a PR URL — v4's SubprocessRoleDispatcher only knows
+    # the issue number + target. Resolve via the reviewer App's client
+    # (read-only get_pulls is in scope for the reviewer identity).
+    registry = V4IdentityRegistry(
+        apps=cfg.apps,
+        orchestrator=cfg.orchestrator,
+        installation_repo=project_cfg.repo,
+    )
+    _host, _token, reviewer_client = build_role_resources(
+        registry=registry,
+        role="reviewer",
+        app_id=cfg.apps.reviewer.app_id,
+        private_key_path=cfg.apps.reviewer.private_key_path,
+    )
+    repo: Repository = reviewer_client.get_repo(project_cfg.repo)
+    owner = project_cfg.repo.split("/", 1)[0]
+    branch_prefix = _V4_TARGET_TO_BRANCH_PREFIX[target]
+    branch = f"{branch_prefix}{issue_number}"
+    head_qualifier = f"{owner}:{branch}"
+    pulls = list(repo.get_pulls(state="open", head=head_qualifier))
+    if not pulls:
+        raise RuntimeError(
+            f"No open PR found for branch {branch!r} in {project_cfg.repo!r}. "
+            f"The v4 Reviewer expects the {target}-side PR to be open for "
+            f"issue #{issue_number}."
+        )
+    pr = pulls[0]
+    pr_url = pr.html_url
+
+    worktrees_root = Path(
+        os.environ.get(
+            "FOREMAN_WORKTREES_ROOT",
+            str(Path.home() / ".foreman" / "worktrees"),
+        )
+    )
+    provider = make_provider()
+    core_result = asyncio.run(
+        _run_reviewer_core(
+            pr_url=pr_url,
+            config=cfg,
+            project_name=project,
+            worktrees_root=worktrees_root,
+            provider=provider,
+            identity_registry=registry,
+        )
+    )
+
+    # Flatten legacy → v4 shape. The legacy ``Finding`` records
+    # ``severity`` (kept verbatim — same severity literals as v4),
+    # ``target`` + ``issue`` + ``needed``; v4's ``Finding`` wants
+    # ``severity`` + ``location`` + ``description``. Map
+    # ``target`` → ``location`` (both name "where in the artifact")
+    # and join ``issue`` + ``needed`` into ``description`` so the
+    # Fixer downstream still has both halves of the prose.
+    llm = core_result.llm_output
+    v4_findings: list[V4Finding] = [
+        V4Finding(
+            severity=f.severity,
+            location=f.target or "general",
+            description=f"{f.issue} — needed: {f.needed}",
+        )
+        for f in llm.findings
+    ]
+    # Phase 8d.17 / foreman#315: preserve ReviewerOutput diagnostic
+    # detail by lifting onto Outcome.details. The reviewer's
+    # full ``review_comment`` lives here (the Outcome.summary slot is
+    # capped at 500 chars; reviewer prose often runs longer) along
+    # with the raw outcome literal + confidence so operators can read
+    # the full verdict without pulling the PR review.
+    details: dict[str, object] = {
+        "outcome": llm.outcome,
+        "pr_review_comment": llm.review_comment,
+        "confidence": llm.confidence,
+    }
+    return _V4ReviewerResult(
+        approved=llm.outcome == "clean",
+        pr_number=pr.number,
+        summary=llm.review_comment[:500] if llm.review_comment else llm.outcome,
+        findings=v4_findings,
+        details=details,
+    )
+
+
+def run_reviewer_cli(*, project: str, issue_number: int, target: str) -> int:
+    """v4 CLI entry-point. Emits FOREMAN_OUTCOME JSON; returns exit code.
+
+    ``target`` is the v4 vocab ("spec" / "impl"). The
+    SubprocessRoleDispatcher (Task 5.6) forks ``foreman review-v4
+    --target spec|impl`` which calls this.
+    """
+    if os.environ.get("FOREMAN_DRY_RUN") == "1":
+        # Short-circuit for the Task 8.6 real-fork integration test. Emits
+        # a canned CLEAN outcome without any provider / GitHub / worktree
+        # work. The chain being exercised here is typer → role entry →
+        # emit_outcome → parser → exit code — the role's actual work is
+        # out of scope for this test path.
+        emit_outcome(
+            Outcome(
+                kind=OutcomeKind.CLEAN,
+                confidence=OutcomeConfidence.HIGH,
+                summary="dry-run",
+            )
+        )
+        return 0
+    try:
+        result = _run_reviewer_for_v4(
+            project=project, issue_number=issue_number, target=target
+        )
+    except Exception as exc:
+        emit_outcome(
+            Outcome(
+                kind=OutcomeKind.ERROR,
+                confidence=OutcomeConfidence.HIGH,
+                summary=f"reviewer raised: {exc}"[:500],
+            )
+        )
+        return 1
+
+    # Phase 8d.17 / foreman#315: forward Reviewer diagnostic detail
+    # onto every emitted Outcome (CLEAN, NEEDS_FIX). The isinstance
+    # check keeps the contract backward-compatible — older test
+    # doubles (MagicMock) that don't set ``details`` explicitly
+    # produce a non-dict attribute by default; we ignore it and emit
+    # an empty bag rather than fail pydantic validation.
+    raw_details = getattr(result, "details", None)
+    details: dict[str, object] = raw_details if isinstance(raw_details, dict) else {}
+
+    if getattr(result, "approved", False):
+        emit_outcome(
+            Outcome(
+                kind=OutcomeKind.CLEAN,
+                confidence=OutcomeConfidence.HIGH,
+                summary=getattr(result, "summary", None) or "approved",
+                artifacts=OutcomeArtifacts(
+                    pr_number=getattr(result, "pr_number", None)
+                ),
+                details=details,
+            )
+        )
+        return 0
+
+    findings_raw = list(getattr(result, "findings", []) or [])
+    # Findings already arrive in v4 shape from ``_run_reviewer_for_v4``
+    # (or from a test double that builds them that way). Rebuild as
+    # ``V4Finding`` instances so a MagicMock-based test stub still
+    # round-trips through the Outcome model's validation.
+    findings = [
+        V4Finding(
+            severity=f.severity,
+            location=f.location,
+            description=f.description,
+        )
+        for f in findings_raw
+    ]
+    emit_outcome(
+        Outcome(
+            kind=OutcomeKind.NEEDS_FIX,
+            confidence=OutcomeConfidence.HIGH,
+            summary=getattr(result, "summary", None) or f"{len(findings)} issues",
+            artifacts=OutcomeArtifacts(pr_number=getattr(result, "pr_number", None)),
+            findings=findings,
+            details=details,
+        )
+    )
+    return 0

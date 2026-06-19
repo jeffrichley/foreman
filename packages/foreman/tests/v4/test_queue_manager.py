@@ -1,0 +1,202 @@
+"""QueueManager — priority heap + multi-filter dequeue."""
+from __future__ import annotations
+
+import datetime as dt
+
+import pytest
+
+from foreman.v4.queue_manager import QueueManager
+from foreman.v4.repository import InMemoryTicketRepository
+from foreman.v4.work import WorkItem
+
+
+@pytest.fixture()
+def repo() -> InMemoryTicketRepository:
+    return InMemoryTicketRepository()
+
+
+def _ticket(repo, issue_number: int, state: str = "Planning") -> int:
+    t = repo.create_ticket(project="p", issue_number=issue_number, now=dt.datetime(2026, 6, 13))
+    repo.set_ticket_state(t.id, state, now=dt.datetime(2026, 6, 13))
+    return t.id
+
+
+def test_enqueue_then_dequeue_returns_same_item(repo):
+    tid = _ticket(repo, 1)
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    item = WorkItem(ticket_id=tid, state_name="Planning")
+    qm.enqueue(item)
+    assert qm.dequeue() == item
+
+
+def test_dedup_collapses_repeated_enqueue(repo):
+    tid = _ticket(repo, 1)
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    item = WorkItem(ticket_id=tid, state_name="Planning")
+    qm.enqueue(item)
+    qm.enqueue(item)
+    qm.enqueue(item)
+    assert qm.dequeue() == item
+    assert qm.dequeue() is None
+
+
+def test_empty_queue_returns_none(repo):
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    assert qm.dequeue() is None
+
+
+def test_priority_late_stage_dequeued_before_early(repo):
+    """A Merging ticket comes out before a Queued ticket, regardless of enqueue order."""
+    early = _ticket(repo, 1, state="Queued")
+    late = _ticket(repo, 2, state="Merging")
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    qm.enqueue(WorkItem(ticket_id=early, state_name="Queued"))
+    qm.enqueue(WorkItem(ticket_id=late, state_name="Merging"))
+    first = qm.dequeue()
+    assert first is not None and first.ticket_id == late  # Merging has priority 1, beats Queued's 6
+
+
+def test_priority_tie_breaker_is_enqueue_order(repo):
+    """Two same-priority WorkItems dequeue FIFO."""
+    a = _ticket(repo, 1, state="Planning")
+    b = _ticket(repo, 2, state="Planning")
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    qm.enqueue(WorkItem(ticket_id=a, state_name="Planning"))
+    qm.enqueue(WorkItem(ticket_id=b, state_name="Planning"))
+    assert qm.dequeue().ticket_id == a
+    assert qm.dequeue().ticket_id == b
+
+
+def test_per_ticket_in_flight_serialization(repo):
+    """At most one transition per ticket runs at a time."""
+    tid = _ticket(repo, 1)
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    qm.enqueue(WorkItem(ticket_id=tid, state_name="Planning"))
+    # Even if Poller re-enqueues the same ticket at a different state mid-transition,
+    # the QM holds it until the first WorkItem completes.
+    first = qm.dequeue()
+    qm.enqueue(WorkItem(ticket_id=tid, state_name="SpecReview"))
+    assert qm.dequeue() is None  # ticket already in flight
+    qm.mark_done(first)
+    second = qm.dequeue()
+    assert second is not None and second.ticket_id == tid
+
+
+def test_global_max_in_flight_cap(repo):
+    a = _ticket(repo, 1)
+    b = _ticket(repo, 2)
+    c = _ticket(repo, 3)
+    qm = QueueManager(repo=repo, max_in_flight=2)
+    qm.enqueue(WorkItem(ticket_id=a, state_name="Planning"))
+    qm.enqueue(WorkItem(ticket_id=b, state_name="Planning"))
+    qm.enqueue(WorkItem(ticket_id=c, state_name="Planning"))
+    qm.dequeue()
+    qm.dequeue()
+    assert qm.dequeue() is None  # at cap
+    assert qm.in_flight_count() == 2
+
+
+def test_mark_done_frees_slot_for_other_ticket(repo):
+    a = _ticket(repo, 1)
+    b = _ticket(repo, 2)
+    qm = QueueManager(repo=repo, max_in_flight=1)
+    qm.enqueue(WorkItem(ticket_id=a, state_name="Planning"))
+    qm.enqueue(WorkItem(ticket_id=b, state_name="Planning"))
+    first = qm.dequeue()
+    qm.mark_done(first)
+    second = qm.dequeue()
+    assert second is not None and second.ticket_id == b
+
+
+def test_held_ticket_is_skipped_and_stays_in_heap(repo):
+    held = _ticket(repo, 1)
+    other = _ticket(repo, 2)
+    repo.hold_ticket(held, held_by="jeff", reason="x", now=dt.datetime(2026, 6, 13))
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    qm.enqueue(WorkItem(ticket_id=held, state_name="Planning"))
+    qm.enqueue(WorkItem(ticket_id=other, state_name="Planning"))
+    item = qm.dequeue()
+    assert item is not None and item.ticket_id == other
+    # Resume → the held one becomes eligible without re-enqueue
+    qm.mark_done(item)
+    repo.resume_ticket(held, now=dt.datetime(2026, 6, 13))
+    item = qm.dequeue()
+    assert item is not None and item.ticket_id == held
+
+
+def test_dep_blocked_ticket_is_skipped_until_upstream_done(repo):
+    upstream = _ticket(repo, 1, state="Implementing")
+    downstream = _ticket(repo, 2, state="Planning")
+    repo.set_ticket_dependencies(downstream, deps=[upstream])
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    qm.enqueue(WorkItem(ticket_id=upstream, state_name="Implementing"))
+    qm.enqueue(WorkItem(ticket_id=downstream, state_name="Planning"))
+    # Implementing has priority 3 (lower number = higher priority) vs Planning's 5;
+    # upstream comes out first. Downstream is dep-blocked anyway.
+    first = qm.dequeue()
+    assert first is not None and first.ticket_id == upstream
+    assert qm.dequeue() is None  # downstream blocked by deps
+    qm.mark_done(first)
+    repo.set_ticket_state(upstream, "Done", now=dt.datetime(2026, 6, 13))
+    second = qm.dequeue()
+    assert second is not None and second.ticket_id == downstream
+
+
+def test_repo_exception_leaves_entry_in_heap(repo):
+    """If the repo raises mid-dequeue, the popped entry must not be lost."""
+    tid = _ticket(repo, 1)
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    qm.enqueue(WorkItem(ticket_id=tid, state_name="Planning"))
+
+    # Patch get_ticket to raise on first call, succeed after
+    original_get_ticket = repo.get_ticket
+    call_count = {"n": 0}
+    def flaky_get_ticket(ticket_id):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("simulated transient repo error")
+        return original_get_ticket(ticket_id)
+    repo.get_ticket = flaky_get_ticket  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="simulated"):
+        qm.dequeue()
+
+    # Entry must still be in heap; subsequent dequeue must succeed
+    assert qm.queue_depth() == 1
+    item = qm.dequeue()
+    assert item is not None and item.ticket_id == tid
+
+
+def test_held_and_dep_blocked_stays_in_heap_until_both_clear(repo):
+    upstream = _ticket(repo, 1, state="Implementing")
+    target = _ticket(repo, 2, state="Planning")
+    repo.set_ticket_dependencies(target, deps=[upstream])
+    repo.hold_ticket(target, held_by="jeff", reason="x", now=dt.datetime(2026, 6, 13))
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    qm.enqueue(WorkItem(ticket_id=upstream, state_name="Implementing"))
+    qm.enqueue(WorkItem(ticket_id=target, state_name="Planning"))
+    # Upstream dispatches; target is filtered by BOTH held and unmet-deps
+    first = qm.dequeue()
+    assert first is not None and first.ticket_id == upstream
+    assert qm.dequeue() is None
+    qm.mark_done(first)
+    # Release hold — still dep-blocked
+    repo.resume_ticket(target, now=dt.datetime(2026, 6, 13))
+    assert qm.dequeue() is None
+    # Resolve dep — now eligible
+    repo.set_ticket_state(upstream, "Done", now=dt.datetime(2026, 6, 13))
+    second = qm.dequeue()
+    assert second is not None and second.ticket_id == target
+
+
+def test_in_flight_count_and_queue_depth(repo):
+    a = _ticket(repo, 1)
+    b = _ticket(repo, 2)
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    qm.enqueue(WorkItem(ticket_id=a, state_name="Planning"))
+    qm.enqueue(WorkItem(ticket_id=b, state_name="Planning"))
+    assert qm.queue_depth() == 2
+    qm.dequeue()
+    qm.dequeue()
+    assert qm.in_flight_count() == 2
+    assert qm.queue_depth() == 0

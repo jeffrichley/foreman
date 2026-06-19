@@ -17,6 +17,8 @@ dev = [
     # Import-graph boundary enforcement. Decision 7 of the 2026-06-11 architecture stability plan.
     "import-linter>=2.0",
     "mypy>=1.11",
+    # Type stubs for PyYAML (used in foreman.v4.cli.formatters).
+    "types-PyYAML>=6,<7",
     # gitleaks pre-commit hook driver (.pre-commit-config.yaml). See RUNBOOK.
     "pre-commit>=4.0",
     # Dead-code finder. Run via ``uv run vulture packages/foreman/src``.
@@ -24,6 +26,12 @@ dev = [
     # ``[tool.vulture]`` block below pins the threshold + allowlist for
     # signal-handler / duck-typing false positives.
     "vulture>=2.13",
+    # Import boundary linter. Decision 7 of the 2026-06-11 architecture
+    # stability plan (originally landed in #311; reinstated here as part
+    # of foreman#318 with R2 added to lock the v3/v4 boundary so the
+    # cross-cutting modules promoted to survival can't silently re-acquire
+    # v3-substrate deps. See [tool.importlinter] below.
+    "import-linter>=2.0",
 ]
 
 [tool.ruff]
@@ -132,6 +140,67 @@ ignore_decorators = [
     "@*.command",
 ]
 
+[tool.importlinter]
+# Decision 7 of the 2026-06-11 architecture stability plan. Rule-source
+# discipline: every contract names the historical bug or design call
+# that motivated it. No speculative rules.
+#
+# Run locally: ``just import-lint`` (or ``uv run lint-imports``).
+# Wired into ``just check`` so it gates pre-push.
+#
+# Both ``foreman`` and ``tests`` must be root_packages so grimp's import
+# graph visits both. Without ``tests`` as a root, a stray ``from tests
+# import X`` inside ``foreman.*`` would not be visible to the contract
+# walker and the R1 rule below would silently no-op.
+root_packages = ["foreman", "tests"]
+include_external_packages = false
+
+# R1: production code does not import from tests
+# -----------------------------------------------------------------------
+# Originally landed in #311 motivated by foreman#19 (a test-fixture
+# pollution bug where a pytest fixture's import chain leaked into prod
+# code paths). Keeps the build directional: tests can import prod, prod
+# can never import tests.
+[[tool.importlinter.contracts]]
+name = "R1: production code does not import from tests"
+type = "forbidden"
+source_modules = ["foreman"]
+forbidden_modules = ["tests"]
+
+# R2: v4 substrate does not import from v3-substrate modules
+# -----------------------------------------------------------------------
+# Locks the boundary established by the foreman v4 substrate redesign.
+# Phase 9 deletes these modules entirely; until then they coexist and
+# foreman.v4.* must never reach into them. Once main is on v4 the rule
+# becomes trivially-satisfied but stays in place: it prevents any future
+# resurrection from putting foreman.v4 back on a path that depends on the
+# old substrate's reconciler / pre-state-machine plumbing.
+#
+# branches.py, stats.py, labels.py are intentionally NOT in this list —
+# they were promoted to survival per foreman#318 because they're
+# cross-cutting infra with no v3-substrate deps. dispatch_recorder is
+# listed because it IS v3 telemetry plumbing (it pulls reconciler.exec_log).
+[[tool.importlinter.contracts]]
+name = "R2: foreman.v4 does not import v3-substrate modules"
+type = "forbidden"
+source_modules = ["foreman.v4"]
+forbidden_modules = [
+    "foreman.reconciler",
+    "foreman.daemon",
+    "foreman.daemon_host",
+    "foreman.daemon_lock",
+    "foreman.daemon_runners",
+    "foreman.dispatcher",
+    "foreman.dispatch_recorder",
+    "foreman.poller",
+    "foreman.queue",
+    "foreman.role_dispatch",
+    "foreman.storage",
+    "foreman.worker",
+    "foreman.ps",
+    "foreman.v3_bus_endpoint",
+]
+
 [tool.pytest.ini_options]
 testpaths = [
     "packages/foreman/tests",
@@ -147,23 +216,3 @@ addopts = "--import-mode=importlib"
 #     "real_engine: requires real engine + heavy deps. Skipped without FOREMAN_REAL_ENGINE_OK=1.",
 # ]
 
-[tool.importlinter]
-# Decision 7 of the 2026-06-11 architecture stability plan. The rule-source
-# discipline ("only when a decision creates the boundary") is documented in
-# that plan's Decision 7 section under "How to add a rule".
-#
-# Both ``foreman`` and ``tests`` must be root_packages so grimp's import
-# graph visits both. Without ``tests`` as a root, a stray ``from tests import
-# X`` inside ``foreman.*`` would not be visible to the contract walker and
-# the R1 rule below would silently no-op.
-root_packages = ["foreman", "tests"]
-include_external_packages = false
-
-# R1: production code (foreman.*) must not import from the test tree.
-# Justification: foreman#19 (2026-06-01) — test-fixture pollution
-# at pre-push hook. Decision 7 of 2026-06-11 architecture stability plan.
-[[tool.importlinter.contracts]]
-name = "R1: production code does not import from tests"
-type = "forbidden"
-source_modules = ["foreman"]
-forbidden_modules = ["tests"]

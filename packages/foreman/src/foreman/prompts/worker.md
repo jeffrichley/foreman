@@ -271,6 +271,81 @@ Record each commit's SHA + summary + files_changed in
 `commits_made`.
 </commit_discipline>
 
+<commit_message_guardrails>
+The commit messages you write are merged into the target repo's
+default branch when Foreman merges the impl PR. GitHub auto-closes any
+issue referenced by a merged PR — and by extension, by any commit on
+that PR's branch — whose body contains a "closing keyword" + issue
+reference. The nine closing-keyword forms (case-insensitive) are:
+
+`close`, `closes`, `closed`,
+`fix`, `fixes`, `fixed`,
+`resolve`, `resolves`, `resolved`
+
+followed by `#<N>` or `owner/repo#<N>`, optionally with a colon
+separator. Examples GitHub recognizes (any of these in a merged
+commit's subject OR body will auto-close the referenced issue):
+`Closes #42`, `Fixes owner/repo#43`, `Resolves: #44`,
+`fix(foo): resolves #45`.
+
+**You MUST NOT include any of these keyword + issue-reference
+combinations in your commit message — SUBJECT OR BODY.** This rule
+applies to every commit you make in this Worker run. Reference the
+issue plainly with a non-closing verb:
+
+- `Implements #<N>` — preferred for the bundled commit
+- `Addresses #<N>` — when partial
+- `See #<N>` / `Per #<N>` — for context refs
+
+Rationale: Foreman routes issue closure exclusively through the v4
+state machine. The originating issue is closed by
+`daemon_runners.close_issue` ONLY AFTER (a) the spec PR merged,
+(b) you implemented, (c) the Reviewer-on-impl approved, and (d) the
+impl PR merged. If a commit on your impl branch contains
+`Closes #<N>`, merging the impl PR auto-closes the issue via the
+commit-body route — bypassing the state machine's close-out gate
+(foreman#63) and orphaning any downstream work that depended on
+the gate.
+
+The Foreman runtime additionally strips matching keyword/reference
+patterns from your HEAD commit via `git commit --amend` before
+pushing the impl branch, as defense in depth. That backstop is
+limited to the single-commit case (the default per `<commit_discipline>`);
+if you split into multiple commits AND any of them contains an
+auto-close keyword, the runtime will log a warning and the
+Reviewer-on-impl will flag the slip. Either way, you should still
+write the messages correctly — the strip is a backstop, not a
+license to be sloppy.
+
+Examples (DO / DON'T):
+
+GOOD:
+```
+feat(foo): add X class per spec
+
+Implements sub-requests 1 and 2 of the spec for #42.
+
+- Adds Foo.bar() (sub-request 1)
+- Wires Foo into the registry (sub-request 2)
+```
+
+BAD (subject-line slip):
+```
+fix(foo): closes #42
+
+Body text here.
+```
+
+BAD (body-line slip):
+```
+feat(foo): add X class per spec
+
+Implements sub-requests 1 and 2.
+
+Closes #42
+```
+</commit_message_guardrails>
+
 <outcome_derivation>
 Apply mechanically, not by feel:
 

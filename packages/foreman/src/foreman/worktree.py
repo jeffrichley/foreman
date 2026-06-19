@@ -35,6 +35,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from foreman._env_filter import filtered_subprocess_env
 from foreman.branches import impl_branch, spec_branch
@@ -488,22 +489,56 @@ class WorktreeManager:
         ticket_id: int,
         *,
         repo_url: str | None = None,
+        target: Literal["spec_pr", "impl_pr"] = "spec_pr",
     ) -> Path:
-        """Attach a worktree to an existing ``foreman/issue-<N>`` branch.
+        """Attach a worktree to an existing role branch.
 
         Used by downstream roles (Reviewer / Fixer / Worker) that should NOT
-        create a new branch — the Planner already opened ``foreman/issue-N``
-        and pushed it. Idempotent: if the worktree path already exists, it
-        is returned untouched.
+        create a new branch — the upstream role (Planner for spec, Worker
+        for impl) already opened the branch and pushed it. Idempotent: if
+        the worktree path already exists, it is returned untouched.
 
-        Falls back to a tracking-branch fetch if the local branch does not
-        yet exist (the Reviewer may run on a clone where the branch only
-        lives on the remote).
+        The ``target`` kwarg selects which branch convention the attach
+        targets:
 
-        Like :meth:`create`, this best-effort syncs the worktree's ``.venv``
-        afterward so the target repo's pre-push hook can ``uv run --no-sync``
-        without exploding.
+        - ``"spec_pr"`` (default — back-compat for every existing caller):
+          attach to ``foreman/issue-<N>`` in the worktree at
+          ``<root>/<repo_slug>/issue-<N>/``. The Planner opened the
+          branch.
+        - ``"impl_pr"``: attach to ``foreman/impl-<N>`` in the worktree at
+          ``<root>/<repo_slug>/impl-<N>/`` (a sibling of ``issue-<N>/``).
+          The Worker opened the branch — this is the path the impl-side
+          Fixer must take so its edits + commits land on the impl PR's
+          branch. Pre-Phase 8d.23 the Fixer hardcoded the spec path even
+          when called with ``target='impl_pr'`` — the algokit#21 dogfood
+          surfaced the bug: the Fixer fetched the impl PR (8d.21 made
+          PR-lookup target-aware) but committed to ``foreman/issue-21``,
+          missing the impl PR entirely. This kwarg is the missing other
+          half of the 8d.21 fix.
+
+        For both targets we fall back to a tracking-branch fetch if the
+        local branch does not yet exist (the role may run on a clone
+        where the branch only lives on the remote — common after
+        container restart).
+
+        Like :meth:`create`, this best-effort syncs the worktree's
+        ``.venv`` afterward so the target repo's pre-push hook can
+        ``uv run --no-sync`` without exploding.
+
+        The impl path delegates to :meth:`attach_impl`, which already
+        encapsulates the existing-branch attach semantics for the impl
+        case (introduced in foreman#41 for the Reviewer-on-impl flow).
+        Callers may continue invoking :meth:`attach_impl` directly — both
+        entry points are supported.
         """
+        if target == "impl_pr":
+            return self.attach_impl(
+                clone_path=clone_path,
+                repo_slug=repo_slug,
+                ticket_id=ticket_id,
+                repo_url=repo_url,
+            )
+
         # Container first-run bootstrap — handles the edge case of a
         # post-`down -v` restart where the foreman-repos volume is empty
         # but the daemon's first observed state of this ticket is already
@@ -604,6 +639,79 @@ class WorktreeManager:
         )
         _maybe_sync_worktree_deps(wt_path, role_token=self._role_token)
         return wt_path
+
+    def prune(
+        self,
+        *,
+        project: str,
+        issue_number: int,
+        clone_path: Path,
+    ) -> list[Path]:
+        """Remove both ``issue-<N>`` and ``impl-<N>`` worktrees for this ticket.
+
+        For each target path:
+
+        1. If the path is a registered git worktree, try
+           ``git worktree remove --force <path>``.
+        2. If that fails (non-zero exit, or path isn't a registered
+           worktree), fall back to ``shutil.rmtree(path, ignore_errors=False)``.
+        3. If the path doesn't exist, silently skip it.
+
+        Returns the list of paths that were actually removed. Used by
+        ``foreman reset`` to wipe local debris for a stuck ticket.
+
+        Args:
+            project: Project slug; selects the ``<worktrees_root>/<project>/``
+                subdirectory whose ``issue-<N>``/``impl-<N>`` siblings
+                are candidates for removal.
+            issue_number: Ticket number whose two sibling worktrees should
+                be pruned.
+            clone_path: The local clone whose registry tracks these worktrees.
+                Required so ``git worktree remove`` consults the right
+                ``.git/worktrees/`` entries — without this, git either errors
+                (cwd isn't a repo) or hits the wrong registry. Comes from
+                ``V4Config.projects[*].local_clone_path`` in production.
+        """
+        project_root = self.worktrees_root / project
+        candidates = [
+            project_root / f"issue-{issue_number}",
+            project_root / f"impl-{issue_number}",
+        ]
+        removed: list[Path] = []
+        for path in candidates:
+            if not path.exists():
+                continue
+            try:
+                subprocess.run(
+                    ["git", "worktree", "remove", "--force", str(path)],
+                    check=True,
+                    capture_output=True,
+                    env=self._env(),
+                    cwd=clone_path,
+                )
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                # Either git rejected (not a registered worktree) or git
+                # isn't on PATH. Fall back to rmtree.
+                if path.exists():
+                    try:
+                        shutil.rmtree(path, ignore_errors=False)
+                    except OSError as exc:
+                        # Windows: daemon's open file handles or antivirus
+                        # can keep files locked. Soft-fail so reset doesn't
+                        # crash on the operator — they can retry once the
+                        # locking process releases.
+                        print(
+                            f"warning: could not remove {path}: {exc}",
+                            file=sys.stderr,
+                        )
+                        continue
+            # Only count it as removed if the path is actually gone.
+            # Guards against future changes (e.g. ignore_errors=True on
+            # rmtree, or catching OSError above without continue) that
+            # would otherwise falsely report removal.
+            if not path.exists():
+                removed.append(path)
+        return removed
 
 
 def _resolve_default_branch(clone_path: Path, *, role_token: str | None = None) -> str:

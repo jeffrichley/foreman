@@ -13,7 +13,7 @@ default:
     @just --list
 
 # Composite gate (recommended before push)
-check: lint typecheck import-linter test
+check: lint typecheck import-lint test
 
 # Developer convenience: apply lint auto-fixes + formatter
 fix:
@@ -28,14 +28,18 @@ lint:
 typecheck:
     uv run --no-sync mypy packages/foreman/src
 
-# Import-graph boundary enforcement (Decision 7).
-# Config lives at [tool.importlinter] in workspace-root pyproject.toml.
-# PYTHONPATH=packages/foreman exposes the ``tests`` package to grimp so the
-# R1 contract's ``forbidden_modules = ["tests"]`` reference resolves.
-# Without it, grimp's graph walker never visits the test tree and the rule
-# would silently no-op against a ``from tests import X`` line in src/.
-import-linter:
+# Import-boundary linter (Decision 7 / foreman#311 + foreman#318 R2).
+# PYTHONPATH lets grimp's graph walker see "tests" as a top-level
+# package alongside "foreman" so the R1 contract resolves. The recipe
+# splits per-OS because the justfile uses `set windows-shell :=
+# ["cmd.exe", "/c"]` and cmd.exe doesn't parse the `VAR=value cmd` shape.
+[unix]
+import-lint:
     PYTHONPATH=packages/foreman uv run --no-sync lint-imports
+
+[windows]
+import-lint:
+    set PYTHONPATH=packages/foreman && uv run --no-sync lint-imports
 
 # Tests
 test:

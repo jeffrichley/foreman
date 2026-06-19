@@ -1192,6 +1192,244 @@ def test_attach_impl_attaches_to_existing_impl_branch(tmp_path: Path) -> None:
 
 
 # ----------------------------------------------------------------------
+# Phase 8d.23: target-aware ``attach`` so impl-side Fixer runs land on
+# ``foreman/impl-<N>`` instead of ``foreman/issue-<N>``.
+#
+# Background: 8d.21 made the Fixer's PR-lookup target-aware. The
+# algokit#21 dogfood at ImplFix proved that wasn't enough — the role
+# fetched the impl PR but ``WorktreeManager.attach()`` hardcoded the spec
+# branch, so the Fixer's commits landed on ``foreman/issue-21`` instead
+# of ``foreman/impl-21``. These tests pin the new ``target`` kwarg on
+# ``attach()``.
+# ----------------------------------------------------------------------
+
+
+def _seed_clone_with_impl_branch_pushed(clone: Path, *, ticket_id: int) -> tuple[str, str]:
+    """Seed a clone with both spec and impl branches pushed to origin.
+
+    Returns ``(spec_head, impl_head)`` for downstream assertions. The
+    helper layers an additional commit on the impl branch so the two
+    tips genuinely differ — proves the worktree attach landed on the
+    correct branch (not coincidentally on the spec tip).
+    """
+    spec_head = _seed_clone_with_spec_branch_pushed(clone, ticket_id=ticket_id)
+    impl_branch_name = f"foreman/impl-{ticket_id}"
+    subprocess.run(
+        ["git", "checkout", "-b", impl_branch_name, f"foreman/issue-{ticket_id}"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    (clone / "src").mkdir(parents=True, exist_ok=True)
+    (clone / "src" / "impl_stub.py").write_text("# impl stub\n")
+    subprocess.run(["git", "add", "."], cwd=clone, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "feat: impl stub"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "push", "origin", impl_branch_name],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    impl_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "checkout", "main"], cwd=clone, check=True, capture_output=True)
+    return spec_head, impl_head
+
+
+def test_attach_spec_pr_default_creates_issue_branch(tmp_path: Path) -> None:
+    """Regression: when ``target`` is omitted, ``attach()`` behaves
+    exactly as it did before Phase 8d.23 — the worktree lives at
+    ``issue-<N>/`` and is checked out on ``foreman/issue-<N>``. Every
+    existing caller (Reviewer-on-spec, etc.) relies on this default.
+    """
+    clone = tmp_path / "clone"
+    _seed_clone_with_spec_branch_pushed(clone, ticket_id=42)
+
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+    wt_path = mgr.attach(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    assert wt_path == worktrees_root / "voice" / "issue-42"
+    branch_check = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert branch_check.stdout.strip() == "foreman/issue-42"
+
+
+def test_attach_impl_pr_attaches_to_existing_impl_branch(tmp_path: Path) -> None:
+    """``attach(..., target='impl_pr')`` lands on ``foreman/impl-<N>``,
+    the branch the Worker already pushed. This is the missing other
+    half of Phase 8d.21: the role fetched the impl PR but commits were
+    landing on the spec branch because attach was hardcoded.
+    """
+    clone = tmp_path / "clone"
+    spec_head, impl_head = _seed_clone_with_impl_branch_pushed(clone, ticket_id=42)
+    assert spec_head != impl_head, "test setup: tips must differ"
+
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+    wt_path = mgr.attach(
+        clone_path=clone, repo_slug="voice", ticket_id=42, target="impl_pr"
+    )
+
+    assert wt_path.exists()
+    branch_check = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert branch_check.stdout.strip() == "foreman/impl-42"
+    attached_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert attached_head == impl_head, (
+        "attach(target='impl_pr') must check out the impl branch's tip, not the spec tip"
+    )
+    assert attached_head != spec_head
+
+
+def test_attach_impl_pr_uses_impl_dir_name(tmp_path: Path) -> None:
+    """The worktree directory for ``target='impl_pr'`` must be
+    ``impl-<N>/``, NOT ``issue-<N>/``. The two are siblings; sharing
+    one dir for both targets would force the Fixer to inherit any
+    Reviewer-on-spec WIP state and would defeat the per-target
+    isolation that ``create_impl`` / ``attach_impl`` already enforce.
+    """
+    clone = tmp_path / "clone"
+    _seed_clone_with_impl_branch_pushed(clone, ticket_id=42)
+
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+    wt_path = mgr.attach(
+        clone_path=clone, repo_slug="voice", ticket_id=42, target="impl_pr"
+    )
+
+    assert wt_path.name == "impl-42", (
+        f"target='impl_pr' must produce 'impl-42' worktree dir; got {wt_path.name!r}"
+    )
+    assert wt_path == worktrees_root / "voice" / "impl-42"
+    # And the spec-side dir must NOT exist as a side effect.
+    assert not (worktrees_root / "voice" / "issue-42").exists(), (
+        "attach(target='impl_pr') leaked a spec-side worktree dir; the two paths must be independent"
+    )
+
+
+def test_attach_impl_pr_does_not_pass_dash_b_to_git_worktree_add(tmp_path: Path) -> None:
+    """Both attach targets must use the existing-branch attach shape
+    (``git worktree add <path> <branch>``) — the upstream role (Planner
+    for spec, Worker for impl) already created the branch and pushed
+    it. Passing ``-b`` would try to create a NEW local branch, which
+    fails when the branch already exists locally AND silently diverges
+    from origin when it doesn't.
+
+    The argv shape is asserted explicitly here because the impl path is
+    new code (added in Phase 8d.23 by delegating to ``attach_impl``)
+    and the ``-b`` mistake is exactly what would slip a regression
+    past green tests — ``git worktree add -b foreman/impl-N <path>
+    origin/foreman/impl-N`` would work superficially (worktree appears,
+    branch exists) but would land the Fixer's commits on a fresh local
+    branch that diverges from the remote tracking ref the Worker
+    pushed, defeating the entire fix.
+    """
+    clone = tmp_path / "clone"
+    _seed_clone_with_impl_branch_pushed(clone, ticket_id=42)
+
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+
+    # Capture every subprocess invocation so we can inspect the actual
+    # ``git worktree add ...`` argv used per target.
+    captured_argvs: list[list[str]] = []
+    real_run = subprocess.run
+
+    def _capture(
+        argv: list[str] | tuple[str, ...], *args: Any, **kwargs: Any
+    ) -> subprocess.CompletedProcess[Any]:
+        captured_argvs.append(list(argv))
+        return real_run(argv, *args, **kwargs)
+
+    with patch("foreman.worktree.subprocess.run", side_effect=_capture):
+        mgr.attach(
+            clone_path=clone, repo_slug="voice", ticket_id=42, target="impl_pr"
+        )
+
+    add_argvs = [
+        argv for argv in captured_argvs if len(argv) >= 3 and argv[1:3] == ["worktree", "add"]
+    ]
+    assert add_argvs, (
+        "expected at least one 'git worktree add' invocation during impl-path attach"
+    )
+    for argv in add_argvs:
+        assert "-b" not in argv, (
+            f"impl-path attach must not pass -b to 'git worktree add' "
+            f"(Worker already pushed the branch); got argv={argv!r}"
+        )
+        # And the branch arg must be the impl branch (not spec).
+        assert "foreman/impl-42" in argv, (
+            f"impl-path attach must target foreman/impl-42; got argv={argv!r}"
+        )
+        assert "foreman/issue-42" not in argv, (
+            f"impl-path attach must NOT target foreman/issue-42 (the spec branch); got argv={argv!r}"
+        )
+
+    # Sibling sanity check on the spec path — same shape, but the
+    # branch arg is the spec branch. Use a dedicated subdirectory so the
+    # spec clone gets its OWN origin.git (sibling of its parent) instead
+    # of colliding with the impl clone's origin.git in tmp_path.
+    captured_spec_argvs: list[list[str]] = []
+
+    def _capture_spec(
+        argv: list[str] | tuple[str, ...], *args: Any, **kwargs: Any
+    ) -> subprocess.CompletedProcess[Any]:
+        captured_spec_argvs.append(list(argv))
+        return real_run(argv, *args, **kwargs)
+
+    spec_dir = tmp_path / "spec_branch_check"
+    spec_dir.mkdir()
+    spec_clone = spec_dir / "clone"
+    _seed_clone_with_spec_branch_pushed(spec_clone, ticket_id=43)
+    spec_worktrees_root = spec_dir / "worktrees"
+    spec_mgr = WorktreeManager(worktrees_root=spec_worktrees_root)
+
+    with patch("foreman.worktree.subprocess.run", side_effect=_capture_spec):
+        spec_mgr.attach(clone_path=spec_clone, repo_slug="voice", ticket_id=43)
+
+    spec_add_argvs = [
+        argv
+        for argv in captured_spec_argvs
+        if len(argv) >= 3 and argv[1:3] == ["worktree", "add"]
+    ]
+    assert spec_add_argvs, "expected at least one 'git worktree add' on spec path"
+    for argv in spec_add_argvs:
+        assert "foreman/issue-43" in argv, (
+            f"spec-path attach must target foreman/issue-43; got argv={argv!r}"
+        )
+        assert "foreman/impl-43" not in argv, (
+            f"spec-path attach must NOT target foreman/impl-43; got argv={argv!r}"
+        )
+
+
+# ----------------------------------------------------------------------
 # dev_base_branch override — Foreman issue #16
 #
 # When the project's active dev line lives on a feature branch (e.g. during

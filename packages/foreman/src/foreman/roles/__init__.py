@@ -2,24 +2,38 @@
 
 This package also exposes the shared defensive-exception helper used by all
 four role runners — see :func:`handle_unhandled_role_exception`.
+
+It also exposes :func:`build_role_resources` — the v4-native identity-
+resource helper that mints a fresh installation token via
+:class:`foreman.v4.identity.V4IdentityRegistry`, fetches the bot's
+App metadata (still needed for v3-era commit attribution + push URL
+construction in :class:`foreman.git_hosts.github.GitHubProvider`), and
+returns the ``(host, token, client)`` trio the role bodies thread
+through worktree creation + GitHub side effects.
 """
 
 from __future__ import annotations
 
-import logging
 import traceback
 from collections.abc import Callable
 from typing import Any
 
-_log = logging.getLogger(__name__)
+from github import Auth, Github
 
-# foreman#229: runaway-burn defense — when an unhandled exception escapes a
-# role runner's body, the in-flight ticket label was NOT being transitioned.
-# The dispatcher's next poll then re-dispatched the SAME role on the SAME
-# ticket, producing a runaway (foreman#227: 171 dispatches in 2h52m). This
-# helper is the uniform "post traceback + transition to terminal blocking
-# label" surface every role runner calls from its outermost ``except``.
-TERMINAL_BLOCKING_LABEL = "foreman:needs-help"
+from foreman.auth import fetch_app_metadata
+from foreman.git_host import BotIdentity, GitHostProvider
+from foreman.git_hosts.github import GitHubProvider
+
+# foreman#229 (v3): the runaway-burn defense in this helper used to
+# transition the in-flight ticket to ``foreman:needs-help`` so the
+# dispatcher's next poll wouldn't re-dispatch the same role on the same
+# ticket. Under v4 the role subprocess dies on an unhandled exception,
+# the :class:`SubprocessRoleDispatcher` reports failure, the state
+# machine transitions to ``NeedsHelp``, and
+# :class:`LabelObservabilityObserver` writes the v4-namespaced
+# ``foreman:state-needs-help`` label. The role-side write was dropped
+# in Phase 8d.7 — the helper now only posts a diagnostic comment so the
+# operator sees the traceback on the issue.
 
 # Cap the traceback shown in the GitHub comment so a runaway provider that
 # fills its own stack with megabytes of context doesn't post a multi-MB
@@ -92,10 +106,9 @@ def build_exception_comment(role: str, exc: BaseException) -> str:
     inline_msg = _truncate_inline(str(exc))
     return (
         f"foreman {role} runner crashed with an unhandled exception. "
-        f"The ticket has been transitioned to `{TERMINAL_BLOCKING_LABEL}` to "
-        "stop the daemon from re-dispatching on every poll (foreman#227, "
-        "foreman#229). Remove the label to resume the autonomous flow once "
-        "the underlying cause is addressed.\n\n"
+        "v4 will transition the ticket to `NeedsHelp` once the role "
+        "subprocess reports failure; the `foreman:state-needs-help` "
+        "label will appear momentarily.\n\n"
         f"**Exception:** `{type(exc).__name__}: {inline_msg}`\n\n"
         "<details>\n"
         "<summary>Traceback</summary>\n\n"
@@ -110,54 +123,103 @@ def handle_unhandled_role_exception(
     issue_number: int,
     exc: BaseException,
     post_comment: Callable[[str], Any],
-    set_needs_help_label: Callable[[], Any],
 ) -> None:
     """Surface an unhandled role-runner exception to the ticket.
 
-    Posts a comment carrying the exception type + message + truncated
-    traceback, then transitions the originating ticket to
-    :data:`TERMINAL_BLOCKING_LABEL` so the daemon stops re-dispatching
-    on every poll (the runaway-burn pattern foreman#227 surfaced and
-    foreman#229 fixes).
+    Posts a diagnostic comment carrying the exception type + message +
+    truncated traceback so the operator can read the crash on the issue
+    page without spelunking daemon logs.
 
-    Both side effects are wrapped in their own try/except so a GitHub
-    5xx during the comment-post does NOT mask the failure to transition
-    the label, and vice-versa. The original exception still propagates
-    via the caller's bare ``raise`` — this helper never swallows.
+    Under v4, the role-side label transition that lived here in v3 has
+    been dropped (Phase 8d.7): when the role subprocess dies the
+    :class:`SubprocessRoleDispatcher` reports failure, the state machine
+    transitions to ``NeedsHelp``, and
+    :class:`LabelObservabilityObserver` writes
+    ``foreman:state-needs-help``. The role-side write was the wrong
+    namespace (literal ``foreman:needs-help``, no ``state-`` prefix) and
+    redundant with the observer's correct one.
+
+    Comment-post failures are swallowed silently — the original
+    exception still propagates via the caller's bare ``raise``, the
+    subprocess still dies, and v4's NeedsHelp transition still happens.
+    The comment is diagnostic; losing it doesn't lose the defense.
 
     Args:
         role: ``"planner"`` / ``"reviewer"`` / ``"worker"`` / ``"fixer"``,
             used only in the human-facing comment prose.
-        issue_number: For diagnostic logs when the helper's own writes
-            fail. The label-transition callable already targets the
-            right issue.
+        issue_number: Retained on the signature for diagnostic
+            symmetry with the closure callbacks the role wires; not
+            consumed by the body today.
         exc: The exception that escaped the role's body. The caller is
             expected to ``raise`` after this helper returns so the
             dispatcher's error handling still sees it.
         post_comment: Closure that posts ``body`` as a GitHub comment on
             the originating ticket. Each role wires its own (the four
             roles use different PyGithub / GitHostProvider surfaces).
-        set_needs_help_label: Closure that atomically transitions the
-            originating ticket to :data:`TERMINAL_BLOCKING_LABEL`. Same
-            rationale as ``post_comment``.
     """
+    del issue_number  # retained on signature for caller-side symmetry
     body = build_exception_comment(role=role, exc=exc)
     try:
         post_comment(body)
     except Exception:
-        _log.exception(
-            "foreman#229 %s exception-handler: post_comment failed for "
-            "issue=%d; label transition will still be attempted",
-            role,
-            issue_number,
-        )
-    try:
-        set_needs_help_label()
-    except Exception:
-        _log.exception(
-            "foreman#229 %s exception-handler: set_needs_help_label "
-            "failed for issue=%d; ticket will remain on the in-flight "
-            "label and the daemon may re-dispatch",
-            role,
-            issue_number,
-        )
+        # Best-effort: a GitHub 5xx during the comment post must not
+        # mask the original exception that triggered this helper.
+        pass
+
+
+def build_role_resources(
+    *,
+    registry: Any,
+    role: str,
+    app_id: int,
+    private_key_path: str,
+) -> tuple[GitHostProvider, str, Github]:
+    """Build the trio of role-side identity resources from a v4 registry.
+
+    Returns ``(host, token, client)``:
+
+    * ``host`` — v3-shape :class:`GitHostProvider` used by the role's
+      commit/push/PR/comment side effects. The :class:`BotIdentity`
+      carries the bot's slug + numeric id (still required for v3-era
+      commit attribution via ``GIT_AUTHOR_*`` env vars and for the
+      tokenized HTTPS push URL inside :class:`GitHubProvider`); these
+      come from :func:`fetch_app_metadata` against the App credentials
+      threaded in by the caller from ``V4Config.apps.<role>``.
+    * ``token`` — the role's current installation-token string, used by
+      :class:`~foreman.worktree.WorktreeManager` for ``GH_TOKEN`` env
+      injection on its git subprocesses.
+    * ``client`` — a fresh :class:`Github` client authenticated with the
+      same token, used by the role for any direct PyGithub calls
+      outside the ``host`` surface.
+
+    ``registry`` is typed ``Any`` so tests can inject any duck-typed
+    object that satisfies the production contract. Real callers pass a
+    :class:`V4IdentityRegistry`.
+
+    Production contract: ``registry.get_role_token(role) -> str``. The
+    helper mints a fresh :class:`Github` client and uses
+    :func:`fetch_app_metadata` (HTTP fetch to GitHub) to build the
+    :class:`BotIdentity`.
+
+    ``app_id`` + ``private_key_path`` come from
+    ``V4Config.apps.<role>`` at the call site — v4's per-role App
+    credentials are top-level (not nested under per-project blocks the
+    way v3 stored them), so the role function reads them off the
+    V4Config and threads them in here rather than this helper rooting
+    through a project shape.
+
+    Test-fake discipline (Wren's standing feedback on fakes mirroring
+    real APIs strictly): tests should
+    :func:`unittest.mock.patch.object` this helper or the per-role
+    re-export to return a pre-baked ``(host, token, client)`` trio,
+    rather than rely on ``MagicMock`` attribute auto-creation —
+    auto-created attributes return ``MagicMock`` instances which would
+    propagate into ``Github(token)`` where the real registry would
+    have given a string.
+    """
+    token = registry.get_role_token(role)
+    client = Github(auth=Auth.Token(token))
+    meta = fetch_app_metadata(app_id, private_key_path)
+    identity = BotIdentity(slug=meta.slug, user_id=meta.app_id, token=token)
+    host = GitHubProvider(identity=identity, client=client)
+    return host, token, client

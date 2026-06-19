@@ -33,7 +33,11 @@ ENV IMAGE_SHA=${IMAGE_SHA} \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git ca-certificates curl gnupg \
         nodejs npm \
+        gettext-base \
     && rm -rf /var/lib/apt/lists/*
+# gettext-base provides ``envsubst``; the entrypoint uses it to expand
+# ${FOREMAN_*_APP_ID} placeholders in /etc/foreman/config.toml.template
+# into the runtime V4Config file at $FOREMAN_V4_CONFIG.
 
 # --- uv -----------------------------------------------------------------
 RUN pip install --no-cache-dir uv
@@ -80,8 +84,22 @@ COPY docker/claude/skills /root/.claude/skills
 COPY docker/claude/plugins /root/.claude/plugins
 
 # --- Foreman config + entrypoint --------------------------------------
-COPY docker/foreman/config.toml.container /etc/foreman/config.toml
+# v4: the config.toml is rendered at container start by envsubst from
+# this template (App IDs come from .env -> compose -> container env).
+# The rendered file lives at /foreman/state/config.toml (the
+# foreman-state volume) so it persists across container restarts.
+COPY docker/foreman/config.toml.template /etc/foreman/config.toml.template
 COPY docker/entrypoint.sh /entrypoint.sh
+
+# Container-internal path defaults. Baked as ENV so they're visible to
+# both the entrypoint and to subsequent ``docker exec foreman ...``
+# processes that the operator runs after startup. The entrypoint can
+# still override these (operator-friendly), but in a stock container
+# every ``foreman`` invocation finds the rendered config without needing
+# the env_file to redeclare these.
+ENV FOREMAN_V4_CONFIG=/foreman/state/config.toml \
+    FOREMAN_LOG_DIR=/foreman/logs \
+    FOREMAN_STATE_DIR=/foreman/state
 # Strip CRLF defensively: .gitattributes locks LF on .sh files going forward,
 # but a developer with an existing working tree (autocrlf=true) may COPY a
 # CRLF-tainted entrypoint into the image. The shebang then reads `#!/bin/bash\r`
