@@ -68,6 +68,12 @@ def test_full_boot_from_toml_to_done(tmp_path: Path, monkeypatch):
         f"[orchestrator]\n"
         f'app_id = 99999\n'
         f'private_key_path = "/tmp/fake-orchestrator.pem"\n'
+        f"[operator.supervisor]\n"
+        f'name = "Test Sup"\n'
+        f'email = "sup@example.com"\n'
+        f"[operator.signer]\n"
+        f'name = "Test Sign"\n'
+        f'email = "sign@example.com"\n'
         f"[[projects]]\n"
         f'name = "p"\n'
         f'repo = "owner/p"\n'
