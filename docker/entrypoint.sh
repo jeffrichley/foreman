@@ -15,7 +15,10 @@
 #
 # Inputs (from compose):
 #   /run/secrets/claude_credentials — Max OAuth token JSON
-#   FOREMAN_CONFIG_PATH, FOREMAN_LOG_DIR, FOREMAN_STATE_DIR, etc.
+#   FOREMAN_LOG_DIR, FOREMAN_STATE_DIR, FOREMAN_*_APP_ID, etc.
+#   FOREMAN_CONFIG_TEMPLATE — path to the baked envsubst-able TOML
+#       (default /etc/foreman/config.toml.template). Rendered at startup
+#       into ``$FOREMAN_V4_CONFIG`` (default /foreman/state/config.toml).
 #   IMAGE_SHA, ALLOW_DIRTY — build args surfaced as env vars
 #
 # Exits:
@@ -59,17 +62,34 @@ fi
 ) &
 disown
 
+# --- Render the v4 config from the template -----------------------------
+# v4 ``V4Config`` (foreman.v4.config) takes integer ``app_id`` values
+# directly — no env-var indirection. The image baked
+# ``/etc/foreman/config.toml.template`` contains ``${VAR}`` placeholders
+# for each App ID; envsubst expands them at startup so the App IDs stay
+# in operator-owned ``.env`` rather than baked into the image.
+#
+# Write the rendered file to a writable path (the volume-attached state
+# dir) so the SQLAlchemyDataStore + daemon can write next to it.
+FOREMAN_CONFIG_TEMPLATE="${FOREMAN_CONFIG_TEMPLATE:-/etc/foreman/config.toml.template}"
+FOREMAN_V4_CONFIG="${FOREMAN_V4_CONFIG:-/foreman/state/config.toml}"
+mkdir -p "$(dirname "$FOREMAN_V4_CONFIG")"
+envsubst < "$FOREMAN_CONFIG_TEMPLATE" > "$FOREMAN_V4_CONFIG"
+export FOREMAN_V4_CONFIG
+
 # --- Startup banner -----------------------------------------------------
 # IMAGE_SHA + ALLOW_DIRTY come in as build args via the Dockerfile.
 # Print as a single JSON line so the daemon's structured log driver
 # captures it cleanly.
-printf '{"event":"container_start","image_sha":"%s","allow_dirty":%s,"foreman_config_path":"%s","foreman_log_dir":"%s"}\n' \
+printf '{"event":"container_start","image_sha":"%s","allow_dirty":%s,"foreman_v4_config":"%s","foreman_log_dir":"%s"}\n' \
     "${IMAGE_SHA:-unknown}" \
     "${ALLOW_DIRTY:-false}" \
-    "${FOREMAN_CONFIG_PATH:-/etc/foreman/config.toml}" \
+    "$FOREMAN_V4_CONFIG" \
     "${FOREMAN_LOG_DIR:-/foreman/logs}"
 
 # --- Hand off to the daemon ---------------------------------------------
 # `exec` so SIGTERM from `docker stop` lands directly on the daemon,
-# not on this shell.
-exec foreman daemon v3-start
+# not on this shell. v4 entry point is ``foreman.v4.cli:main``; the
+# ``daemon start`` subcommand was registered in Phase 6.6 as the
+# replacement for v3's ``daemon v3-start``.
+exec foreman daemon start

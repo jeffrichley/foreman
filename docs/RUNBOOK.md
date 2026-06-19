@@ -53,19 +53,52 @@ worktrees won't be touched again post-cutover.
 
 The Phase 9 PR replaces the v3 reconciler-rules state engine with the
 v4 state-machine + EventBus + observers substrate. There is no in-place
-migration of in-flight tickets; the cutover is a stop-old / rebuild /
-start-new sequence.
+migration of in-flight tickets — the v3 and v4 SQLite schemas are
+disjoint, the v4 Poller does NOT reconstruct ticket state from GitHub
+labels, and any ticket mid-pipeline at cutover will be **silently
+ignored** by the v4 daemon unless operator-rescued.
 
-Why no migration: ticket state in v3 lived in the reconciler's SQLite
-tables; v4 state lives in a different SQLite schema owned by
-`foreman.v4.sqlite_repository`. The schemas don't overlap. Rather than
-write a translation layer for a one-shot cutover, the v4 daemon
-re-discovers in-flight tickets by polling GitHub on startup —
-`foreman:*` labels on issues + open PRs by head-branch are the
-source-of-truth the Poller reads. Any ticket mid-pipeline keeps its
-labels through the cutover and gets re-picked-up by v4.
+What the v4 Poller actually does on startup (`foreman.v4.poller`):
 
-Sequence:
+- `_adopt_new_tickets()` queries GitHub for issues bearing the single
+  configured `trigger_label` (default `foreman:plan`) and creates fresh
+  v4 SQLite rows for them in Planning state.
+- `_enqueue_open_tickets()` re-enqueues anything already in the v4
+  SQLite — but the v4 SQLite is **empty at first boot** because it's a
+  brand-new schema file.
+
+That means: a ticket past Planning at cutover (the Observer removed its
+`foreman:plan` label on the first state transition per Phase 8d.8)
+will not have `foreman:plan` to re-trigger Planning, and no v4 SQLite
+row exists yet, so the daemon will not touch it.
+
+### Pre-cutover: inventory + manual rescue plan
+
+For every project the daemon manages, list each open issue that has any
+`foreman:*` label and decide a per-ticket disposition BEFORE rebuilding:
+
+```bash
+# repeat per project; use the Wren PAT if hitting GitHub from a script
+gh issue list --repo jeffrichley/<project> \
+  --label foreman:plan,foreman:planning,foreman:plan-review,foreman:spec-fix,foreman:implementing,foreman:impl-review,foreman:impl-fix,foreman:merging,foreman:needs-help \
+  --state open --json number,title,labels
+```
+
+For each ticket, pick one disposition:
+
+| Current state | Disposition |
+|---|---|
+| Just submitted (`foreman:plan` only) | Leave it. v4's Poller will adopt it on first poll cycle. |
+| Mid-pipeline with PR open | Either let the human finish it and merge by hand, OR strip all `foreman:*` labels + re-apply `foreman:plan` post-cutover to restart from Planning. |
+| `foreman:needs-help` | Leave the label; manually `foreman reset <ticket-id>` post-cutover to wipe + re-queue. |
+| Already merged spec but no impl PR yet | Strip `foreman:*` labels + re-apply `foreman:plan` post-cutover. |
+
+There is no "preserve mid-flight progress" path. The conservative move
+for tickets the operator wants to keep is to let the v3 daemon finish
+them before cutover — but the v3 substrate is dying with this PR, so
+"finish them" means human-driving each through the remaining steps.
+
+### Cutover sequence
 
 1. **Stop the running v3 container** (preserves volumes — important):
    ```bash
@@ -86,38 +119,55 @@ Sequence:
    daemon start`` from a Bash invocation) and `Stop-Process -Id <pid>
    -Force`.
 
-3. **Rebuild the container image against the v4 code:**
+3. **Drain the v3 state volume** (optional but recommended — fresh v4
+   SQLite is cheaper than coexistence-debugging). With the v3 container
+   stopped:
+   ```bash
+   docker run --rm -v foreman-state:/state alpine sh -c \
+     'rm -f /state/reconciler.sqlite /state/v3-daemon.log'
+   ```
+   This leaves the volume intact but clears v3-specific files. v4
+   creates its own `foreman.sqlite` and writes a rendered `config.toml`
+   into the same volume on first boot.
+
+4. **Rebuild the container image against the v4 code:**
    ```bash
    ./scripts/build-docker.sh
    ```
 
-4. **Start the v4 container daemon:**
+5. **Start the v4 container daemon:**
    ```bash
    docker compose up -d foreman-daemon
    ```
 
-5. **Verify it boots cleanly** — the JSONL log should start emitting
-   `state_entered` records as the Poller re-discovers in-flight tickets:
+6. **Verify it boots cleanly** — the JSONL log should show one
+   `container_start` record naming `foreman_v4_config`, then the
+   daemon's own `state_entered`/`tick` records:
    ```bash
    docker compose logs -f foreman-daemon | head -40
    docker exec foreman-daemon foreman daemon status
    docker exec foreman-daemon foreman ps
+   docker exec foreman-daemon cat /foreman/logs/transitions.jsonl | head -10
    ```
 
-6. **Spot-check** any ticket that was in flight at cutover time:
+7. **Apply the per-ticket disposition plan** from the pre-cutover
+   inventory:
    ```bash
-   docker exec foreman-daemon foreman show <ticket-id>
-   ```
-   v4's state machine should report a recognized state name (Queued /
-   Planning / SpecReview / ImplFix / etc.). If the label set on GitHub
-   doesn't map to a v4 state, the Poller skips the ticket — surface
-   it manually with `foreman reset` or by relabeling.
+   # Re-trigger from Planning on tickets that need it:
+   gh issue edit <N> --repo <owner>/<repo> \
+     --remove-label foreman:planning,foreman:spec-fix,... \
+     --add-label foreman:plan
 
-If anything goes wrong, the rollback is to redeploy the previous image:
-the `feat/foreman-v4-substrate` Git tag `pre-phase-9-cutover` marks the
-last v3-compatible commit. `git checkout pre-phase-9-cutover` then
-`./scripts/build-docker.sh && docker compose up -d foreman-daemon`
-restores the v3 daemon against the unchanged state volumes.
+   # Wipe + re-queue stuck tickets:
+   docker exec foreman-daemon foreman reset <project>#<issue>
+   ```
+
+If the v4 daemon's boot fails, the rollback is to redeploy the previous
+image: `git checkout pre-phase-9-cutover` (the tag marks the last
+v3-compatible commit) then `./scripts/build-docker.sh && docker compose
+up -d foreman-daemon`. The state volume keeps both `reconciler.sqlite`
+(v3, untouched until step 3) and `foreman.sqlite` (v4, fresh) so
+rollback restores v3 behavior cleanly.
 
 ---
 
@@ -151,7 +201,7 @@ docker compose logs -f daemon
 
 ```bash
 docker exec foreman-daemon ls /foreman/state
-docker exec foreman-daemon cat /foreman/state/transitions.jsonl | tail -50
+docker exec foreman-daemon cat /foreman/logs/transitions.jsonl | tail -50
 docker exec foreman-daemon ls /foreman/logs/planner
 ```
 
@@ -203,7 +253,7 @@ intentionally skipped.
 1. Check the daemon-log file directly (no need for the container to be
    alive — the named volume persists):
    ```bash
-   docker run --rm -v foreman-state:/state alpine cat /state/transitions.jsonl | tail -30
+   docker run --rm -v foreman-logs:/logs alpine cat /logs/transitions.jsonl | tail -30
    ```
 2. Check container exit reason:
    ```bash

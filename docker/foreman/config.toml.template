@@ -1,0 +1,49 @@
+# Foreman v4 container config — envsubst template.
+#
+# All paths are container-internal. The image bakes this file at
+# /etc/foreman/config.toml.template; the entrypoint runs ``envsubst`` on
+# it at container start to expand ${FOREMAN_*} placeholders into a real
+# config at $FOREMAN_V4_CONFIG (default /foreman/state/config.toml).
+#
+# Schema: foreman.v4.config.V4Config. Per-project [[projects]] is an
+# array of tables (TOML double-bracket); apps + orchestrator live at
+# the top level because v4 uses one App installation per role across
+# all v4-managed repos (see foreman.v4.identity.V4IdentityRegistry).
+#
+# NOTE: no [admin] section here. FOREMAN_ADMIN_TOKEN is only consumed
+# by ``foreman init`` (host-side bootstrap to create labels in a target
+# repo); the daemon at runtime authenticates as the role Apps directly.
+
+[daemon]
+db_path = "/foreman/state/foreman.sqlite"
+log_dir = "/foreman/logs"
+log_level = "INFO"
+tick_seconds = 30.0
+max_in_flight = 1
+role_timeout_seconds = 1800
+max_state_attempts = 3
+
+[apps]
+planner = { app_id = ${FOREMAN_PLANNER_APP_ID}, private_key_path = "/run/secrets/planner_pem" }
+reviewer = { app_id = ${FOREMAN_REVIEWER_APP_ID}, private_key_path = "/run/secrets/reviewer_pem" }
+fixer = { app_id = ${FOREMAN_FIXER_APP_ID}, private_key_path = "/run/secrets/fixer_pem" }
+worker = { app_id = ${FOREMAN_WORKER_APP_ID}, private_key_path = "/run/secrets/worker_pem" }
+
+[orchestrator]
+app_id = ${FOREMAN_ORCHESTRATOR_APP_ID}
+private_key_path = "/run/secrets/orchestrator_pem"
+
+[[projects]]
+name = "voice"
+repo = "jeffrichley/voice"
+local_clone_path = "/foreman/repos/voice"
+
+[[projects]]
+name = "foreman"
+repo = "jeffrichley/foreman"
+local_clone_path = "/foreman/repos/foreman"
+
+[[projects]]
+name = "agent_core"
+repo = "jeffrichley/agent_core"
+local_clone_path = "/foreman/repos/agent_core"
