@@ -90,6 +90,16 @@ COPY docker/claude/plugins /root/.claude/plugins
 # foreman-state volume) so it persists across container restarts.
 COPY docker/foreman/config.toml.template /etc/foreman/config.toml.template
 COPY docker/entrypoint.sh /entrypoint.sh
+
+# Container-internal path defaults. Baked as ENV so they're visible to
+# both the entrypoint and to subsequent ``docker exec foreman ...``
+# processes that the operator runs after startup. The entrypoint can
+# still override these (operator-friendly), but in a stock container
+# every ``foreman`` invocation finds the rendered config without needing
+# the env_file to redeclare these.
+ENV FOREMAN_V4_CONFIG=/foreman/state/config.toml \
+    FOREMAN_LOG_DIR=/foreman/logs \
+    FOREMAN_STATE_DIR=/foreman/state
 # Strip CRLF defensively: .gitattributes locks LF on .sh files going forward,
 # but a developer with an existing working tree (autocrlf=true) may COPY a
 # CRLF-tainted entrypoint into the image. The shebang then reads `#!/bin/bash\r`
