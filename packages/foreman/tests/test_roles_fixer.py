@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -37,6 +38,31 @@ from foreman.schemas.fixer import (
     FixerOutput,
     UnaddressedFinding,
 )
+
+_DEFAULT_ROLE_BOT_LOGINS = {
+    "foreman-planner[bot]",
+    "foreman-reviewer[bot]",
+    "foreman-fixer[bot]",
+    "foreman-worker[bot]",
+}
+
+
+class _FakeIssueComment:
+    """Mirror of PyGithub's ``IssueComment`` for the surface foreman#328 touches.
+
+    Carries the three fields the role's inline ``CommentRef`` walk
+    reads — ``user.login``, ``created_at``, ``body``. Provides a nested
+    ``user`` stub so ``c.user.login`` works without an extra import.
+    """
+
+    class _User:
+        def __init__(self, login: str) -> None:
+            self.login = login
+
+    def __init__(self, *, login: str, created_at: datetime, body: str) -> None:
+        self.user = _FakeIssueComment._User(login)
+        self.created_at = created_at
+        self.body = body
 
 
 def _with_usage(output: Any) -> tuple[Any, UsageInfo]:
@@ -173,7 +199,15 @@ class _FakeIssue:
     would refuse.
     """
 
-    def __init__(self, *, number: int, title: str, body: str, labels: list[str]) -> None:
+    def __init__(
+        self,
+        *,
+        number: int,
+        title: str,
+        body: str,
+        labels: list[str],
+        comments: list[_FakeIssueComment] | None = None,
+    ) -> None:
         self.number = number
         self.title = title
         self.body = body
@@ -190,6 +224,16 @@ class _FakeIssue:
         self.set_labels_calls: list[tuple[str, ...]] = []
         # Audit trail for cache-busting assertions.
         self.update_calls: int = 0
+        # foreman#328: comment-fetch surface + call counter for
+        # regression tests that assert ``get_comments()`` was NEVER
+        # called on the impl-PR fix path.
+        self._comments: list[_FakeIssueComment] = list(comments or [])
+        self.get_comments_calls: int = 0
+
+    def get_comments(self) -> list[_FakeIssueComment]:
+        # foreman#328: mirrors PyGithub's ``Issue.get_comments()``.
+        self.get_comments_calls += 1
+        return list(self._comments)
 
     @property
     def labels(self) -> list[_FakeLabel]:
@@ -407,6 +451,11 @@ def _make_registry(client: _FakeFixerClient, token: str = "ghs_fixer_token") -> 
     reg = MagicMock()
     reg.get_fixer_client.return_value = client
     reg.get_fixer_token.return_value = token
+    # foreman#328: bot-login seam for the comment filter. Fresh-magic-mock
+    # ``get_role_bot_logins`` would return a ``MagicMock`` object that
+    # ``filter_bot_self_comments`` can't ``in``-test against, so pin a
+    # real set here.
+    reg.get_role_bot_logins.return_value = set(_DEFAULT_ROLE_BOT_LOGINS)
     return reg
 
 
@@ -1882,3 +1931,107 @@ async def test_run_fixer_logs_exception_with_safe_defaults_when_run_agent_raises
     assert row["unaddressed_by_reason"] == {}
     assert row["disagreed_count"] == 0
     assert row["confidence"] == "low"
+
+
+# ----------------------------------------------------------------------
+# foreman#328 — issue comments on the Fixer-on-spec path; never on
+# the Fixer-on-impl path (regression-by-construction at the fetch site)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_fixer_on_spec_pr_injects_human_comments_no_labels_section(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """foreman#328: spec-side Fixer sees the originating issue's
+    human comments. NO ``## Labels`` section (labels are Planner-only).
+    """
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    cfg = _make_config(clone)
+    repo, _pr, issue = _make_fake_repo(issue_number=42, head_sha=head_sha)
+    issue._comments = [
+        _FakeIssueComment(
+            login="alice",
+            created_at=datetime(2026, 6, 17, 20, 0, tzinfo=UTC),
+            body="Operator clarification on scope.",
+        ),
+    ]
+    client = _FakeFixerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
+
+    await run_fixer(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    user_prompt = fake_provider.run_agent.call_args.kwargs["user_prompt"]
+    assert "## Comments" in user_prompt
+    assert "### @alice" in user_prompt
+    assert "Operator clarification on scope." in user_prompt
+    # Fixer-on-spec must NOT carry labels — that's a Planner-only
+    # concern (per the foreman#328 design table).
+    assert "## Labels" not in user_prompt
+    # The fetch happened exactly once.
+    assert issue.get_comments_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_run_fixer_on_impl_pr_never_calls_get_comments_and_omits_section(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """foreman#328: impl-side Fixer must stay byte-identical to its
+    pre-#328 prompt shape. Branching on ``target`` BEFORE the fetch
+    means ``issue.get_comments()`` is NEVER called — the regression
+    test asserts on the call counter directly (regression-by-construction).
+    """
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_FIXER_APP_ID", "777777")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    cfg = _make_config(clone)
+    # Issue carries the impl-fix entry label and a human comment that
+    # MUST NOT reach the impl-side prompt.
+    repo, _pr, issue = _make_fake_repo(
+        issue_number=42,
+        head_sha=head_sha,
+        labels=["foreman:impl-fix", "priority:high"],
+    )
+    issue._comments = [
+        _FakeIssueComment(
+            login="alice",
+            created_at=datetime(2026, 6, 17, 20, 0, tzinfo=UTC),
+            body="Late scope hint — must NOT reach the impl Fixer.",
+        ),
+    ]
+    client = _FakeFixerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_fixed_output()))
+
+    await run_fixer(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+        target="impl_pr",
+    )
+
+    user_prompt = fake_provider.run_agent.call_args.kwargs["user_prompt"]
+    assert "## Comments" not in user_prompt
+    assert "## Labels" not in user_prompt
+    assert "Late scope hint" not in user_prompt
+    # Strongest possible guarantee: the fetch path never fired.
+    assert issue.get_comments_calls == 0

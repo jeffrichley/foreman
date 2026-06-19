@@ -7,11 +7,12 @@ contract). Concrete-provider behavior is exercised in
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from foreman.git_host import BotIdentity, GitHostProvider, IssueRef, PRRef
+from foreman.git_host import BotIdentity, CommentRef, GitHostProvider, IssueRef, PRRef
 
 
 def test_bot_identity_dataclass_shape() -> None:
@@ -30,6 +31,18 @@ def test_issue_ref_dataclass_shape() -> None:
         repo_slug="owner/repo",
     )
     assert ref.labels == ["bug", "good first issue"]
+
+
+def test_comment_ref_dataclass_shape() -> None:
+    """foreman#328: ``CommentRef`` is a frozen dataclass with three fields."""
+    posted = datetime(2026, 6, 17, 20, 0, tzinfo=UTC)
+    ref = CommentRef(author_login="alice", posted_at=posted, body="hello")
+    assert ref.author_login == "alice"
+    assert ref.posted_at == posted
+    assert ref.body == "hello"
+    # Frozen — assignment should raise.
+    with pytest.raises(Exception):  # noqa: B017 - frozen dataclass raises FrozenInstanceError
+        ref.body = "changed"  # type: ignore[misc]
 
 
 def test_pr_ref_dataclass_shape() -> None:
@@ -65,6 +78,10 @@ class _FakeProvider(GitHostProvider):
     def get_default_branch(self, repo_slug: str) -> str:
         self.calls.append(("get_default_branch", (repo_slug,)))
         return "main"
+
+    def get_issue_comments(self, repo_slug: str, issue_number: int) -> list[CommentRef]:
+        self.calls.append(("get_issue_comments", (repo_slug, issue_number)))
+        return []
 
     def commit_files_to_worktree(
         self, worktree_path: Path, files: dict[str, str], message: str

@@ -247,6 +247,26 @@ class IdentityRegistry:
             "'planner', 'reviewer', 'fixer', 'worker', and 'orchestrator'."
         )
 
+    def get_role_bot_logins(self) -> set[str]:
+        """Return the GitHub login strings for the four foreman role bots.
+
+        Each login is ``f"{slug}[bot]"`` derived from the role's
+        ``AppMetadata`` (fetched via ``GET /app``). Used by the spec-side
+        role dispatchers (Planner / Reviewer-on-spec / Fixer-on-spec) to
+        filter out role-bot self-comments from the originating issue's
+        comment stream so the bots' own previous postings don't feed
+        back into subsequent LLM runs.
+
+        Per-role metadata is cached for the registry's lifetime
+        (``self._app_meta_cache``), so the cost on first call is at most
+        three extra ``GET /app`` HTTP calls (the calling role's metadata
+        is already cached); subsequent calls are free.
+        """
+        return {
+            f"{self._get_app_metadata(role).slug}[bot]"
+            for role in ("planner", "reviewer", "fixer", "worker")
+        }
+
     def get_role_identity_env(self, role: str) -> dict[str, str]:
         """Return GIT_AUTHOR_*/GIT_COMMITTER_* env vars for a role's bot identity.
 

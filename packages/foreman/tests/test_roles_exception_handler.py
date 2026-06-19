@@ -40,7 +40,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from foreman.config import AppsConfig, Config, ProjectConfig
-from foreman.git_host import GitHostProvider, IssueRef, PRRef
+from foreman.git_host import CommentRef, GitHostProvider, IssueRef, PRRef
 from foreman.roles import (
     TERMINAL_BLOCKING_LABEL,
     build_exception_comment,
@@ -216,6 +216,12 @@ class _FakeHostProvider(GitHostProvider):
 
     def get_default_branch(self, repo_slug: str) -> str:
         return self.default_branch
+
+    def get_issue_comments(self, repo_slug: str, issue_number: int) -> list[CommentRef]:
+        # foreman#328: provider seam. Default empty list — exception-handler
+        # tests don't seed comments; they just need the seam to exist so
+        # the role's pre-LLM call doesn't AttributeError.
+        return []
 
     def commit_files_to_worktree(
         self, worktree_path: Path, files: dict[str, str], message: str

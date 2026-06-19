@@ -647,6 +647,18 @@ class _FakeIssue:
         self.set_labels_calls: list[tuple[str, ...]] = []
         # Audit trail for cache-busting assertions.
         self.update_calls: int = 0
+        # foreman#328: comment-fetch call counter for the regression
+        # test that asserts the Worker never reads issue comments
+        # (impl-side roles must stay byte-identical to pre-#328 behavior).
+        self.get_comments_calls: int = 0
+
+    def get_comments(self) -> list[Any]:
+        # foreman#328: mirrors PyGithub's ``Issue.get_comments()``.
+        # The Worker must NEVER call this — comments are a spec-side
+        # role concern. Returning an empty list keeps the surface valid
+        # but the test's strongest assertion is that the counter stays 0.
+        self.get_comments_calls += 1
+        return []
 
     @property
     def labels(self) -> list[_FakeLabel]:
@@ -2940,3 +2952,61 @@ async def test_run_worker_logs_exception_with_safe_defaults_when_create_impl_rai
     assert row["new_failures_count"] == 0
     # provider.run_agent was never called.
     fake_provider.run_agent.assert_not_called()
+
+
+# ----------------------------------------------------------------------
+# foreman#328 — Worker prompt stays byte-identical to pre-#328 behavior
+#
+# The Worker is the canonical impl-side role. It must NEVER read issue
+# comments and its user prompt must NEVER carry ``## Comments`` or
+# ``## Labels`` sections, even when the seeded issue would have
+# provided both. The strongest possible guarantee is that the
+# Worker never calls ``issue.get_comments()`` — which is asserted on
+# the call counter directly.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_worker_never_reads_comments_or_labels_into_user_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """foreman#328: even with comments + labels seeded on the issue,
+    the Worker's user prompt must NOT contain ``## Comments`` or
+    ``## Labels`` and ``issue.get_comments()`` must NEVER be called.
+    """
+    clone = tmp_path / "clone"
+    head_sha = _seed_clone_with_spec_branch(clone, issue_number=42)
+    monkeypatch.setenv("FOREMAN_WORKER_APP_ID", "444444")
+    monkeypatch.setenv("FOREMAN_STATS_ROOT", str(tmp_path / "stats"))
+
+    cfg = _make_config(clone)
+    # Issue carries the impl entry label PLUS a couple of foreman
+    # spec-side labels to maximize the chance a future regression
+    # would leak them into the prompt.
+    repo, _spec_pr, issue = _make_fake_repo(
+        issue_number=42,
+        head_sha=head_sha,
+        labels=["foreman:plan-approved", "priority:high"],
+    )
+
+    client = _FakeWorkerClient(repo=repo)
+    registry = _make_registry(client)
+    fake_provider = MagicMock()
+    fake_provider.run_agent = AsyncMock(return_value=_with_usage(_implemented_output()))
+    _make_passing_check_command(monkeypatch)
+
+    await run_worker(
+        issue_url="https://github.com/jeffrichley/voice/issues/42",
+        config=cfg,
+        project_name="voice",
+        worktrees_root=tmp_path / "worktrees",
+        provider=fake_provider,
+        identity_registry=registry,
+    )
+
+    user_prompt = fake_provider.run_agent.call_args.kwargs["user_prompt"]
+    # Neither section header appears.
+    assert "## Comments" not in user_prompt
+    assert "## Labels" not in user_prompt
+    # Strongest possible guarantee: the fetch path never fired.
+    assert issue.get_comments_calls == 0
