@@ -62,6 +62,28 @@ def test_subscriber_exception_does_not_break_others(caplog):
     assert len(boom_logs) == 2
 
 
+def test_subscriber_exception_log_names_observer_and_exception(caplog):
+    bus = EventBus()
+
+    class BrokenObserver:
+        def __call__(self, _):
+            raise ValueError("observer details")
+
+    bus.subscribe(BrokenObserver())
+    with caplog.at_level(logging.WARNING, logger="foreman.v4.event_bus"):
+        bus.publish(_make_event())
+
+    record = next(
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "observer raised" in r.getMessage()
+    )
+    assert record.observer == "BrokenObserver"
+    assert record.exc_type == "ValueError"
+    assert "BrokenObserver" in record.getMessage()
+    assert "ValueError: observer details" in record.getMessage()
+
+
 def test_publish_does_not_raise_when_subscriber_raises():
     bus = EventBus()
     bus.subscribe(lambda _: (_ for _ in ()).throw(RuntimeError("nope")))

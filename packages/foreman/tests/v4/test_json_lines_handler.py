@@ -46,6 +46,33 @@ def test_emit_wraps_non_json_messages_safely(tmp_path: Path):
     assert payload["message"] == "plain string warning"
 
 
+def test_emit_persists_extra_fields_and_exception(tmp_path: Path):
+    log_path = tmp_path / "transitions.jsonl"
+    handler = JsonLinesHandler(filename=str(log_path))
+    log = logging.getLogger("test_jsonl_exc")
+    log.setLevel(logging.WARNING)
+    log.addHandler(handler)
+    try:
+        try:
+            raise RuntimeError("observer details")
+        except RuntimeError:
+            log.warning(
+                "observer raised",
+                exc_info=True,
+                extra={"observer": "BrokenObserver", "exc_type": "RuntimeError"},
+            )
+    finally:
+        log.removeHandler(handler)
+        handler.close()
+
+    payload = json.loads(log_path.read_text(encoding="utf-8").strip())
+    assert payload["observer"] == "BrokenObserver"
+    assert payload["exc_type"] == "RuntimeError"
+    assert payload["exception"]["type"] == "RuntimeError"
+    assert payload["exception"]["message"] == "observer details"
+    assert "Traceback" in payload["exception"]["traceback"]
+
+
 def test_emit_includes_timestamp(tmp_path: Path):
     log_path = tmp_path / "transitions.jsonl"
     handler = JsonLinesHandler(filename=str(log_path))
