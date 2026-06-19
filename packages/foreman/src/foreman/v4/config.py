@@ -76,10 +76,91 @@ Schema:
 
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+# Basic RFC-5321-ish email-shape regex per issue #347 spec. The schema
+# only validates SHAPE — semantic validity (LDAP, GitHub account exists,
+# MX record check) is the operator's responsibility.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+class OperatorIdentity(BaseModel):
+    """One human operator identity (name + email) used in a commit trailer.
+
+    Issue #347: the operator-identity primitive that backs both
+    ``Supervised-by:`` (orchestration attribution) and ``Signed-off-by:``
+    (DCO legal attestation). The same shape is used for the top-level
+    block and (when set) per-project overrides.
+
+    Both ``name`` and ``email`` are required and must be non-empty
+    AFTER ``.strip()`` — a raw whitespace ``name`` like ``" "`` would
+    satisfy ``Field(..., min_length=1)`` because that constraint counts
+    pre-strip characters, so we use a ``mode='before'`` validator
+    explicitly.
+
+    The ``email`` field is further constrained by an RFC-5321-ish shape
+    regex (``^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$``) — enough to catch typos
+    like ``not-an-email`` without pretending to validate addressing
+    semantics.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    email: str
+
+    @field_validator("name", "email", mode="before")
+    @classmethod
+    def _non_empty_after_strip(cls, value: Any) -> Any:
+        if isinstance(value, str) and not value.strip():
+            raise ValueError("must be non-empty after .strip()")
+        return value
+
+    @field_validator("email")
+    @classmethod
+    def _email_shape(cls, value: str) -> str:
+        if not _EMAIL_RE.match(value):
+            raise ValueError("must match RFC-5321-ish shape '<local>@<domain>.<tld>'")
+        return value
+
+
+class OperatorConfig(BaseModel):
+    """Top-level [operator] block carrying both attribution identities.
+
+    Issue #347: ``[operator.supervisor]`` names the human who actively
+    orchestrated this run; ``[operator.signer]`` names the human who
+    legally attests DCO. Both required — the daemon refuses to boot
+    without both, so every downstream commit pathway can rely on the
+    resolver returning a real ``OperatorConfig`` with both fields
+    populated ("make the right thing easy" — Google §).
+
+    Supervisor and signer may legitimately resolve to the same identity
+    (common single-operator case); the schema does not enforce
+    uniqueness.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    supervisor: OperatorIdentity
+    signer: OperatorIdentity
+
+
+class ProjectOperatorOverride(BaseModel):
+    """Per-project [[projects.operator]] override (per-identity, optional).
+
+    Issue #347 + the @wrenrichley 2026-06-19 comment: a project MAY
+    override one identity, the other, both, or neither. Unset fields
+    inherit from the top-level :class:`OperatorConfig`. Each override,
+    when present, is validated with the same rules as a top-level
+    identity.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    supervisor: OperatorIdentity | None = None
+    signer: OperatorIdentity | None = None
 
 
 class ProjectConfig(BaseModel):
@@ -116,6 +197,13 @@ class ProjectConfig(BaseModel):
     Matches v3 ProjectConfig.max_impl_attempts default + ge=1 validation
     (a value of 0 would silently skip the cycle and dump to NeedsHelp
     on first dispatch). Read at role runtime by ``foreman.roles.worker``."""
+
+    operator: ProjectOperatorOverride | None = None
+    """Per-project per-identity override of the top-level
+    :class:`OperatorConfig`. Either, both, or neither of
+    ``operator.supervisor`` / ``operator.signer`` may be set; unset
+    fields inherit from the top-level identity via
+    :func:`resolve_operator`. Issue #347."""
 
 
 class AppCredentials(BaseModel):
@@ -191,6 +279,13 @@ class V4Config(BaseModel):
     # PAT-env-var fallback. A missing [orchestrator] block raises
     # ValidationError at load time, same as the per-role [apps.*] blocks.
     orchestrator: OrchestratorConfig
+    operator: OperatorConfig
+    """Issue #347: REQUIRED top-level operator-identity block carrying
+    both :class:`OperatorIdentity` sub-tables (``supervisor`` + ``signer``)
+    used to build the ``Supervised-by:`` and ``Signed-off-by:`` trailers
+    on every role-bot commit. No default — the daemon refuses to boot
+    without an operator block so every downstream commit path can rely
+    on :func:`resolve_operator` returning both identities."""
     projects: list[ProjectConfig] = Field(default_factory=list)
 
 
@@ -218,4 +313,34 @@ def load_config(path: Path) -> V4Config:
         payload["apps"] = raw["apps"]
     if "orchestrator" in raw:
         payload["orchestrator"] = raw["orchestrator"]
+    if "operator" in raw:
+        payload["operator"] = raw["operator"]
     return V4Config.model_validate(payload)
+
+
+def resolve_operator(project: ProjectConfig, config: V4Config) -> OperatorConfig:
+    """Resolve the operator identities for ``project``.
+
+    Issue #347: returns a fresh :class:`OperatorConfig` whose
+    ``supervisor`` is ``project.operator.supervisor`` if set, else
+    ``config.operator.supervisor``; ``signer`` is resolved the same way
+    independently. Both fields are guaranteed populated because the
+    top-level :class:`OperatorConfig` is required at config load.
+
+    Pure function (no I/O). Single resolution surface every consumer
+    (Planner / Worker / Fixer) calls so the project → top-level fallback
+    isn't duplicated as ``project.operator.X or config.operator.X``
+    ladders across the codebase.
+    """
+    override = project.operator
+    supervisor = (
+        override.supervisor
+        if override is not None and override.supervisor is not None
+        else config.operator.supervisor
+    )
+    signer = (
+        override.signer
+        if override is not None and override.signer is not None
+        else config.operator.signer
+    )
+    return OperatorConfig(supervisor=supervisor, signer=signer)

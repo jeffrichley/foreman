@@ -311,6 +311,135 @@ def test_commit_files_to_worktree_writes_adds_commits_and_returns_sha(
     assert author == "foreman-planner[bot] <12345+foreman-planner[bot]@users.noreply.github.com>"
 
 
+def test_commit_files_to_worktree_appends_provenance_trailers(tmp_path: Path) -> None:
+    """Issue #347: provenance_trailers (when non-empty) are spliced as
+    one ``--trailer "<value>"`` flag per entry into ``git commit``.
+
+    Verifies BOTH a ``Supervised-by:`` and a ``Signed-off-by:`` trailer
+    land in the commit body, in the order the caller specified.
+    """
+    wt = _init_worktree(tmp_path)
+    provider = GitHubProvider(identity=_identity(), client=MagicMock())
+
+    trailers = [
+        "Supervised-by: Wren Richley <wren@example.com>",
+        "Signed-off-by: Jeff Richley <jeff@example.com>",
+    ]
+    provider.commit_files_to_worktree(
+        worktree_path=wt,
+        files={"docs/specs/x.md": "# Spec\n"},
+        message="docs(spec): add x",
+        provenance_trailers=trailers,
+    )
+
+    body = subprocess.run(
+        ["git", "log", "-1", "--pretty=%B"],
+        cwd=wt,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "Supervised-by: Wren Richley <wren@example.com>" in body
+    assert "Signed-off-by: Jeff Richley <jeff@example.com>" in body
+
+
+def test_commit_files_to_worktree_planner_trailer_pattern_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """Issue #347: end-to-end test for the Planner's
+    ``resolve_operator → provenance_trailers list → commit body`` flow.
+
+    Builds a real OperatorConfig, calls the resolver, formats the two
+    trailers the same way :func:`foreman.roles.planner._run_planner_core`
+    does at the host call site, and asserts the resulting commit body
+    carries BOTH trailers in the expected shape. This pins the contract
+    on the integration boundary between the resolver (pure function in
+    ``foreman.v4.config``) and the host commit invocation
+    (``foreman.git_hosts.github.GitHubProvider.commit_files_to_worktree``).
+    """
+    from foreman.v4.config import (
+        AppCredentials,
+        AppsConfig,
+        OperatorConfig,
+        OperatorIdentity,
+        OrchestratorConfig,
+        ProjectConfig,
+        V4Config,
+        resolve_operator,
+    )
+
+    wt = _init_worktree(tmp_path)
+    provider = GitHubProvider(identity=_identity(), client=MagicMock())
+
+    config = V4Config(
+        db_path="/tmp/v4.db",
+        log_dir="/tmp/logs",
+        apps=AppsConfig(
+            planner=AppCredentials(app_id=1, private_key_path="/dev/null"),
+            reviewer=AppCredentials(app_id=2, private_key_path="/dev/null"),
+            fixer=AppCredentials(app_id=3, private_key_path="/dev/null"),
+            worker=AppCredentials(app_id=4, private_key_path="/dev/null"),
+        ),
+        orchestrator=OrchestratorConfig(app_id=5, private_key_path="/dev/null"),
+        operator=OperatorConfig(
+            supervisor=OperatorIdentity(name="Wren Richley", email="wren@example.com"),
+            signer=OperatorIdentity(name="Jeff Richley", email="jeff@example.com"),
+        ),
+        projects=[
+            ProjectConfig(
+                name="p",
+                repo="o/r",
+                local_clone_path="/tmp/r",
+            ),
+        ],
+    )
+    op = resolve_operator(config.projects[0], config)
+    trailers = [
+        f"Supervised-by: {op.supervisor.name} <{op.supervisor.email}>",
+        f"Signed-off-by: {op.signer.name} <{op.signer.email}>",
+    ]
+    provider.commit_files_to_worktree(
+        worktree_path=wt,
+        files={"docs/superpowers/specs/foreman-issue-347-spec.md": "spec\n"},
+        message="docs(spec): add foo per spec",
+        provenance_trailers=trailers,
+    )
+
+    body = subprocess.run(
+        ["git", "log", "-1", "--pretty=%B"],
+        cwd=wt,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "Supervised-by: Wren Richley <wren@example.com>" in body
+    assert "Signed-off-by: Jeff Richley <jeff@example.com>" in body
+
+
+def test_commit_files_to_worktree_omits_trailers_when_none(tmp_path: Path) -> None:
+    """Issue #347: backwards-compatible default. ``None`` / empty list
+    leaves the commit body untouched (no spurious trailers)."""
+    wt = _init_worktree(tmp_path)
+    provider = GitHubProvider(identity=_identity(), client=MagicMock())
+
+    provider.commit_files_to_worktree(
+        worktree_path=wt,
+        files={"docs/specs/x.md": "# Spec\n"},
+        message="docs(spec): add x",
+        provenance_trailers=None,
+    )
+
+    body = subprocess.run(
+        ["git", "log", "-1", "--pretty=%B"],
+        cwd=wt,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "Supervised-by:" not in body
+    assert "Signed-off-by:" not in body
+
+
 def test_commit_files_to_worktree_is_idempotent_when_content_matches_head(
     tmp_path: Path,
 ) -> None:

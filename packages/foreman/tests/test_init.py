@@ -456,6 +456,12 @@ def _v4_skeleton_config() -> str:
         "[orchestrator]\n"
         "app_id = 99999\n"
         'private_key_path = "/keys/orchestrator.pem"\n\n'
+        "[operator.supervisor]\n"
+        'name = "Test Sup"\n'
+        'email = "sup@example.com"\n\n'
+        "[operator.signer]\n"
+        'name = "Test Sign"\n'
+        'email = "sign@example.com"\n\n'
     )
 
 

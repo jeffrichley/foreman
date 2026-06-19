@@ -184,6 +184,14 @@ private_key_path = "/tmp/does-not-exist-worker.pem"
 app_id = 99999
 private_key_path = "/tmp/does-not-exist-orch.pem"
 
+[operator.supervisor]
+name = "Test Sup"
+email = "sup@example.com"
+
+[operator.signer]
+name = "Test Sign"
+email = "sign@example.com"
+
 [[projects]]
 name = "{project_name}"
 repo = "{repo}"

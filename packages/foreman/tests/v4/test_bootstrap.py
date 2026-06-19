@@ -11,6 +11,8 @@ from foreman.v4.bootstrap import bootstrap_cli_context
 from foreman.v4.config import (
     AppCredentials,
     AppsConfig,
+    OperatorConfig,
+    OperatorIdentity,
     OrchestratorConfig,
     ProjectConfig,
     V4Config,
@@ -70,12 +72,22 @@ def _orchestrator_config() -> OrchestratorConfig:
     )
 
 
+def _operator_config() -> OperatorConfig:
+    """Issue #347: V4Config now requires a top-level [operator] block.
+    Compact-fakes pattern for tests that don't exercise operator wiring."""
+    return OperatorConfig(
+        supervisor=OperatorIdentity(name="Test Supervisor", email="sup@example.com"),
+        signer=OperatorIdentity(name="Test Signer", email="sign@example.com"),
+    )
+
+
 def test_bootstrap_returns_clicontext_with_all_fields(tmp_path: Path):
     config = V4Config(
         db_path=str(tmp_path / "foreman.db"),
         log_dir=str(tmp_path / "logs"),
         apps=_apps_config(),
         orchestrator=_orchestrator_config(),
+        operator=_operator_config(),
         projects=[
             ProjectConfig(
                 name="voice", repo="owner/voice",
@@ -101,6 +113,7 @@ def test_db_file_created_at_configured_path(tmp_path: Path):
         log_dir=str(tmp_path / "logs"),
         apps=_apps_config(),
         orchestrator=_orchestrator_config(),
+        operator=_operator_config(),
         projects=[
             ProjectConfig(
                 name="voice", repo="owner/voice",
@@ -124,6 +137,7 @@ def test_bootstrap_builds_one_poller_per_project(tmp_path: Path):
         log_dir=str(tmp_path / "logs"),
         apps=_apps_config(),
         orchestrator=_orchestrator_config(),
+        operator=_operator_config(),
         projects=[
             ProjectConfig(name="a", repo="o/a", local_clone_path=str(tmp_path / "a")),
             ProjectConfig(name="b", repo="o/b", local_clone_path=str(tmp_path / "b")),
@@ -152,6 +166,7 @@ def test_bootstrap_wires_event_bus_with_standard_observers(tmp_path: Path):
         log_dir=str(tmp_path / "logs"),
         apps=_apps_config(),
         orchestrator=_orchestrator_config(),
+        operator=_operator_config(),
         projects=[
             ProjectConfig(
                 name="voice", repo="owner/voice",
@@ -204,6 +219,7 @@ def test_bootstrap_wires_routing_git_provider_for_multi_project(tmp_path: Path):
         log_dir=str(tmp_path / "logs"),
         apps=_apps_config(),
         orchestrator=_orchestrator_config(),
+        operator=_operator_config(),
         projects=[
             ProjectConfig(
                 name="voice", repo="owner/voice",
@@ -256,6 +272,7 @@ def test_bootstrap_skips_label_observer_when_no_projects(tmp_path: Path):
         log_dir=str(tmp_path / "logs"),
         apps=_apps_config(),
         orchestrator=_orchestrator_config(),
+        operator=_operator_config(),
         projects=[],
     )
     ctx = bootstrap_cli_context(

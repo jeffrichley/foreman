@@ -82,6 +82,14 @@ private_key_path = "{(tmp_path / "worker.pem").as_posix()}"
 app_id = 12349
 private_key_path = "{(tmp_path / "orchestrator.pem").as_posix()}"
 
+[operator.supervisor]
+name = "Test Sup"
+email = "sup@example.com"
+
+[operator.signer]
+name = "Test Sign"
+email = "sign@example.com"
+
 [[projects]]
 name = "p"
 repo = "owner/p"
