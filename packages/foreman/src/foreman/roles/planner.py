@@ -504,8 +504,7 @@ def run_planner_cli(*, project: str, issue_number: int) -> int:
     """v4 CLI entry-point. Emits FOREMAN_OUTCOME JSON; returns exit code.
 
     The SubprocessRoleDispatcher (Task 5.6) forks ``foreman plan-v4`` which
-    calls this. Legacy ``plan`` command + label-writing tail in this module
-    are tagged ``v4-PHASE-8-KILL`` and deleted together in Phase 8.
+    calls this.
     """
     if os.environ.get("FOREMAN_DRY_RUN") == "1":
         # Short-circuit for the Task 8.6 real-fork integration test. Emits
