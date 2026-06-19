@@ -1,5 +1,6 @@
 name: ci
 
+# Triggers: PRs (with concurrency cancellation), merge groups, pushes to main.
 on:
   pull_request:
   merge_group:
