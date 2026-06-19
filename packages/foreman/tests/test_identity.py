@@ -570,3 +570,74 @@ def test_get_role_identity_env_raises_on_unknown_role() -> None:
     reg = IdentityRegistry(_make_project())
     with pytest.raises(ValueError, match=r"Unknown role"):
         reg.get_role_identity_env("not_a_real_role")
+
+
+# ---------------------------------------------------------------------------
+# get_role_bot_logins — foreman#328
+#
+# Spec-side roles filter the foreman role-bots' own previous comments out
+# of the issue's comment stream before injecting them into the user
+# prompt. The login set is derived from each role's cached AppMetadata
+# at call time so projects with custom App slugs still get the right
+# filter (vs. a hard-coded {"foreman-planner[bot]", ...}).
+# ---------------------------------------------------------------------------
+
+
+def test_get_role_bot_logins_returns_one_login_per_role() -> None:
+    """Each of the four foreman role bots contributes one
+    ``{slug}[bot]`` entry to the returned set. With the default
+    metadata fixture all four roles share the same slug, so the set
+    collapses to one entry — which is fine for the contract (the
+    deduplication is desirable when projects share a slug accidentally)."""
+    fake_meta = _fake_app_metadata(app_id=123456, slug="foreman-planner")
+    with patch("foreman.identity.fetch_app_metadata", return_value=fake_meta):
+        reg = IdentityRegistry(_make_project())
+        logins = reg.get_role_bot_logins()
+    # Default fixture: all four roles resolve to "foreman-planner"
+    # slug, collapsing to one entry — accept that shape.
+    assert logins == {"foreman-planner[bot]"}
+
+
+def test_get_role_bot_logins_returns_all_four_when_slugs_differ() -> None:
+    """When each role's App resolves to a distinct slug, all four
+    appear in the set. Pins the per-role metadata fetch behavior so a
+    project running four distinct foreman-* GitHub Apps gets the right
+    filter scope."""
+
+    def _meta_per_role(app_id: int, _key_path: object) -> AppMetadata:
+        # Map app_id (which uniquely identifies each role in the
+        # ``_make_project`` fixture) back to the role's slug.
+        per_id_slug = {
+            123456: "foreman-planner",
+            654321: "foreman-reviewer",
+            777777: "foreman-fixer",
+            444444: "foreman-worker",
+        }
+        return AppMetadata(app_id=app_id, slug=per_id_slug[app_id], name="x")
+
+    with patch("foreman.identity.fetch_app_metadata", side_effect=_meta_per_role):
+        reg = IdentityRegistry(_make_project())
+        logins = reg.get_role_bot_logins()
+    assert logins == {
+        "foreman-planner[bot]",
+        "foreman-reviewer[bot]",
+        "foreman-fixer[bot]",
+        "foreman-worker[bot]",
+    }
+
+
+def test_get_role_bot_logins_caches_metadata_per_role() -> None:
+    """Repeated calls must NOT re-fetch ``GET /app`` for the same
+    role — the registry caches metadata for its lifetime so the
+    four-call cost is amortized across the project's runtime."""
+    fake_meta = _fake_app_metadata(app_id=123456, slug="foreman-planner")
+    with patch(
+        "foreman.identity.fetch_app_metadata", return_value=fake_meta
+    ) as mock_fetch:
+        reg = IdentityRegistry(_make_project())
+        reg.get_role_bot_logins()
+        reg.get_role_bot_logins()
+        reg.get_role_bot_logins()
+    # First call: 4 GET /app HTTP calls (one per role).
+    # Subsequent calls: cached, zero new fetches.
+    assert mock_fetch.call_count == 4

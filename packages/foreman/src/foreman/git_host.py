@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 
@@ -57,6 +58,22 @@ class IssueRef:
 
 
 @dataclass(frozen=True)
+class CommentRef:
+    """Issue-comment payload returned by :meth:`GitHostProvider.get_issue_comments`.
+
+    Frozen so role-side code can treat it as an immutable wire shape. The
+    foreman role-bot self-comments are NOT filtered at the provider layer
+    — that's a role-policy concern. See
+    :func:`foreman.roles._prompt_helpers.filter_bot_self_comments` for the
+    filter.
+    """
+
+    author_login: str
+    posted_at: datetime
+    body: str
+
+
+@dataclass(frozen=True)
 class PRRef:
     """PR payload returned by :meth:`GitHostProvider.open_pull_request`."""
 
@@ -81,6 +98,16 @@ class GitHostProvider(ABC):
     @abstractmethod
     def get_issue(self, repo_slug: str, issue_number: int) -> IssueRef:
         """Fetch issue title, body, and labels."""
+
+    @abstractmethod
+    def get_issue_comments(self, repo_slug: str, issue_number: int) -> list[CommentRef]:
+        """Fetch the issue's comments in chronological order (oldest first).
+
+        No filtering is applied at the provider layer; foreman role-bot
+        self-comments and any other policy-driven exclusions are the
+        caller's responsibility (see
+        :func:`foreman.roles._prompt_helpers.filter_bot_self_comments`).
+        """
 
     @abstractmethod
     def get_default_branch(self, repo_slug: str) -> str:

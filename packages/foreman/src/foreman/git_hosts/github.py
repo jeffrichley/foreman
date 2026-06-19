@@ -36,7 +36,7 @@ from pathlib import Path
 from github import Github
 
 from foreman._env_filter import filtered_subprocess_env as _filtered_subprocess_env
-from foreman.git_host import BotIdentity, GitHostProvider, IssueRef, PRRef
+from foreman.git_host import BotIdentity, CommentRef, GitHostProvider, IssueRef, PRRef
 from foreman.git_hosts._errors import GitCommandError
 
 # The same filter is applied by :class:`~foreman.worktree.WorktreeManager`
@@ -80,6 +80,28 @@ class GitHubProvider(GitHostProvider):
     def get_default_branch(self, repo_slug: str) -> str:
         repo = self._client.get_repo(repo_slug)
         return repo.default_branch
+
+    def get_issue_comments(self, repo_slug: str, issue_number: int) -> list[CommentRef]:
+        """Fetch the issue's comments in chronological order (oldest first).
+
+        PyGithub returns ``Issue.get_comments()`` in chronological order
+        by default; we ``sorted(...)`` defensively so callers can rely
+        on the ordering even if PyGithub's default ever shifts. No
+        filtering happens here — the foreman role-bot self-comments are
+        filtered one layer up (see
+        :func:`foreman.roles._prompt_helpers.filter_bot_self_comments`).
+        """
+        repo = self._client.get_repo(repo_slug)
+        issue = repo.get_issue(issue_number)
+        refs = [
+            CommentRef(
+                author_login=c.user.login,
+                posted_at=c.created_at,
+                body=c.body or "",
+            )
+            for c in issue.get_comments()
+        ]
+        return sorted(refs, key=lambda r: r.posted_at)
 
     # ------------------------------------------------------------------
     # Worktree git operations

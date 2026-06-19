@@ -41,12 +41,6 @@ def resolve_config_path() -> Path:
     return Path.home() / ".foreman" / "config.toml"
 
 
-class AdminConfig(BaseModel):
-    """Admin identity (Jeff's PAT) used for ``foreman project add`` ops."""
-
-    github_token_env: str = "FOREMAN_ADMIN_TOKEN"
-
-
 class OrchestratorConfig(BaseModel):
     """Orchestrator-bot identity used by the daemon for host operations.
 
@@ -556,7 +550,6 @@ class ProjectConfig(BaseModel):
 class Config(BaseModel):
     """Top-level Foreman config."""
 
-    admin: AdminConfig = Field(default_factory=AdminConfig)
     daemon: DaemonConfig = Field(default_factory=DaemonConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
     reconciler: ReconcilerConfig = Field(default_factory=ReconcilerConfig)

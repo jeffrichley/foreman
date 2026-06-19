@@ -52,7 +52,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
-from foreman.auth import InstallationToken, mint_installation_token
+from foreman.auth import AppMetadata, InstallationToken, fetch_app_metadata, mint_installation_token
 from foreman.v4.config import AppCredentials, AppsConfig, OrchestratorConfig
 
 # Pre-expiry safety window: refresh the cached token when fewer than this
@@ -149,6 +149,7 @@ class V4IdentityRegistry:
         self._orchestrator = orchestrator
         self._installation_repo = installation_repo
         self._cache: dict[tuple[str, str], InstallationToken] = {}
+        self._app_meta_cache: dict[str, AppMetadata] = {}
         self._clock = clock
 
     def get_role_token(self, role: str) -> str:
@@ -182,6 +183,36 @@ class V4IdentityRegistry:
         )
         self._cache[key] = token
         return token.token
+
+    def get_role_bot_logins(self) -> set[str]:
+        """Return the GitHub login strings for the four foreman role bots.
+
+        Each login is ``f"{slug}[bot]"`` derived from the role's
+        ``AppMetadata`` (fetched via ``GET /app``). Used by the spec-side
+        role dispatchers (Planner / Reviewer-on-spec / Fixer-on-spec) to
+        filter out role-bot self-comments from the originating issue's
+        comment stream so the bots' own previous postings don't feed
+        back into subsequent LLM runs (foreman#328, agent_core#180).
+
+        Mirrors :meth:`foreman.identity.IdentityRegistry.get_role_bot_logins`
+        so v4 substrate keeps PR #331's prompt-injection feature behavior
+        after the v3 substrate cutover. Per-role metadata is cached for
+        the registry's lifetime; first call costs up to four
+        ``GET /app`` HTTP round-trips.
+        """
+        return {
+            f"{self._get_app_metadata(role).slug}[bot]"
+            for role in ("planner", "reviewer", "fixer", "worker")
+        }
+
+    def _get_app_metadata(self, role: str) -> AppMetadata:
+        cached = self._app_meta_cache.get(role)
+        if cached is not None:
+            return cached
+        creds, _repo_slug = self._resolve(role)
+        meta = fetch_app_metadata(creds.app_id, creds.private_key_path)
+        self._app_meta_cache[role] = meta
+        return meta
 
     def _resolve(self, role: str) -> tuple[AppCredentials, str]:
         """Map ``role`` to its (credentials, repo_slug) tuple.
