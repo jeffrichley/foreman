@@ -23,6 +23,10 @@ _log = logging.getLogger(__name__)
 EventListener = Callable[[Event], None]
 
 
+def _listener_name(listener: EventListener) -> str:
+    return getattr(listener, "__name__", type(listener).__name__)
+
+
 class EventBus:
     def __init__(self) -> None:
         self._subscribers: list[EventListener] = []
@@ -41,9 +45,21 @@ class EventBus:
         for listener in list(self._subscribers):
             try:
                 listener(event)
-            except Exception:
+            except Exception as exc:
+                observer = _listener_name(listener)
+                exc_type = type(exc).__name__
                 _log.warning(
-                    "observer raised on %s for ticket=%d instance=%d",
-                    type(event).__name__, event.ticket_id, event.instance_id,
+                    "observer raised on %s for ticket=%d instance=%d: observer=%s exc=%s: %s",
+                    type(event).__name__,
+                    event.ticket_id,
+                    event.instance_id,
+                    observer,
+                    exc_type,
+                    exc,
                     exc_info=True,
+                    extra={
+                        "observer": observer,
+                        "exc_type": exc_type,
+                        "exc_message": str(exc),
+                    },
                 )
