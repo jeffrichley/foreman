@@ -24,6 +24,12 @@ dev = [
     # ``[tool.vulture]`` block below pins the threshold + allowlist for
     # signal-handler / duck-typing false positives.
     "vulture>=2.13",
+    # Import boundary linter. Decision 7 of the 2026-06-11 architecture
+    # stability plan (originally landed in #311; reinstated here as part
+    # of foreman#318 with R2 added to lock the v3/v4 boundary so the
+    # cross-cutting modules promoted to survival can't silently re-acquire
+    # v3-substrate deps. See [tool.importlinter] below.
+    "import-linter>=2.0",
 ]
 
 [tool.ruff]
@@ -134,6 +140,76 @@ ignore_decorators = [
     "@cli.command",
     "@daemon.command",
     "@*.command",
+]
+
+[tool.importlinter]
+# Decision 7 of the 2026-06-11 architecture stability plan. Rule-source
+# discipline: every contract names the historical bug or design call
+# that motivated it. No speculative rules.
+#
+# Run locally: ``just import-lint`` (or ``uv run lint-imports``).
+# Wired into ``just check`` so it gates pre-push.
+root_packages = ["foreman", "tests"]
+
+# R1: production code does not import from tests
+# -----------------------------------------------------------------------
+# Originally landed in #311 motivated by foreman#19 (a test-fixture
+# pollution bug where a pytest fixture's import chain leaked into prod
+# code paths). Keeps the build directional: tests can import prod, prod
+# can never import tests.
+[[tool.importlinter.contracts]]
+name = "R1: production code does not import from tests"
+type = "forbidden"
+source_modules = ["foreman"]
+forbidden_modules = ["tests"]
+
+# R2: v4 substrate does not import from v3-substrate modules
+# -----------------------------------------------------------------------
+# Locks the boundary established by the foreman v4 substrate redesign.
+# Phase 9 deletes these modules entirely; until then they coexist and
+# foreman.v4.* must never reach into them. Once main is on v4 the rule
+# becomes trivially-satisfied but stays in place: it prevents any future
+# resurrection from putting foreman.v4 back on a path that depends on the
+# old substrate's reconciler / pre-state-machine plumbing.
+#
+# branches.py, stats.py, labels.py are intentionally NOT in this list —
+# they were promoted to survival per foreman#318 because they're
+# cross-cutting infra with no v3-substrate deps. dispatch_recorder is
+# listed because it IS v3 telemetry plumbing (it pulls reconciler.exec_log).
+[[tool.importlinter.contracts]]
+name = "R2: foreman.v4 does not import v3-substrate modules"
+type = "forbidden"
+source_modules = ["foreman.v4"]
+forbidden_modules = [
+    "foreman.reconciler",
+    "foreman.daemon",
+    "foreman.daemon_host",
+    "foreman.daemon_lock",
+    "foreman.daemon_runners",
+    "foreman.dispatcher",
+    "foreman.dispatch_recorder",
+    "foreman.poller",
+    "foreman.queue",
+    "foreman.role_dispatch",
+    "foreman.storage",
+    "foreman.worker",
+    "foreman.ps",
+    "foreman.v3_bus_endpoint",
+]
+# Transitive carve-outs for the Phase 9 transition window. The survival
+# roles still import foreman.dispatch_recorder inside their legacy
+# entry-points (each tagged v4-PHASE-8-KILL). Both the role-side import
+# AND dispatch_recorder.py itself die in Phase 9 (see
+# docs/superpowers/plans/v4-phases/2026-06-13-foreman-v4-phase-9-deletion-cutover.md).
+# When the cutover PR lands, the role→dispatch_recorder edges vanish
+# and these ignore lines can be deleted along with the target module.
+# Until then, ignore the four chains so R2 enforces every NEW v4→v3
+# direct or roles-mediated import while tolerating the known-doomed ones.
+ignore_imports = [
+    "foreman.roles.planner -> foreman.dispatch_recorder",
+    "foreman.roles.reviewer -> foreman.dispatch_recorder",
+    "foreman.roles.fixer -> foreman.dispatch_recorder",
+    "foreman.roles.worker -> foreman.dispatch_recorder",
 ]
 
 [tool.pytest.ini_options]

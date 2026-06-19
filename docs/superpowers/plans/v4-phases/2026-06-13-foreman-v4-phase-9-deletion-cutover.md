@@ -92,11 +92,14 @@ git rm src/foreman/queue.py
 git rm src/foreman/storage.py
 git rm src/foreman/worker.py
 git rm src/foreman/role_dispatch.py
-git rm src/foreman/stats.py
 git rm src/foreman/ps.py
-git rm src/foreman/labels.py
-git rm src/foreman/branches.py
 git rm src/foreman/v3_bus_endpoint.py
+# branches.py, stats.py, labels.py promoted to survival per foreman#318:
+# they are cross-cutting infra (git branch naming, role telemetry JSONL,
+# label vocabulary enum) with zero v3-substrate deps. Kept at top-level
+# foreman.<module>; survival code (roles, init.py, worktree.py) keeps
+# importing them. Drift is now blocked by the import-linter rule added
+# alongside this plan edit (see pyproject.toml [tool.importlinter]).
 # v3 substrate tests
 git rm -r tests/reconciler tests/daemon tests/dispatcher 2>/dev/null || true
 # v3 role tests (Phase 5 left these covering legacy label-writing paths)
@@ -106,7 +109,7 @@ git rm tests/test_roles_fixer.py
 git rm tests/test_roles_worker.py
 git rm tests/test_roles_exception_handler.py
 # Top-level v3 helper tests
-git rm tests/test_labels.py 2>/dev/null || true
+# (test_labels.py NOT deleted — labels.py promoted to survival per foreman#318)
 git rm tests/test_dispatcher.py 2>/dev/null || true
 git rm tests/test_role_dispatch.py 2>/dev/null || true
 git rm tests/test_daemon_e2e.py 2>/dev/null || true
@@ -454,7 +457,8 @@ docs/superpowers/plans/2026-06-13-foreman-v4-substrate-redesign-implementation.m
 - `packages/foreman/src/foreman/v4/` — the new substrate (Repository, state machine, observers, QueueManager, Poller, WorkerPool, typer CLI, daemon, bootstrap)
 - `packages/foreman/src/foreman/roles/*.py` — role CLI exits replaced with `emit_outcome` calls (label-writing tails deleted)
 - `packages/foreman/src/foreman/cli.py` — rewritten as a thin typer-app wrapper
-- v3 substrate deleted: `reconciler/`, `daemon.py`, `daemon_runners.py`, `daemon_host.py`, `daemon_lock.py`, `dispatcher.py`, `dispatch_recorder.py`, `poller.py`, `queue.py`, `storage.py`, `worker.py`, `role_dispatch.py`, `stats.py`, `ps.py`, `labels.py`, `branches.py`, `v3_bus_endpoint.py`, plus `tests/{reconciler,daemon,dispatcher}/`
+- v3 substrate deleted: `reconciler/`, `daemon.py`, `daemon_runners.py`, `daemon_host.py`, `daemon_lock.py`, `dispatcher.py`, `dispatch_recorder.py`, `poller.py`, `queue.py`, `storage.py`, `worker.py`, `role_dispatch.py`, `ps.py`, `v3_bus_endpoint.py`, plus `tests/{reconciler,daemon,dispatcher}/`
+- `branches.py`, `stats.py`, `labels.py` — promoted to survival per foreman#318 (cross-cutting infra; no v3-substrate deps; kept at top-level `foreman.<module>`). New `[tool.importlinter]` boundary rule blocks v3-substrate drift back into them.
 - `docs/RUNBOOK.md` — MergeQueue setup + daemon config + cutover procedure
 
 ## Test plan
