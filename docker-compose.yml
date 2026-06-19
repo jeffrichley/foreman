@@ -20,6 +20,14 @@ services:
     # See Docker design spec, Architecture section, "PID 1 / signal forwarding."
     init: true
 
+    # Restart on container crash + on host reboot. `unless-stopped` (vs.
+    # `always`) honors an explicit `docker compose stop daemon` — operator
+    # intent wins over the policy. See #359 for the failure modes this
+    # closes (Windows update reboot, WSL2 shutdown, unhandled-exception
+    # crash). Override locally with `docker compose stop daemon` if you
+    # need the daemon down for maintenance.
+    restart: unless-stopped
+
     # Env file (gitignored) holds the GitHub App IDs. Required for
     # production — without it the daemon starts but auth fails at first
     # GraphQL fetch (no FOREMAN_*_APP_ID env vars). Copy `.env.example`
