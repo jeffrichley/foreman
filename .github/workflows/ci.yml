@@ -40,3 +40,35 @@ jobs:
       - run: uv sync --locked --all-packages
       - run: just check
       - run: uv cache prune --ci
+
+  dco:
+    # DCO sign-off check — non-blocking observation mode. Every commit in
+    # the PR must have a ``Signed-off-by:`` trailer for the human who takes
+    # responsibility for the change. AI agents can't certify provenance
+    # (see CONTRIBUTING.md AI disclosure section). Initially deployed
+    # without being added to branch protection's required checks; we're
+    # measuring foreman-bot PR behavior before flipping to enforce.
+    name: DCO check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
+      - name: Verify Signed-off-by on every commit
+        run: |
+          set -eu
+          BASE_REF="origin/${{ github.base_ref }}"
+          MISSING=0
+          for commit in $(git log --format=%H "${BASE_REF}..HEAD"); do
+            if ! git log -1 --format=%B "${commit}" | grep -qE '^Signed-off-by: .+ <.+@.+>$'; then
+              SUBJECT=$(git log -1 --format=%s "${commit}")
+              echo "::error::Commit ${commit} (${SUBJECT}) is missing 'Signed-off-by:' trailer. Use 'git commit -s' or amend with 'git commit --amend -s'."
+              MISSING=$((MISSING + 1))
+            fi
+          done
+          if [ "${MISSING}" -gt 0 ]; then
+            echo "::error::${MISSING} commit(s) missing DCO sign-off. See CONTRIBUTING.md."
+            exit 1
+          fi
+          echo "All commits carry Signed-off-by trailer."
