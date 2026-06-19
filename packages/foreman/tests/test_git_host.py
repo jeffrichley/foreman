@@ -84,9 +84,16 @@ class _FakeProvider(GitHostProvider):
         return []
 
     def commit_files_to_worktree(
-        self, worktree_path: Path, files: dict[str, str], message: str
+        self,
+        worktree_path: Path,
+        files: dict[str, str],
+        message: str,
+        *,
+        provenance_trailers: list[str] | None = None,
     ) -> str:
-        self.calls.append(("commit_files_to_worktree", (worktree_path, files, message)))
+        self.calls.append(
+            ("commit_files_to_worktree", (worktree_path, files, message, provenance_trailers))
+        )
         return "deadbeef"
 
     def push_branch(self, worktree_path: Path, branch: str) -> None:
@@ -115,9 +122,7 @@ class _FakeProvider(GitHostProvider):
     ) -> None:
         self.calls.append(("update_issue_labels", (repo_slug, issue_number, add, remove)))
 
-    def post_issue_comment(
-        self, repo_slug: str, issue_number: int, body: str
-    ) -> None:
+    def post_issue_comment(self, repo_slug: str, issue_number: int, body: str) -> None:
         self.calls.append(("post_issue_comment", (repo_slug, issue_number, body)))
 
 

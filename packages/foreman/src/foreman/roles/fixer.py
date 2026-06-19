@@ -60,7 +60,7 @@ from foreman.roles.reviewer import FINDINGS_BEGIN_MARKER, FINDINGS_END_MARKER
 from foreman.schemas.fixer import FixerOutput, FixerRunResult
 from foreman.schemas.reviewer import Finding
 from foreman.stats import log_fixer_run
-from foreman.v4.config import V4Config
+from foreman.v4.config import V4Config, resolve_operator
 from foreman.v4.identity import V4IdentityRegistry
 from foreman.worktree import WorktreeManager
 
@@ -429,14 +429,11 @@ async def _run_fixer_core(
     try:
         owner, repo_name, issue_number = parse_issue_url(issue_url)
         _setup_issue_number = issue_number
-        project = next(
-            (p for p in config.projects if p.name == project_name), None
-        )
+        project = next((p for p in config.projects if p.name == project_name), None)
         if project is None:
             known = [p.name for p in config.projects]
             raise ValueError(
-                f"project {project_name!r} not found in V4Config. "
-                f"Known projects: {known}"
+                f"project {project_name!r} not found in V4Config. Known projects: {known}"
             )
         expected_repo_slug = project.repo
         actual_repo_slug = f"{owner}/{repo_name}"
@@ -447,7 +444,11 @@ async def _run_fixer_core(
                 f"{project_name!r} configured repo {expected_repo_slug!r}"
             )
 
-        _host, fixer_token, fixer_client = build_role_resources(
+        # Issue #347: the Fixer now owns the post-LLM ``host.push_branch``
+        # call so the runtime ``_ensure_provenance_trailers`` amend lands
+        # on the REMOTE branch the DCO gate from PR #346 checks.
+        # Mirrors the Worker's foreman#222 pattern at ``worker.py:1032``.
+        host, fixer_token, fixer_client = build_role_resources(
             registry=identity_registry,
             role="fixer",
             app_id=config.apps.fixer.app_id,
@@ -644,18 +645,58 @@ async def _run_fixer_core(
             comments=comments,
         )
 
+        # Issue #347: resolve the operator identities once. The env
+        # injection feeds the LLM's ``<provenance_trailers>`` prompt
+        # section (primary defense); the post-LLM
+        # ``_ensure_provenance_trailers`` helper run + ``host.push_branch``
+        # below are the runtime backstop that ensures every Fixer commit
+        # lands on the REMOTE with BOTH ``Supervised-by:`` and
+        # ``Signed-off-by:`` trailers — regardless of which target
+        # (spec_pr / impl_pr) is in flight.
+        operator = resolve_operator(project, config)
         llm_output, run_usage = await provider.run_agent(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             allowed_tools=FIXER_ALLOWED_TOOLS,
             output_model=FixerOutput,
             cwd=wt_path,
-            env={**os.environ, "GH_TOKEN": fixer_token},
+            env={
+                **os.environ,
+                "GH_TOKEN": fixer_token,
+                # Issue #347: identical env-var quadruple as the Worker
+                # (see ``worker.py``'s ``provider.run_agent`` call site).
+                "FOREMAN_OPERATOR_SUPERVISOR_NAME": operator.supervisor.name,
+                "FOREMAN_OPERATOR_SUPERVISOR_EMAIL": operator.supervisor.email,
+                "FOREMAN_OPERATOR_SIGNER_NAME": operator.signer.name,
+                "FOREMAN_OPERATOR_SIGNER_EMAIL": operator.signer.email,
+            },
         )
         # foreman#239: hoist ``usage`` to the outer scope IMMEDIATELY
         # so a failure in any later step (create_issue_comment) still
         # records the per-call token cost in the fixer_failed row.
         usage = run_usage
+
+        # Issue #347 runtime defense: amend HEAD if EITHER trailer is
+        # missing, then deterministically push from Python so the
+        # amended commit lands on the remote where the DCO gate
+        # checks. The prompt-side ``<provenance_trailers>`` section in
+        # ``fixer.md`` / ``fixer_impl.md`` is the primary defense. Both
+        # Fixer targets follow this shape — the per-target ``branch``
+        # was resolved above at the ``branch = …`` lines.
+        from foreman.roles.worker import _ensure_provenance_trailers
+
+        _ensure_provenance_trailers(
+            worktree_path=wt_path,
+            operator=operator,
+            commits_made_count=len(llm_output.commits_made),
+            role_token=fixer_token,
+        )
+        # Push only when the LLM actually committed; if commits_made is
+        # empty the branch is in whatever state the previous push left
+        # it (or hasn't been touched), and ``host.push_branch`` would
+        # be a wasted call.
+        if llm_output.commits_made:
+            host.push_branch(worktree_path=wt_path, branch=branch)
         duration_seconds = time.monotonic() - start_time
 
         # Post the fix summary as a PR COMMENT, not a review. The Fixer is
@@ -788,9 +829,7 @@ class _V4FixerResult:
         self.details: dict[str, object] = details if details is not None else {}
 
 
-def _run_fixer_for_v4(
-    *, project: str, issue_number: int, target: str
-) -> _V4FixerResult:
+def _run_fixer_for_v4(*, project: str, issue_number: int, target: str) -> _V4FixerResult:
     """Run the fixer end-to-end for a v4 caller.
 
     Wraps :func:`_run_fixer_core` (worktree attach → LLM dispatch →
@@ -814,8 +853,7 @@ def _run_fixer_for_v4(
     if project_cfg is None:
         known = [p.name for p in cfg.projects]
         raise ValueError(
-            f"project {project!r} not found in V4Config at {cfg_path}. "
-            f"Known projects: {known}"
+            f"project {project!r} not found in V4Config at {cfg_path}. Known projects: {known}"
         )
 
     # Locate the open PR for this issue. The Fixer's legacy entry-
@@ -904,12 +942,8 @@ def _run_fixer_for_v4(
         "confidence": llm.confidence,
         "attempt": core_result.attempt,
         "commits_made": [c.model_dump(mode="json") for c in llm.commits_made],
-        "addressed_findings": [
-            f.model_dump(mode="json") for f in llm.addressed_findings
-        ],
-        "unaddressed_findings": [
-            f.model_dump(mode="json") for f in llm.unaddressed_findings
-        ],
+        "addressed_findings": [f.model_dump(mode="json") for f in llm.addressed_findings],
+        "unaddressed_findings": [f.model_dump(mode="json") for f in llm.unaddressed_findings],
     }
     return _V4FixerResult(
         pushed=pushed,
@@ -942,9 +976,7 @@ def run_fixer_cli(*, project: str, issue_number: int, target: str) -> int:
         )
         return 0
     try:
-        result = _run_fixer_for_v4(
-            project=project, issue_number=issue_number, target=target
-        )
+        result = _run_fixer_for_v4(project=project, issue_number=issue_number, target=target)
     except Exception as exc:
         emit_outcome(
             Outcome(

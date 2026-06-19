@@ -184,6 +184,8 @@ def _full_reset_ctx(tmp_path):
     from foreman.v4.config import (
         AppCredentials,
         AppsConfig,
+        OperatorConfig,
+        OperatorIdentity,
         OrchestratorConfig,
         ProjectConfig,
         V4Config,
@@ -230,6 +232,10 @@ def _full_reset_ctx(tmp_path):
         ),
         orchestrator=OrchestratorConfig(
             app_id=2, private_key_path="/tmp/fake-orch.pem",
+        ),
+        operator=OperatorConfig(
+            supervisor=OperatorIdentity(name="Test Sup", email="sup@example.com"),
+            signer=OperatorIdentity(name="Test Sign", email="sign@example.com"),
         ),
         projects=[
             ProjectConfig(

@@ -33,6 +33,20 @@ worker = { app_id = ${FOREMAN_WORKER_APP_ID}, private_key_path = "/run/secrets/w
 app_id = ${FOREMAN_ORCHESTRATOR_APP_ID}
 private_key_path = "/run/secrets/orchestrator_pem"
 
+# Issue #347: operator identities used for the per-commit
+# ``Supervised-by:`` (orchestration attribution) and ``Signed-off-by:``
+# (DCO legal attestation) trailers on every bot commit. Both
+# sub-tables are REQUIRED; the four ${FOREMAN_OPERATOR_*} placeholders
+# are expanded by ``envsubst`` at container start (set them in your
+# ``.env`` alongside ``FOREMAN_PLANNER_APP_ID`` etc.).
+[operator.supervisor]
+name = "${FOREMAN_OPERATOR_SUPERVISOR_NAME}"
+email = "${FOREMAN_OPERATOR_SUPERVISOR_EMAIL}"
+
+[operator.signer]
+name = "${FOREMAN_OPERATOR_SIGNER_NAME}"
+email = "${FOREMAN_OPERATOR_SIGNER_EMAIL}"
+
 [[projects]]
 name = "voice"
 repo = "jeffrichley/voice"

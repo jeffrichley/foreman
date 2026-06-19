@@ -1,4 +1,5 @@
 """V4Config — TOML-loaded settings."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,7 +7,15 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from foreman.v4.config import ProjectConfig, load_config
+from foreman.v4.config import (
+    OperatorConfig,
+    OperatorIdentity,
+    ProjectConfig,
+    ProjectOperatorOverride,
+    V4Config,
+    load_config,
+    resolve_operator,
+)
 
 # Shared `[apps.*]` + `[orchestrator]` blocks used by every existing
 # test. As of Task 8.3 `apps` is REQUIRED on V4Config; Task 8.4 makes
@@ -16,22 +25,37 @@ from foreman.v4.config import ProjectConfig, load_config
 # assertions focused on what they're actually testing (projects, etc.)
 # instead of rewriting every TOML string inline.
 _APPS_TOML = (
-    '[apps.planner]\n'
-    'app_id = 12345\n'
+    "[apps.planner]\n"
+    "app_id = 12345\n"
     'private_key_path = "/tmp/fake-planner.pem"\n'
-    '[apps.reviewer]\n'
-    'app_id = 12346\n'
+    "[apps.reviewer]\n"
+    "app_id = 12346\n"
     'private_key_path = "/tmp/fake-reviewer.pem"\n'
-    '[apps.fixer]\n'
-    'app_id = 12347\n'
+    "[apps.fixer]\n"
+    "app_id = 12347\n"
     'private_key_path = "/tmp/fake-fixer.pem"\n'
-    '[apps.worker]\n'
-    'app_id = 12348\n'
+    "[apps.worker]\n"
+    "app_id = 12348\n"
     'private_key_path = "/tmp/fake-worker.pem"\n'
-    '[orchestrator]\n'
-    'app_id = 12349\n'
+    "[orchestrator]\n"
+    "app_id = 12349\n"
     'private_key_path = "/tmp/fake-orchestrator.pem"\n'
 )
+
+# Issue #347: ``[operator]`` is REQUIRED on V4Config. The shared TOML
+# fixture below carries both sub-tables so every existing test that
+# concatenates ``_APPS_TOML`` (now actually ``_APPS_TOML + _OPERATOR_TOML``)
+# continues to validate. Operator-targeted tests further down build
+# their own TOML to assert load-time validation of malformed inputs.
+_OPERATOR_TOML = (
+    "[operator.supervisor]\n"
+    'name = "Wren Richley"\n'
+    'email = "wren@example.com"\n'
+    "[operator.signer]\n"
+    'name = "Jeff Richley"\n'
+    'email = "jeff@example.com"\n'
+)
+_APPS_TOML = _APPS_TOML + _OPERATOR_TOML
 
 
 def test_daemon_defaults(tmp_path: Path):
@@ -40,11 +64,9 @@ def test_daemon_defaults(tmp_path: Path):
     other daemon-level defaults stay."""
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        '[daemon]\n'
+        "[daemon]\n"
         'db_path = "/tmp/foreman.db"\n'
-        'log_dir = "/tmp/foreman-logs"\n'
-        + _APPS_TOML +
-        '[[projects]]\n'
+        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
@@ -57,15 +79,13 @@ def test_daemon_defaults(tmp_path: Path):
 def test_projects_round_trip(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        '[daemon]\n'
+        "[daemon]\n"
         'db_path = "/tmp/foreman.db"\n'
-        'log_dir = "/tmp/foreman-logs"\n'
-        + _APPS_TOML +
-        '[[projects]]\n'
+        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
-        '[[projects]]\n'
+        "[[projects]]\n"
         'name = "foreman"\n'
         'repo = "jeffrichley/foreman"\n'
         'local_clone_path = "/tmp/foreman"\n'
@@ -79,11 +99,9 @@ def test_projects_round_trip(tmp_path: Path):
 def test_missing_project_name_raises(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        '[daemon]\n'
+        "[daemon]\n"
         'db_path = "/tmp/foreman.db"\n'
-        'log_dir = "/tmp/foreman-logs"\n'
-        + _APPS_TOML +
-        '[[projects]]\n'
+        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
     )
@@ -93,7 +111,8 @@ def test_missing_project_name_raises(tmp_path: Path):
 
 def test_project_config_default_trigger_label():
     p = ProjectConfig(
-        name="voice", repo="jeffrichley/voice",
+        name="voice",
+        repo="jeffrichley/voice",
         local_clone_path="/tmp/voice",
     )
     assert p.trigger_label == "foreman:plan"
@@ -105,11 +124,9 @@ def test_role_timeout_seconds_default_600(tmp_path: Path):
     dispatcher constructor."""
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        '[daemon]\n'
+        "[daemon]\n"
         'db_path = "/tmp/foreman.db"\n'
-        'log_dir = "/tmp/foreman-logs"\n'
-        + _APPS_TOML +
-        '[[projects]]\n'
+        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
@@ -121,12 +138,10 @@ def test_role_timeout_seconds_default_600(tmp_path: Path):
 def test_role_timeout_seconds_override(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        '[daemon]\n'
+        "[daemon]\n"
         'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n'
-        'role_timeout_seconds = 1200\n'
-        + _APPS_TOML +
-        '[[projects]]\n'
+        "role_timeout_seconds = 1200\n" + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
@@ -141,11 +156,9 @@ def test_max_state_attempts_default_3(tmp_path: Path):
     one retry after a transient failure."""
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        '[daemon]\n'
+        "[daemon]\n"
         'db_path = "/tmp/foreman.db"\n'
-        'log_dir = "/tmp/foreman-logs"\n'
-        + _APPS_TOML +
-        '[[projects]]\n'
+        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
@@ -157,12 +170,10 @@ def test_max_state_attempts_default_3(tmp_path: Path):
 def test_max_state_attempts_override(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        '[daemon]\n'
+        "[daemon]\n"
         'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n'
-        'max_state_attempts = 5\n'
-        + _APPS_TOML +
-        '[[projects]]\n'
+        "max_state_attempts = 5\n" + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
@@ -176,12 +187,10 @@ def test_max_state_attempts_zero_raises(tmp_path: Path):
     first entry, which is never a valid configuration."""
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        '[daemon]\n'
+        "[daemon]\n"
         'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n'
-        'max_state_attempts = 0\n'
-        + _APPS_TOML +
-        '[[projects]]\n'
+        "max_state_attempts = 0\n" + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
@@ -202,10 +211,10 @@ def test_missing_apps_block_raises(tmp_path: Path):
     ``apps`` so the operator sees the gap immediately."""
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        '[daemon]\n'
+        "[daemon]\n"
         'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n'
-        '[[projects]]\n'
+        "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
@@ -222,20 +231,20 @@ def test_missing_role_app_raises(tmp_path: Path):
     halfway through processing a ticket."""
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        '[daemon]\n'
+        "[daemon]\n"
         'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n'
-        '[apps.planner]\n'
-        'app_id = 12345\n'
+        "[apps.planner]\n"
+        "app_id = 12345\n"
         'private_key_path = "/tmp/fake-planner.pem"\n'
-        '[apps.reviewer]\n'
-        'app_id = 12346\n'
+        "[apps.reviewer]\n"
+        "app_id = 12346\n"
         'private_key_path = "/tmp/fake-reviewer.pem"\n'
-        '[apps.fixer]\n'
-        'app_id = 12347\n'
+        "[apps.fixer]\n"
+        "app_id = 12347\n"
         'private_key_path = "/tmp/fake-fixer.pem"\n'
         # No [apps.worker].
-        '[[projects]]\n'
+        "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
@@ -252,25 +261,24 @@ def test_apps_orchestrator_round_trip(tmp_path: Path):
     App installation credentials (no env-var PAT)."""
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        '[daemon]\n'
+        "[daemon]\n"
         'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n'
-        '[apps.planner]\n'
-        'app_id = 12345\n'
+        "[apps.planner]\n"
+        "app_id = 12345\n"
         'private_key_path = "/tmp/fake-planner.pem"\n'
-        '[apps.reviewer]\n'
-        'app_id = 12346\n'
+        "[apps.reviewer]\n"
+        "app_id = 12346\n"
         'private_key_path = "/tmp/fake-reviewer.pem"\n'
-        '[apps.fixer]\n'
-        'app_id = 12347\n'
+        "[apps.fixer]\n"
+        "app_id = 12347\n"
         'private_key_path = "/tmp/fake-fixer.pem"\n'
-        '[apps.worker]\n'
-        'app_id = 12348\n'
+        "[apps.worker]\n"
+        "app_id = 12348\n"
         'private_key_path = "/tmp/fake-worker.pem"\n'
-        '[orchestrator]\n'
-        'app_id = 99999\n'
-        'private_key_path = "/tmp/fake-orchestrator.pem"\n'
-        '[[projects]]\n'
+        "[orchestrator]\n"
+        "app_id = 99999\n"
+        'private_key_path = "/tmp/fake-orchestrator.pem"\n' + _OPERATOR_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
@@ -304,11 +312,9 @@ def test_project_minimal_still_parses(tmp_path: Path):
     """
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        '[daemon]\n'
+        "[daemon]\n"
         'db_path = "/tmp/foreman.db"\n'
-        'log_dir = "/tmp/foreman-logs"\n'
-        + _APPS_TOML +
-        '[[projects]]\n'
+        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
@@ -329,11 +335,9 @@ def test_project_check_command_override(tmp_path: Path):
     """
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        '[daemon]\n'
+        "[daemon]\n"
         'db_path = "/tmp/foreman.db"\n'
-        'log_dir = "/tmp/foreman-logs"\n'
-        + _APPS_TOML +
-        '[[projects]]\n'
+        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
@@ -351,11 +355,9 @@ def test_project_dev_base_branch_override(tmp_path: Path):
     """
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        '[daemon]\n'
+        "[daemon]\n"
         'db_path = "/tmp/foreman.db"\n'
-        'log_dir = "/tmp/foreman-logs"\n'
-        + _APPS_TOML +
-        '[[projects]]\n'
+        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
@@ -372,15 +374,13 @@ def test_project_max_fix_attempts_override(tmp_path: Path):
     """
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        '[daemon]\n'
+        "[daemon]\n"
         'db_path = "/tmp/foreman.db"\n'
-        'log_dir = "/tmp/foreman-logs"\n'
-        + _APPS_TOML +
-        '[[projects]]\n'
+        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
-        'max_fix_attempts = 5\n'
+        "max_fix_attempts = 5\n"
     )
     config = load_config(config_path)
     assert config.projects[0].max_fix_attempts == 5
@@ -396,15 +396,13 @@ def test_project_max_impl_attempts_override(tmp_path: Path):
     """
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        '[daemon]\n'
+        "[daemon]\n"
         'db_path = "/tmp/foreman.db"\n'
-        'log_dir = "/tmp/foreman-logs"\n'
-        + _APPS_TOML +
-        '[[projects]]\n'
+        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
-        'max_impl_attempts = 5\n'
+        "max_impl_attempts = 5\n"
     )
     config = load_config(config_path)
     assert config.projects[0].max_impl_attempts == 5
@@ -421,15 +419,13 @@ def test_project_attempt_caps_reject_zero(tmp_path: Path):
     for field, bad in (("max_fix_attempts", 0), ("max_impl_attempts", 0)):
         config_path = tmp_path / "config.toml"
         config_path.write_text(
-            '[daemon]\n'
+            "[daemon]\n"
             'db_path = "/tmp/foreman.db"\n'
-            'log_dir = "/tmp/foreman-logs"\n'
-            + _APPS_TOML
-            + '[[projects]]\n'
+            'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
             'name = "voice"\n'
             'repo = "jeffrichley/voice"\n'
             'local_clone_path = "/tmp/voice"\n'
-            f'{field} = {bad}\n'
+            f"{field} = {bad}\n"
         )
         with pytest.raises(ValidationError):
             load_config(config_path)
@@ -443,23 +439,23 @@ def test_missing_orchestrator_raises(tmp_path: Path):
     ValidationError at load time, same as the per-role [apps.*] blocks."""
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        '[daemon]\n'
+        "[daemon]\n"
         'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n'
-        '[apps.planner]\n'
-        'app_id = 12345\n'
+        "[apps.planner]\n"
+        "app_id = 12345\n"
         'private_key_path = "/tmp/fake-planner.pem"\n'
-        '[apps.reviewer]\n'
-        'app_id = 12346\n'
+        "[apps.reviewer]\n"
+        "app_id = 12346\n"
         'private_key_path = "/tmp/fake-reviewer.pem"\n'
-        '[apps.fixer]\n'
-        'app_id = 12347\n'
+        "[apps.fixer]\n"
+        "app_id = 12347\n"
         'private_key_path = "/tmp/fake-fixer.pem"\n'
-        '[apps.worker]\n'
-        'app_id = 12348\n'
+        "[apps.worker]\n"
+        "app_id = 12348\n"
         'private_key_path = "/tmp/fake-worker.pem"\n'
         # No [orchestrator] block.
-        '[[projects]]\n'
+        "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
@@ -467,3 +463,283 @@ def test_missing_orchestrator_raises(tmp_path: Path):
     with pytest.raises(ValidationError) as exc_info:
         load_config(config_path)
     assert "orchestrator" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# Issue #347: [operator] block (supervisor + signer) + per-project override
+# ---------------------------------------------------------------------------
+
+
+def _config_text(operator_block: str | None, project_extra: str = "") -> str:
+    """Helper to build a valid TOML string with a custom operator block.
+
+    Pulls in the shared _APPS_TOML minus its embedded operator block,
+    so each test can swap the operator section without rebuilding the
+    boilerplate.
+    """
+    # _APPS_TOML already contains _OPERATOR_TOML (see top-of-file fixture
+    # composition). Strip it for tests that need to test malformed
+    # operator blocks; the shared _APPS_TOML covers the happy path.
+    base_without_operator = _APPS_TOML[: -len(_OPERATOR_TOML)]
+    body = (
+        "[daemon]\n"
+        'db_path = "/tmp/foreman.db"\n'
+        'log_dir = "/tmp/foreman-logs"\n' + base_without_operator
+    )
+    if operator_block is not None:
+        body += operator_block
+    body += (
+        "[[projects]]\n"
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n' + project_extra
+    )
+    return body
+
+
+def test_operator_parse_round_trip(tmp_path: Path):
+    """Top-level [operator] with both sub-tables round-trips through pydantic."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(_config_text(_OPERATOR_TOML))
+    config = load_config(config_path)
+    assert config.operator.supervisor.name == "Wren Richley"
+    assert config.operator.supervisor.email == "wren@example.com"
+    assert config.operator.signer.name == "Jeff Richley"
+    assert config.operator.signer.email == "jeff@example.com"
+
+
+def test_missing_operator_block_raises(tmp_path: Path):
+    """Issue #347: ``[operator]`` is REQUIRED — refuse to boot without it."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(_config_text(None))
+    with pytest.raises(ValidationError) as exc_info:
+        load_config(config_path)
+    assert "operator" in str(exc_info.value)
+
+
+def test_missing_operator_supervisor_raises(tmp_path: Path):
+    """Issue #347: ``[operator.supervisor]`` is REQUIRED."""
+    operator_block = '[operator.signer]\nname = "Jeff Richley"\nemail = "jeff@example.com"\n'
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(_config_text(operator_block))
+    with pytest.raises(ValidationError) as exc_info:
+        load_config(config_path)
+    assert "supervisor" in str(exc_info.value)
+
+
+def test_missing_operator_signer_raises(tmp_path: Path):
+    """Issue #347: ``[operator.signer]`` is REQUIRED."""
+    operator_block = '[operator.supervisor]\nname = "Wren Richley"\nemail = "wren@example.com"\n'
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(_config_text(operator_block))
+    with pytest.raises(ValidationError) as exc_info:
+        load_config(config_path)
+    assert "signer" in str(exc_info.value)
+
+
+def test_missing_supervisor_name_raises(tmp_path: Path):
+    """Each identity requires ``name``."""
+    operator_block = (
+        "[operator.supervisor]\n"
+        'email = "wren@example.com"\n'
+        "[operator.signer]\n"
+        'name = "Jeff Richley"\n'
+        'email = "jeff@example.com"\n'
+    )
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(_config_text(operator_block))
+    with pytest.raises(ValidationError):
+        load_config(config_path)
+
+
+def test_missing_signer_email_raises(tmp_path: Path):
+    """Each identity requires ``email``."""
+    operator_block = (
+        "[operator.supervisor]\n"
+        'name = "Wren Richley"\n'
+        'email = "wren@example.com"\n'
+        "[operator.signer]\n"
+        'name = "Jeff Richley"\n'
+    )
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(_config_text(operator_block))
+    with pytest.raises(ValidationError):
+        load_config(config_path)
+
+
+def test_whitespace_only_name_raises(tmp_path: Path):
+    """Issue #347 AC bullet 1: name must be non-empty after .strip()."""
+    operator_block = (
+        "[operator.supervisor]\n"
+        'name = " "\n'
+        'email = "wren@example.com"\n'
+        "[operator.signer]\n"
+        'name = "Jeff Richley"\n'
+        'email = "jeff@example.com"\n'
+    )
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(_config_text(operator_block))
+    with pytest.raises(ValidationError):
+        load_config(config_path)
+
+
+def test_whitespace_only_email_raises(tmp_path: Path):
+    """Issue #347 AC bullet 1: email must be non-empty after .strip()."""
+    operator_block = (
+        "[operator.supervisor]\n"
+        'name = "Wren Richley"\n'
+        'email = "   "\n'
+        "[operator.signer]\n"
+        'name = "Jeff Richley"\n'
+        'email = "jeff@example.com"\n'
+    )
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(_config_text(operator_block))
+    with pytest.raises(ValidationError):
+        load_config(config_path)
+
+
+def test_malformed_email_raises(tmp_path: Path):
+    """Issue #347: email must match RFC-5321-ish shape regex."""
+    operator_block = (
+        "[operator.supervisor]\n"
+        'name = "Wren Richley"\n'
+        'email = "not-an-email"\n'
+        "[operator.signer]\n"
+        'name = "Jeff Richley"\n'
+        'email = "jeff@example.com"\n'
+    )
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(_config_text(operator_block))
+    with pytest.raises(ValidationError):
+        load_config(config_path)
+
+
+def test_project_operator_override_supervisor_only(tmp_path: Path):
+    """Per-project override may set only supervisor; signer inherits."""
+    project_extra = (
+        "[projects.operator.supervisor]\n"
+        'name = "Other Supervisor"\n'
+        'email = "other-sup@example.com"\n'
+    )
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(_config_text(_OPERATOR_TOML, project_extra=project_extra))
+    config = load_config(config_path)
+    proj = config.projects[0]
+    assert proj.operator is not None
+    assert proj.operator.supervisor is not None
+    assert proj.operator.supervisor.name == "Other Supervisor"
+    assert proj.operator.signer is None
+
+
+def test_project_operator_override_signer_only(tmp_path: Path):
+    """Per-project override may set only signer; supervisor inherits."""
+    project_extra = (
+        '[projects.operator.signer]\nname = "Other Signer"\nemail = "other-sign@example.com"\n'
+    )
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(_config_text(_OPERATOR_TOML, project_extra=project_extra))
+    config = load_config(config_path)
+    proj = config.projects[0]
+    assert proj.operator is not None
+    assert proj.operator.signer is not None
+    assert proj.operator.signer.name == "Other Signer"
+    assert proj.operator.supervisor is None
+
+
+def test_project_operator_override_both(tmp_path: Path):
+    """Per-project override may set both identities."""
+    project_extra = (
+        "[projects.operator.supervisor]\n"
+        'name = "Project Supervisor"\n'
+        'email = "psup@example.com"\n'
+        "[projects.operator.signer]\n"
+        'name = "Project Signer"\n'
+        'email = "psign@example.com"\n'
+    )
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(_config_text(_OPERATOR_TOML, project_extra=project_extra))
+    config = load_config(config_path)
+    proj = config.projects[0]
+    assert proj.operator is not None
+    assert proj.operator.supervisor is not None
+    assert proj.operator.supervisor.name == "Project Supervisor"
+    assert proj.operator.signer is not None
+    assert proj.operator.signer.name == "Project Signer"
+
+
+def _build_config_with_override(
+    override: ProjectOperatorOverride | None,
+) -> tuple[ProjectConfig, V4Config]:
+    top = OperatorConfig(
+        supervisor=OperatorIdentity(name="Top Supervisor", email="topsup@example.com"),
+        signer=OperatorIdentity(name="Top Signer", email="topsign@example.com"),
+    )
+    project = ProjectConfig(
+        name="p",
+        repo="o/r",
+        local_clone_path="/tmp/r",
+        operator=override,
+    )
+    config = V4Config(
+        db_path="/tmp/foreman.db",
+        log_dir="/tmp/foreman-logs",
+        apps=AppsConfig(
+            planner=AppCredentials(app_id=1, private_key_path="/dev/null"),
+            reviewer=AppCredentials(app_id=2, private_key_path="/dev/null"),
+            fixer=AppCredentials(app_id=3, private_key_path="/dev/null"),
+            worker=AppCredentials(app_id=4, private_key_path="/dev/null"),
+        ),
+        orchestrator=OrchestratorConfig(app_id=5, private_key_path="/dev/null"),
+        operator=top,
+        projects=[project],
+    )
+    return project, config
+
+
+def test_resolve_operator_no_override(tmp_path: Path):
+    project, config = _build_config_with_override(None)
+    op = resolve_operator(project, config)
+    assert op.supervisor.name == "Top Supervisor"
+    assert op.signer.name == "Top Signer"
+
+
+def test_resolve_operator_supervisor_override_only():
+    override = ProjectOperatorOverride(
+        supervisor=OperatorIdentity(name="Proj Sup", email="psup@example.com"),
+    )
+    project, config = _build_config_with_override(override)
+    op = resolve_operator(project, config)
+    assert op.supervisor.name == "Proj Sup"
+    assert op.signer.name == "Top Signer"  # inherited from top-level
+
+
+def test_resolve_operator_signer_override_only():
+    override = ProjectOperatorOverride(
+        signer=OperatorIdentity(name="Proj Sign", email="psign@example.com"),
+    )
+    project, config = _build_config_with_override(override)
+    op = resolve_operator(project, config)
+    assert op.supervisor.name == "Top Supervisor"  # inherited
+    assert op.signer.name == "Proj Sign"
+
+
+def test_resolve_operator_both_overridden():
+    override = ProjectOperatorOverride(
+        supervisor=OperatorIdentity(name="Proj Sup", email="psup@example.com"),
+        signer=OperatorIdentity(name="Proj Sign", email="psign@example.com"),
+    )
+    project, config = _build_config_with_override(override)
+    op = resolve_operator(project, config)
+    assert op.supervisor.name == "Proj Sup"
+    assert op.signer.name == "Proj Sign"
+
+
+# Imports required by the helper above. We import these lazily-named at
+# the bottom of the file so the existing tests' top-level imports remain
+# minimal.
+from foreman.v4.config import (  # noqa: E402
+    AppCredentials,
+    AppsConfig,
+    OrchestratorConfig,
+)

@@ -119,6 +119,8 @@ class GitHostProvider(ABC):
         worktree_path: Path,
         files: dict[str, str],
         message: str,
+        *,
+        provenance_trailers: list[str] | None = None,
     ) -> str:
         """Write ``files`` (relpath → content), ``git add`` + ``git commit``.
 
@@ -129,6 +131,14 @@ class GitHostProvider(ABC):
         because git worktrees share that file with the parent repo and
         the leaked identity would mis-attribute subsequent human
         commits (foreman#53).
+
+        ``provenance_trailers`` (issue #347): when provided as a non-empty
+        list, each entry is appended to the ``git commit`` invocation as a
+        ``--trailer "<value>"`` flag, in list order. Used to layer the
+        ``Supervised-by:`` (orchestration attribution) and
+        ``Signed-off-by:`` (DCO legal attestation) trailers on top of
+        the bot's authorial attribution. ``None`` or empty list leaves
+        the commit unchanged (backwards-compatible default).
         """
 
     @abstractmethod
