@@ -87,7 +87,7 @@ Borrowed from [curl](https://curl.se/dev/contribute.html): an AI-assisted PR mus
 
 ### Signing a commit
 
-`git commit -s` appends the `Signed-off-by:` trailer using the `user.name` / `user.email` from your git config. To amend a commit that's missing the trailer: `git commit --amend -s --no-edit`. The DCO CI check fails the PR if any commit (except synthetic merge commits) lacks it.
+`git commit -s` appends the `Signed-off-by:` trailer using the `user.name` / `user.email` from your git config. If you forgot `-s` on one or more commits already on your branch, the fastest recovery is `foreman contrib sign-commits` (or `foreman contrib check-signoff` to dry-run + see which commits are missing the trailer). For a single-commit amend without rebase: `git commit --amend -s --no-edit`. The DCO CI check fails the PR if any commit (except synthetic merge commits) lacks it.
 
 ## Project shape
 
