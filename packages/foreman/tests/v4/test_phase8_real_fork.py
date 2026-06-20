@@ -99,6 +99,13 @@ def test_role_subcommand_real_fork_emits_parseable_outcome(
         cmd,
         capture_output=True,
         text=True,
+        # foreman#367: same Windows-codepage insulation as the real-fork
+        # planner test below — both subprocess.run calls share the
+        # contract that their child's stdout is text inspected by the
+        # test, and ``encoding='utf-8', errors='replace'`` keeps that
+        # contract durable across host-locale variation.
+        encoding="utf-8",
+        errors="replace",
         env=_build_dry_run_env(),
         timeout=_SUBPROCESS_TIMEOUT_SECONDS,
         cwd=tmp_path,
@@ -242,6 +249,18 @@ def test_planner_real_fork_loads_v4_config_without_v3_config_present(
         cmd,
         capture_output=True,
         text=True,
+        # foreman#367: ``encoding='utf-8', errors='replace'`` insulates
+        # the test from Windows console-codepage drift. The subprocess
+        # is a foreman role CLI whose Python writes to stdout using the
+        # OS locale; on Windows that's CP1252, so any non-ASCII byte
+        # (em-dash 0x97, etc.) in a docstring/error path emerges as
+        # invalid UTF-8 to the parent's decode. Linux CI never tripped
+        # this — but a Windows-local ``just check`` did once our PR
+        # added more code along the failure path. The ``errors='replace'``
+        # keeps the test asserting on the right substrings even when
+        # the locale-encoded bytes are lossy.
+        encoding="utf-8",
+        errors="replace",
         env=_build_v4_only_env(v4_cfg_path=cfg_path),
         timeout=_SUBPROCESS_TIMEOUT_SECONDS,
         cwd=tmp_path,
