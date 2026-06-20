@@ -81,6 +81,7 @@ from foreman.schemas.worker import WorkerOutput, WorkerRunResult
 from foreman.stats import log_worker_run
 from foreman.v4.config import OperatorConfig, V4Config, resolve_operator
 from foreman.v4.identity import V4IdentityRegistry
+from foreman.v4.pygithub_git_provider import CI_PASSING_MERGEABLE_STATES
 from foreman.worktree import WorktreeManager
 
 _log = logging.getLogger(__name__)
@@ -490,19 +491,38 @@ def _read_spec_doc_from_branch(
     return None
 
 
-def _find_spec_pr(repo: Repository, owner: str, branch: str) -> PullRequest | None:
-    """Locate the open spec PR whose head branch matches ``branch``.
+def _find_open_pr_by_head_branch(
+    repo: Repository, owner: str, branch: str
+) -> PullRequest | None:
+    """Locate the open PR whose head branch matches ``branch``.
 
-    The Planner names spec branches ``foreman/issue-<N>``. We query
-    open PRs by head (``owner:branch``) and take the first match.
+    Generalized from the original spec-PR-only ``_find_spec_pr`` helper
+    so both callers in :func:`_run_worker_core` can reuse it (issue
+    #342):
 
-    Returns ``None`` if no open spec PR is found. The Worker proceeds
-    anyway in this case — the implementation can still happen against
-    the spec doc on the spec branch; the only thing missing is the PR
-    number for the impl PR body's "Spec PR: #<N>" reference (which we
-    leave as a placeholder). Posting a spec_invalid_reason without a
-    target PR is harmless (we skip the post and log a warning); the
-    issue's label transition still happens.
+    - **Spec PR lookup** (the original use): caller passes
+      ``branch=foreman/issue-<N>``. ``None`` means the spec PR has
+      already merged + auto-deleted (the v4 normal path after
+      ``SpecReviewState``), which is fine — the implementation still
+      proceeds against the spec doc on disk; only the impl PR body's
+      "Spec PR: #<N>" reference is omitted. Posting a
+      ``spec_invalid_reason`` without a target PR is harmless (we skip
+      the post and log a warning); the v4 state machine transition
+      still fires.
+    - **Existing impl PR detection** (issue #342, BLOCKED-retry
+      idempotency): caller passes ``branch=foreman/impl-<N>``. A
+      non-``None`` return means a previous Worker dispatch already
+      opened the impl PR and is still polling its CI status; the
+      Python-side push + ``create_pull`` MUST be skipped to avoid a
+      GitHub 422 ("A pull request already exists") which would crash
+      the Worker subprocess and transition the ticket to ``Failed``.
+
+    The helper is a thin wrapper over
+    ``repo.get_pulls(state="open", head=f"{owner}:{branch}")``. The
+    query is stable: GitHub's REST search returns the open PRs whose
+    head ref qualifier matches; for our branch-name conventions
+    (``foreman/issue-<N>`` and ``foreman/impl-<N>``) at most one open
+    PR can match in practice, so taking the first hit is safe.
     """
     head_qualifier = f"{owner}:{branch}"
     pulls = list(repo.get_pulls(state="open", head=head_qualifier))
@@ -944,7 +964,7 @@ async def _run_worker_core(
         # proceeds either way; the impl PR body's spec-PR reference adapts).
         spec_branch_name = spec_branch(issue_number)
         impl_branch_name = impl_branch(issue_number)
-        spec_pr = _find_spec_pr(repo, owner=owner, branch=spec_branch_name)
+        spec_pr = _find_open_pr_by_head_branch(repo, owner=owner, branch=spec_branch_name)
         spec_pr_number = spec_pr.number if spec_pr is not None else None
 
         # Resolve check_command per D2: project override or default.
@@ -1171,63 +1191,119 @@ async def _run_worker_core(
             # `implemented` → `incomplete`, never the reverse.
             assert llm_output.pr_title is not None
             assert llm_output.pr_body is not None
-            # Issue #347 runtime defense: ensure HEAD's commit body
-            # carries BOTH the ``Supervised-by:`` and ``Signed-off-by:``
-            # trailers. Runs BEFORE ``_sanitize_head_commit_auto_close``
-            # so the auto-close strip's amend (which fully overwrites
-            # the message body with ``-m <sanitized>``) operates on the
-            # final-shape message that already has both trailers. The
-            # prompt is the primary defense; this is the backstop.
-            _ensure_provenance_trailers(
-                worktree_path=wt_path,
-                operator=operator,
-                commits_made_count=len(llm_output.commits_made),
-                role_token=worker_token,
+            # Issue #342: probe for an already-open impl PR on
+            # ``foreman/impl-<N>`` BEFORE the push + create_pull
+            # sequence. The v4 state machine's BLOCKED-exempts-retry-cap
+            # rule (foreman#453) re-dispatches the Worker subprocess
+            # while CI is still in flight on a previously-opened impl
+            # PR; if we naively re-run push + ``create_pull``, GitHub
+            # returns 422 ("A pull request already exists ...") and the
+            # subprocess crashes, transitioning the ticket to ``Failed``
+            # (the foreman#337 dogfood wedge). The fix: when the helper
+            # returns a non-``None`` PullRequest, skip the entire
+            # push/verify/create + provenance/auto-close-strip amend
+            # surface and re-derive ``final_did_check_pass`` from the
+            # existing PR's GitHub-reported ``mergeable_state``.
+            existing_impl_pr = _find_open_pr_by_head_branch(
+                repo, owner=owner, branch=impl_branch_name
             )
-            # foreman#63 runtime defense (Phase 8d.22): scrub the HEAD
-            # commit message of any GitHub auto-close keyword + issue
-            # reference BEFORE Python pushes the branch. If a Worker
-            # commit body contains ``Closes #N``, merging the impl PR
-            # auto-closes the issue via the commit-body route, bypassing
-            # the v4 state machine's close-out gate. The prompt is the
-            # primary defense; this is the backstop. Limited to the
-            # single-commit case (the default per ``<commit_discipline>``);
-            # multi-commit runs log a warning and skip the amend to
-            # avoid destructive rebases on shared history.
-            _sanitize_head_commit_auto_close(
-                worktree_path=wt_path,
-                commits_made_count=len(llm_output.commits_made),
-                role_token=worker_token,
-            )
-            # foreman#222: deterministically push the impl branch from
-            # Python via host.push_branch (tokenized URL using the
-            # worker installation token). Previously this was delegated
-            # to the LLM's Bash via the prompt, but the container has
-            # no git credential helper so Claude's `git push` fails
-            # with a 401-shaped "could not read Username" whenever a
-            # manual gh-auth-setup-git hasn't been done. Now Python
-            # pushes deterministically using the same mechanism
-            # Planner uses (see git_hosts/github.py:push_branch).
-            host.push_branch(worktree_path=wt_path, branch=impl_branch_name)
-            # foreman#175: belt-and-suspenders verify that the push
-            # actually landed before opening the PR. Recovers via the
-            # same host.push_branch path if the primary attempt above
-            # somehow didn't take.
-            _verify_impl_branch_remote_state(
-                repo,
-                branch=impl_branch_name,
-                worktree_path=wt_path,
-                role_token=worker_token,
-                host=host,
-            )
-            impl_pr = _create_pull_with_base_fallback(
-                repo,
-                title=llm_output.pr_title,
-                body=llm_output.pr_body,
-                base=wt_result.base_branch,
-                head=impl_branch_name,
-            )
-            pr_url = impl_pr.html_url
+            if existing_impl_pr is None:
+                # First-run path — behavior unchanged.
+                # Issue #347 runtime defense: ensure HEAD's commit body
+                # carries BOTH the ``Supervised-by:`` and ``Signed-off-by:``
+                # trailers. Runs BEFORE ``_sanitize_head_commit_auto_close``
+                # so the auto-close strip's amend (which fully overwrites
+                # the message body with ``-m <sanitized>``) operates on the
+                # final-shape message that already has both trailers. The
+                # prompt is the primary defense; this is the backstop.
+                #
+                # Issue #342: deliberately scoped to the first-run path.
+                # On the existing-PR (BLOCKED-retry) branch we are NOT
+                # pushing anything new — the commits being attributed
+                # are already on origin from the prior dispatch — so the
+                # amend backstops are no-ops at best and destructive at
+                # worst.
+                _ensure_provenance_trailers(
+                    worktree_path=wt_path,
+                    operator=operator,
+                    commits_made_count=len(llm_output.commits_made),
+                    role_token=worker_token,
+                )
+                # foreman#63 runtime defense (Phase 8d.22): scrub the HEAD
+                # commit message of any GitHub auto-close keyword + issue
+                # reference BEFORE Python pushes the branch. If a Worker
+                # commit body contains ``Closes #N``, merging the impl PR
+                # auto-closes the issue via the commit-body route, bypassing
+                # the v4 state machine's close-out gate. The prompt is the
+                # primary defense; this is the backstop. Limited to the
+                # single-commit case (the default per ``<commit_discipline>``);
+                # multi-commit runs log a warning and skip the amend to
+                # avoid destructive rebases on shared history.
+                #
+                # Issue #342: also gated to the first-run path for the
+                # same "no new commits being pushed" reason as the
+                # provenance amend above.
+                _sanitize_head_commit_auto_close(
+                    worktree_path=wt_path,
+                    commits_made_count=len(llm_output.commits_made),
+                    role_token=worker_token,
+                )
+                # foreman#222: deterministically push the impl branch from
+                # Python via host.push_branch (tokenized URL using the
+                # worker installation token). Previously this was delegated
+                # to the LLM's Bash via the prompt, but the container has
+                # no git credential helper so Claude's `git push` fails
+                # with a 401-shaped "could not read Username" whenever a
+                # manual gh-auth-setup-git hasn't been done. Now Python
+                # pushes deterministically using the same mechanism
+                # Planner uses (see git_hosts/github.py:push_branch).
+                host.push_branch(worktree_path=wt_path, branch=impl_branch_name)
+                # foreman#175: belt-and-suspenders verify that the push
+                # actually landed before opening the PR. Recovers via the
+                # same host.push_branch path if the primary attempt above
+                # somehow didn't take.
+                _verify_impl_branch_remote_state(
+                    repo,
+                    branch=impl_branch_name,
+                    worktree_path=wt_path,
+                    role_token=worker_token,
+                    host=host,
+                )
+                impl_pr = _create_pull_with_base_fallback(
+                    repo,
+                    title=llm_output.pr_title,
+                    body=llm_output.pr_body,
+                    base=wt_result.base_branch,
+                    head=impl_branch_name,
+                )
+                pr_url = impl_pr.html_url
+            else:
+                # Issue #342: BLOCKED-retry idempotency. An open impl PR
+                # already exists for ``foreman/impl-<N>`` — a prior
+                # Worker dispatch opened it and is still polling its
+                # CI status. Re-running push + ``create_pull`` would
+                # 422 ("A pull request already exists ...") and crash
+                # the subprocess. Skip the create surface entirely,
+                # take the existing PR's html_url, and override
+                # ``final_did_check_pass`` from its GitHub-reported
+                # ``mergeable_state`` — the in-worktree
+                # ``_run_check_command`` rerun above is unreliable as a
+                # proxy for "is the impl PR's CI green" because the
+                # worktree was freshly created from origin/<dev_base>
+                # for this dispatch. The PR's ``mergeable_state`` is
+                # the answer we actually want; ``"clean"`` / ``"unstable"``
+                # mean CI is green, anything else means still in flight
+                # or failing.
+                _log.info(
+                    "Worker BLOCKED retry: existing impl PR #%d found "
+                    "for branch %r; skipping push+create_pull",
+                    existing_impl_pr.number,
+                    impl_branch_name,
+                )
+                pr_url = existing_impl_pr.html_url
+                final_did_check_pass = (
+                    existing_impl_pr.mergeable_state in CI_PASSING_MERGEABLE_STATES
+                )
         elif final_outcome == "spec_invalid":
             # D6: post the spec_invalid_reason as a comment on the SPEC PR
             # (not the issue). The Worker's branch is left in place (commits,
