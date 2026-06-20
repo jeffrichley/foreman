@@ -21,6 +21,7 @@ from foreman.roles.fixer import run_fixer_cli
 from foreman.roles.planner import run_planner_cli
 from foreman.roles.reviewer import run_reviewer_cli
 from foreman.roles.worker import run_worker_cli
+from foreman.v4.cli.contrib import contrib_app
 from foreman.v4.cli.daemon import (
     cmd_daemon_reload,
     cmd_daemon_start,
@@ -94,6 +95,11 @@ daemon_app.command("start")(cmd_daemon_start)
 daemon_app.command("stop")(cmd_daemon_stop)
 daemon_app.command("reload")(cmd_daemon_reload)
 daemon_app.command("status")(cmd_daemon_status)
+
+
+# Contributor helpers (sign-commits, check-signoff). Sub-app lives in
+# foreman.v4.cli.contrib and registers its own commands at import time.
+app.add_typer(contrib_app)
 
 
 # Role commands — delegate to the run_<role>_cli imports at the top of
