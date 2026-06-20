@@ -26,7 +26,7 @@ def stub_foreman(tmp_path: Path) -> Path:
     return script
 
 
-def test_subprocess_round_trip(stub_foreman: Path):
+def test_subprocess_round_trip(stub_foreman: Path, tmp_path: Path):
     identity = MagicMock()
     identity.get_role_token.return_value = "ghp_STUB"
     # foreman_cli points at python + stub script; CLI args after are ignored
@@ -34,6 +34,7 @@ def test_subprocess_round_trip(stub_foreman: Path):
     dispatcher = SubprocessRoleDispatcher(
         foreman_cli=[sys.executable, str(stub_foreman)],
         identity=identity,
+        log_dir=tmp_path,
     )
     stdout = dispatcher.dispatch(
         role="planner", project="p", issue_number=1, ticket_id=1,
