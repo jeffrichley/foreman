@@ -86,6 +86,52 @@ def test_recovers_when_exception_success_and_valid_result_message() -> None:
     assert usage.output_tokens == 22
 
 
+def test_recovers_when_exception_is_wrapped_success_form() -> None:
+    """Positive case: the wrapped form
+    ``Exception("Claude Code returned an error result: success")`` is the
+    SAME upstream SDK bug as the bare form — just expressed one layer
+    deeper in the SDK's error envelope. Both shapes raise at the SAME
+    SDK source line and follow the SAME emission pattern
+    (ResultMessage yielded BEFORE the raise), so recovery works
+    identically. Pinned tickets: foreman#335, #363, #367 all crashed
+    with this shape during the 2026-06-20 overnight stress test.
+
+    Upstream SDK source (``claude_agent_sdk/_internal/query.py``
+    around line 852 at SDK 0.2.87, the pinned version at time of
+    writing) — three lines from the same loop produce BOTH the bare
+    AND wrapped exception bodies depending on what string the CLI
+    subprocess put in ``message["error"]``::
+
+        elif message.get("type") == "error":
+            raise Exception(message.get("error", "Unknown error"))
+        yield message
+
+    The ``yield`` runs before the ``raise`` for any prior non-error
+    message — that's how a valid ResultMessage gets into the partial
+    state before the exception fires.
+    """
+    rm = _make_result_message(
+        subtype="success",
+        structured_output={"name": "ok", "count": 7},
+        usage={"input_tokens": 11, "output_tokens": 22},
+    )
+    partial: PartialResult[_DemoOutput] = PartialResult(
+        result_message=rm, output_model=_DemoOutput
+    )
+    exc = Exception("Claude Code returned an error result: success")
+    strategy = SuccessAsErrorRecovery()
+
+    assert strategy.can_recover(exc, partial) is True
+
+    output, usage = strategy.recover(exc, partial)
+    assert isinstance(output, _DemoOutput)
+    assert output.name == "ok"
+    assert output.count == 7
+    assert isinstance(usage, UsageInfo)
+    assert usage.input_tokens == 11
+    assert usage.output_tokens == 22
+
+
 def test_declines_when_exception_message_is_different() -> None:
     """Negative case: a different exception arg → strategy declines.
 
