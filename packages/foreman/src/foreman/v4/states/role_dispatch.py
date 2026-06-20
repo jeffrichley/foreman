@@ -37,6 +37,10 @@ class RoleDispatchState(TicketState):
             project=ctx.ticket.project,
             issue_number=ctx.ticket.issue_number,
             ticket_id=ctx.ticket.id,
+            # foreman#367: thread the state-instance id so the role-core
+            # dedup-key construction is stable across retries on the
+            # same state instance.
+            state_instance_id=ctx.instance.id,
         )
         return parse_outcome_from_stdout(stdout)
 

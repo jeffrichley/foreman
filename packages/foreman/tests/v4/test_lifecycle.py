@@ -135,7 +135,9 @@ def test_needs_fix_loop_spec_review_to_spec_fix_back():
     review_calls = {"n": 0}
 
     class _ScriptedDispatcher:
-        def dispatch(self, *, role, project, issue_number, ticket_id):
+        def dispatch(self, *, role, project, issue_number, ticket_id,
+                     state_instance_id=None):
+            del state_instance_id  # foreman#367: accepted but unused here
             if role == "planner":
                 return _canned("clean", pr_number=7)
             if role == "reviewer-spec":

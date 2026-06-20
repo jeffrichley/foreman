@@ -220,6 +220,7 @@ class SubprocessRoleDispatcher:
 
     def dispatch(
         self, *, role: str, project: str, issue_number: int, ticket_id: int,
+        state_instance_id: int | None = None,
     ) -> str:
         try:
             inv = _ROLE_TO_INVOCATION[role]
@@ -236,6 +237,15 @@ class SubprocessRoleDispatcher:
 
         env = dict(os.environ)
         env["GH_TOKEN"] = self._identity.get_role_token(role)
+        # foreman#367: thread the current state-instance id into the
+        # subprocess so the role-core dedup-key construction
+        # (`state-instance-<id>`) is stable across retries on the same
+        # state instance. When None (legacy / direct-CLI invocation),
+        # the env var is OMITTED — the role-core fallback reads
+        # ``os.environ.get("FOREMAN_STATE_INSTANCE_ID")`` as None and
+        # uses the literal ``"unknown"`` for its dedup key.
+        if state_instance_id is not None:
+            env["FOREMAN_STATE_INSTANCE_ID"] = str(state_instance_id)
 
         started_at = dt.datetime.now(dt.UTC)
         role_base = _base_role(role)

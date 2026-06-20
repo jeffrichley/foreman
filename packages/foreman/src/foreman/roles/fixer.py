@@ -53,6 +53,7 @@ from foreman.roles import (
     emit_transient_provider_outcome,
     handle_unhandled_role_exception,
 )
+from foreman.roles._escalation_comment import post_escalation_comment
 from foreman.roles._prompt_helpers import (
     filter_bot_self_comments,
     format_comments_section,
@@ -713,6 +714,36 @@ async def _run_fixer_core(
         # JSONL stats — write regardless of outcome.
         unaddressed_hist = _unaddressed_by_reason_histogram(llm_output)
         disagreed_count = unaddressed_hist.get("needed_remediation_wrong", 0)
+
+        # foreman#367: post the operator-visible escalation comment
+        # BEFORE log_fixer_run so a comment-post failure is visible in
+        # the daemon log without preventing the JSONL row.
+        if llm_output.outcome == "incomplete" or llm_output.confidence == "low":
+            state_instance_id = os.environ.get(
+                "FOREMAN_STATE_INSTANCE_ID", "unknown",
+            )
+            fallback_reason = None
+            if llm_output.escalation_comment is None:
+                fallback_reason = (
+                    "fixer LLM produced outcome/confidence triggering "
+                    "escalation but did not populate escalation_comment"
+                )
+            post_escalation_comment(
+                host=host,
+                repo_slug=actual_repo_slug,
+                issue_number=issue_number,
+                role="fixer",
+                outcome_label=llm_output.outcome,
+                summary=llm_output.fix_comment[:500] or llm_output.outcome,
+                payload=llm_output.escalation_comment,
+                fallback_reason=fallback_reason,
+                source=f"role:fixer-{target}",
+                key=(
+                    f"state-instance-{state_instance_id}-pr-"
+                    f"{pr_number}-{llm_output.outcome}"
+                ),
+            )
+
         log_fixer_run(
             repo_slug=actual_repo_slug,
             issue_number=issue_number,
