@@ -115,11 +115,13 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
 ### Role prompts (six files)
 
 - [ ] `packages/foreman/src/foreman/prompts/planner.md` gains an
-  `<escalation_comment>` section between `<output_schema>` and
-  `<self_review>` instructing the LLM to populate `escalation_comment`
-  with `why` / `what_tried` / `what_would_unblock` whenever
-  `confidence == 'low'`. The section names the
-  three-field content requirements from the issue's table verbatim
+  `<escalation_comment>` section between `<process>` and `<self_review>`
+  (planner.md uniquely places `<self_review>` BEFORE `<output_schema>`
+  — verify by `grep -nE '^<(process|self_review|output_schema)>' planner.md`
+  before inserting; current line numbers are 186 / 204 / 220) instructing
+  the LLM to populate `escalation_comment` with `why` / `what_tried` /
+  `what_would_unblock` whenever `confidence == 'low'`. The section names
+  the three-field content requirements from the issue's table verbatim
   ("Why I escalated · What I attempted · What an operator would need
   to do to unblock") and forbids posting via Bash directly (the LLM
   cannot — its tool surface is read-only — but the prompt section
@@ -309,8 +311,17 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
   `GitHostProvider` — the bootstrap currently constructs the v4
   `GitProvider` only, so add a parallel
   `per_project_git_hosts: dict[str, GitHostProvider]` map keyed by
-  project name, built by calling `build_role_resources(role="orchestrator", ...)`
-  per project — same way the role cores acquire their `GitHostProvider`).
+  project name, built by calling
+  `build_role_resources(role="orchestrator",
+  app_id=config.orchestrator.app_id,
+  private_key_path=config.orchestrator.private_key_path, ...)`
+  per project. NOTE: unlike the four role cores (Planner / Reviewer /
+  Fixer / Worker), which read their App credentials from
+  `config.apps.<role>.app_id` / `config.apps.<role>.private_key_path`,
+  the orchestrator's credentials live at the TOP-LEVEL `config.orchestrator`
+  block — there is no `config.apps.orchestrator` (see
+  `v4/config.py:308` and `v4/identity.py:247-249`). Do NOT copy the
+  role-core call shape verbatim or it will crash at startup.
   If the orchestrator identity is not configured for a given project,
   the helper logs a warning and skips wiring the observer for that
   project; this preserves the existing "additive change" discipline.
@@ -357,7 +368,7 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
 ### Tests
 
 - [ ] NEW test
-  `packages/foreman/tests/roles/test_escalation_comment.py` exercising
+  `packages/foreman/tests/v4/roles/test_escalation_comment.py` exercising
   `_escalation_comment.py`:
   * `test_build_body_with_payload_renders_all_three_sections`
   * `test_build_body_fallback_names_missing_field`
@@ -397,13 +408,13 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
     `<log_dir>/<role>/<ticket_id>__<iso>.log` (or the convention
     string).
 - [ ] NEW test
-  `packages/foreman/tests/roles/test_planner_low_confidence_posts_comment.py`:
+  `packages/foreman/tests/v4/roles/test_planner_low_confidence_posts_comment.py`:
   patches `host.post_issue_comment` on a `MagicMock`; runs
   `_run_planner_core` with a forced-low-confidence `PlannerOutput`
   fixture; asserts the mock was called once with a body containing
   the begin marker + `source=role:planner`.
 - [ ] NEW test
-  `packages/foreman/tests/roles/test_planner_fallback_when_field_missing.py`:
+  `packages/foreman/tests/v4/roles/test_planner_fallback_when_field_missing.py`:
   same but the `PlannerOutput` has
   `confidence='low'` AND `escalation_comment=None` — asserts the
   posted body contains the fallback prose
@@ -412,7 +423,7 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
   (one happy-path + one fallback path per role; 6 new test functions
   total across three new files alongside the Planner pair).
 - [ ] NEW test
-  `packages/foreman/tests/roles/test_fixer_received_rejection_pre_dispatch.py`:
+  `packages/foreman/tests/v4/roles/test_fixer_received_rejection_pre_dispatch.py`:
   asserts the Fixer's core posts the "received rejection" comment
   BEFORE invoking `provider.run_agent` (use a `MagicMock` order
   assertion via `mock_calls`). A second test asserts the
@@ -590,23 +601,23 @@ attached today.
 - `packages/foreman/src/foreman/v4/observers/__init__.py` — re-export.
 - `packages/foreman/src/foreman/v4/bootstrap.py` — construct +
   wire both observers; build `per_project_git_hosts` map.
-- `packages/foreman/tests/roles/test_escalation_comment.py` —
+- `packages/foreman/tests/v4/roles/test_escalation_comment.py` —
   NEW: helper unit tests.
 - `packages/foreman/tests/v4/observers/test_sustained_blocked_observer.py`
   — NEW: observer behavior tests.
 - `packages/foreman/tests/v4/observers/test_terminal_landing_observer.py`
   — NEW: observer behavior tests.
-- `packages/foreman/tests/roles/test_planner_low_confidence_posts_comment.py`
+- `packages/foreman/tests/v4/roles/test_planner_low_confidence_posts_comment.py`
   — NEW: per-role escalation test (Planner).
-- `packages/foreman/tests/roles/test_planner_fallback_when_field_missing.py`
+- `packages/foreman/tests/v4/roles/test_planner_fallback_when_field_missing.py`
   — NEW: per-role fallback test (Planner).
-- `packages/foreman/tests/roles/test_reviewer_low_confidence_posts_comment.py`
+- `packages/foreman/tests/v4/roles/test_reviewer_low_confidence_posts_comment.py`
   — NEW (one happy + one fallback in same file).
-- `packages/foreman/tests/roles/test_fixer_escalation_paths.py`
+- `packages/foreman/tests/v4/roles/test_fixer_escalation_paths.py`
   — NEW (escalation + fallback).
-- `packages/foreman/tests/roles/test_fixer_received_rejection_pre_dispatch.py`
+- `packages/foreman/tests/v4/roles/test_fixer_received_rejection_pre_dispatch.py`
   — NEW.
-- `packages/foreman/tests/roles/test_worker_escalation_paths.py`
+- `packages/foreman/tests/v4/roles/test_worker_escalation_paths.py`
   — NEW (escalation + fallback).
 - `packages/foreman/tests/v4/test_subprocess_dispatcher.py` — EXTEND
   with `test_subprocess_timeout_routes_to_terminal_landing_comment`.
