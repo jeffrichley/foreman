@@ -52,6 +52,7 @@ def bootstrap_cli_context(
     dispatcher = SubprocessRoleDispatcher(
         foreman_cli=foreman_cli or ["foreman"],
         identity=identity,
+        log_dir=Path(config.log_dir),
         timeout_seconds=config.role_timeout_seconds,  # Phase 5 carryover
     )
 

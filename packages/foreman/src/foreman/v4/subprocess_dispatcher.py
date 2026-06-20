@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 from foreman.v4.outcome import OUTCOME_MARKER
@@ -51,10 +52,12 @@ class SubprocessRoleDispatcher:
         *,
         foreman_cli: list[str],
         identity: IdentityProvider,
+        log_dir: Path,
         timeout_seconds: int = 600,
     ) -> None:
         self._foreman_cli = foreman_cli
         self._identity = identity
+        self._log_dir = log_dir
         self._timeout = timeout_seconds
 
     def dispatch(
