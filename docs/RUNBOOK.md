@@ -248,6 +248,99 @@ intentionally skipped.
 
 ---
 
+## Provider transient failures and backoff suspension
+
+Foreman classifies Anthropic-side transport blips (5xx, 429, connection
+refused, transport-level timeout) as `TRANSIENT_PROVIDER_ERROR` outcomes
+distinct from genuine role failures (foreman#361). The state machine
+exempts these from the runaway-defense `max_state_attempts` cap and
+schedules a delayed retry on an exponential-backoff schedule. A short
+Anthropic blip therefore does NOT escalate the ticket to `NeedsHelp`
+by the wrong path.
+
+### What `next_action_at` in `foreman show <id>` means
+
+When a ticket hits a transient provider error, the state machine writes
+an ISO-8601 timestamp into the ticket's `next_action_at` column. The
+Poller refuses to enqueue the ticket until wall-clock time has passed
+that timestamp. The header line of `foreman show <id>` renders this
+suspension as:
+
+```
+[yellow]suspended until 2026-06-20T14:25:00+00:00 (provider-throttled, attempt 2/4)[/yellow]
+```
+
+The `attempt N/4` count is the number of transient outcomes already
+observed; `4` is the schedule length (after which the next transient
+escalates to NeedsHelp).
+
+### The backoff schedule
+
+Delays in seconds, indexed by prior-attempt count:
+
+| Prior attempts | Delay  |
+|----------------|--------|
+| 0              | 30s    |
+| 1              | 2m     |
+| 2              | 10m    |
+| 3              | 30m    |
+| 4              | escalate to NeedsHelp |
+
+Cumulative wall-clock window before escalation: ~42 minutes 30 seconds.
+
+### How to verify "this is Anthropic, not us"
+
+The structured log emits one `transient_provider_error` line per
+observed transient. From the daemon container:
+
+```bash
+docker run --rm -v foreman-logs:/logs alpine \
+    grep '"event": "transient_provider_error"' /logs/transitions.jsonl | tail -20
+```
+
+Each line carries:
+- `attempt` — the prior-attempt count at that moment
+- `next_retry_at` — when the suspension lifts (or `null` if escalating)
+- `provider_status` — the verbatim cause string from the SDK
+  (e.g. `"Claude Code returned an error result: 503 Service Unavailable"`)
+
+If you see a sustained run of these lines with rising `attempt` values
+across multiple tickets in the same minute, Anthropic itself is
+degraded. Check https://status.anthropic.com/.
+
+### Operator override
+
+To bypass the suspension immediately (e.g. to confirm Anthropic has
+recovered):
+
+```bash
+foreman retry <ticket-id>
+```
+
+`cmd_retry` clears `next_action_at` before enqueuing the WorkItem. The
+CLI prints a `(cleared next_action_at)` parenthetical when a suspension
+was active.
+
+### When escalation to NeedsHelp legitimately means "Anthropic is out"
+
+After 4 transient attempts (~40 min cumulative), the next transient
+escalates the ticket to NeedsHelp via the same path as any other
+NeedsHelp landing — except the `transient_provider_error` log line at
+that moment carries `next_retry_at: null` and `attempt: 4`. The
+operator playbook on this:
+
+1. Check Anthropic status (above).
+2. If Anthropic is healthy: investigate the `provider_status` cause
+   string. A `429` that persists ~40 minutes is usually a quota issue
+   on the foreman App's API key — rotate or wait.
+3. If Anthropic is degraded: leave the ticket parked; once Anthropic
+   recovers, `foreman retry <ticket-id>` resumes from the last state
+   without re-running prior work.
+4. If degraded for hours: switch the affected projects to manual mode
+   (`foreman hold <ticket-id> --reason "anthropic outage 2026-06-20"`).
+
+---
+
 ## Recovery: daemon won't start
 
 1. Check the daemon-log file directly (no need for the container to be

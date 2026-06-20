@@ -16,7 +16,7 @@ class QueuedState(TicketState):
             summary="queued; advancing to planning",
         )
 
-    def next_state(self, outcome: Outcome) -> TicketState | None:
+    def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:
         # Late import to keep the states package import-cycle-free.
         from foreman.v4.states.planning import PlanningState
         return PlanningState()

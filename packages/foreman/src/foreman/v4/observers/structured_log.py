@@ -13,6 +13,7 @@ from foreman.v4.events import (
     StateEnteredEvent,
     StateExitedEvent,
     StateFailedEvent,
+    TransientProviderErrorEvent,
 )
 
 _EVENT_NAMES: dict[type[Event], tuple[str, int]] = {
@@ -21,6 +22,7 @@ _EVENT_NAMES: dict[type[Event], tuple[str, int]] = {
     ExecuteCompletedEvent: ("execute_completed", logging.INFO),
     StateExitedEvent:      ("state_exited", logging.INFO),
     StateFailedEvent:      ("state_failed", logging.WARNING),
+    TransientProviderErrorEvent: ("transient_provider_error", logging.WARNING),
 }
 
 
@@ -52,4 +54,15 @@ class StructuredLogObserver:
         elif isinstance(event, StateFailedEvent):
             payload["failure_phase"] = event.failure_phase
             payload["failure_reason"] = event.failure_reason
+        elif isinstance(event, TransientProviderErrorEvent):
+            # foreman#361: the three fields the runbook promises will
+            # appear in transient_provider_error log lines. Without
+            # this branch they would be silently dropped — the
+            # generic dataclass(...) emit path is intentionally
+            # absent in this observer.
+            payload["attempt"] = event.attempt
+            payload["next_retry_at"] = (
+                event.next_retry_at.isoformat() if event.next_retry_at else None
+            )
+            payload["provider_status"] = event.provider_status
         self._log.log(level, json.dumps(payload, sort_keys=True))

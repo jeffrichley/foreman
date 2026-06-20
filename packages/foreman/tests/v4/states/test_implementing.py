@@ -21,7 +21,12 @@ def _o(kind: OutcomeKind) -> Outcome:
     ],
 )
 def test_routing(kind, expected_state_name):
-    next_state = ImplementingState().next_state(_o(kind))
+    # foreman#361: per-state routing lives on ``next_state_for``;
+    # ``next_state`` is now the Template Method (intercepts
+    # TRANSIENT_PROVIDER_ERROR, otherwise delegates). The unit test
+    # for routing keeps calling the underlying ``next_state_for``
+    # so it doesn't need a real ``StateContext``.
+    next_state = ImplementingState().next_state_for(_o(kind))
     assert next_state is not None
     assert next_state.state_name == expected_state_name
 
@@ -29,7 +34,7 @@ def test_routing(kind, expected_state_name):
 def test_blocked_returns_new_implementing_instance():
     """Same logical state, new instance — Poller picks it up next tick."""
     state = ImplementingState()
-    next_state = state.next_state(_o(OutcomeKind.BLOCKED))
+    next_state = state.next_state_for(_o(OutcomeKind.BLOCKED))
     assert isinstance(next_state, ImplementingState)
     assert next_state is not state
 

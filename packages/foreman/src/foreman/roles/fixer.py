@@ -47,7 +47,7 @@ from foreman.branches import impl_branch, spec_branch
 from foreman.git_host import CommentRef
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
-from foreman.providers import ProviderError
+from foreman.providers import ProviderError, ProviderTransientError
 from foreman.roles import (
     build_role_resources,
     handle_unhandled_role_exception,
@@ -746,6 +746,12 @@ async def _run_fixer_core(
             final_labels=final_labels,
         )
     except ProviderError as exc:
+        # foreman#361: transient failures are retried by the state
+        # machine with backoff; suppress the runaway-burn issue
+        # comment so a 40-min outage does not carpet the issue with
+        # redundant tracebacks.
+        if isinstance(exc, ProviderTransientError):
+            raise
         # foreman#266: typed catch for the documented provider-boundary
         # failure mode. Same body as the ``except Exception`` arm
         # below — structural (type narrowing + boundary documentation),
@@ -977,6 +983,27 @@ def run_fixer_cli(*, project: str, issue_number: int, target: str) -> int:
         return 0
     try:
         result = _run_fixer_for_v4(project=project, issue_number=issue_number, target=target)
+    except ProviderTransientError as exc:
+        # foreman#361: classify Anthropic-side transient failures so
+        # the state machine's RoleDispatchState Template Method can
+        # schedule an exponential-backoff retry without burning the
+        # max_state_attempts cap. Exit 0 — non-zero would trip
+        # RoleSubprocessError in the dispatcher and lose the
+        # discriminator. The outcome JSON carries the signal.
+        cause = exc.__cause__
+        exception_class = type(cause).__name__ if cause is not None else type(exc).__name__
+        emit_outcome(
+            Outcome(
+                kind=OutcomeKind.TRANSIENT_PROVIDER_ERROR,
+                confidence=OutcomeConfidence.HIGH,
+                summary=f"provider transient failure: {exc}"[:500],
+                details={
+                    "provider_status": str(exc),
+                    "exception_class": exception_class,
+                },
+            )
+        )
+        return 0
     except Exception as exc:
         emit_outcome(
             Outcome(

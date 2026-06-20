@@ -54,6 +54,28 @@ def test_retry_enqueues_workitem_for_current_state():
     assert qm.dequeue() == WorkItem(ticket_id=tid, state_name="Planning")
 
 
+def test_retry_clears_next_action_at():
+    """foreman#361: an operator-forced retry MUST bypass any active
+    transient-provider-error suspension. ``cmd_retry`` calls
+    ``clear_next_action_at`` before enqueuing so the Poller doesn't
+    skip the just-requeued WorkItem until the suspension window
+    elapses.
+    """
+    repo, tid = _make()
+    repo.set_next_action_at(
+        tid, when=dt.datetime(2026, 6, 13, 12, 30, tzinfo=dt.UTC)
+    )
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    runner = CliRunner()
+    result = runner.invoke(
+        app, ["retry", str(tid)],
+        obj=build_cli_context(repo=repo, qm=qm),
+    )
+    assert result.exit_code == 0
+    assert repo.get_ticket(tid).next_action_at is None
+    assert qm.dequeue() == WorkItem(ticket_id=tid, state_name="Planning")
+
+
 def test_set_state_changes_current_state():
     repo, tid = _make()
     runner = CliRunner()

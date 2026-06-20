@@ -188,8 +188,15 @@ class TicketState(ABC):
     # --- Transition policy ---
 
     @abstractmethod
-    def next_state(self, outcome: Outcome) -> TicketState | None:
-        """Decide what comes next. Return None to halt the state machine."""
+    def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:
+        """Decide what comes next. Return None to halt the state machine.
+
+        The ``ctx`` parameter mirrors the other lifecycle hooks
+        (``enter`` / ``execute`` / ``verify`` / ``exit``) and is
+        load-bearing for the ``RoleDispatchState`` transient-retry
+        intercept (foreman#361). Concrete states that don't need
+        ``ctx`` may simply ignore it.
+        """
 
     # --- Template Method ---
 
@@ -310,7 +317,7 @@ class TicketState(ABC):
                 _publish(ctx, StateFailedEvent, failure_phase="verify", failure_reason=repr(exc))
                 return None
 
-            next_ = self.next_state(outcome)
+            next_ = self.next_state(ctx, outcome)
             ctx.repo.mark_execute_completed(
                 ctx.instance.id, now=ctx.clock(),
                 outcome_kind=outcome.kind,

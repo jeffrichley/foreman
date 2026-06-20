@@ -20,7 +20,7 @@ class _ConcreteState(TicketState):
             summary="ok",
         )
 
-    def next_state(self, outcome: Outcome) -> TicketState | None:
+    def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:
         return None
 
 
