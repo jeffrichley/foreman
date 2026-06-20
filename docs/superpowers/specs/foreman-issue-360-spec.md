@@ -298,11 +298,18 @@ file in minutes. Tracks
   new file `packages/foreman/src/foreman/v4/cli/restore.py`
   registered in `packages/foreman/src/foreman/v4/cli/__init__.py`
   via `app.command("restore")(cmd_restore)`. Signature:
-  `cmd_restore(snapshot_file: Path = typer.Argument(...))`.
-  Behavior, in order:
+  `def cmd_restore(ctx: typer.Context, snapshot_file: Path =
+  typer.Argument(...)) -> None` — `ctx: typer.Context` is the
+  required first parameter because step 1 below reads
+  `ctx.obj.config`; the `snapshot_file` positional argument is
+  declared via `typer.Argument(...)` after `ctx`. Behavior,
+  in order:
   1. Resolve `db_path` from
      `ctx.obj.config.db_path` (CliContext already carries the
-     config; existing pattern at `cli/init.py:65-69`).
+     config; existing pattern at `cli/mutations.py:247` and
+     `cli/mutations.py:395`, where the mutation commands read
+     `config = ctx.obj.config` and then refuse with exit 1 when
+     `config is None`).
   2. Refuse if the daemon is alive: check
      `~/.foreman/v4/daemon.pid` (the path constant lives at
      `cli/daemon.py:36` as `_PID_PATH` — import it; do not
@@ -314,6 +321,31 @@ file in minutes. Tracks
      `foreman daemon stop` before restoring" to stderr and exit
      code 1. The daemon's writers would race the restore swap
      and corrupt either the live DB or the restored one.
+     **Best-effort caveat (Docker invocation).** This PID check
+     is reliable when the operator runs the daemon directly on
+     the host (e.g., `foreman daemon start` outside Docker —
+     the daemon writes `~/.foreman/v4/daemon.pid` on the host
+     filesystem, and a host-side `foreman restore` invocation
+     reads the same file). It is BEST-EFFORT inside the
+     documented Docker invocation, because the daemon container
+     writes `/root/.foreman/v4/daemon.pid` into its own
+     writable layer (no bind mount, no shared volume), while
+     the one-off `docker compose run --rm daemon foreman
+     restore <file>` container spawns with a FRESH writable
+     layer and a FRESH `/root/.foreman/v4/` — the one-off
+     container literally cannot see the daemon's PID file.
+     The check therefore degenerates to "no PID file found,
+     assume safe" inside the one-off container even if the
+     real daemon is actively writing the DB. This is why the
+     RUNBOOK procedure makes `docker compose stop daemon` the
+     MANDATORY first step (see RUNBOOK section below). The
+     PID check stays as defense-in-depth for the host-direct
+     invocation path and for the future case where the spec
+     adds a Docker-aware liveness probe (deferred — out of
+     scope for this ticket, see Out of scope below).
+     Document the best-effort behavior in the `cmd_restore`
+     module docstring so the next reader doesn't mistake the
+     check for a hard safety guarantee.
   3. Validate `snapshot_file` exists and is readable; exit 1
      otherwise with a clean error message.
   4. Take a "pre-restore" snapshot of the current live DB
@@ -414,10 +446,13 @@ file in minutes. Tracks
   * `test_restore_refuses_corrupt_snapshot`: hand-craft a
     "snapshot" file containing random bytes; invoke
     `cmd_restore`; assert exit code 1 AND the live DB was not
-    modified AND the pre-restore snapshot from step 4 is gone
-    too (the pre-restore is taken BEFORE the integrity check,
-    so the test asserts the operator can still find their
-    pre-restore file on disk — see acceptance criterion above).
+    modified AND the pre-restore snapshot from step 4 STILL
+    EXISTS on disk (`assert pre_restore_path.exists()`). Per
+    step 6 of the `cmd_restore` behavior, the pre-restore is
+    taken BEFORE the integrity check runs, so when the corrupt
+    snapshot is rejected the pre-restore file remains on disk
+    as the operator's recovery anchor — the test asserts that
+    invariant explicitly.
 - [ ] `packages/foreman/tests/v4/test_config.py` is extended with
   three new tests:
   * `test_backup_block_defaulted_when_absent`: load a TOML with
@@ -458,14 +493,29 @@ file in minutes. Tracks
     sqlite3 /tmp/check.sqlite "PRAGMA integrity_check;"
     # should print: ok
     ```
-  * The restore procedure verbatim:
+  * The restore procedure verbatim, with a prominent warning
+    that `docker compose stop daemon` is MANDATORY (NOT
+    optional) before the `restore` invocation:
     ```bash
+    # MANDATORY: stop the daemon FIRST. The `foreman restore`
+    # PID-file check is best-effort inside Docker — the one-off
+    # `docker compose run` container cannot see the daemon
+    # container's PID file (it lives in the daemon's writable
+    # layer, not on a shared volume), so the check will say
+    # "safe to proceed" even if the daemon is actively writing
+    # the DB. Running restore against a live DB will corrupt
+    # either the live DB or the restored one.
     docker compose stop daemon
+
     # one-off container mounts the same volumes/binds as `up`:
     docker compose run --rm daemon \
         foreman restore /foreman/backups/foreman-<ts>.sqlite.gz
     docker compose up -d daemon
     ```
+    The RUNBOOK section MUST include this warning verbatim
+    (or an equivalent prominent block) immediately above the
+    code fence — not as a buried footnote — so an operator
+    skimming the section under pressure cannot miss it.
   * The one-step undo: the pre-restore snapshot is written next
     to the live DB as `foreman.pre-restore-<ts>.sqlite.gz`;
     rename it back into place with another `foreman restore`
@@ -881,3 +931,20 @@ which files survive.
   contents are inspectable with `sqlite3`); a separate
   "backup history" table would be redundant with what
   `ls ~/.foreman/backups/` already shows.
+- **Docker-aware daemon-liveness probe for `foreman
+  restore`.** The PID-file check this spec ships is reliable
+  for host-direct invocation but best-effort inside the
+  documented `docker compose run --rm daemon foreman
+  restore ...` shape (the one-off container cannot see the
+  daemon container's writable-layer PID file). A real
+  cross-container liveness check would need either (a)
+  promoting the PID file onto the `foreman-state` named
+  volume so both containers can read it, or (b) shelling
+  out to `docker inspect foreman-daemon` from inside the
+  one-off container (requires mounting the Docker socket,
+  which is its own threat surface). Both options are larger
+  than the scope of this ticket; the RUNBOOK warning that
+  `docker compose stop daemon` is MANDATORY before restore
+  closes the safety gap in the meantime. Track separately
+  when off-host backup (also out of scope above) is picked
+  up.
