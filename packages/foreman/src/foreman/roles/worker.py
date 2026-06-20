@@ -74,6 +74,7 @@ from foreman.provider import ProviderFacade, UsageInfo
 from foreman.providers import ProviderError, ProviderTransientError
 from foreman.roles import (
     build_role_resources,
+    emit_transient_provider_outcome,
     handle_unhandled_role_exception,
 )
 from foreman.schemas.worker import WorkerOutput, WorkerRunResult
@@ -1548,23 +1549,9 @@ def run_worker_cli(*, project: str, issue_number: int) -> int:
         # foreman#361: classify Anthropic-side transient failures so
         # the state machine's RoleDispatchState Template Method can
         # schedule an exponential-backoff retry without burning the
-        # max_state_attempts cap. Exit 0 — non-zero would trip
-        # RoleSubprocessError in the dispatcher and lose the
-        # discriminator. The outcome JSON carries the signal.
-        cause = exc.__cause__
-        exception_class = type(cause).__name__ if cause is not None else type(exc).__name__
-        emit_outcome(
-            Outcome(
-                kind=OutcomeKind.TRANSIENT_PROVIDER_ERROR,
-                confidence=OutcomeConfidence.HIGH,
-                summary=f"provider transient failure: {exc}"[:500],
-                details={
-                    "provider_status": str(exc),
-                    "exception_class": exception_class,
-                },
-            )
-        )
-        return 0
+        # max_state_attempts cap. Shared helper for the body — see
+        # :func:`foreman.roles.emit_transient_provider_outcome`.
+        return emit_transient_provider_outcome(exc)
     except Exception as exc:
         emit_outcome(
             Outcome(
