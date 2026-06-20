@@ -25,7 +25,19 @@ from foreman.v4.poller import Poller
 from foreman.v4.queue_manager import QueueManager
 from foreman.v4.repository import TicketRepository
 from foreman.v4.role_dispatcher import RoleDispatcher
+from foreman.v4.state_backup import (
+    BackupSchedulerLike,
+    _DisabledBackupScheduler,
+)
 from foreman.v4.worker_pool import WorkerPool
+
+# Module-level singleton for the daemon's ``backup_scheduler`` default
+# kwarg. Defined here (rather than inlined as ``= _DisabledBackupScheduler()``
+# in the signature) so ruff's B008 lint doesn't flag the function-call-
+# in-default pattern. The sentinel is stateless (``tick()`` returns None
+# and writes no files) so sharing one instance across every
+# ``Daemon(...)`` construction is safe — see ``state_backup._DisabledBackupScheduler``.
+_DISABLED_BACKUP_SCHEDULER: BackupSchedulerLike = _DisabledBackupScheduler()
 
 if TYPE_CHECKING:
     from foreman.v4.config import ProjectConfig
@@ -68,6 +80,7 @@ class Daemon:
         clock: Callable[[], dt.datetime],
         bus: EventBus | None = None,
         project_configs: dict[str, ProjectConfig] | None = None,
+        backup_scheduler: BackupSchedulerLike = _DISABLED_BACKUP_SCHEDULER,
     ) -> None:
         self._repo = repo
         self._git = git
@@ -89,6 +102,15 @@ class Daemon:
             max_state_attempts=config.max_state_attempts,
             project_configs=self._project_configs,
         )
+        # Issue #360: in-process backup scheduler ticks alongside the
+        # WorkerPool. Default is the stateless
+        # ``_DisabledBackupScheduler`` sentinel — its ``tick()``
+        # returns None and writes no files, so sharing one instance
+        # across every test-only ``Daemon(...)`` construction is
+        # safe. Production wires the real scheduler via
+        # ``BackupScheduler.from_config(config.backup, ...)`` in
+        # ``bootstrap_cli_context``.
+        self._backup_scheduler = backup_scheduler
         self._stop = threading.Event()
 
     @property
@@ -119,6 +141,15 @@ class Daemon:
         for poller in self._pollers:
             poller.tick()
         self._pool.tick()
+        # Issue #360: take a SQLite snapshot if the configured
+        # interval has elapsed. The scheduler is
+        # ``_DisabledBackupScheduler`` (no-op) when
+        # ``config.backup.enabled = False`` OR when the daemon was
+        # constructed without an explicit ``backup_scheduler=`` kwarg
+        # (test path) — see ``BackupScheduler.from_config``. The
+        # call is unconditional so the call site never drifts away
+        # from the default-sentinel decision.
+        self._backup_scheduler.tick()
         # Bounded drain — see docstring.
         budget = 5.0
         while self._qm.in_flight_count() > 0 and budget > 0:

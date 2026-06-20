@@ -235,6 +235,33 @@ class AppsConfig(BaseModel):
     worker: AppCredentials
 
 
+class BackupConfig(BaseModel):
+    """SQLite snapshot scheduler config (issue #360).
+
+    Controls the daemon-internal scheduler that takes online
+    ``sqlite3.Connection.backup()``-based snapshots of the live
+    ``foreman.sqlite`` DB, writes them gzip-compressed to ``dir``, and
+    enforces a tier-based retention policy (``retention_hourly``,
+    ``retention_daily``, ``retention_weekly``).
+
+    ``interval_seconds`` has a ``ge=60`` floor as runaway defense — a
+    misconfigured ``0`` would snapshot every daemon tick (default 30s)
+    and fill disk in minutes.
+
+    Defaults reflect the issue body's stated retention goal: 24/7/4 →
+    ~35 files total, each in the low-MB range after gzip → tens of MB
+    on disk.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True
+    dir: str = "/foreman/backups"
+    interval_seconds: int = Field(default=3600, ge=60)
+    retention_hourly: int = Field(default=24, ge=0)
+    retention_daily: int = Field(default=7, ge=0)
+    retention_weekly: int = Field(default=4, ge=0)
+
+
 class OrchestratorConfig(BaseModel):
     """Orchestrator-level (non-role) GitHub App identity.
 
@@ -287,6 +314,11 @@ class V4Config(BaseModel):
     without an operator block so every downstream commit path can rely
     on :func:`resolve_operator` returning both identities."""
     projects: list[ProjectConfig] = Field(default_factory=list)
+    backup: BackupConfig = Field(default_factory=BackupConfig)
+    """Issue #360: periodic SQLite snapshot scheduler. Defaulted (NOT
+    required) so configs without a ``[backup]`` block continue to load —
+    backups default to ON with the documented hourly schedule + 24/7/4
+    retention totalling ~35 files."""
 
 
 def load_config(path: Path) -> V4Config:
@@ -315,6 +347,8 @@ def load_config(path: Path) -> V4Config:
         payload["orchestrator"] = raw["orchestrator"]
     if "operator" in raw:
         payload["operator"] = raw["operator"]
+    if "backup" in raw:
+        payload["backup"] = raw["backup"]
     return V4Config.model_validate(payload)
 
 

@@ -331,13 +331,23 @@ def cmd_retry(
     ctx: typer.Context,
     ticket_id: int = typer.Argument(...),
 ) -> None:
-    _, ticket = _resolve(ctx, ticket_id)
+    repo, ticket = _resolve(ctx, ticket_id)
     qm = ctx.obj.qm
     if qm is None:
         typer.echo("retry requires a queue manager", err=True)
         raise typer.Exit(code=1)
+    # foreman#361: an operator-forced retry MUST bypass any active
+    # transient-provider-error suspension. Without this clear, the
+    # Poller would skip the enqueue + the requeued WorkItem until
+    # next_action_at, which defeats the point of ``foreman retry``.
+    cleared_suspension = ticket.next_action_at is not None
+    if cleared_suspension:
+        repo.clear_next_action_at(ticket_id)
     qm.enqueue(WorkItem(ticket_id=ticket_id, state_name=ticket.current_state))
-    typer.echo(f"ticket {ticket_id} re-enqueued in {ticket.current_state}")
+    suspension_note = " (cleared next_action_at)" if cleared_suspension else ""
+    typer.echo(
+        f"ticket {ticket_id} re-enqueued in {ticket.current_state}{suspension_note}"
+    )
 
 
 def cmd_set_state(

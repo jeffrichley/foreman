@@ -41,7 +41,7 @@ class _HappyState(TicketState):
     def exit(self, ctx: StateContext, outcome: Outcome | None) -> None:
         self.r.calls.append("exit")
 
-    def next_state(self, outcome: Outcome) -> TicketState | None:
+    def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:
         return self._next
 
 
@@ -54,7 +54,7 @@ class _NextState(TicketState):
             summary="done",
         )
 
-    def next_state(self, outcome: Outcome) -> TicketState | None:
+    def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:
         return None
 
 
@@ -89,7 +89,7 @@ class _RaisingState(TicketState):
         if self._raise_in == "exit":
             raise RuntimeError("exit boom")
 
-    def next_state(self, outcome: Outcome) -> TicketState | None:
+    def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:
         return None
 
 
@@ -449,7 +449,7 @@ class _BlockedPollingState(TicketState):
             summary="still waiting",
         )
 
-    def next_state(self, outcome: Outcome) -> TicketState | None:
+    def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:
         # Self-loop on BLOCKED — same shape as MergingState.next_state
         # and ImplementingState.next_state.
         if outcome.kind == OutcomeKind.BLOCKED:

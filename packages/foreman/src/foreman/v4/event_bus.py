@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
-from foreman.v4.events import Event
+from foreman.v4.events import Event, TicketEvent
 
 _log = logging.getLogger(__name__)
 
@@ -48,18 +48,42 @@ class EventBus:
             except Exception as exc:
                 observer = _listener_name(listener)
                 exc_type = type(exc).__name__
-                _log.warning(
-                    "observer raised on %s for ticket=%d instance=%d: observer=%s exc=%s: %s",
-                    type(event).__name__,
-                    event.ticket_id,
-                    event.instance_id,
-                    observer,
-                    exc_type,
-                    exc,
-                    exc_info=True,
-                    extra={
-                        "observer": observer,
-                        "exc_type": exc_type,
-                        "exc_message": str(exc),
-                    },
-                )
+                extra = {
+                    "observer": observer,
+                    "exc_type": exc_type,
+                    "exc_message": str(exc),
+                }
+                if isinstance(event, TicketEvent):
+                    # Ticket-scoped events: log the full
+                    # ticket-and-instance context so a stuck ticket is
+                    # immediately findable in the JSONL.
+                    _log.warning(
+                        "observer raised on %s for ticket=%d instance=%d: "
+                        "observer=%s exc=%s: %s",
+                        type(event).__name__,
+                        event.ticket_id,
+                        event.instance_id,
+                        observer,
+                        exc_type,
+                        exc,
+                        exc_info=True,
+                        extra=extra,
+                    )
+                else:
+                    # Daemon-level events (BackupTakenEvent /
+                    # BackupFailedEvent — issue #360): no ticket /
+                    # instance fields. Log a degraded message that
+                    # keeps the event type, observer, and exception
+                    # context. Without this isinstance guard, the
+                    # AttributeError on ``event.ticket_id`` would
+                    # bubble out of ``publish`` and crash the daemon
+                    # on the first backup event.
+                    _log.warning(
+                        "observer raised on %s: observer=%s exc=%s: %s",
+                        type(event).__name__,
+                        observer,
+                        exc_type,
+                        exc,
+                        exc_info=True,
+                        extra=extra,
+                    )

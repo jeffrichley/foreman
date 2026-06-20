@@ -10,11 +10,13 @@ from __future__ import annotations
 from typing import Protocol
 
 from foreman.v4.events import (
+    DaemonEvent,
     Event,
     ExecuteCompletedEvent,
     StateEnteredEvent,
     StateExitedEvent,
     StateFailedEvent,
+    TicketEvent,
 )
 
 
@@ -38,6 +40,19 @@ class MetricsObserver:
         self._backend = backend or NoopMetricsBackend()
 
     def __call__(self, event: Event) -> None:
+        # Issue #360: daemon-level events (:class:`DaemonEvent`
+        # subclasses, e.g. BackupTakenEvent / BackupFailedEvent) have
+        # no ``state_name`` and no metric semantics under the current
+        # MetricsObserver shape. Skip them BEFORE the
+        # ``event.state_name`` access below — without this guard the
+        # first BackupTakenEvent would raise AttributeError and the
+        # EventBus would log it but the daemon would still publish a
+        # broken event every tick.
+        if isinstance(event, DaemonEvent):
+            return
+        assert isinstance(event, TicketEvent), (
+            f"unrecognized Event subclass: {type(event).__name__}"
+        )
         tags = {"state": event.state_name}
         if isinstance(event, StateEnteredEvent):
             self._backend.increment("foreman.v4.state.entered", tags=tags)

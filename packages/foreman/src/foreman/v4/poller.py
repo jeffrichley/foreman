@@ -83,8 +83,20 @@ class Poller:
 
     def _enqueue_open_tickets(self) -> None:
         assert self._qm is not None  # narrowed by tick()
+        now = self._clock()
         for ticket in self._repo.list_open_tickets():
             if ticket.current_state in _TERMINAL_STATES:
+                continue
+            # foreman#361: respect the transient-provider-error
+            # backoff suspension. Tickets whose ``next_action_at`` is
+            # in the future are NOT enqueued; the next tick after
+            # ``next_action_at`` re-tries them. Clearing happens
+            # inside ``RoleDispatchState.next_state`` on any
+            # non-transient outcome (defense in depth) and via
+            # ``cmd_retry`` for operator overrides — we deliberately
+            # do NOT clear here so a daemon restart mid-suspension
+            # picks up the same suspension window from SQLite.
+            if ticket.next_action_at is not None and ticket.next_action_at > now:
                 continue
             self._qm.enqueue(WorkItem(
                 ticket_id=ticket.id, state_name=ticket.current_state,

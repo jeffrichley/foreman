@@ -55,7 +55,7 @@ def _isolate_v4_logging():
 
 def test_status_when_no_pid_file(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
-        "foreman.v4.cli.daemon._PID_PATH", tmp_path / "missing.pid",
+        "foreman.v4.cli.daemon.PID_PATH", tmp_path / "missing.pid",
     )
     result = CliRunner().invoke(
         app, ["daemon", "status"],
@@ -67,7 +67,7 @@ def test_status_when_no_pid_file(tmp_path: Path, monkeypatch):
 def test_status_when_pid_alive(tmp_path: Path, monkeypatch):
     pid_path = tmp_path / "daemon.pid"
     pid_path.write_text("12345")
-    monkeypatch.setattr("foreman.v4.cli.daemon._PID_PATH", pid_path)
+    monkeypatch.setattr("foreman.v4.cli.daemon.PID_PATH", pid_path)
     with patch("os.kill") as mock_kill:
         mock_kill.return_value = None
         result = CliRunner().invoke(
@@ -81,7 +81,7 @@ def test_status_when_pid_alive(tmp_path: Path, monkeypatch):
 def test_status_when_pid_stale(tmp_path: Path, monkeypatch):
     pid_path = tmp_path / "daemon.pid"
     pid_path.write_text("99999")
-    monkeypatch.setattr("foreman.v4.cli.daemon._PID_PATH", pid_path)
+    monkeypatch.setattr("foreman.v4.cli.daemon.PID_PATH", pid_path)
     with patch("os.kill", side_effect=ProcessLookupError):
         result = CliRunner().invoke(
             app, ["daemon", "status"],
@@ -96,7 +96,7 @@ def test_stop_when_pid_stale_posix(tmp_path: Path, monkeypatch):
     """
     pid_path = tmp_path / "daemon.pid"
     pid_path.write_text("99999")
-    monkeypatch.setattr("foreman.v4.cli.daemon._PID_PATH", pid_path)
+    monkeypatch.setattr("foreman.v4.cli.daemon.PID_PATH", pid_path)
     with patch("os.kill", side_effect=ProcessLookupError):
         result = CliRunner().invoke(
             app, ["daemon", "stop"],

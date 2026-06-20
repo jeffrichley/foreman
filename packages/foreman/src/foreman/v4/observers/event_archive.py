@@ -13,12 +13,14 @@ import json
 import sqlite3
 
 from foreman.v4.events import (
+    DaemonEvent,
     Event,
     ExecuteCompletedEvent,
     ExecuteStartedEvent,
     StateEnteredEvent,
     StateExitedEvent,
     StateFailedEvent,
+    TicketEvent,
 )
 
 _EVENT_TYPE_NAMES = {
@@ -30,7 +32,7 @@ _EVENT_TYPE_NAMES = {
 }
 
 
-def _payload_for(event: Event) -> dict:
+def _payload_for(event: TicketEvent) -> dict:
     if isinstance(event, ExecuteCompletedEvent):
         return {
             "outcome_kind": event.outcome.kind.value,
@@ -62,6 +64,18 @@ class EventArchiveObserver:
         self._conn = conn
 
     def __call__(self, event: Event) -> None:
+        # Issue #360: the events table requires ``ticket_id INTEGER NOT
+        # NULL`` (schema.sql:53). Daemon-level events
+        # (:class:`DaemonEvent` subclasses, e.g. BackupTakenEvent /
+        # BackupFailedEvent) have no ticket scope, so writing them
+        # would violate the constraint. Skip them entirely — the
+        # structured-log JSONL is the durable record for daemon-level
+        # events; the events SQL table stays ticket-scoped.
+        if isinstance(event, DaemonEvent):
+            return
+        assert isinstance(event, TicketEvent), (
+            f"unrecognized Event subclass: {type(event).__name__}"
+        )
         event_type = _EVENT_TYPE_NAMES.get(type(event), "unknown")
         self._conn.execute(
             "INSERT INTO events"

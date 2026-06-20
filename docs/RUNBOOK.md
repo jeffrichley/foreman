@@ -248,6 +248,183 @@ intentionally skipped.
 
 ---
 
+## Backups and restoration
+
+Issue #360 added a daemon-internal scheduler that takes online SQLite
+snapshots of `/foreman/state/foreman.sqlite` and writes them gzip-
+compressed to a host bind mount at `~/.foreman/backups/`. The bind
+mount is load-bearing: `docker compose down -v` deletes named volumes
+(the whole failure mode the backups protect against) but leaves
+host-bind directories alone.
+
+### What exists
+
+- Path: `~/.foreman/backups/foreman-<YYYYMMDDTHHMMSSZ>.sqlite.gz`
+- Schedule: hourly by default (`config.toml.template` `[backup]`
+  `interval_seconds = 3600`).
+- Retention: 24 hourly + 7 daily + 4 weekly survivors ≈ 35 files
+  at any time. Each file is a few MB after gzip; total footprint
+  is in the low tens of MB.
+
+### Verify a backup is non-corrupt
+
+Before restoring, sanity-check the snapshot with `PRAGMA
+integrity_check`:
+
+```bash
+gunzip -c ~/.foreman/backups/foreman-<ts>.sqlite.gz > /tmp/check.sqlite
+sqlite3 /tmp/check.sqlite "PRAGMA integrity_check;"
+# should print: ok
+```
+
+If the result is anything other than `ok`, pick the next-older
+snapshot and re-verify.
+
+### Restore procedure
+
+**MANDATORY: stop the daemon FIRST.** The `foreman restore` PID-file
+check is best-effort inside Docker — the one-off `docker compose run`
+container cannot see the daemon container's PID file (it lives in
+the daemon's writable layer, not on a shared volume), so the check
+will say "safe to proceed" even if the daemon is actively writing
+the DB. Running restore against a live DB will corrupt either the
+live DB or the restored one.
+
+```bash
+# MANDATORY first step — stop writers before the swap.
+docker compose stop daemon
+
+# One-off container mounts the same volumes/binds as `up`, so
+# `db_path` (inside `foreman-state`) and the bind-mounted backup
+# file are both resolvable inside the one-off container.
+docker compose run --rm daemon \
+    foreman restore /foreman/backups/foreman-<ts>.sqlite.gz
+
+# Bring the daemon back online.
+docker compose up -d daemon
+```
+
+The restore command writes a "pre-restore" snapshot of the live DB
+next to it as `foreman.pre-restore-<ts>.sqlite.gz` BEFORE swapping
+in the requested snapshot. Use it as a one-step undo if you
+restored the wrong file: another `foreman restore` invocation
+against the pre-restore path swaps it back into place.
+
+### Tuning
+
+Edit `[backup]` in `docker/foreman/config.toml.template` (or your
+own deployed `config.toml`) to change the cadence or retention:
+
+```toml
+[backup]
+enabled = true              # set to false to turn snapshots off
+dir = "/foreman/backups"
+interval_seconds = 3600     # ge=60 floor; 0 is rejected at load
+retention_hourly = 24
+retention_daily = 7
+retention_weekly = 4
+```
+
+Operators with a small WSL2 disk who don't want backups at all can
+set `enabled = false`; the scheduler returns a no-op sentinel and
+writes no files. Operators with a bigger disk who want longer
+horizons can grow the three `retention_*` knobs.
+
+---
+
+## Provider transient failures and backoff suspension
+
+Foreman classifies Anthropic-side transport blips (5xx, 429, connection
+refused, transport-level timeout) as `TRANSIENT_PROVIDER_ERROR` outcomes
+distinct from genuine role failures (foreman#361). The state machine
+exempts these from the runaway-defense `max_state_attempts` cap and
+schedules a delayed retry on an exponential-backoff schedule. A short
+Anthropic blip therefore does NOT escalate the ticket to `NeedsHelp`
+by the wrong path.
+
+### What `next_action_at` in `foreman show <id>` means
+
+When a ticket hits a transient provider error, the state machine writes
+an ISO-8601 timestamp into the ticket's `next_action_at` column. The
+Poller refuses to enqueue the ticket until wall-clock time has passed
+that timestamp. The header line of `foreman show <id>` renders this
+suspension as:
+
+```
+[yellow]suspended until 2026-06-20T14:25:00+00:00 (provider-throttled, attempt 2/4)[/yellow]
+```
+
+The `attempt N/4` count is the number of transient outcomes already
+observed; `4` is the schedule length (after which the next transient
+escalates to NeedsHelp).
+
+### The backoff schedule
+
+Delays in seconds, indexed by prior-attempt count:
+
+| Prior attempts | Delay  |
+|----------------|--------|
+| 0              | 30s    |
+| 1              | 2m     |
+| 2              | 10m    |
+| 3              | 30m    |
+| 4              | escalate to NeedsHelp |
+
+Cumulative wall-clock window before escalation: ~42 minutes 30 seconds.
+
+### How to verify "this is Anthropic, not us"
+
+The structured log emits one `transient_provider_error` line per
+observed transient. From the daemon container:
+
+```bash
+docker run --rm -v foreman-logs:/logs alpine \
+    grep '"event": "transient_provider_error"' /logs/transitions.jsonl | tail -20
+```
+
+Each line carries:
+- `attempt` — the prior-attempt count at that moment
+- `next_retry_at` — when the suspension lifts (or `null` if escalating)
+- `provider_status` — the verbatim cause string from the SDK
+  (e.g. `"Claude Code returned an error result: 503 Service Unavailable"`)
+
+If you see a sustained run of these lines with rising `attempt` values
+across multiple tickets in the same minute, Anthropic itself is
+degraded. Check https://status.anthropic.com/.
+
+### Operator override
+
+To bypass the suspension immediately (e.g. to confirm Anthropic has
+recovered):
+
+```bash
+foreman retry <ticket-id>
+```
+
+`cmd_retry` clears `next_action_at` before enqueuing the WorkItem. The
+CLI prints a `(cleared next_action_at)` parenthetical when a suspension
+was active.
+
+### When escalation to NeedsHelp legitimately means "Anthropic is out"
+
+After 4 transient attempts (~40 min cumulative), the next transient
+escalates the ticket to NeedsHelp via the same path as any other
+NeedsHelp landing — except the `transient_provider_error` log line at
+that moment carries `next_retry_at: null` and `attempt: 4`. The
+operator playbook on this:
+
+1. Check Anthropic status (above).
+2. If Anthropic is healthy: investigate the `provider_status` cause
+   string. A `429` that persists ~40 minutes is usually a quota issue
+   on the foreman App's API key — rotate or wait.
+3. If Anthropic is degraded: leave the ticket parked; once Anthropic
+   recovers, `foreman retry <ticket-id>` resumes from the last state
+   without re-running prior work.
+4. If degraded for hours: switch the affected projects to manual mode
+   (`foreman hold <ticket-id> --reason "anthropic outage 2026-06-20"`).
+
+---
+
 ## Recovery: daemon won't start
 
 1. Check the daemon-log file directly (no need for the container to be

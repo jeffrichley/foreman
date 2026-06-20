@@ -28,7 +28,7 @@ class _ClassicState(TicketState):
             summary="ok",
         )
 
-    def next_state(self, outcome: Outcome) -> TicketState | None:
+    def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:
         return None
 
 
@@ -41,7 +41,7 @@ class _FailEnter(TicketState):
     def execute(self, ctx: StateContext) -> Outcome:  # pragma: no cover
         raise NotImplementedError
 
-    def next_state(self, outcome: Outcome) -> TicketState | None:  # pragma: no cover
+    def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:  # pragma: no cover
         return None
 
 
@@ -113,7 +113,7 @@ class _DiagnosticDetailState(TicketState):
             },
         )
 
-    def next_state(self, outcome: Outcome) -> TicketState | None:
+    def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:
         return None
 
 
@@ -204,7 +204,7 @@ class _AdvanceToTerminalState(TicketState):
             summary="advance",
         )
 
-    def next_state(self, outcome: Outcome) -> TicketState | None:
+    def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:
         return self._terminal
 
 
@@ -329,7 +329,7 @@ def test_retry_cap_branch_emits_state_entered_for_needs_help() -> None:
         def execute(self, ctx):  # pragma: no cover — cap trips first
             raise NotImplementedError
 
-        def next_state(self, outcome):  # pragma: no cover
+        def next_state(self, ctx, outcome):  # pragma: no cover
             return None
 
     received: list[Event] = []
@@ -425,7 +425,7 @@ def test_retry_cap_emits_state_exited_for_failed_state() -> None:
         def execute(self, ctx):  # pragma: no cover — cap trips first
             raise NotImplementedError
 
-        def next_state(self, outcome):  # pragma: no cover
+        def next_state(self, ctx, outcome):  # pragma: no cover
             return None
 
     received: list[Event] = []

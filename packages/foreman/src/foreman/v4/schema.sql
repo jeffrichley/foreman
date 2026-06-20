@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS tickets (
     held_at         TEXT,
     held_reason     TEXT,
     depends_on      TEXT    NOT NULL DEFAULT '[]',
+    next_action_at  TEXT,
     created_at      TEXT    NOT NULL,
     updated_at      TEXT    NOT NULL,
     UNIQUE(project, issue_number)

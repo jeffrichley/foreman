@@ -33,7 +33,7 @@ from foreman.v4.logging_config import configure_logging, reset_logging
 if TYPE_CHECKING:
     from foreman.v4.config import V4Config
 
-_PID_PATH = Path.home() / ".foreman" / "v4" / "daemon.pid"
+PID_PATH = Path.home() / ".foreman" / "v4" / "daemon.pid"
 
 # SIGHUP doesn't exist on Windows (signal module omits it). getattr
 # (instead of `try: signal.SIGHUP`) keeps mypy happy on Windows hosts —
@@ -43,7 +43,7 @@ _PID_PATH = Path.home() / ".foreman" / "v4" / "daemon.pid"
 _SIGHUP: int | None = getattr(signal, "SIGHUP", None)
 
 
-def _is_pid_alive(pid: int) -> bool:
+def is_pid_alive(pid: int) -> bool:
     """Probe whether ``pid`` corresponds to a live process.
 
     POSIX semantics: ``os.kill(pid, 0)`` succeeds for a live PID, raises
@@ -100,8 +100,8 @@ def cmd_daemon_start(ctx: typer.Context) -> None:
     if daemon is None:
         typer.echo("daemon not configured", err=True)
         raise typer.Exit(code=1)
-    _PID_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _PID_PATH.write_text(str(os.getpid()))
+    PID_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PID_PATH.write_text(str(os.getpid()))
     try:
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda *_args: daemon.stop())
@@ -117,18 +117,18 @@ def cmd_daemon_start(ctx: typer.Context) -> None:
 
         daemon.run_forever()
     finally:
-        if _PID_PATH.exists():
-            _PID_PATH.unlink()
+        if PID_PATH.exists():
+            PID_PATH.unlink()
 
 
 def cmd_daemon_stop(ctx: typer.Context) -> None:
-    if not _PID_PATH.exists():
+    if not PID_PATH.exists():
         typer.echo("no daemon PID file", err=True)
         raise typer.Exit(code=1)
-    pid = int(_PID_PATH.read_text().strip())
-    if not _is_pid_alive(pid):
+    pid = int(PID_PATH.read_text().strip())
+    if not is_pid_alive(pid):
         typer.echo(f"PID {pid} not running; cleaning stale file")
-        _PID_PATH.unlink()
+        PID_PATH.unlink()
         return
     try:
         os.kill(pid, signal.SIGTERM)
@@ -136,17 +136,17 @@ def cmd_daemon_stop(ctx: typer.Context) -> None:
         # Race: process died between the liveness check and the
         # SIGTERM. Same outcome as the up-front stale path.
         typer.echo(f"PID {pid} not running; cleaning stale file")
-        _PID_PATH.unlink()
+        PID_PATH.unlink()
         return
     typer.echo(f"sent SIGTERM to {pid}")
 
 
 def cmd_daemon_status(ctx: typer.Context) -> None:
-    if not _PID_PATH.exists():
+    if not PID_PATH.exists():
         typer.echo("daemon: not running")
         return
-    pid = int(_PID_PATH.read_text().strip())
-    if _is_pid_alive(pid):
+    pid = int(PID_PATH.read_text().strip())
+    if is_pid_alive(pid):
         typer.echo(f"daemon: running (pid {pid})")
     else:
         typer.echo(f"daemon: stale PID file (pid {pid} not alive)")
@@ -156,9 +156,9 @@ def cmd_daemon_reload(ctx: typer.Context) -> None:
     if _SIGHUP is None:
         typer.echo("reload not supported on this platform", err=True)
         raise typer.Exit(code=1)
-    if not _PID_PATH.exists():
+    if not PID_PATH.exists():
         typer.echo("no daemon PID file", err=True)
         raise typer.Exit(code=1)
-    pid = int(_PID_PATH.read_text().strip())
+    pid = int(PID_PATH.read_text().strip())
     os.kill(pid, _SIGHUP)
     typer.echo(f"sent SIGHUP to {pid}")

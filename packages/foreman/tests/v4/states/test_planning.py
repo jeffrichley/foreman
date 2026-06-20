@@ -16,8 +16,12 @@ from foreman.v4.states.planning import PlanningState
     ],
 )
 def test_next_state_branching(kind, next_class_name):
+    # foreman#361: routing logic lives on ``next_state_for``; the
+    # widened ``next_state`` Template Method intercepts
+    # TRANSIENT_PROVIDER_ERROR and would need a real StateContext to
+    # call. Routing tests stay on ``next_state_for``.
     outcome = Outcome(kind=kind, confidence=OutcomeConfidence.HIGH, summary="x")
-    next_state = PlanningState().next_state(outcome)
+    next_state = PlanningState().next_state_for(outcome)
     if next_class_name is None:
         assert next_state is None
     else:
