@@ -148,10 +148,22 @@ file in minutes. Tracks
   call.
 - [ ] `Daemon.__init__` in
   `packages/foreman/src/foreman/v4/daemon.py` gains a keyword-only
-  `backup_scheduler: BackupSchedulerLike = field(default_factory=_DisabledBackupScheduler)`
-  kwarg (i.e., the default is the `_DisabledBackupScheduler` sentinel
-  itself, NOT None; the `BackupSchedulerLike` alias is imported from
-  `state_backup.py`). The default lets existing test fixtures that
+  `backup_scheduler: BackupSchedulerLike = _DisabledBackupScheduler()`
+  kwarg (i.e., the default is a `_DisabledBackupScheduler` sentinel
+  instance evaluated once at function-definition time, NOT None; the
+  `BackupSchedulerLike` alias is imported from `state_backup.py`).
+  `Daemon` is a regular class with an explicit `__init__` (see
+  `packages/foreman/src/foreman/v4/daemon.py:53-92`), NOT a
+  `@dataclass`, so `dataclasses.field(default_factory=...)` is NOT
+  the right shape here — `field(default_factory=...)` only works as
+  a dataclass field declaration, and in a regular function signature
+  it would evaluate once at definition time and store a `dataclasses.Field`
+  sentinel as the default rather than a `_DisabledBackupScheduler`
+  instance. The bare-instance default is safe because
+  `_DisabledBackupScheduler` is stateless: its `tick()` returns None
+  and writes no files, so sharing one instance across every
+  `Daemon(...)` construction does not introduce any cross-instance
+  mutation hazard. The default lets existing test fixtures that
   construct `Daemon(...)` directly stay green AND keeps the call
   site unconditional. `Daemon.tick_once()` calls
   `self._backup_scheduler.tick()` (one unconditional call — no
@@ -607,7 +619,21 @@ production wiring to thread the bool through the same
 indirection, (c) drift over time. A sentinel
 `_DisabledBackupScheduler.tick()` that just `return None` is
 one line of code and means the daemon's call site is
-unconditional. Single shape, single test, no drift.
+unconditional. Single shape, single test, no drift. Concretely
+this is wired as a bare-instance default on the keyword-only
+kwarg: `backup_scheduler: BackupSchedulerLike =
+_DisabledBackupScheduler()`. The bare instance is safe — and
+explicitly chosen over `field(default_factory=...)` — because
+`Daemon` is a regular class with an explicit `__init__`, NOT a
+`@dataclass`. `dataclasses.field(default_factory=...)` is a
+dataclass-only declaration; in a regular function signature it
+evaluates once at definition time and stashes a
+`dataclasses.Field` sentinel as the default, which would make
+`self._backup_scheduler.tick()` raise `AttributeError` the first
+time `tick_once()` ran. The bare-instance default does not have
+this trap, and because `_DisabledBackupScheduler` is stateless
+(its `tick()` returns None and writes no files) sharing one
+sentinel across every `Daemon(...)` construction is fine.
 
 ## Sub-requests (topologically sorted)
 1. Add `BackupConfig` pydantic model + `backup: BackupConfig =
@@ -648,8 +674,15 @@ unconditional. Single shape, single test, no drift.
    `_PID_PATH` → `PID_PATH`; update the in-file call sites
    (the rename touches ~12 references in `cli/daemon.py` — every
    reader/writer of `_PID_PATH` plus the one `_is_pid_alive`
-   call; grep + replace inside the file). Optional `__all__`
-   addition; either shape is fine.
+   call; grep + replace inside the file). The rename ALSO touches
+   `packages/foreman/tests/v4/cli/test_daemon_commands.py` — four
+   `monkeypatch.setattr("foreman.v4.cli.daemon._PID_PATH", ...)`
+   sites at lines 58, 70, 84, 99 reference the old underscore-
+   prefixed name and must be updated to `PID_PATH`. `monkeypatch.setattr`
+   raises `AttributeError` by default when the attribute does not
+   exist, so missing this update would fail every one of those
+   four tests under `just check`. Optional `__all__` addition;
+   either shape is fine.
 6. Add `packages/foreman/src/foreman/v4/cli/restore.py` with
    `cmd_restore` per the acceptance shape, importing
    `is_pid_alive` + `PID_PATH` from the renamed symbols in
@@ -663,8 +696,10 @@ unconditional. Single shape, single test, no drift.
    to `Daemon(..., backup_scheduler=...)`.
 8. Extend `Daemon.__init__` (new keyword-only kwarg
    `backup_scheduler: BackupSchedulerLike =
-   field(default_factory=_DisabledBackupScheduler)`) and
-   `Daemon.tick_once` (one unconditional call to
+   _DisabledBackupScheduler()` — bare-instance default, NOT
+   `field(default_factory=...)`, because `Daemon` is a regular
+   class with an explicit `__init__` rather than a `@dataclass`)
+   and `Daemon.tick_once` (one unconditional call to
    `self._backup_scheduler.tick()`) in
    `packages/foreman/src/foreman/v4/daemon.py`.
 9. Add the `~/.foreman/backups → /foreman/backups` bind mount
@@ -708,8 +743,13 @@ unconditional. Single shape, single test, no drift.
   at top of `__call__` (above the `event.state_name` access).
 - `packages/foreman/src/foreman/v4/daemon.py` — add keyword-only
   `backup_scheduler: BackupSchedulerLike =
-  field(default_factory=_DisabledBackupScheduler)` kwarg on
-  `__init__`; import `BackupSchedulerLike` and
+  _DisabledBackupScheduler()` kwarg on `__init__` (bare-instance
+  default, NOT `field(default_factory=...)`, because `Daemon` is
+  a regular class with an explicit `__init__` — the
+  `dataclasses.field` helper only works inside a `@dataclass`;
+  in a normal function signature it would stash a
+  `dataclasses.Field` sentinel as the default and break the first
+  `tick_once()` call); import `BackupSchedulerLike` and
   `_DisabledBackupScheduler` from `state_backup`; store; call
   `self._backup_scheduler.tick()` (one unconditional call) from
   `tick_once()` after `self._pool.tick()` and before the
@@ -725,6 +765,12 @@ unconditional. Single shape, single test, no drift.
   `_is_pid_alive` → `is_pid_alive` and `_PID_PATH` →
   `PID_PATH`; update the two existing call sites in the same
   file.
+- `packages/foreman/tests/v4/cli/test_daemon_commands.py` —
+  update the four `monkeypatch.setattr("foreman.v4.cli.daemon._PID_PATH", ...)`
+  call sites at lines 58, 70, 84, 99 to reference the renamed
+  `PID_PATH` symbol (without these updates `monkeypatch.setattr`
+  raises `AttributeError` and every one of those four tests
+  fails under `just check`).
 - `packages/foreman/src/foreman/v4/cli/restore.py` — NEW:
   `cmd_restore` per the acceptance shape.
 - `docker-compose.yml` — add
@@ -743,7 +789,7 @@ unconditional. Single shape, single test, no drift.
   when-present, extras-forbidden).
 - `packages/foreman/tests/v4/test_daemon.py` — append
   `test_tick_once_calls_backup_scheduler` and
-  `test_tick_once_runs_when_backup_scheduler_is_none`.
+  `test_tick_once_runs_with_disabled_scheduler_default`.
 - `docs/RUNBOOK.md` — new "Backups and restoration" section
   placed between "Daily operations" and "Recovery: daemon
   won't start".
