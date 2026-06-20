@@ -28,6 +28,7 @@ from foreman.v4.cli.daemon import (
     cmd_daemon_status,
     cmd_daemon_stop,
 )
+from foreman.v4.cli.doctor import cmd_doctor
 from foreman.v4.cli.init import cmd_init
 from foreman.v4.cli.log import cmd_log
 from foreman.v4.cli.mutations import (
@@ -86,6 +87,7 @@ app.command("set-state")(cmd_set_state)
 app.command("enqueue")(cmd_enqueue)
 app.command("reset")(cmd_reset)
 app.command("restore")(cmd_restore)
+app.command("doctor")(cmd_doctor)
 
 
 daemon_app = typer.Typer(name="daemon", help="Daemon lifecycle")

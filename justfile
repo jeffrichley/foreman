@@ -54,3 +54,12 @@ test:
 # Build wheels locally (sanity-check that release.yml would succeed)
 build:
     uv build --all-packages --wheel --out-dir dist/
+
+# Rebuild + relaunch the daemon container from the current working
+# tree. Use this when CI/Watchtower are unavailable (offline dev,
+# GHCR outage) OR when you need to test an uncommitted change
+# without going through PR + merge. For the normal flow the daemon
+# auto-updates from GHCR via Watchtower (foreman#363).
+rebuild-daemon:
+    ./scripts/build-docker.sh
+    docker compose up -d daemon

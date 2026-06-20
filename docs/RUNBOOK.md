@@ -177,9 +177,16 @@ rollback restores v3 behavior cleanly.
 
 ```bash
 cd e:/workspaces/ai/agents/foreman
-./scripts/build-docker.sh        # rebuild if source changed
 docker compose up -d daemon
 ```
+
+The recommended flow on a healthy setup is `docker compose up -d
+daemon` alone — Watchtower will pull the latest
+`ghcr.io/jeffrichley/foreman:dev` image from GHCR within 2 minutes
+of the next merge to main. See "Image lifecycle (auto-rebuild)"
+below for the full loop. Use `just rebuild-daemon` only for offline
+dev (no GHCR reachability) or when testing uncommitted changes
+that haven't been merged yet.
 
 For a dev iteration that needs uncommitted source changes:
 
@@ -245,6 +252,109 @@ The refresh script never touches `docker/claude/CLAUDE.md` (the daemon
 contract — hand-maintained) or `docker/claude/.mcp.json` (Linux-form,
 not Windows-cmd-wrapped). User-scope `~/.claude/skills/` is also
 intentionally skipped.
+
+---
+
+## Image lifecycle (auto-rebuild)
+
+The daemon image is dev-rolling: every merge to `main` rebuilds
+`ghcr.io/jeffrichley/foreman:dev` and a Watchtower sidecar on the host
+pulls + recreates the daemon container automatically. Operators never
+pin versions; they always run latest. See
+[foreman#363](https://github.com/jeffrichley/foreman/issues/363) for
+the motivating failure (a stale container shipping a known-buggy
+Worker against real tickets) and the full design.
+
+### One-shot operator setup
+
+The first `image.yml` workflow push creates a **private** package on
+GHCR (GitHub's default for the org owner's namespace). For Watchtower
+to pull without an auth token, flip the package to public exactly once:
+
+1. Open
+   https://github.com/jeffrichley/foreman/pkgs/container/foreman
+2. Click "Package settings" (right sidebar).
+3. Scroll to "Change visibility" → "Change visibility".
+4. Select "Public" and confirm.
+
+This is safe: the image contains no secrets. Credentials flow in at
+runtime via Compose secrets (`/run/secrets/*`, tmpfs-mounted), and
+the `IMAGE_SHA` / `ALLOW_DIRTY` build-args stamped into the image
+are not sensitive.
+
+### The auto-update loop
+
+```
+merge to main
+  └─→ image.yml workflow (CI) builds + pushes to GHCR  (~2-3 min)
+        ├─→ ghcr.io/jeffrichley/foreman:dev               (rolling pointer)
+        └─→ ghcr.io/jeffrichley/foreman:sha-<short>       (immutable)
+              └─→ foreman-watchtower polls every 2 min
+                    └─→ pulls new digest, recreates foreman-daemon (~30s)
+```
+
+Typical wall-clock from merge to running daemon: ~5 minutes. The
+`:dev` tag is the rolling pointer Watchtower follows; the
+`:sha-<short>` tag is the immutable handle for "which exact commit
+is this container running?" (use it to pin a temporary rollback —
+see below).
+
+### Verify the running image is up-to-date
+
+```bash
+docker exec foreman-daemon foreman doctor
+# Expected on a fresh container:
+# [doctor] image-fresh: OK — running sha-<X> matches main
+```
+
+`foreman doctor` exit codes are scripting-friendly: 0 on OK / SKIPPED
+/ WARN (transient network blip), 1 only on confirmed-stale. Use it in
+`&&`-chained scripts without false alarms.
+
+### Manual override (offline dev OR Watchtower / GHCR outage)
+
+```bash
+cd e:/workspaces/ai/agents/foreman
+just rebuild-daemon
+```
+
+`just rebuild-daemon` calls `./scripts/build-docker.sh` (local clean-
+tree build) then `docker compose up -d daemon` (recreate the
+container). Use this whenever GHCR is unreachable, Watchtower is
+down, or you need to test an uncommitted change without going through
+PR + merge.
+
+### Tail the Watchtower log
+
+```bash
+docker compose logs -f watchtower
+```
+
+Structured JSON-lines output (matches the daemon's log convention).
+Look for `"msg":"Found new"` lines for pull events and
+`"msg":"Updated"` lines for successful container recreations.
+
+### Pin a specific image temporarily (rollback)
+
+```bash
+# Pin to a known-good immutable sha tag:
+# Edit docker-compose.yml: image: ghcr.io/jeffrichley/foreman:sha-<X>
+docker compose up -d daemon
+
+# Restore by reverting docker-compose.yml back to:
+#   image: ghcr.io/jeffrichley/foreman:dev
+docker compose up -d daemon
+```
+
+Watchtower will not stomp the pinned tag (it only updates `:dev`),
+so a sha-pinned container stays put until the operator reverts.
+
+### Tuning the poll interval
+
+Edit `WATCHTOWER_POLL_INTERVAL` in the `watchtower:` service block of
+`docker-compose.yml`. Operators on a fast iteration loop can drop to
+60s; operators who care about GHCR rate-limit quota can raise to 300s.
+The 120s default is the trade-off the foreman#363 spec settled on.
 
 ---
 

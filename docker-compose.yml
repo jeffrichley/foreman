@@ -13,8 +13,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: foreman:dev
+    image: ghcr.io/jeffrichley/foreman:dev
     container_name: foreman-daemon
+
+    # Watchtower-scope label: the foreman-watchtower sidecar below
+    # (WATCHTOWER_SCOPE=foreman) only manages containers carrying
+    # this label, so it can never touch unrelated dev containers the
+    # operator happens to have on the same host. See foreman#363.
+    labels:
+      com.centurylinklabs.watchtower.scope: foreman
 
     # PID 1: tini handles zombie reaping + signal forwarding for Python.
     # See Docker design spec, Architecture section, "PID 1 / signal forwarding."
@@ -66,6 +73,42 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+
+  # Watchtower sidecar (foreman#363): poll GHCR for new digests on the
+  # `ghcr.io/jeffrichley/foreman:dev` tag and recreate the daemon
+  # container when one lands. Scoped via WATCHTOWER_SCOPE to ONLY manage
+  # containers carrying the matching `com.centurylinklabs.watchtower.scope`
+  # label — blast radius is limited to foreman-daemon, never sibling
+  # dev containers on the same host.
+  watchtower:
+    image: containrrr/watchtower:1.7.1
+    container_name: foreman-watchtower
+    restart: unless-stopped
+    environment:
+      # Poll GHCR every 2 minutes. The merge → image-published →
+      # daemon-pulled wall-clock budget is ~5 min in the acceptance
+      # criteria; CI build is ~2-3 min and the next poll lands
+      # within 2 min after that. Tighter intervals burn rate-limit
+      # quota on GHCR without operational gain.
+      WATCHTOWER_POLL_INTERVAL: "120"
+      # Remove the previous image layer after a successful update.
+      # Without this the WSL2 disk fills with one stale image per
+      # merge over time.
+      WATCHTOWER_CLEANUP: "true"
+      # Only manage containers labeled with this scope. Without a
+      # scope, Watchtower would attempt to manage EVERY container
+      # on the host (any voice/agent_core dev containers the
+      # operator happens to be running).
+      WATCHTOWER_SCOPE: "foreman"
+      # JSON-lines log output matches the daemon's structured log
+      # convention; tail via `docker compose logs -f watchtower`.
+      WATCHTOWER_LOG_FORMAT: "Json"
+    volumes:
+      # Docker socket is required for Watchtower to inspect/pull/
+      # recreate containers. This is essentially root-on-host; the
+      # scope label above keeps the blast radius limited to
+      # foreman-daemon.
+      - /var/run/docker.sock:/var/run/docker.sock
 
 # Named volumes (managed by Docker; survive container restarts and `down`).
 volumes:
