@@ -44,6 +44,23 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
     key: str) -> bool` — scans the issue's existing comments for the
     `source=<source>:key=<key>` substring in the begin marker; returns
     True iff at least one match is found.
+  * `any_recent_marker_with_source_prefix(comments: list[CommentRef], *,
+    source_prefix: str, since: dt.datetime) -> bool` — scans the
+    issue's existing comments for ANY begin marker whose `source=`
+    field starts with `source_prefix` AND whose `CommentRef.posted_at`
+    is `>= since`. Returns True iff at least one comment satisfies
+    both predicates. The substring check is a literal scan for
+    `source=<source_prefix>` inside the begin marker (matching e.g.
+    `source=role:planner`, `source=role:reviewer-spec_pr`,
+    `source=role:worker`, etc., when called with
+    `source_prefix="role:"`). The timestamp check uses the existing
+    `CommentRef.posted_at` field directly — no parsing of the marker
+    timestamp. Required by `TerminalLandingObserver`'s step-3
+    "Recent-in-role suppress" check; see that observer's spec for
+    the 5-minute window rationale. The helper is independent of
+    `already_posted_for_key` (different shape: prefix scan +
+    timestamp filter vs. exact substring scan), but lives in the
+    same module so the single-source-of-truth invariant holds.
   * `post_escalation_comment(*, host: GitHostProvider, repo_slug: str,
     issue_number: int, role: str, outcome_label: str, summary: str,
     payload: EscalationComment | None, source: str, key: str,
@@ -225,6 +242,28 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
     take only `project: str` + `issue_number: int` keyword args
     today; adding a flag means touching every CLI signature.
     Env var keeps the change additive.
+  * **Signature shape (explicit).** The new keyword arg is
+    `state_instance_id: int | None = None` — **optional, with a
+    `None` default**. Rationale: there are 18+ existing call
+    sites in `packages/foreman/tests/v4/test_subprocess_dispatcher.py`
+    plus one each in `packages/foreman/tests/v4/test_daemon.py:95`
+    and `packages/foreman/tests/v4/test_worker_pool.py:123` that
+    do NOT pass the kwarg today. Making the arg required-without-default
+    breaks every one of them at collection time, which is gold-plating
+    the contract for no gain — the dispatcher's body must already
+    handle the "no id" case for direct-CLI invocation. When
+    `state_instance_id is None`, the dispatcher MUST NOT inject
+    `FOREMAN_STATE_INSTANCE_ID` into the subprocess env at all
+    (the env var is absent, NOT set to the string `"None"`). The
+    role-core fallback then reads `os.environ.get("FOREMAN_STATE_INSTANCE_ID")`
+    as `None` and falls through to the `"unknown"` literal per
+    the role-core bullet below. The production code path —
+    `RoleDispatchState.execute` — always passes a real
+    `ctx.instance.id`, so the `None` default never fires in
+    production. The optional-default keeps the change strictly
+    additive: existing dispatcher tests continue to compile
+    without edits and continue to assert their original
+    behavior.
   * Each role core (`_run_planner_core` / `_run_reviewer_core` /
     `_run_fixer_core` / `_run_worker_core`) reads the env var via
     `state_instance_id = os.environ.get("FOREMAN_STATE_INSTANCE_ID")`
@@ -375,22 +414,48 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
   On entry to a state whose name is in `{"NeedsHelp", "Failed"}`:
   1. Fetch the issue's existing comments.
   2. Build dedup key `f"ticket-{ticket_id}-instance-{instance_id}"`.
-  3. If `already_posted_for_key(comments, source="terminal-landing",
-     key=key)` — short-circuit. (The in-role escalation comment carries
-     `source="role:<role>"`, so the dedup keys are DISJOINT — an
-     in-role comment does NOT suppress the terminal-landing comment,
-     and vice versa. This is intentional: if the role-side path
-     posted, the terminal observer still posts a "ticket landed on
-     <terminal>" confirmation; for sustained-BLOCKED → NeedsHelp via
-     cap exhaustion, the in-role path never ran, so the terminal
-     observer is the only signal source.)
-     **Correction (avoid double-post in the happy path):** the
-     terminal observer ALSO checks for any comment whose marker
-     carries `source^="role:"` AND has been posted within the last
-     5 minutes; if found, it SKIPS the post — the role-side path
-     already produced operator-visible context. The 5-minute window
-     is a defensive heuristic; document it in the observer's
-     docstring.
+  3. **Belt-and-suspenders dedup layering.** The observer
+     applies TWO short-circuit checks in order, both consulting
+     the same fetched comment list; the post fires only if BOTH
+     checks pass:
+     a. **Same-key dedup (belt).** If
+        `already_posted_for_key(comments, source="terminal-landing",
+        key=key)` returns True — short-circuit. This catches the
+        case where the same terminal landing has already been
+        commented on (e.g., the EventBus replayed the event after
+        a daemon restart). Distinct from the in-role escalation
+        comment's marker, which carries `source="role:<role>"`
+        and a different `key`; this check is exact-match for
+        terminal-landing's own past posts.
+     b. **Recent-in-role suppress (suspenders).** If
+        `any_recent_marker_with_source_prefix(comments,
+        source_prefix="role:",
+        since=clock() - timedelta(minutes=5))` returns True —
+        also short-circuit. This catches the happy-path case
+        where the in-role escalation comment has just posted (the
+        Worker/Fixer/Planner/Reviewer self-reported "I cannot
+        finish" via the structured `escalation_comment` field,
+        Foreman core rendered + posted seconds before the
+        terminal landing fired). Re-posting the terminal-landing
+        comment seconds later would duplicate operator-visible
+        context without adding signal. The 5-minute window is a
+        defensive heuristic — wide enough to absorb daemon-tick
+        skew between the role-core post and the
+        `StateEnteredEvent("NeedsHelp")` emission, narrow enough
+        that a stale `role:` marker from a prior dispatch on the
+        same ticket does NOT suppress a fresh terminal landing.
+        Document the 5-minute window in the observer's docstring.
+
+     Layering rationale (belt-and-suspenders, not disjoint keys):
+     check (a) guarantees no duplicate terminal-landing post on
+     the same state instance; check (b) suppresses the
+     terminal-landing post entirely when the in-role path has
+     already produced operator-visible context within the recent
+     window. Both checks fail iff this is a fresh terminal
+     landing on a state instance where the role-side path did
+     NOT post (subprocess crash, TIMEOUT, retry-cap exhaustion);
+     in that case the terminal observer is the only signal
+     source and MUST post.
      **Consequence for the inline exit-code + log-tail block.** The
      `extra_context` block defined under "Inline exit code + last
      500 chars of stderr" below is, by design, ONLY rendered on
@@ -674,6 +739,18 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
   * `test_build_body_fallback_names_missing_field`
   * `test_already_posted_for_key_matches_substring`
   * `test_already_posted_for_key_misses_when_source_differs`
+  * `test_any_recent_marker_with_source_prefix_matches_recent_prefix` —
+    seeds a comment list with one `source=role:planner` marker posted
+    2 minutes ago; calls the helper with `source_prefix="role:"` and
+    `since=now - timedelta(minutes=5)`; asserts True.
+  * `test_any_recent_marker_with_source_prefix_misses_stale_marker` —
+    seeds the comment list with one `source=role:planner` marker
+    posted 10 minutes ago; calls the helper with the same prefix and
+    a 5-minute `since`; asserts False (timestamp filter rejects).
+  * `test_any_recent_marker_with_source_prefix_misses_wrong_prefix` —
+    seeds the comment list with one `source=terminal-landing` marker
+    posted 30 seconds ago; calls the helper with
+    `source_prefix="role:"`; asserts False (prefix filter rejects).
   * `test_post_escalation_short_circuits_when_already_posted`
   * `test_post_escalation_proceeds_on_get_comments_failure` (asserts
     the post still fires when the fetch raises)
