@@ -1,11 +1,14 @@
-"""bootstrap_cli_context — turns V4Config into a CliContext."""
+"""bootstrap_cli_context — turns V4Config into a CliContext.
+
+Logging cleanup between tests is handled by the v4-scoped autouse
+fixture in ``conftest.py`` (bootstrap_cli_context calls
+configure_logging, which mutates process-global handler + propagate
+state on the v4 loggers).
+"""
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from unittest.mock import MagicMock
-
-import pytest
 
 from foreman.v4.bootstrap import bootstrap_cli_context
 from foreman.v4.config import (
@@ -18,31 +21,11 @@ from foreman.v4.config import (
     V4Config,
 )
 from foreman.v4.git_provider import FakeGitProvider
-from foreman.v4.logging_config import reset_logging
 from foreman.v4.observers.event_archive import EventArchiveObserver
 from foreman.v4.observers.label_observability import LabelObservabilityObserver
 from foreman.v4.observers.metrics import MetricsObserver
 from foreman.v4.observers.structured_log import StructuredLogObserver
 from foreman.v4.routing_git_provider import RoutingGitProvider
-
-_V4_LOGGER_NAMES = (
-    "foreman.v4",
-    "foreman.v4.transitions",
-    "foreman.v4.event_bus",
-)
-
-
-@pytest.fixture(autouse=True)
-def _reset_logging():
-    # bootstrap_cli_context calls configure_logging, which mutates the
-    # `foreman.v4.*` loggers (handlers + propagate=False). Snapshot
-    # propagate before each test, then restore + drop handlers after so
-    # later caplog-based tests can capture warnings on these loggers.
-    snapshots = {n: logging.getLogger(n).propagate for n in _V4_LOGGER_NAMES}
-    yield
-    reset_logging()
-    for name, propagate in snapshots.items():
-        logging.getLogger(name).propagate = propagate
 
 
 def _stub_identity():
