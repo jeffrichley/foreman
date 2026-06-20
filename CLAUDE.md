@@ -9,6 +9,28 @@ Multi-identity GitHub-issue-to-PR orchestrator on agent-core substrate.
 - `just fix` applies ruff auto-fixes + formatting
 - `.githooks/pre-push` runs `just check` before push; emergency bypass: `git push --no-verify` (use sparingly)
 
+## Running tests
+
+`just check` runs the full test gate: random order (pytest-randomly), parallel
+execution across CPU cores (pytest-xdist `-n auto`), 60-second per-test
+wallclock cap (pytest-timeout), and a global coverage gate of 78%
+(pytest-cov). Per-PR patch coverage is separately gated at 80% via diff-cover
+in CI (`.github/workflows/ci.yml`).
+
+Useful flags for tight inner loops (pass them to `pytest` directly, not
+`just check`):
+
+- `--no-cov` skips coverage measurement when you want a fast pass/fail
+- `--randomly-seed=<N>` reproduces a specific test order — the seed prints at
+  the top of every run, so copy it from a failing run to reproduce
+- `-p no:randomly` disables randomization entirely (use only as a diagnostic
+  to confirm an ordering bug; do not commit code that depends on this)
+
+The 78% global cov-fail-under is a regression floor, not an aspirational
+target — it stays slightly below measured coverage to leave room for normal
+refactoring. Ratcheting it upward happens in dedicated test-debt tickets, not
+in PRs that didn't intentionally add tests.
+
 ## Release
 
 This project uses release-please. Conventional-commit messages on merged PRs
