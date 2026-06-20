@@ -169,11 +169,20 @@ the existing static gate without conflict.
    `uv run --no-sync pytest --cov=packages/foreman/src --cov-branch
    --no-header -q 2>&1 | tail -20`
    from the repo root. Record the TOTAL percentage line in the PR
-   description. Compute `<MEASURED_BASELINE> = floor(TOTAL) - 4`
-   and use that value in step 5. If TOTAL is below 50%, the Worker
-   records the value and uses `max(measured - 4, 30)` as a sane
-   floor (don't ship a gate at 0%, but don't shame-set it at 85
-   either — the issue explicitly anticipates a lower baseline).
+   description. Compute `<MEASURED_BASELINE> = max(floor(TOTAL) - 4,
+   0)` and use that value in step 5. There is NO lower floor beyond
+   the `max(..., 0)` guard against negative thresholds — the gate
+   value is always strictly below measured coverage, which is the
+   only invariant that satisfies both the issue body's "don't ship a
+   gate that's red on day one" rule AND the acceptance criterion
+   "`just check` exits zero on the impl PR's branch". If TOTAL turns
+   out to be unexpectedly low (e.g. below 30%), the Worker records
+   the value verbatim in the PR description and notes the low
+   baseline; the ratchet to a higher floor is follow-up work, not a
+   day-one decision. Do NOT clamp the gate to 30 (or any other
+   non-zero floor): a gate higher than measured coverage ships red,
+   which violates the issue body and this spec's own acceptance
+   criterion.
 
 5. **Extend `[tool.pytest.ini_options].addopts`** with the new
    flags per the acceptance criteria, using `<MEASURED_BASELINE>`
