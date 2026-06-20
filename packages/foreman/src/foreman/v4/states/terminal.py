@@ -23,7 +23,7 @@ class _TerminalState(TicketState):
             summary=f"terminal: {self.state_name}",
         )
 
-    def next_state(self, outcome: Outcome) -> TicketState | None:
+    def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:
         return None
 
 

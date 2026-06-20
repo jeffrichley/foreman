@@ -140,3 +140,26 @@ class BackupFailedEvent(DaemonEvent):
 
     phase: Literal["snapshot", "prune"]
     reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class TransientProviderErrorEvent(TicketEvent):
+    """A role-dispatch state observed a ``TRANSIENT_PROVIDER_ERROR`` outcome.
+
+    Emitted by :meth:`RoleDispatchState.next_state` (foreman#361) when
+    the state machine schedules a backoff retry OR (with
+    ``next_retry_at=None``) when the schedule has exhausted and the
+    state is escalating to ``NeedsHelp``. Operators surface this as
+    "Anthropic was unreachable from 14:22:14 to 14:23:01" via the
+    structured log; the suspension itself is on the ticket row
+    (``next_action_at``).
+
+    Inherits ``ticket_id`` / ``instance_id`` / ``state_name`` / ``sequence``
+    from :class:`TicketEvent` (foreman#360 hierarchy split) — the
+    transient happens inside a role-dispatch state, so the ticket
+    scope is well-defined at emit time.
+    """
+
+    attempt: int
+    next_retry_at: dt.datetime | None
+    provider_status: str

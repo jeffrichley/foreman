@@ -33,6 +33,15 @@ def cmd_ps(
             "state": t.current_state,
             "held": "yes" if t.is_held else "",
             "updated": t.updated_at.isoformat(),
+            # foreman#361: surface the transient-provider-error
+            # suspension alongside ``state`` / ``updated`` so the
+            # Formatter Strategy carries the same dict shape across
+            # table / json / yaml callers. Empty string when no
+            # suspension is active (formatters render that as blank
+            # column rather than a literal "None").
+            "next_action_at": (
+                t.next_action_at.isoformat() if t.next_action_at is not None else ""
+            ),
         }
         for t in tickets
     ]

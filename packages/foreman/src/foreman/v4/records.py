@@ -27,6 +27,14 @@ class TicketRecord:
     held_at: dt.datetime | None
     held_reason: str | None
     depends_on: list[int] = field(default_factory=list)
+    # foreman#361: when non-None, the Poller refuses to enqueue this
+    # ticket until ``next_action_at <= now``. Set by
+    # ``RoleDispatchState.next_state`` after observing a
+    # ``TRANSIENT_PROVIDER_ERROR`` outcome; cleared on any
+    # non-transient outcome (defense in depth) and explicitly by
+    # ``cmd_retry`` so an operator-forced retry bypasses the
+    # suspension. ISO 8601 UTC on the wire.
+    next_action_at: dt.datetime | None = None
 
     @property
     def is_held(self) -> bool:

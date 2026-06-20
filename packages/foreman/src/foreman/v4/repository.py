@@ -46,6 +46,10 @@ class TicketRepository(Protocol):
     def hold_ticket(self, ticket_id: int, *, held_by: str, reason: str, now: dt.datetime) -> None: ...
     def resume_ticket(self, ticket_id: int, *, now: dt.datetime) -> None: ...
     def delete_ticket(self, ticket_id: int) -> None: ...
+    # foreman#361: schedule + clear the transient-provider-error
+    # suspension window. Poller filters on these.
+    def set_next_action_at(self, ticket_id: int, *, when: dt.datetime) -> None: ...
+    def clear_next_action_at(self, ticket_id: int) -> None: ...
 
     # --- State-instance journal ---
 
@@ -81,6 +85,43 @@ class TicketRepository(Protocol):
 
     def latest_pr_number_for_ticket(self, ticket_id: int) -> int | None: ...
     def count_state_instances_for_ticket(self, ticket_id: int) -> int: ...
+    def count_consecutive_transient_provider_errors(self, ticket_id: int) -> int:
+        """Returns the count of consecutive completed-and-recorded
+        ``TRANSIENT_PROVIDER_ERROR`` outcomes for ``ticket_id``,
+        excluding any in-flight attempt (rows with
+        ``outcome_kind IS NULL``).
+
+        When called from inside ``RoleDispatchState.next_state``
+        (state.py:313, BEFORE ``mark_execute_completed`` at
+        state.py:314), the most-recent row is the in-flight attempt
+        — skipped — so the returned count is the number of PRIOR
+        completed transient attempts. The caller passes that count
+        directly to ``next_retry_delay(attempt)``: 0 → 30s, 1 → 2m,
+        2 → 10m, 3 → 30m, 4 → None (escalate to NeedsHelp).
+
+        When called from ``cmd_show`` AFTER
+        ``mark_execute_completed`` has written the outcome (the
+        suspension is already in effect by the time an operator runs
+        ``foreman show <id>``), the most-recent row is a completed
+        transient — counted — so the returned count is the number of
+        transient attempts already observed; the ``cmd_show``
+        ``attempt N/4`` display therefore matches the user-visible
+        "attempt N just observed" rather than the next attempt's
+        index.
+
+        This single docstring sentence is load-bearing: it is what
+        reconciles the two call sites that otherwise look
+        superficially in tension.
+
+        Skip rules: rows whose ``failure_phase == 'can_run'`` are
+        skipped (same precedent as
+        :meth:`count_consecutive_same_state`). Rows whose
+        ``outcome_kind IS NULL`` are skipped (the in-flight row
+        opened by the WorkerPool before ``transition()`` runs).
+        Any non-NULL, non-can_run ``outcome_kind`` value that is
+        not ``TRANSIENT_PROVIDER_ERROR.value`` breaks the run.
+        """
+        ...
     def count_consecutive_same_state(
         self, *, ticket_id: int, state: str
     ) -> int:
@@ -204,6 +245,33 @@ class InMemoryTicketRepository:
             held_at=None,
             held_reason=None,
             updated_at=now,
+        )
+
+    def set_next_action_at(self, ticket_id: int, *, when: dt.datetime) -> None:
+        existing = self.get_ticket(ticket_id)
+        self._tickets[ticket_id] = dataclasses.replace(
+            existing,
+            next_action_at=when,
+            updated_at=when,
+        )
+
+    def clear_next_action_at(self, ticket_id: int) -> None:
+        existing = self.get_ticket(ticket_id)
+        if existing.next_action_at is None:
+            return
+        # Use the existing updated_at; in-memory has no notion of
+        # "now" without a clock parameter and SqliteTicketRepository's
+        # variant stamps updated_at via _to_iso(dt.datetime.now). Keep
+        # the two impls behavior-equivalent by mirroring the same
+        # updated_at semantics in the SQL impl (it passes
+        # ``dt.datetime.now(dt.UTC)`` only because it has to give SQL a
+        # value). For the in-memory impl, keeping updated_at unchanged
+        # avoids spurious clock injection in repository tests; the
+        # SQL impl matches the contract because callers always go
+        # through it with explicit clock-based timestamps elsewhere.
+        self._tickets[ticket_id] = dataclasses.replace(
+            existing,
+            next_action_at=None,
         )
 
     def delete_ticket(self, ticket_id: int) -> None:
@@ -343,9 +411,46 @@ class InMemoryTicketRepository:
             # don't trip the cap and escalate the ticket to NeedsHelp.
             if inst.outcome_kind == OutcomeKind.BLOCKED:
                 continue
+            # foreman#361: TRANSIENT_PROVIDER_ERROR rows record an
+            # Anthropic-side blip that the RoleDispatchState handles
+            # via the backoff scheduler — transient-provider self-loops
+            # are not runaway-defense signal. Skip them entirely so a
+            # short Anthropic outage doesn't trip the cap and escalate
+            # the ticket to NeedsHelp by the wrong path.
+            if inst.outcome_kind == OutcomeKind.TRANSIENT_PROVIDER_ERROR:
+                continue
             if inst.state_name == state:
                 count += 1
             else:
+                break
+        return count
+
+    def count_consecutive_transient_provider_errors(self, ticket_id: int) -> int:
+        matches = [
+            i for i in self._instances.values() if i.ticket_id == ticket_id
+        ]
+        matches.sort(key=lambda i: i.sequence, reverse=True)
+        count = 0
+        for inst in matches:
+            # foreman#361: same precedent as
+            # count_consecutive_same_state — can_run failures don't
+            # count and don't break.
+            if inst.failure_phase == "can_run":
+                continue
+            # foreman#361 CRITICAL: skip the in-flight row.
+            # ``RoleDispatchState.next_state`` is called BEFORE
+            # ``mark_execute_completed`` writes the outcome_kind, so
+            # the most-recent row has outcome_kind=None when we walk
+            # from inside the Template Method. Without this skip,
+            # every call would see "current row, NULL outcome, break"
+            # and return 0 — the backoff would never advance past
+            # 30s.
+            if inst.outcome_kind is None:
+                continue
+            if inst.outcome_kind == OutcomeKind.TRANSIENT_PROVIDER_ERROR:
+                count += 1
+            else:
+                # Any other completed outcome breaks the run.
                 break
         return count
 

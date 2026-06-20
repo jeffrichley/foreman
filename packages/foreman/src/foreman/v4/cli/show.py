@@ -35,6 +35,20 @@ def cmd_show(
         f"({ticket.project}#{ticket.issue_number}) "
         f"— {ticket.current_state}"
     )
+    # foreman#361: surface the transient-provider-error suspension as
+    # the first tree child so an operator running ``foreman show
+    # <id>`` against a parked ticket sees the wait window + attempt
+    # count immediately. "attempt N/4" reads N as the count of
+    # transients ALREADY observed (matches the docstring on
+    # count_consecutive_transient_provider_errors — at this call site
+    # mark_execute_completed has already written, so the count
+    # includes the just-observed transient).
+    if ticket.next_action_at is not None:
+        attempt = repo.count_consecutive_transient_provider_errors(ticket.id)
+        tree.add(
+            f"[yellow]suspended until {ticket.next_action_at.isoformat()} "
+            f"(provider-throttled, attempt {attempt}/4)[/yellow]"
+        )
     for inst in instances:
         outcome = inst.outcome_kind.value if inst.outcome_kind else "in-flight"
         next_state = inst.next_state or "—"

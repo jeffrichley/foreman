@@ -23,6 +23,9 @@ from github import Auth, Github
 from foreman.auth import fetch_app_metadata
 from foreman.git_host import BotIdentity, GitHostProvider
 from foreman.git_hosts.github import GitHubProvider
+from foreman.providers import ProviderTransientError
+from foreman.v4.emit import emit_outcome
+from foreman.v4.outcome import Outcome, OutcomeConfidence, OutcomeKind
 
 # foreman#229 (v3): the runaway-burn defense in this helper used to
 # transition the in-flight ticket to ``foreman:needs-help`` so the
@@ -165,6 +168,43 @@ def handle_unhandled_role_exception(
         # Best-effort: a GitHub 5xx during the comment post must not
         # mask the original exception that triggered this helper.
         pass
+
+
+def emit_transient_provider_outcome(exc: ProviderTransientError) -> int:
+    """Emit the ``FOREMAN_OUTCOME`` for a transient provider failure.
+
+    Shared by every role CLI's ``except ProviderTransientError`` arm
+    (foreman#361) so the per-role bodies stay one line each and the
+    ``details`` shape has exactly one definition. Returns exit code
+    ``0`` deliberately — a non-zero exit would trip
+    :class:`SubprocessRoleDispatcher`'s
+    ``RoleSubprocessError`` and erase the
+    ``TRANSIENT_PROVIDER_ERROR`` discriminator that
+    :class:`RoleDispatchState` needs to schedule the
+    exponential-backoff retry.
+
+    ``exception_class`` walks ``exc.__cause__`` first so the
+    classification in
+    :func:`foreman.providers.anthropic_sdk._is_transient_sdk_error`
+    surfaces the underlying SDK / transport exception type (e.g.
+    ``RateLimitError``) rather than the wrapping
+    ``ProviderTransientError`` itself — operators reading the
+    structured log learn what actually went wrong.
+    """
+    cause = exc.__cause__
+    exception_class = type(cause).__name__ if cause is not None else type(exc).__name__
+    emit_outcome(
+        Outcome(
+            kind=OutcomeKind.TRANSIENT_PROVIDER_ERROR,
+            confidence=OutcomeConfidence.HIGH,
+            summary=f"provider transient failure: {exc}"[:500],
+            details={
+                "provider_status": str(exc),
+                "exception_class": exception_class,
+            },
+        )
+    )
+    return 0
 
 
 def build_role_resources(

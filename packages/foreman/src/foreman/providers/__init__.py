@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 from foreman.providers.exceptions import (
     ProviderError,
     ProviderTimeoutError,
+    ProviderTransientError,
     ProviderUnknownError,
 )
 from foreman.providers.recovery import (
@@ -79,6 +80,7 @@ __all__ = [
     "ProviderError",
     "ProviderInvalidResultError",
     "ProviderTimeoutError",
+    "ProviderTransientError",
     "ProviderUnknownError",
     # Recovery pattern types (kept on the public surface so future
     # strategies can be unit-tested via the same imports as the

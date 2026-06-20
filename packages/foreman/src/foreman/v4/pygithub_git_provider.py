@@ -58,7 +58,14 @@ if TYPE_CHECKING:
     from github import Github
     from github.Repository import Repository
 
-_CI_PASSING_STATES = frozenset({"clean", "unstable"})
+#: GitHub PR ``mergeable_state`` values that we treat as "CI passing"
+#: for the purposes of v4 routing decisions. Public (no underscore) so
+#: other modules — notably ``foreman.roles.worker`` for the BLOCKED-retry
+#: existing-impl-PR idempotency path (issue #342) — can import this set
+#: instead of redefining it. ``"clean"`` is GitHub's "all green" state;
+#: ``"unstable"`` means required checks passed but at least one optional
+#: check failed, which is still a green-light for our purposes.
+CI_PASSING_MERGEABLE_STATES = frozenset({"clean", "unstable"})
 
 # Default refresh window: 50 minutes (3000 seconds). Load-bearing — the
 # GitHub App installation token TTL is 1 hour (3600s); rebuilding the
@@ -171,7 +178,7 @@ class PyGithubGitProvider:
         return PRState(
             merged=bool(pr.merged),
             mergeable=bool(pr.mergeable),
-            ci_passing=(pr.mergeable_state in _CI_PASSING_STATES),
+            ci_passing=(pr.mergeable_state in CI_PASSING_MERGEABLE_STATES),
             base_ref=pr.base.ref,
         )
 
