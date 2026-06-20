@@ -404,12 +404,64 @@ short Anthropic outages. Tracks
 - [ ] `count_consecutive_transient_provider_errors` is added to the
   `TicketRepository` Protocol and both impls. The implementation walks
   `state_instances` for `ticket_id` ORDER BY `sequence DESC` and counts
-  rows whose `outcome_kind == TRANSIENT_PROVIDER_ERROR.value`. Rows
-  whose `failure_phase == "can_run"` are skipped (same precedent as
-  `count_consecutive_same_state`); any other outcome kind breaks the
-  run (resets the count). A consecutive sequence interrupted by a
-  CLEAN / NEEDS_FIX / NEEDS_HELP / BLOCKED / ERROR outcome restarts
-  from zero — so a successful retry mid-backoff resets the budget.
+  rows whose `outcome_kind == TRANSIENT_PROVIDER_ERROR.value`. THREE
+  skip clauses (each `continue`s without counting AND without breaking
+  the run):
+  1. Rows whose `failure_phase == "can_run"` are skipped (same
+     precedent as `count_consecutive_same_state` lines 386–387 of
+     `sqlite_repository.py`).
+  2. **CRITICAL — Rows whose `outcome_kind IS NULL` are skipped
+     (foreman#361 Reviewer-identified gap).** The in-flight
+     `state_instance` row is opened by
+     `worker_pool._run_transition` at `worker_pool.py:125` BEFORE
+     `transition()` runs, and its `outcome_kind` is not written
+     until `mark_execute_completed` at `state.py:314`. But
+     `next_state` is called at `state.py:313` — one line BEFORE
+     that write. So when `RoleDispatchState.next_state` calls this
+     helper, the most-recent row in the DESC walk has
+     `outcome_kind = NULL`. Without this skip, a literal DESC walk
+     would hit the NULL row first, treat it as "any other outcome
+     kind", break, and return 0 on EVERY call — every transient
+     would get `next_retry_delay(0) = BACKOFF[0] = 30s`, the
+     schedule would never advance past 30s, and the escalation
+     branch (`next_retry_delay(>=4) → None`) would never fire.
+     The precedent helper `count_consecutive_same_state` doesn't
+     hit this case because it keys off `state_name`, which the
+     in-flight row DOES match — so the in-flight row is correctly
+     counted as the current same-state attempt. The new helper
+     keys off `outcome_kind`, which the in-flight row doesn't yet
+     have, hence the need for an explicit skip.
+  3. (No third clause beyond the two above — any other non-transient
+     outcome kind BREAKS the run, not skips. See below.)
+
+  Any non-NULL, non-can_run `outcome_kind` value that is not
+  `TRANSIENT_PROVIDER_ERROR.value` breaks the run (resets the
+  count). A consecutive sequence interrupted by a CLEAN / NEEDS_FIX
+  / NEEDS_HELP / BLOCKED / ERROR outcome restarts from zero — so a
+  successful retry mid-backoff resets the budget.
+
+  The helper's docstring MUST state the canonical counting
+  semantics verbatim so the call sites in `next_state` and
+  `cmd_show` reconcile unambiguously: "Returns the count of
+  consecutive completed-and-recorded TRANSIENT_PROVIDER_ERROR
+  outcomes for `ticket_id`, excluding any in-flight attempt
+  (rows with `outcome_kind IS NULL`). When called from inside
+  `RoleDispatchState.next_state` (state.py:313, BEFORE
+  `mark_execute_completed` at state.py:314), the most-recent row
+  is the in-flight attempt — skipped — so the returned count is
+  the number of PRIOR completed transient attempts. The caller
+  passes that count directly to `next_retry_delay(attempt)`: 0 →
+  30s, 1 → 2m, 2 → 10m, 3 → 30m, 4 → None (escalate to
+  NeedsHelp). When called from `cmd_show` AFTER
+  `mark_execute_completed` has written the outcome (the suspension
+  is already in effect by the time an operator runs `foreman show
+  <id>`), the most-recent row is a completed transient — counted
+  — so the returned count is the number of transient attempts
+  already observed; the `cmd_show` 'attempt N/4' display therefore
+  matches the user-visible 'attempt N just observed' rather than
+  the next attempt's index." This single docstring sentence is
+  load-bearing: it is what reconciles the two call sites that
+  otherwise look superficially in tension.
 - [ ] `count_consecutive_same_state` in both repository impls is
   extended to skip rows whose `outcome_kind ==
   TRANSIENT_PROVIDER_ERROR.value` — the same precedent as the
@@ -473,10 +525,17 @@ short Anthropic outages. Tracks
   suspended until 2026-06-20T14:25:00Z (provider-throttled,
   attempt 2/4)[/yellow]`. The "attempt N/4" hint comes from a
   fresh call to
-  `count_consecutive_transient_provider_errors(ticket_id)`. The
-  `cmd_show` body builds a `rich.Tree` (it does not go through
-  the Formatter Strategy — see file docstring); add the suspension
-  line as another `tree.add(...)` before the per-instance loop.
+  `count_consecutive_transient_provider_errors(ticket_id)` —
+  which per the helper's docstring (see canonical-counting-
+  semantics paragraph above) returns the number of transient
+  outcomes ALREADY observed when called from this call site
+  (post-`mark_execute_completed`, no in-flight row to skip). So
+  N in "attempt N/4" reads as "the Nth transient just landed and
+  the schedule is N out of 4 attempts deep" — matching operator
+  intuition. The `cmd_show` body builds a `rich.Tree` (it does
+  not go through the Formatter Strategy — see file docstring);
+  add the suspension line as another `tree.add(...)` before the
+  per-instance loop.
 - [ ] `cmd_ps` in `packages/foreman/src/foreman/v4/cli/ps.py`
   (function defined at `ps.py:16`) gains a `next_action_at` column
   in its row dict (formatted as ISO 8601 or empty string when
@@ -536,7 +595,11 @@ short Anthropic outages. Tracks
   (one module, parametrized over Planning + Implementing + ImplFix as
   representatives of the role-dispatch family): seed a fake repo with
   a ticket in `Planning`. Drive three transient outcomes in a row;
-  assert (a) `next_action_at` advances per the backoff schedule,
+  assert (a) `next_action_at` advances per the FULL backoff schedule
+  (30s, then 2m, then 10m — NOT three identical 30s delays; this
+  assertion is the regression guard for the NULL-row skip in
+  `count_consecutive_transient_provider_errors` — without that skip
+  every transient would land at 30s and this assertion would fail),
   (b) `count_consecutive_same_state` returns 0 (cap not burned),
   (c) `TransientProviderErrorEvent` fires with the right `attempt`
   and `next_retry_at`. Then drive a CLEAN outcome and assert
