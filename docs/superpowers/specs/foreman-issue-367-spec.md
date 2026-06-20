@@ -634,12 +634,43 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
        observer's directory naming and the dispatcher's directory
        naming cannot drift.
     2. The role name comes from the prior `state_instances` row's
-       `state_name` (e.g., `Planning` → `planner`,
-       `SpecReview` → `reviewer-spec`, `Fixing` → `fixer-spec`,
-       `Implementing` → `worker`) via a new module-level
-       `_STATE_NAME_TO_ROLE` map in
-       `terminal_landing.py` that mirrors the inverse of
-       `subprocess_dispatcher._ROLE_TO_INVOCATION`.
+       `state_name` via a new module-level `_STATE_NAME_TO_ROLE` map
+       in `terminal_landing.py`. The map MUST be the full 6-entry
+       enumeration of role-dispatch states:
+
+       ```python
+       _STATE_NAME_TO_ROLE: dict[str, str] = {
+           "Planning":     "planner",
+           "SpecReview":   "reviewer-spec",
+           "SpecFix":      "fixer-spec",
+           "Implementing": "worker",
+           "ImplReview":   "reviewer-impl",
+           "ImplFix":      "fixer-impl",
+       }
+       ```
+
+       The keys are the exact `state_name` strings declared in
+       `packages/foreman/src/foreman/v4/states/*.py` (verified via
+       `grep -rn "state_name = " packages/foreman/src/foreman/v4/states/`
+       — `Planning` at `planning.py:11`, `SpecReview` at
+       `spec_review.py:17`, `SpecFix` at `spec_fix.py:10`,
+       `Implementing` at `implementing.py:17`, `ImplReview` at
+       `impl_review.py:10`, `ImplFix` at `impl_fix.py:10`). The
+       values are the exact role keys in
+       `subprocess_dispatcher._ROLE_TO_INVOCATION` at
+       `subprocess_dispatcher.py:79-86`, which `_base_role` then
+       strips to the directory name (e.g., `reviewer-spec` →
+       `reviewer/`, `fixer-impl` → `fixer/`). The map is NOT the
+       inverse of `_ROLE_TO_INVOCATION` (that map is
+       role→invocation, not state_name→role; state names do not
+       appear in `_ROLE_TO_INVOCATION` at all) — it is a fresh
+       lookup table whose two columns are pinned to the two
+       upstream sources of truth. A regression test in
+       `test_terminal_landing_observer.py` asserts every key
+       matches a real `state_name` declaration and every value
+       matches a real `_ROLE_TO_INVOCATION` key, so drift in
+       either source is caught at test-collection time rather
+       than as a silent "log file not found" warning at runtime.
     3. Glob is `role_log_dir.glob(f"{ticket_id}__*.log")`; pick the
        file with the highest `Path.stat().st_mtime`. The dispatcher
        writes log lines as the role runs (`buffering=1` per
