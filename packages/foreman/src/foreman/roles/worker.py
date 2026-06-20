@@ -77,6 +77,7 @@ from foreman.roles import (
     emit_transient_provider_outcome,
     handle_unhandled_role_exception,
 )
+from foreman.roles._escalation_comment import EscalationComment
 from foreman.schemas.worker import WorkerOutput, WorkerRunResult
 from foreman.stats import log_worker_run
 from foreman.v4.config import OperatorConfig, V4Config, resolve_operator
@@ -1105,6 +1106,28 @@ async def _run_worker_core(
                 did_check_pass=False,
                 check_output_summary=(f"provider.run_agent raised {type(exc).__name__}: {exc}"),
                 confidence="low",
+                # foreman#367: synthesized incomplete carries a
+                # synthetic escalation_comment so the validator
+                # accepts and the operator-visible comment surface
+                # has structured content even on the
+                # provider-error-before-structured-output path.
+                escalation_comment=EscalationComment(
+                    why=(
+                        "Worker provider error before structured output was "
+                        f"produced: {type(exc).__name__}: {exc}"
+                    ),
+                    what_tried=(
+                        "Dispatched the Worker LLM via provider.run_agent; "
+                        "the provider raised before returning a parseable "
+                        "WorkerOutput."
+                    ),
+                    what_would_unblock=(
+                        "Operator should inspect the daemon log for the "
+                        "provider exception and apply the `foreman:retry` "
+                        "label once the underlying cause (API key, quota, "
+                        "network) is resolved."
+                    ),
+                ),
             )
             usage = UsageInfo()
         except Exception as exc:
@@ -1128,6 +1151,28 @@ async def _run_worker_core(
                 did_check_pass=False,
                 check_output_summary=(f"provider.run_agent raised {type(exc).__name__}: {exc}"),
                 confidence="low",
+                # foreman#367: synthesized incomplete carries a
+                # synthetic escalation_comment so the validator
+                # accepts and the operator-visible comment surface
+                # has structured content even on the
+                # provider-error-before-structured-output path.
+                escalation_comment=EscalationComment(
+                    why=(
+                        "Worker provider error before structured output was "
+                        f"produced: {type(exc).__name__}: {exc}"
+                    ),
+                    what_tried=(
+                        "Dispatched the Worker LLM via provider.run_agent; "
+                        "the provider raised before returning a parseable "
+                        "WorkerOutput."
+                    ),
+                    what_would_unblock=(
+                        "Operator should inspect the daemon log for the "
+                        "provider exception and apply the `foreman:retry` "
+                        "label once the underlying cause (API key, quota, "
+                        "network) is resolved."
+                    ),
+                ),
             )
             # foreman#227: no usage info available on the exception path —
             # the provider crashed before producing a ResultMessage, so we

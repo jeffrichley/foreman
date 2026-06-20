@@ -14,9 +14,10 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from foreman.git_host import PRRef
+from foreman.roles._escalation_comment import EscalationComment
 
 
 class PlannerOutput(BaseModel):
@@ -52,6 +53,37 @@ class PlannerOutput(BaseModel):
         default="medium",
         description="Planner's self-rated confidence in the spec approach",
     )
+    escalation_comment: EscalationComment | None = Field(
+        default=None,
+        description=(
+            "Required-iff ``confidence == 'low'``. The Planner LLM "
+            "populates this when self-escalating; Foreman core renders "
+            "+ posts it on the issue. A ``pydantic.model_validator`` "
+            "enforces the requirement so a slip surfaces at "
+            "schema-validation time rather than as a missing GitHub "
+            "comment. Added by foreman#367."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _enforce_escalation_comment_required(self) -> PlannerOutput:
+        """Require ``escalation_comment`` when ``confidence == 'low'``.
+
+        Centralized here (not in the prompt) because the contract is a
+        wire-level invariant Foreman core relies on when rendering the
+        operator-visible escalation comment. A prompt slip that produced
+        ``confidence='low'`` without ``escalation_comment`` would
+        otherwise reach the orchestrator and fall through to the
+        fallback shape that names the slip in the rendered body.
+        """
+        if self.confidence == "low" and self.escalation_comment is None:
+            raise ValueError(
+                "confidence='low' requires escalation_comment to be "
+                "populated (why / what_tried / what_would_unblock); "
+                "the foreman runtime posts this as an operator-visible "
+                "comment on the issue."
+            )
+        return self
 
 
 class PlannerRunResult(BaseModel):

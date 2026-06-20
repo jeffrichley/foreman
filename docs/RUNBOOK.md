@@ -535,6 +535,75 @@ operator playbook on this:
 
 ---
 
+## Operator-visible escalation comments
+
+Issue #367 wired the autonomous loop's operator-significant state
+transitions to the GitHub issue's comment stream. When a ticket
+escalates to `NeedsHelp`, lands on `Failed`, or sits BLOCKED on the
+same async signal for ≥15 minutes, foreman now posts a comment to
+the originating issue so the operator who opens the issue page sees
+the context without spelunking daemon logs.
+
+### Comment sources (the `source=...` marker)
+
+Every escalation comment is wrapped in HTML markers carrying a
+dedup key. The `source` field identifies WHICH surface posted:
+
+| `source` | When fires |
+|---|---|
+| `role:planner` | Planner LLM returned `confidence: low`. Why the spec is under-specified. |
+| `role:reviewer-spec_pr` | Reviewer-on-spec returned `confidence: low`. Why the verdict is uncertain. |
+| `role:reviewer-impl_pr` | Reviewer-on-impl returned `confidence: low`. |
+| `role:fixer-spec_pr` | Fixer-on-spec returned `outcome: incomplete` or `confidence: low`. What rejection it received. |
+| `role:fixer-impl_pr` | Fixer-on-impl returned `outcome: incomplete` or `confidence: low`. |
+| `role:worker` | Worker returned `outcome: incomplete` or `outcome: spec_invalid`. Why it could not finish. |
+| `fixer-received-rejection` | Pre-dispatch: Fixer is about to act on the Reviewer's rejection. |
+| `sustained-blocked` | A ticket has been BLOCKED ≥15 minutes on the same async signal (e.g., CI not completing). |
+| `terminal-landing` | Subprocess crash / TIMEOUT / retry-cap-trip; the role-side path could not post. Includes exit code + log tail inline. |
+
+### Reading the marker for triage
+
+Each comment opens with a hidden HTML comment carrying the source +
+dedup key:
+
+```
+<!-- foreman:escalation:begin ticket=<owner>/<repo>#<N>:source=<source>:key=<key> -->
+**[role] · [outcome_label] · [iso8601 timestamp]**
+...
+<!-- foreman:escalation:end -->
+```
+
+Operators triaging a stuck ticket should:
+
+1. Scan the comment stream for the most recent `source=...` marker
+   to identify which surface raised the escalation.
+2. Read the `## Why` section for the structured cause.
+3. On `terminal-landing` comments, expand the `<details>` fold to
+   see the role subprocess's exit code and the last 500 chars of
+   its log. The named log file under
+   `<log_dir>/<role>/<ticket_id>__<iso>.log` carries the full
+   stderr if more context is needed.
+
+### The 15-minute sustained-BLOCKED threshold
+
+A ticket polling on the same BLOCKED reason for 15 minutes triggers
+exactly one comment per `(ticket, reason)` pair. Subsequent ticks on
+the same signal do NOT re-post. When the underlying signal changes
+(e.g., CI moves from "pending" to "mergeable but conflicted"), the
+new reason gets its own comment. The threshold is a module-level
+constant in `foreman.v4.observers.sustained_blocked`
+(`SUSTAINED_BLOCKED_THRESHOLD`); tests override it via the
+observer's constructor.
+
+### Re-dispatch via `foreman:retry`
+
+The standard re-dispatch verb is the `foreman:retry` label. Every
+escalation comment's footer names it explicitly. Applying the label
+clears the suspension (`next_action_at`) and re-enqueues the ticket
+through the v4 Poller.
+
+---
+
 ## Recovery: daemon won't start
 
 1. Check the daemon-log file directly (no need for the container to be

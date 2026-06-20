@@ -25,6 +25,8 @@ from foreman.v4.observers.event_archive import EventArchiveObserver
 from foreman.v4.observers.label_observability import LabelObservabilityObserver
 from foreman.v4.observers.metrics import MetricsObserver
 from foreman.v4.observers.structured_log import StructuredLogObserver
+from foreman.v4.observers.sustained_blocked import SustainedBlockedObserver
+from foreman.v4.observers.terminal_landing import TerminalLandingObserver
 from foreman.v4.routing_git_provider import RoutingGitProvider
 
 
@@ -169,9 +171,13 @@ def test_bootstrap_wires_event_bus_with_standard_observers(tmp_path: Path):
     assert bus is not None, "bootstrap should have constructed an EventBus"
 
     subscribers = bus._subscribers  # type: ignore[attr-defined]
-    assert len(subscribers) == 4, (
-        f"expected 4 observers (structured-log, event-archive, "
-        f"label-observability, metrics), got {len(subscribers)}"
+    # foreman#367: bootstrap now wires SustainedBlockedObserver and
+    # TerminalLandingObserver in addition to the original four
+    # observers, bringing the total to 6.
+    assert len(subscribers) == 6, (
+        f"expected 6 observers (structured-log, event-archive, "
+        f"label-observability, metrics, sustained-blocked, "
+        f"terminal-landing), got {len(subscribers)}"
     )
 
     observer_types = {type(s) for s in subscribers}
@@ -179,6 +185,8 @@ def test_bootstrap_wires_event_bus_with_standard_observers(tmp_path: Path):
     assert EventArchiveObserver in observer_types
     assert LabelObservabilityObserver in observer_types
     assert MetricsObserver in observer_types
+    assert SustainedBlockedObserver in observer_types
+    assert TerminalLandingObserver in observer_types
 
 
 def test_bootstrap_wires_routing_git_provider_for_multi_project(tmp_path: Path):
