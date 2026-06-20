@@ -126,7 +126,7 @@ def test_implementing_retry_with_blocked_does_not_transition_to_failed():
         f"first dispatch must produce BLOCKED, got {outcome_1.kind}"
     )
     assert outcome_1.artifacts.pr_number == 9001
-    next_state_1 = state_1.next_state(outcome_1)
+    next_state_1 = state_1.next_state(ctx, outcome_1)
     assert isinstance(next_state_1, ImplementingState), (
         f"BLOCKED must route back to ImplementingState, got "
         f"{type(next_state_1).__name__}"
@@ -142,7 +142,7 @@ def test_implementing_retry_with_blocked_does_not_transition_to_failed():
         f"{outcome_2.kind} — this is the foreman#342 regression."
     )
     assert outcome_2.kind != OutcomeKind.ERROR
-    next_state_2 = next_state_1.next_state(outcome_2)
+    next_state_2 = next_state_1.next_state(ctx, outcome_2)
     assert isinstance(next_state_2, ImplementingState), (
         f"second BLOCKED must also route back to ImplementingState, "
         f"never FailedState. Got {type(next_state_2).__name__}"
