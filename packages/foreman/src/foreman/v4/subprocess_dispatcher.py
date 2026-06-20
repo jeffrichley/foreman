@@ -281,6 +281,13 @@ class SubprocessRoleDispatcher:
             returncode = proc.wait(timeout=self._timeout)
         except subprocess.TimeoutExpired:
             proc.kill()
+            # Reap the process explicitly so Popen.__del__ doesn't
+            # later trigger an unraisable WinError 6 ("handle is
+            # invalid") during GC after the kill closed the handle.
+            try:
+                proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                pass
             # Drain the threads before writing the marker so the marker
             # lands AFTER whatever the role had time to emit, not
             # interleaved with the final lines.
