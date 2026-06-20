@@ -53,6 +53,22 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
     body via `build_escalation_comment_body` (with the begin marker
     carrying `ticket=<repo>#<N>:source=<source>:key=<key>`) and posts
     via `host.post_issue_comment`. Returns True iff it actually posted.
+  * **POST-failure semantics (load-bearing for the "non-fatal comment
+    post" claim in the role-core wiring section).**
+    `host.post_issue_comment` failures (any `Exception` subclass — GitHub
+    5xx, rate limit, network drop) are caught inside the helper and
+    logged via `logger.exception`; the helper returns `False` rather
+    than re-raising. The four role-core call sites and both observers
+    treat a `False` return as a non-fatal comment-post failure and
+    proceed with their normal success-path telemetry write (e.g.,
+    `log_planner_run` / `log_reviewer_run` / etc.). This contract is
+    the regression guard against foreman#235 — a transient GitHub 5xx
+    on the comment post MUST NOT skip the JSONL telemetry write or
+    kill the role subprocess. Rationale: the comment is a
+    nice-to-have; the role's structured outcome is the contract.
+    Crashing the role on a comment-post 5xx escalates a survivable
+    failure into the NeedsHelp pipeline, which is strictly worse than
+    a missing comment.
 
 - [ ] The skeleton produced by `build_escalation_comment_body` matches
   the shape the issue body specifies (with the begin/end markers
@@ -244,7 +260,15 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
      into the EventBus (precedent: `LabelObservabilityObserver`'s
      deliberate no-catch policy is overridden here because the
      observer's job IS the post; losing the post on transient host
-     failure should not crash the daemon).
+     failure should not crash the daemon). Operationally, the
+     post-failure catch is delegated to
+     `post_escalation_comment` (which catches and returns `False`
+     per the helper's POST-failure contract); the observer treats
+     `False` as a no-op and proceeds. The observer's own
+     `try/except` is the belt to the helper's suspenders: an
+     unexpected exception path (e.g., key-derivation crash, host
+     resolver crash) is also swallowed at the observer boundary so
+     EventBus dispatch never raises.
 - [ ] The observer accepts a `host_for_project: Callable[[str],
   GitHostProvider]` (resolves the per-project GitHostProvider — the
   project name is on `repo.get_ticket(ticket_id).project`) at
@@ -296,6 +320,16 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
   `SustainedBlockedObserver` plus a
   `clock: Callable[[], dt.datetime]` (defaults to
   `lambda: dt.datetime.now(dt.UTC)`) for the 5-minute-window check.
+- [ ] **POST-failure semantics (shared rule).** Like
+  `SustainedBlockedObserver`, the `TerminalLandingObserver`
+  delegates comment-post catch to `post_escalation_comment` (which
+  returns `False` on `host.post_issue_comment` failure per the
+  helper's POST-failure contract); the observer treats `False` as a
+  no-op and proceeds. The observer additionally wraps the entire
+  `handle()` body in a top-level `try/except Exception` that logs
+  via `logger.exception` and swallows — EventBus dispatch must
+  never raise out of this observer. Same belt-and-suspenders
+  rationale as `SustainedBlockedObserver`.
 
 ### Bootstrap wiring
 
@@ -340,12 +374,79 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
   message (truncated to 500 chars) via the prior state-instance row's
   `failure_reason` field — which `state.py:303-307` already populates
   with `repr(exc)`.
+- [ ] **Inline exit code + last 500 chars of stderr (issue table
+  requirement).** The issue body's table names "Role · timestamp ·
+  exit code · last 500 chars of stderr" as the REQUIRED minimum
+  content for the subprocess-crash / timeout event. Role + timestamp
+  are already in the body skeleton; the observer MUST additionally
+  surface exit code AND log-tail inline. Concrete contract:
+  * NEW helper `extract_subprocess_failure_signals(*, failure_reason:
+    str | None, log_path: pathlib.Path | None) -> tuple[int | None,
+    str | None]` in `_escalation_comment.py`. Returns
+    `(exit_code, log_tail)`.
+  * `exit_code` is extracted by regex `r"exited (\d+)"` (or
+    `r"exit code: (\d+)"` against the on-disk footer
+    `--- exit code: <N> ---` written at
+    `subprocess_dispatcher.py:449-451`) against
+    `failure_reason`; returns `None` when neither pattern matches
+    (e.g., TIMEOUT path, generic retry-cap failure_reason).
+  * `log_tail` is the last 500 chars of the role's log file at
+    `<log_dir>/<role-base>/<ticket_id>__<iso>.log` — read via
+    `log_path.read_bytes()[-500:].decode("utf-8", errors="replace")`
+    (bytes-then-decode because the file is mixed stdout/stderr UTF-8
+    with no length guarantee). When the file is missing, unreadable,
+    or empty, returns `None` and the observer logs a
+    `logger.warning`; the comment is still posted without the
+    log_tail block. Read failures MUST NOT raise into the observer.
+  * The `TerminalLandingObserver` calls this helper, then renders
+    the `extra_context` block as:
+    ```markdown
+    ## Subprocess signals
+    - exit code: <exit_code OR "(unknown — TIMEOUT or generic
+      cap-trip; see log)">
+    - log path: <log_path>
+
+    <details>
+    <summary>last 500 chars of role log</summary>
+
+    ```
+    <log_tail OR "(log file missing or unreadable)">
+    ```
+
+    </details>
+    ```
+  * The `<details>` fold prevents the inline tail from dominating
+    the issue body when stderr is verbose; the operator clicks to
+    expand. Precedent: the Reviewer's findings JSON uses the same
+    `<details><summary>` fold in `roles/reviewer.py` (the
+    `FINDINGS_BEGIN_MARKER` block).
+  * Log path is computed in the observer using the same
+    `_fs_safe_iso_utc` helper exported from
+    `subprocess_dispatcher.py` and the role's `started_at` derived
+    from the prior `state_instances` row's `dispatched_at`. Reusing
+    the dispatcher's helper guarantees the path the observer names
+    matches the file the dispatcher actually wrote.
 - [ ] The subprocess log path
   (`<log_dir>/<role-base>/<ticket_id>__<iso>.log`) is mentioned in
   the terminal-landing comment's `extra_context` so operators can
   pull the full stderr without spelunking. The path is computed
   identically to `subprocess_dispatcher._fs_safe_iso_utc` —
   reusing the constants ensures the comment names the actual log file.
+- [ ] **Retry-cap-trip recovery (failure_reason is generic on this
+  path).** On the subprocess-crash → retry-cap → NeedsHelp path,
+  `state_instances[-2]`'s `failure_reason` is the generic "state X
+  failed N consecutive times" message — the original crash's exit
+  code is no longer present in `[-2]`. The observer MUST walk
+  backward from `[-2]` through prior `state_instances` rows of the
+  SAME state name to find the EARLIEST row whose `failure_phase ==
+  "execute"` AND whose `failure_reason` matches the regex
+  `r"exited \d+"` (i.e., the actual crash row, not the cap-trip
+  row). Use that crash row's `failure_reason` as the input to
+  `extract_subprocess_failure_signals`. When no such row is found
+  (e.g., the cap was tripped by some other failure phase),
+  `exit_code` falls back to `None` and the comment names "(retry
+  cap exhausted; original crash exit code not recoverable — see
+  log for the most recent attempt)".
 
 ### Idempotency invariants
 
@@ -364,6 +465,16 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
   limit), the helper logs `logger.exception` and PROCEEDS to post —
   a duplicate comment is preferable to a missing comment under the
   "issue is the answer" invariant.
+- [ ] When `host.post_issue_comment` itself fails (GitHub 5xx, rate
+  limit, network drop), the helper logs `logger.exception` and
+  returns `False` rather than re-raising. The four role-core call
+  sites and both observers treat `False` as a non-fatal comment-post
+  failure: they MUST NOT abort their normal success-path telemetry
+  write (`log_planner_run` / `log_reviewer_run` / `log_fixer_run` /
+  `log_worker_run`), MUST NOT change their outcome label, and MUST
+  NOT propagate the failure into the EventBus. The single contract
+  point is the helper; callers are spared `try/except` ceremony
+  around every call.
 
 ### Tests
 
@@ -377,6 +488,24 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
   * `test_post_escalation_short_circuits_when_already_posted`
   * `test_post_escalation_proceeds_on_get_comments_failure` (asserts
     the post still fires when the fetch raises)
+  * `test_post_escalation_returns_false_on_post_failure` — patches
+    `host.post_issue_comment` to raise; asserts the helper does NOT
+    re-raise, asserts the helper logs via `logger.exception`, and
+    asserts the helper returns `False`.
+  * `test_extract_subprocess_failure_signals_parses_exit_code` —
+    feeds `failure_reason="RoleSubprocessError('role=worker exited
+    137 without emitting an outcome; see log at ...')"` and asserts
+    the returned exit code is `137`.
+  * `test_extract_subprocess_failure_signals_returns_none_on_timeout` —
+    feeds a generic TIMEOUT failure_reason that doesn't carry an
+    `exited <N>` substring; asserts the returned exit code is
+    `None`.
+  * `test_extract_subprocess_failure_signals_reads_last_500_chars` —
+    writes a 10 KB log file to a temp path, asserts the returned
+    `log_tail` is the LAST 500 bytes decoded with `errors="replace"`.
+  * `test_extract_subprocess_failure_signals_handles_missing_log` —
+    points at a nonexistent path; asserts the helper returns
+    `(exit_code, None)` and does NOT raise.
   * `test_body_contains_no_github_closing_keywords` (regression guard
     for foreman#63 mirror)
 - [ ] NEW test
@@ -407,6 +536,25 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
     asserts the rendered comment body names
     `<log_dir>/<role>/<ticket_id>__<iso>.log` (or the convention
     string).
+  * `test_failed_landing_renders_exit_code_and_log_tail_inline` —
+    seeds a prior `state_instances` row with
+    `failure_reason="RoleSubprocessError('role=worker exited 137
+    without emitting an outcome; see log at /tmp/x.log')"` and
+    writes a real log file to the resolved path; asserts the
+    posted comment body contains the literal `exit code: 137` AND
+    contains the log file's last 500 chars inside the
+    `<details>` fold.
+  * `test_failed_landing_retry_cap_walks_back_to_crash_row` —
+    seeds a sequence of `state_instances`:
+    `(execute, "exited 1, see log...")` → `(execute, "exited 1,
+    see log...")` → `(state_instance, "state Implementing failed
+    3 consecutive times")` → terminal NeedsHelp landing. Asserts
+    the observer walks back from `[-2]` to find the EARLIEST
+    crash row and renders `exit code: 1` (not `None`).
+  * `test_failed_landing_post_failure_does_not_raise` — patches
+    `host.post_issue_comment` to raise; asserts the observer
+    swallows (via the helper's `False` return) and the EventBus
+    dispatch completes normally.
 - [ ] NEW test
   `packages/foreman/tests/v4/roles/test_planner_low_confidence_posts_comment.py`:
   patches `host.post_issue_comment` on a `MagicMock`; runs
