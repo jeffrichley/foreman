@@ -8,6 +8,7 @@ stderr / timing / exit code.
 """
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from foreman.v4 import subprocess_dispatcher as sd
 from foreman.v4.subprocess_dispatcher import (
     RoleSubprocessError,
     SubprocessRoleDispatcher,
@@ -442,6 +444,9 @@ def test_dispatch_aborted_marker_on_unexpected_exception(
     assert "--- role subprocess start ---" in log_text
     assert "--- ABORTED ---" in log_text
     assert "--- exit code:" not in log_text
+    # I5: file handle must be released so Windows allows unlink.
+    logs[0].unlink()
+    assert not logs[0].exists()
     # Sanity: real_popen still exists so other tests aren't poisoned.
     assert real_popen is not None
 
@@ -475,3 +480,360 @@ def test_fs_safe_iso_utc_replaces_colons_and_dot_and_t_and_z():
     # Filesystem-illegal characters on Windows must not appear.
     for char in (":", "/", "\\", "*", "?", "\"", "<", ">", "|"):
         assert char not in iso
+
+
+# ---------------------------------------------------------------------------
+# Code-quality fix pass: exception-path resource lifecycle (C1+C2+C3),
+# UTF-8 encoding (I1), error-message log path (I4), bounded joins (I6).
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_reaps_subprocess_when_internal_exception_raised_mid_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """If something raises AFTER Popen succeeds — e.g. an internal helper
+    blows up — the subprocess must be killed + reaped and the log file
+    handle released. Otherwise we leak children and Windows file handles
+    until daemon restart.
+
+    We capture the spawned ``Popen`` instance and patch ``threading.Thread``
+    to raise; the dispatcher's cleanup must kill+reap the subprocess
+    before propagating the exception. After dispatch raises, ``proc.poll()``
+    must return a non-None exit code (subprocess reaped, not still running).
+    """
+    # Script sleeps long enough that the subprocess is definitely still
+    # running when we synthesize the failure.
+    script = textwrap.dedent("""
+        import time
+        print("started", flush=True)
+        time.sleep(10)
+    """)
+    spawned_procs: list[subprocess.Popen] = []
+    real_popen = subprocess.Popen
+
+    def tracking_popen(*args, **kwargs):
+        p = real_popen(*args, **kwargs)
+        spawned_procs.append(p)
+        return p
+
+    monkeypatch.setattr(sd.subprocess, "Popen", tracking_popen)
+
+    real_thread = threading.Thread
+
+    def boom_thread(*args, **kwargs):
+        raise RuntimeError("synthetic mid-run failure")
+
+    monkeypatch.setattr(sd.threading, "Thread", boom_thread)
+
+    dispatcher = SubprocessRoleDispatcher(
+        foreman_cli=_python_script_cli(script),
+        identity=_stub_identity(),
+        log_dir=tmp_path,
+        timeout_seconds=30,
+    )
+    start = time.monotonic()
+    with pytest.raises(RuntimeError, match="synthetic mid-run failure"):
+        dispatcher.dispatch(
+            role="planner", project="p", issue_number=1, ticket_id=1,
+        )
+    elapsed = time.monotonic() - start
+    # Must NOT hang 10s waiting for the subprocess. Reaping should be fast.
+    assert elapsed < 8.0, (
+        f"dispatch hung {elapsed:.1f}s after mid-run exception; "
+        "subprocess likely not reaped"
+    )
+
+    # The subprocess we spawned must be reaped — poll() returns the
+    # exit code (or signal), not None.
+    assert len(spawned_procs) == 1
+    proc = spawned_procs[0]
+    assert proc.poll() is not None, (
+        "subprocess leaked: still running after dispatch raised mid-run"
+    )
+
+    # ABORTED marker present (this is a non-timeout failure path).
+    logs = list((tmp_path / "planner").glob("*.log"))
+    assert len(logs) == 1
+    log_text = logs[0].read_text(encoding="utf-8")
+    assert "--- ABORTED ---" in log_text
+    # Log file handle must be released — Windows blocks unlink otherwise.
+    logs[0].unlink()
+
+    # Real refs restored after monkeypatch teardown — sanity.
+    assert real_thread is not None
+    assert real_popen is not None
+
+
+def test_dispatch_joins_reader_threads_in_aborted_path(
+    tmp_path: Path,
+):
+    """Reader threads must be joined before dispatch returns/raises.
+
+    We track reader threads by name pattern. If they're still alive
+    after dispatch raises, we leaked them (the old code did this on
+    every non-happy exit because joins lived in the happy branch only).
+    """
+    # Subprocess emits a steady stream then exits 1 without a marker so
+    # dispatch raises RoleSubprocessError on the happy-path exit too.
+    script = textwrap.dedent("""
+        import sys, time
+        for i in range(5):
+            print("out-" + str(i), flush=True)
+            time.sleep(0.05)
+        sys.exit(1)
+    """)
+    dispatcher = SubprocessRoleDispatcher(
+        foreman_cli=_python_script_cli(script),
+        identity=_stub_identity(),
+        log_dir=tmp_path,
+        timeout_seconds=5,
+    )
+    threads_before = {t.ident for t in threading.enumerate()}
+
+    with pytest.raises(RoleSubprocessError):
+        dispatcher.dispatch(
+            role="planner", project="p", issue_number=1, ticket_id=1,
+        )
+
+    # Give a brief moment in case OS scheduler hasn't reaped yet — but
+    # any reader thread should already have been join()ed.
+    time.sleep(0.05)
+    new_threads = [
+        t for t in threading.enumerate()
+        if t.ident not in threads_before and t.is_alive()
+    ]
+    # Filter to threads obviously belonging to our reader pool. We name
+    # them via Thread(name=...) in the dispatcher; if that name shows
+    # up still alive, that's a leak.
+    leaked_readers = [t for t in new_threads if "role-stream-" in t.name]
+    assert not leaked_readers, (
+        f"reader threads leaked after dispatch raised: {leaked_readers}"
+    )
+
+
+def test_stream_to_log_failure_does_not_deadlock_subprocess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    """If the log_file.write/flush itself raises mid-stream (disk full,
+    closed file, whatever), the reader thread must NOT die silently.
+    Silent death leaves the subprocess blocked on a full pipe buffer.
+
+    We wrap the dispatcher's _stream_to_log so the write call raises
+    after the first line. The reader must drain the rest of the pipe
+    so the subprocess doesn't deadlock, and the failure must be
+    observable via the standard logger.
+    """
+    # Subprocess emits 5000 lines fast — enough to saturate the OS pipe
+    # buffer if the reader stops consuming.
+    script = textwrap.dedent(f"""
+        import sys
+        for i in range(5000):
+            print("line-" + str(i), flush=True)
+            print("err-" + str(i), file=sys.stderr, flush=True)
+        print({_HAPPY_OUTCOME!r}, flush=True)
+    """)
+
+    # Wrap the open() returned file object so .write() raises on the
+    # 2nd call. Use a counter shared across stdout + stderr readers so
+    # at least one of them trips.
+    real_open = sd.open if hasattr(sd, "open") else open
+    write_calls = {"n": 0}
+
+    class _FlakyFile:
+        def __init__(self, f):
+            self._f = f
+            self.closed = False
+
+        def write(self, s):
+            write_calls["n"] += 1
+            if write_calls["n"] == 2:
+                raise OSError("simulated disk write failure")
+            return self._f.write(s)
+
+        def flush(self):
+            return self._f.flush()
+
+        def close(self):
+            self.closed = True
+            return self._f.close()
+
+        def __getattr__(self, name):
+            return getattr(self._f, name)
+
+    def flaky_open(*args, **kwargs):
+        return _FlakyFile(real_open(*args, **kwargs))
+
+    monkeypatch.setattr(sd, "open", flaky_open, raising=False)
+
+    dispatcher = SubprocessRoleDispatcher(
+        foreman_cli=_python_script_cli(script),
+        identity=_stub_identity(),
+        log_dir=tmp_path,
+        timeout_seconds=15,
+    )
+
+    # Capture at the module logger directly. Earlier tests in the
+    # suite may have called configure_logging() which sets propagate=False
+    # on the foreman.v4 tree, so caplog's root-attached handler can't
+    # see records originating below it. Attach a fresh handler instead.
+    records: list[logging.LogRecord] = []
+
+    class _ListHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    list_handler = _ListHandler(level=logging.WARNING)
+    module_logger = logging.getLogger("foreman.v4.subprocess_dispatcher")
+    prior_level = module_logger.level
+    module_logger.setLevel(logging.WARNING)
+    module_logger.addHandler(list_handler)
+    try:
+        start = time.monotonic()
+        # Whether dispatch returns normally or raises is implementation
+        # choice; what matters is it RETURNS within reasonable time and
+        # the failure is logged.
+        try:
+            dispatcher.dispatch(
+                role="planner", project="p", issue_number=1, ticket_id=1,
+            )
+        except Exception:
+            pass
+        elapsed = time.monotonic() - start
+    finally:
+        module_logger.removeHandler(list_handler)
+        module_logger.setLevel(prior_level)
+
+    assert elapsed < 10.0, (
+        f"dispatch hung {elapsed:.1f}s — subprocess likely deadlocked on "
+        "full pipe buffer because the writer thread died silently"
+    )
+    # The writer failure must surface in logs (warning or exception level).
+    failure_logged = any(
+        "write" in rec.getMessage().lower()
+        or "stream" in rec.getMessage().lower()
+        or "drain" in rec.getMessage().lower()
+        for rec in records
+        if rec.levelno >= logging.WARNING
+    )
+    assert failure_logged, (
+        f"writer failure was not logged; records: "
+        f"{[(r.levelname, r.getMessage()) for r in records]}"
+    )
+    # Suppress unused-fixture warning — caplog reserved for future use.
+    _ = caplog
+
+
+def test_popen_uses_explicit_utf8_encoding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """I1: Popen must be called with explicit ``encoding='utf-8'`` so
+    the decode side doesn't depend on ``locale.getpreferredencoding()``
+    — cp1252 on stock Windows, which mismatches the log file's utf-8
+    encoding and corrupts non-ASCII output.
+
+    We intercept the dispatcher's Popen call and assert the kwargs
+    carry the explicit encoding. ``errors='replace'`` is belt-and-
+    suspenders against truly bad bytes from a misbehaving child.
+    """
+    captured: dict = {}
+    real_popen = subprocess.Popen
+
+    def spy_popen(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(sd.subprocess, "Popen", spy_popen)
+
+    dispatcher = SubprocessRoleDispatcher(
+        foreman_cli=_python_script_cli(_outcome_script()),
+        identity=_stub_identity(),
+        log_dir=tmp_path,
+    )
+    dispatcher.dispatch(
+        role="planner", project="p", issue_number=1, ticket_id=1,
+    )
+    assert captured["kwargs"].get("encoding") == "utf-8", (
+        f"Popen must specify encoding='utf-8' explicitly; got "
+        f"kwargs={captured['kwargs']!r}"
+    )
+    assert captured["kwargs"].get("errors") == "replace", (
+        f"Popen must specify errors='replace' as belt-and-suspenders; got "
+        f"kwargs={captured['kwargs']!r}"
+    )
+
+
+def test_popen_utf8_roundtrips_non_ascii(tmp_path: Path):
+    """Integration sanity for I1: child writes UTF-8 bytes, dispatcher
+    decodes them, log file contains the same characters."""
+    script = textwrap.dedent(f"""
+        import sys
+        sys.stdout.buffer.write("héllo \\U0001fab6\\n".encode("utf-8"))
+        sys.stdout.flush()
+        print({_HAPPY_OUTCOME!r}, flush=True)
+    """)
+    dispatcher = SubprocessRoleDispatcher(
+        foreman_cli=_python_script_cli(script),
+        identity=_stub_identity(),
+        log_dir=tmp_path,
+    )
+    stdout = dispatcher.dispatch(
+        role="planner", project="p", issue_number=1, ticket_id=1,
+    )
+    assert "héllo" in stdout
+    assert "\U0001fab6" in stdout
+    log_text = next((tmp_path / "planner").glob("*.log")).read_text(
+        encoding="utf-8",
+    )
+    assert "héllo" in log_text
+    assert "\U0001fab6" in log_text
+
+
+def test_error_message_includes_log_path(tmp_path: Path):
+    """I4: when RoleSubprocessError fires, the operator needs to know
+    WHERE the log file is, not just that one exists somewhere."""
+    # Non-zero exit, no outcome marker → raises.
+    script = textwrap.dedent("""
+        import sys
+        print("boom", flush=True)
+        sys.exit(7)
+    """)
+    dispatcher = SubprocessRoleDispatcher(
+        foreman_cli=_python_script_cli(script),
+        identity=_stub_identity(),
+        log_dir=tmp_path,
+    )
+    with pytest.raises(RoleSubprocessError) as exc_info:
+        dispatcher.dispatch(
+            role="planner", project="p", issue_number=1, ticket_id=1,
+        )
+    msg = str(exc_info.value)
+    log_path = next((tmp_path / "planner").glob("*.log"))
+    assert str(log_path) in msg, (
+        f"error message {msg!r} does not contain log path {log_path!s}"
+    )
+
+
+def test_timeout_error_message_includes_log_path(tmp_path: Path):
+    """I4: same shape as exit-without-outcome, but for the TIMEOUT branch."""
+    script = textwrap.dedent("""
+        import time
+        print("starting", flush=True)
+        time.sleep(30)
+    """)
+    dispatcher = SubprocessRoleDispatcher(
+        foreman_cli=_python_script_cli(script),
+        identity=_stub_identity(),
+        log_dir=tmp_path,
+        timeout_seconds=1,
+    )
+    with pytest.raises(RoleSubprocessError) as exc_info:
+        dispatcher.dispatch(
+            role="planner", project="p", issue_number=1, ticket_id=1,
+        )
+    msg = str(exc_info.value)
+    log_path = next((tmp_path / "planner").glob("*.log"))
+    assert str(log_path) in msg, (
+        f"timeout error message {msg!r} does not contain log path {log_path!s}"
+    )
