@@ -5,7 +5,6 @@ import logging
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 from typer.testing import CliRunner
 
 from foreman.v4.cli import app
@@ -32,25 +31,6 @@ _V4_LOGGER_NAMES = (
     "foreman.v4.transitions",
     "foreman.v4.event_bus",
 )
-
-
-@pytest.fixture
-def _isolate_v4_logging():
-    """Snapshot + restore v4 logger propagate flags around a test.
-
-    configure_logging() sets propagate=False on the v4 loggers. The
-    SIGHUP tests below call configure_logging directly, so without
-    this fixture the propagate-False state leaks to later tests
-    (notably the caplog-based observer suites that assume
-    propagate=True). Mirrors the same pattern in test_bootstrap.py.
-    """
-    snapshots = {
-        n: logging.getLogger(n).propagate for n in _V4_LOGGER_NAMES
-    }
-    yield
-    reset_logging()
-    for name, propagate in snapshots.items():
-        logging.getLogger(name).propagate = propagate
 
 
 def test_status_when_no_pid_file(tmp_path: Path, monkeypatch):
@@ -158,9 +138,7 @@ def _handler_counts_by_type() -> dict[str, dict[str, int]]:
     return snapshot
 
 
-def test_sighup_resets_and_reconfigures_logging_no_stacking(
-    tmp_path: Path, _isolate_v4_logging: None,
-):
+def test_sighup_resets_and_reconfigures_logging_no_stacking(tmp_path: Path):
     """A simulated SIGHUP must NOT stack file handlers.
 
     We invoke the SIGHUP handler directly (signal delivery isn't
@@ -195,9 +173,7 @@ def test_sighup_resets_and_reconfigures_logging_no_stacking(
             )
 
 
-def test_sighup_handler_closes_old_file_handles_on_reset(
-    tmp_path: Path, _isolate_v4_logging: None,
-):
+def test_sighup_handler_closes_old_file_handles_on_reset(tmp_path: Path):
     """reset_logging() must close handlers, not just detach them.
 
     JsonLinesHandler owns a file handle; if reset only removed the
