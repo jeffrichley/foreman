@@ -446,6 +446,33 @@ command name the orchestrator gave you. Don't invent acceptance
 criteria — copy them from the spec doc's Acceptance criteria section.
 </pr_body_template>
 
+<escalation_comment>
+When (and only when) you finish with `outcome in {'incomplete',
+'spec_invalid'}`, you MUST also populate the `escalation_comment`
+field on `WorkerOutput`. Foreman core renders this as an
+operator-visible comment on the originating GitHub issue.
+
+The field has three required sub-fields (and one optional):
+
+- `why` — Why I could not finish. Multi-sentence reasoning. Be
+  specific: which sub-request blocked, what the spec said, what
+  the codebase actually has.
+- `what_tried` — What sub-requests landed and which I skipped.
+  Brief bullets or a short paragraph.
+- `what_would_unblock` — What an operator (or another role) would
+  need to do for the loop to make progress.
+- `extra_context` — Optional.
+
+DO NOT use Bash to call `gh issue comment` — comments are routed via
+the structured field. Foreman core posts it deterministically after
+you return. The schema's `pydantic.model_validator` enforces the
+requirement: an `outcome: incomplete` or `outcome: spec_invalid`
+output without `escalation_comment` fails validation.
+
+When `outcome == 'implemented'`, leave `escalation_comment` as its
+default (`None`).
+</escalation_comment>
+
 <output_schema>
 Return a `WorkerOutput`. The shape is enforced by the SDK from the
 Pydantic model — you cannot produce an invalid shape. Semantic rules:

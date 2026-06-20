@@ -154,6 +154,15 @@ def _minimal_implemented() -> dict[str, object]:
     }
 
 
+def _escalation_payload() -> dict[str, object]:
+    """Minimal escalation_comment payload satisfying foreman#367 validator."""
+    return {
+        "why": "Worker could not finish for reason X.",
+        "what_tried": "Read the spec, walked the sub-requests.",
+        "what_would_unblock": "Operator clarifies the conflicting sub-request.",
+    }
+
+
 def _minimal_incomplete() -> dict[str, object]:
     return {
         "outcome": "incomplete",
@@ -163,6 +172,9 @@ def _minimal_incomplete() -> dict[str, object]:
         "skipped_sub_requests": [_skipped_sub_request()],
         "did_check_pass": False,
         "check_output_summary": "test_x_returns_y failed: assertion mismatch on row 3.",
+        # foreman#367: required-iff outcome in {'incomplete',
+        # 'spec_invalid'}; the validator rejects None.
+        "escalation_comment": _escalation_payload(),
     }
 
 
@@ -179,6 +191,9 @@ def _minimal_spec_invalid() -> dict[str, object]:
         "implemented_sub_requests": [],
         "skipped_sub_requests": [],
         "did_check_pass": True,
+        # foreman#367: required-iff outcome in {'incomplete',
+        # 'spec_invalid'}.
+        "escalation_comment": _escalation_payload(),
     }
 
 

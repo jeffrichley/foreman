@@ -138,6 +138,14 @@ def _minimal_fixed() -> dict[str, object]:
     }
 
 
+def _escalation_payload() -> dict[str, object]:
+    return {
+        "why": "Fixer received Reviewer rejection on finding X.",
+        "what_tried": "Attempted minimal edit; the edit conflicts with sub-request 2.",
+        "what_would_unblock": "Operator clarifies the conflicting sub-request.",
+    }
+
+
 def _minimal_incomplete() -> dict[str, object]:
     return {
         "outcome": "incomplete",
@@ -145,6 +153,8 @@ def _minimal_incomplete() -> dict[str, object]:
         "commits_made": [],
         "addressed_findings": [],
         "unaddressed_findings": [_unaddressed()],
+        # foreman#367: required-iff outcome == 'incomplete'.
+        "escalation_comment": _escalation_payload(),
     }
 
 
@@ -184,6 +194,8 @@ def test_fixer_output_allows_empty_addressed_and_commits_for_full_skip() -> None
         "commits_made": [],
         "addressed_findings": [],
         "unaddressed_findings": [_unaddressed("requires_git_surgery")],
+        # foreman#367: required-iff outcome == 'incomplete'.
+        "escalation_comment": _escalation_payload(),
     }
     obj = FixerOutput.model_validate(data)
     assert obj.addressed_findings == []

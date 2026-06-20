@@ -50,6 +50,7 @@ from foreman.roles import (
     emit_transient_provider_outcome,
     handle_unhandled_role_exception,
 )
+from foreman.roles._escalation_comment import post_escalation_comment
 from foreman.roles._prompt_helpers import (
     filter_bot_self_comments,
     format_comments_section,
@@ -409,6 +410,35 @@ async def _run_planner_core(
         final_labels = sorted(set(issue.labels))
 
         duration_seconds = time.monotonic() - start_time
+
+        # foreman#367: post the operator-visible escalation comment
+        # BEFORE log_planner_run so a comment-post failure is visible
+        # in the daemon log without preventing the JSONL row. The
+        # helper catches host.post_issue_comment failures and returns
+        # False; we do not branch on the return.
+        if llm_output.confidence == "low":
+            import os as _os
+            state_instance_id = _os.environ.get(
+                "FOREMAN_STATE_INSTANCE_ID", "unknown",
+            )
+            fallback_reason = None
+            if llm_output.escalation_comment is None:
+                fallback_reason = (
+                    "planner LLM produced confidence=low but did not "
+                    "populate escalation_comment"
+                )
+            post_escalation_comment(
+                host=host,
+                repo_slug=actual_repo_slug,
+                issue_number=issue_number,
+                role="planner",
+                outcome_label="low confidence",
+                summary=llm_output.summary[:500] or "low confidence",
+                payload=llm_output.escalation_comment,
+                fallback_reason=fallback_reason,
+                source="role:planner",
+                key=f"state-instance-{state_instance_id}",
+            )
 
         # foreman#227: append the per-call token usage + cost to the
         # Planner JSONL stats file at

@@ -201,6 +201,37 @@ Foreman core then writes the spec to disk, commits, pushes, opens the PR,
 and advances the issue label. You don't do those steps.
 </process>
 
+<escalation_comment>
+When (and only when) you finish with `confidence: low`, you MUST also
+populate the `escalation_comment` field on `PlannerOutput`. Foreman
+core renders this as an operator-visible comment on the GitHub issue
+so the human reading the issue page understands why the Planner's
+confidence dropped — without spelunking daemon logs.
+
+The field has three required sub-fields (and one optional):
+
+- `why` — Why I escalated / why my confidence is low. Multi-sentence
+  reasoning. Be specific; cite the issue line / spec section the
+  ambiguity hangs on.
+- `what_tried` — What I attempted before settling on low confidence.
+  Brief bullets in prose or a short paragraph.
+- `what_would_unblock` — What an operator (or another role) would
+  need to do for the loop to make progress.
+- `extra_context` — Optional. Additional context the three required
+  fields don't cover.
+
+DO NOT post the comment via Bash directly — your tool surface is
+read-only (Read / Glob / Grep). Foreman core posts it deterministically
+after you return. The schema's `pydantic.model_validator` enforces
+the requirement: an `output` with `confidence == 'low'` and
+`escalation_comment is None` fails validation, the SDK round-trips
+you, and you must populate the field before returning.
+
+When your `confidence` is `medium` or `high`, leave
+`escalation_comment` as its default (`None`). Posting a comment for
+a normal outcome would be noise.
+</escalation_comment>
+
 <self_review>
 Before returning, review your draft with fresh eyes:
 

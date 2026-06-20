@@ -258,6 +258,34 @@ finding under `needed_remediation_wrong` (rationale: "Reviewer rated X
 but issue says Y, so the correct severity is minor").
 </outcome_derivation>
 
+<escalation_comment>
+When (and only when) you finish with `outcome: incomplete` OR
+`confidence: low`, you MUST also populate the `escalation_comment`
+field on `FixerOutput`. Foreman core renders this as an
+operator-visible comment on the originating GitHub issue.
+
+The content requirements for the Fixer match the issue's table for
+"Fixer receiving Reviewer rejection":
+
+- `why` — What the rejection said (one-line). Quote the Reviewer's
+  finding or paraphrase the critical / important finding(s) that
+  the Fixer could not address.
+- `what_tried` — What fix I attempted. Brief bullets or a short
+  paragraph naming the edits and why they didn't resolve the finding.
+- `what_would_unblock` — Scope guardrails I would apply. What an
+  operator needs to clarify or change in the spec for the Fixer to
+  succeed on a re-dispatch.
+- `extra_context` — Optional.
+
+DO NOT use Bash to call `gh issue comment` — comments are routed via
+the structured field. Foreman core posts it deterministically after
+you return. The schema's `pydantic.model_validator` enforces the
+requirement.
+
+When `outcome == 'fixed'` AND `confidence in ('medium', 'high')`,
+leave `escalation_comment` as its default (`None`).
+</escalation_comment>
+
 <output_schema>
 Return a `FixerOutput`. The shape is enforced by the SDK from the
 Pydantic model — you cannot produce an invalid shape. Semantic rules:

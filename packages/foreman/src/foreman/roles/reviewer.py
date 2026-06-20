@@ -48,6 +48,7 @@ from foreman.roles import (
     emit_transient_provider_outcome,
     handle_unhandled_role_exception,
 )
+from foreman.roles._escalation_comment import post_escalation_comment
 from foreman.roles._prompt_helpers import (
     filter_bot_self_comments,
     format_comments_section,
@@ -602,6 +603,41 @@ async def _run_reviewer_core(
         final_labels = sorted({label.name for label in issue.labels})
 
         duration_seconds = time.monotonic() - start_time
+
+        # foreman#367: post the operator-visible escalation comment
+        # BEFORE log_reviewer_run so a comment-post failure is visible
+        # in the daemon log without preventing the JSONL row.
+        if llm_output.confidence == "low":
+            _host_for_post, _, _ = build_role_resources(
+                registry=identity_registry,
+                role="reviewer",
+                app_id=config.apps.reviewer.app_id,
+                private_key_path=config.apps.reviewer.private_key_path,
+            )
+            state_instance_id = os.environ.get(
+                "FOREMAN_STATE_INSTANCE_ID", "unknown",
+            )
+            fallback_reason = None
+            if llm_output.escalation_comment is None:
+                fallback_reason = (
+                    "reviewer LLM produced confidence=low but did not "
+                    "populate escalation_comment"
+                )
+            post_escalation_comment(
+                host=_host_for_post,
+                repo_slug=actual_repo_slug,
+                issue_number=issue_number,
+                role="reviewer",
+                outcome_label="low confidence",
+                summary=llm_output.review_comment[:500] or "low confidence",
+                payload=llm_output.escalation_comment,
+                fallback_reason=fallback_reason,
+                source=f"role:reviewer-{target}",
+                key=(
+                    f"state-instance-{state_instance_id}-pr-"
+                    f"{pr_number}-{llm_output.outcome}"
+                ),
+            )
 
         # foreman#227: append the per-call token usage + cost to the
         # Reviewer JSONL stats file. New file under

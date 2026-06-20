@@ -49,6 +49,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from foreman.roles._escalation_comment import EscalationComment
+
 SkippedReason = Literal[
     "needs_info",
     "spec_unclear",
@@ -277,6 +279,14 @@ class WorkerOutput(BaseModel):
         default="medium",
         description="Worker's self-rated confidence in the implementation.",
     )
+    escalation_comment: EscalationComment | None = Field(
+        default=None,
+        description=(
+            "Required-iff ``outcome in {'incomplete', 'spec_invalid'}``. "
+            "Core renders + posts when the Worker self-reports it could "
+            "not finish. Added by foreman#367."
+        ),
+    )
 
     @model_validator(mode="after")
     def _enforce_outcome_required_fields(self) -> WorkerOutput:
@@ -309,6 +319,19 @@ class WorkerOutput(BaseModel):
                 raise ValueError(
                     "outcome='incomplete' must not set pr_title, pr_body, or spec_invalid_reason"
                 )
+        # foreman#367: outcome in {'incomplete', 'spec_invalid'} requires
+        # escalation_comment so Foreman core can render the
+        # operator-visible comment.
+        if (
+            self.outcome in ("incomplete", "spec_invalid")
+            and self.escalation_comment is None
+        ):
+            raise ValueError(
+                f"outcome={self.outcome!r} requires escalation_comment "
+                "to be populated (why / what_tried / what_would_unblock); "
+                "the foreman runtime posts this as an operator-visible "
+                "comment on the issue."
+            )
         return self
 
 

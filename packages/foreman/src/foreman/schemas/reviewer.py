@@ -21,6 +21,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from foreman.roles._escalation_comment import EscalationComment
+
 
 class Finding(BaseModel):
     """One issue the Reviewer found in the spec under review."""
@@ -92,6 +94,16 @@ class ReviewerOutput(BaseModel):
         default="medium",
         description="Reviewer's self-rated confidence in the outcome.",
     )
+    escalation_comment: EscalationComment | None = Field(
+        default=None,
+        description=(
+            "Required-iff ``confidence == 'low'``. The Reviewer LLM "
+            "populates this when its confidence in the outcome is low; "
+            "Foreman core renders + posts it on the issue. The Reviewer "
+            "never self-escalates to NEEDS_HELP — its surface is "
+            "low-confidence on CLEAN / NEEDS_FIX. Added by foreman#367."
+        ),
+    )
 
     @model_validator(mode="after")
     def _enforce_finding_contract(self) -> ReviewerOutput:
@@ -130,6 +142,16 @@ class ReviewerOutput(BaseModel):
             raise ValueError(
                 "outcome is 'needs_fix' but findings is empty; the Fixer "
                 "needs at least one structured finding to act on"
+            )
+        # foreman#367: low-confidence outcome must carry an
+        # escalation_comment so Foreman core can render the
+        # operator-visible comment.
+        if self.confidence == "low" and self.escalation_comment is None:
+            raise ValueError(
+                "confidence='low' requires escalation_comment to be "
+                "populated (why / what_tried / what_would_unblock); "
+                "the foreman runtime posts this as an operator-visible "
+                "comment on the issue."
             )
         return self
 

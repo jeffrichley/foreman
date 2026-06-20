@@ -23,8 +23,16 @@ class RoleDispatcher(Protocol):
         project: str,
         issue_number: int,
         ticket_id: int,
+        state_instance_id: int | None = None,
     ) -> str:
-        """Return the role subprocess's stdout. Must contain FOREMAN_OUTCOME:."""
+        """Return the role subprocess's stdout. Must contain FOREMAN_OUTCOME:.
+
+        ``state_instance_id`` (foreman#367) is the current state-instance
+        row id; the dispatcher exports it as ``FOREMAN_STATE_INSTANCE_ID``
+        in the subprocess env so the role-core dedup-key construction is
+        stable across retries on the same state instance. Default
+        ``None`` for direct-CLI invocation outside the v4 dispatcher.
+        """
 
 
 class FakeRoleDispatcher:
@@ -41,7 +49,9 @@ class FakeRoleDispatcher:
         project: str,
         issue_number: int,
         ticket_id: int,
+        state_instance_id: int | None = None,
     ) -> str:
+        del state_instance_id  # not relevant to the in-memory fake
         self.calls.append((role, project, issue_number, ticket_id))
         key = (role, project, issue_number)
         try:

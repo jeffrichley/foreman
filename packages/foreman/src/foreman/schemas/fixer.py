@@ -24,7 +24,9 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from foreman.roles._escalation_comment import EscalationComment
 
 UnaddressedReason = Literal[
     "needs_info",
@@ -167,6 +169,37 @@ class FixerOutput(BaseModel):
         default="medium",
         description="Fixer's self-rated confidence in the edits applied.",
     )
+    escalation_comment: EscalationComment | None = Field(
+        default=None,
+        description=(
+            "Required-iff ``outcome == 'incomplete'`` OR "
+            "``confidence == 'low'``. Core renders + posts. The Fixer "
+            "uses this surface for the 'received rejection' content "
+            "the issue body's table requires (what the rejection said, "
+            "what fix is being attempted, scope guardrails). Added by "
+            "foreman#367."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _enforce_escalation_comment_required(self) -> FixerOutput:
+        """Require ``escalation_comment`` on incomplete OR low-confidence.
+
+        Centralized here so a prompt slip is caught at schema-validation
+        time. Foreman core's render path falls back to a structured
+        default body if this somehow remains None at post time, but the
+        validator is the primary gate.
+        """
+        if (
+            self.outcome == "incomplete" or self.confidence == "low"
+        ) and self.escalation_comment is None:
+            raise ValueError(
+                "outcome='incomplete' OR confidence='low' requires "
+                "escalation_comment to be populated; the foreman "
+                "runtime posts this as an operator-visible comment "
+                "on the issue."
+            )
+        return self
 
 
 class FixerRunResult(BaseModel):

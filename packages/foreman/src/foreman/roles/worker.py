@@ -77,6 +77,10 @@ from foreman.roles import (
     emit_transient_provider_outcome,
     handle_unhandled_role_exception,
 )
+from foreman.roles._escalation_comment import (
+    EscalationComment,
+    post_escalation_comment,
+)
 from foreman.schemas.worker import WorkerOutput, WorkerRunResult
 from foreman.stats import log_worker_run
 from foreman.v4.config import OperatorConfig, V4Config, resolve_operator
@@ -1105,6 +1109,28 @@ async def _run_worker_core(
                 did_check_pass=False,
                 check_output_summary=(f"provider.run_agent raised {type(exc).__name__}: {exc}"),
                 confidence="low",
+                # foreman#367: synthesized incomplete carries a
+                # synthetic escalation_comment so the validator
+                # accepts and the operator-visible comment surface
+                # has structured content even on the
+                # provider-error-before-structured-output path.
+                escalation_comment=EscalationComment(
+                    why=(
+                        "Worker provider error before structured output was "
+                        f"produced: {type(exc).__name__}: {exc}"
+                    ),
+                    what_tried=(
+                        "Dispatched the Worker LLM via provider.run_agent; "
+                        "the provider raised before returning a parseable "
+                        "WorkerOutput."
+                    ),
+                    what_would_unblock=(
+                        "Operator should inspect the daemon log for the "
+                        "provider exception and apply the `foreman:retry` "
+                        "label once the underlying cause (API key, quota, "
+                        "network) is resolved."
+                    ),
+                ),
             )
             usage = UsageInfo()
         except Exception as exc:
@@ -1128,6 +1154,28 @@ async def _run_worker_core(
                 did_check_pass=False,
                 check_output_summary=(f"provider.run_agent raised {type(exc).__name__}: {exc}"),
                 confidence="low",
+                # foreman#367: synthesized incomplete carries a
+                # synthetic escalation_comment so the validator
+                # accepts and the operator-visible comment surface
+                # has structured content even on the
+                # provider-error-before-structured-output path.
+                escalation_comment=EscalationComment(
+                    why=(
+                        "Worker provider error before structured output was "
+                        f"produced: {type(exc).__name__}: {exc}"
+                    ),
+                    what_tried=(
+                        "Dispatched the Worker LLM via provider.run_agent; "
+                        "the provider raised before returning a parseable "
+                        "WorkerOutput."
+                    ),
+                    what_would_unblock=(
+                        "Operator should inspect the daemon log for the "
+                        "provider exception and apply the `foreman:retry` "
+                        "label once the underlying cause (API key, quota, "
+                        "network) is resolved."
+                    ),
+                ),
             )
             # foreman#227: no usage info available on the exception path —
             # the provider crashed before producing a ResultMessage, so we
@@ -1342,6 +1390,40 @@ async def _run_worker_core(
             except ValueError:
                 impl_pr_number = None
         skipped_hist = _skipped_by_reason_histogram(llm_output)
+
+        # foreman#367: post the operator-visible escalation comment
+        # BEFORE log_worker_run so a comment-post failure is visible
+        # in the daemon log without preventing the JSONL row. The
+        # helper catches host.post_issue_comment failures and returns
+        # False; we do not branch on the return because the
+        # success-path telemetry write must proceed unconditionally.
+        if final_outcome in ("incomplete", "spec_invalid"):
+            state_instance_id = os.environ.get(
+                "FOREMAN_STATE_INSTANCE_ID", "unknown",
+            )
+            dedup_key = (
+                f"state-instance-{state_instance_id}-attempt-"
+                f"{attempt}-{final_outcome}"
+            )
+            fallback_reason: str | None = None
+            if llm_output.escalation_comment is None:
+                fallback_reason = (
+                    f"worker LLM produced outcome={final_outcome} but did "
+                    "not populate escalation_comment"
+                )
+            post_escalation_comment(
+                host=host,
+                repo_slug=actual_repo_slug,
+                issue_number=issue_number,
+                role="worker",
+                outcome_label=final_outcome,
+                summary=llm_output.work_comment[:500] or final_outcome,
+                payload=llm_output.escalation_comment,
+                fallback_reason=fallback_reason,
+                source="role:worker",
+                key=dedup_key,
+            )
+
         log_worker_run(
             repo_slug=actual_repo_slug,
             issue_number=issue_number,

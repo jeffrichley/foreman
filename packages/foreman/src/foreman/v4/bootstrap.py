@@ -8,10 +8,13 @@ calls with the real PyGithub-backed factories.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
+from foreman.git_host import GitHostProvider
+from foreman.roles import build_role_resources
 from foreman.v4.cli.context import CliContext, build_cli_context
 from foreman.v4.config import ProjectConfig, V4Config
 from foreman.v4.daemon import Daemon, DaemonConfig
@@ -22,11 +25,15 @@ from foreman.v4.observers.event_archive import EventArchiveObserver
 from foreman.v4.observers.label_observability import LabelObservabilityObserver
 from foreman.v4.observers.metrics import MetricsObserver
 from foreman.v4.observers.structured_log import StructuredLogObserver
+from foreman.v4.observers.sustained_blocked import SustainedBlockedObserver
+from foreman.v4.observers.terminal_landing import TerminalLandingObserver
 from foreman.v4.poller import Poller
 from foreman.v4.routing_git_provider import RoutingGitProvider
 from foreman.v4.sqlite_repository import SqliteTicketRepository
 from foreman.v4.state_backup import BackupScheduler
 from foreman.v4.subprocess_dispatcher import SubprocessRoleDispatcher
+
+logger = logging.getLogger(__name__)
 
 
 class IdentityProvider(Protocol):
@@ -109,6 +116,75 @@ def bootstrap_cli_context(
             writer=git_for_cross_project, repo=repo,
         ))
     bus.subscribe(MetricsObserver())
+
+    # foreman#367: per-project v3-shape GitHostProvider map keyed by
+    # project name. Built lazily via ``build_role_resources`` with the
+    # orchestrator's App credentials so the observers' comment surface
+    # has the right token attribution. Distinct construction from
+    # ``per_project_providers`` above (which holds v4 GitProvider
+    # instances whose Protocol does NOT include
+    # ``get_issue_comments`` / ``post_issue_comment``).
+    per_project_git_hosts: dict[str, GitHostProvider] = {}
+    per_project_repo_slug: dict[str, str] = {}
+    for project_config in config.projects:
+        per_project_repo_slug[project_config.name] = project_config.repo
+        try:
+            host, _token, _client = build_role_resources(
+                registry=identity,
+                role="orchestrator",
+                app_id=config.orchestrator.app_id,
+                private_key_path=config.orchestrator.private_key_path,
+            )
+        except Exception:  # pragma: no cover - defensive
+            logger.warning(
+                "bootstrap: failed to build orchestrator-token host for "
+                "project=%s; SustainedBlockedObserver + "
+                "TerminalLandingObserver will be no-op for this project",
+                project_config.name,
+                exc_info=True,
+            )
+            continue
+        per_project_git_hosts[project_config.name] = host
+
+    class _HostForProject:
+        """Callable shim exposing ``repo_slug_for`` for the observers.
+
+        :class:`SustainedBlockedObserver` /
+        :class:`TerminalLandingObserver` consult ``repo_slug_for`` on
+        the ``host_for_project`` argument to translate project name →
+        owner/repo slug. A plain function with attribute set doesn't
+        survive ``mypy`` strict checks on Callable; a class does.
+        """
+
+        def __init__(
+            self,
+            *,
+            hosts: dict[str, GitHostProvider],
+            slugs: dict[str, str],
+        ) -> None:
+            self._hosts = hosts
+            self._slugs = slugs
+
+        def __call__(self, project: str) -> GitHostProvider | None:
+            return self._hosts.get(project)
+
+        def repo_slug_for(self, project: str) -> str | None:
+            return self._slugs.get(project)
+
+    host_for_project = _HostForProject(
+        hosts=per_project_git_hosts,
+        slugs=per_project_repo_slug,
+    )
+
+    bus.subscribe(SustainedBlockedObserver(
+        repo=repo,
+        host_for_project=host_for_project,
+    ))
+    bus.subscribe(TerminalLandingObserver(
+        repo=repo,
+        host_for_project=host_for_project,
+        log_dir=Path(config.log_dir),
+    ))
 
     # foreman#357: per-project ProjectConfig map keyed by name. Mirrors
     # the shape of ``per_project_providers`` above — config resolution
