@@ -22,11 +22,17 @@ file in minutes. Tracks
   the path); `prune_snapshots(dst_dir: Path, *, now: dt.datetime,
   retention: RetentionPolicy) -> list[Path]` (returns the list of deleted
   paths); and a `BackupScheduler` class with constructor
-  `BackupScheduler(*, src_conn, dst_dir, interval_seconds: int,
-  retention: RetentionPolicy, clock: Callable[[], dt.datetime])` and one
+  `BackupScheduler(*, src_conn: sqlite3.Connection, dst_dir: Path,
+  interval_seconds: int, retention: RetentionPolicy,
+  clock: Callable[[], dt.datetime], bus: EventBus)` and one
   method `tick() -> Path | None` (returns the new snapshot's path on the
-  ticks where one was taken; returns None otherwise — including
-  `enabled=False`, see below).
+  ticks where one was taken; returns None otherwise — including the
+  disabled-via-`from_config(enabled=False)` case, see below). The
+  `bus: EventBus` parameter is the publication seam for
+  `BackupTakenEvent` / `BackupFailedEvent` (see acceptance criterion
+  on the scheduler's tick semantics below); without it the scheduler
+  has nowhere to emit the daemon-level events the structured-log
+  observer keys off of.
 - [ ] `take_snapshot` MUST use the stdlib
   `sqlite3.Connection.backup(target, *, pages=-1, sleep=0.25)` API
   against an open destination `sqlite3.connect(<tempfile>)`, then close
@@ -41,9 +47,20 @@ file in minutes. Tracks
   `packages/foreman/src/foreman/v4/observers/event_archive.py:60` —
   pass the shared `SqliteTicketRepository.connection` handle (exposed
   at `packages/foreman/src/foreman/v4/sqlite_repository.py:125-136`)
-  as `src_conn` so the snapshot rides the same connection RLock and
-  the documented "additional writes from outside the repository are
-  serialized by the SQLite engine layer" guarantee holds.
+  as `src_conn`. The connection property's docstring is explicit
+  that the repository's Python-level `RLock` does NOT cover external
+  callers; the `.backup` call is safe under concurrent writers
+  because SQLite's online-backup API serializes backup pages against
+  writer pages at the engine layer (in WAL mode), not because it
+  participates in the repository's RLock. Reuse the existing
+  handle anyway so there is exactly one connection open per
+  process — opening a second `sqlite3.connect(db_path)` for backup
+  purposes would work but adds a second file handle for no benefit.
+  The module docstring MUST frame the safety argument in
+  SQLite-engine-layer terms (WAL + online-backup atomicity), NOT
+  in Python-RLock terms — the RLock framing would be incorrect
+  and would mislead the next reader into believing the lock
+  matters.
 - [ ] `RetentionPolicy` is a frozen dataclass in the same module with
   fields `hourly: int = 24`, `daily: int = 7`, `weekly: int = 4`. The
   three integers correspond directly to the issue's stated retention
@@ -100,45 +117,90 @@ file in minutes. Tracks
   `V4Config` gains `backup: BackupConfig = Field(default_factory=BackupConfig)`
   (defaulted, NOT required, so existing operator configs without a
   `[backup]` block continue to load — backups default to on with the
-  documented schedule). When `backup.enabled` is False the
-  `BackupScheduler` constructor short-circuits to a sentinel whose
-  `tick()` always returns None — the daemon wiring becomes a single
-  unconditional `self._backup_scheduler.tick()` call site (Approach:
-  "make the right thing easy" — no None-check in the hot path).
+  documented schedule).
+- [ ] `BackupScheduler.from_config(config: BackupConfig, *,
+  src_conn: sqlite3.Connection, bus: EventBus,
+  clock: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC))
+  -> BackupScheduler | _DisabledBackupScheduler` is the documented
+  factory that bridges `BackupConfig` and the scheduler classes.
+  When `config.enabled` is False the classmethod returns a
+  module-private `_DisabledBackupScheduler()` sentinel whose
+  `tick()` is `return None` and which writes no files. When
+  `config.enabled` is True the classmethod constructs and returns a
+  real `BackupScheduler` from `config.dir`, `config.interval_seconds`,
+  and `RetentionPolicy(hourly=config.retention_hourly,
+  daily=config.retention_daily, weekly=config.retention_weekly)`.
+  Both return values share the `tick() -> Path | None` method
+  signature (structural typing — not a formal Protocol; the daemon
+  attribute is typed as `BackupScheduler | _DisabledBackupScheduler`
+  via a `BackupSchedulerLike` type alias or `Union` declared in
+  `state_backup.py`). The factory is the only constructor path that
+  bootstrap uses; constructing `BackupScheduler` directly is
+  reserved for tests that want a hand-tuned interval / clock /
+  retention.
 - [ ] `bootstrap_cli_context` in
-  `packages/foreman/src/foreman/v4/bootstrap.py` constructs a
-  `BackupScheduler` from `config.backup` + `repo.connection` and
-  passes it to `Daemon(..., backup_scheduler=...)`. When
-  `config.backup.enabled` is False, bootstrap still constructs a
-  scheduler (the no-op sentinel form) so `Daemon` has a uniform
-  attribute to call.
+  `packages/foreman/src/foreman/v4/bootstrap.py` calls
+  `BackupScheduler.from_config(config.backup, src_conn=repo.connection,
+  bus=bus)` and passes the result to `Daemon(...,
+  backup_scheduler=...)`. When `config.backup.enabled` is False the
+  factory returns the `_DisabledBackupScheduler` sentinel; bootstrap
+  passes it through unchanged so `Daemon` has a uniform attribute to
+  call.
 - [ ] `Daemon.__init__` in
-  `packages/foreman/src/foreman/v4/daemon.py` gains a
-  `backup_scheduler: BackupScheduler | None = None` kwarg (defaulted so
-  existing test fixtures that construct `Daemon(...)` directly stay
-  green; bootstrap always passes one in production). `Daemon.tick_once()`
-  calls `self._backup_scheduler.tick()` (if non-None) AFTER
-  `self._pool.tick()` and BEFORE the bounded-drain `while` loop — the
-  snapshot work is in-process, single-threaded, and runs on the same
-  thread as the tick; the WAL-mode online backup does not block
-  worker-pool writers but burns a few hundred ms per snapshot, which
-  is negligible against the 30s default `tick_seconds`.
+  `packages/foreman/src/foreman/v4/daemon.py` gains a keyword-only
+  `backup_scheduler: BackupSchedulerLike = field(default_factory=_DisabledBackupScheduler)`
+  kwarg (i.e., the default is the `_DisabledBackupScheduler` sentinel
+  itself, NOT None; the `BackupSchedulerLike` alias is imported from
+  `state_backup.py`). The default lets existing test fixtures that
+  construct `Daemon(...)` directly stay green AND keeps the call
+  site unconditional. `Daemon.tick_once()` calls
+  `self._backup_scheduler.tick()` (one unconditional call — no
+  None-check) AFTER `self._pool.tick()` and BEFORE the
+  bounded-drain `while` loop. The snapshot work is in-process,
+  single-threaded, and runs on the same thread as the tick; the
+  WAL-mode online backup does not block worker-pool writers but
+  burns a few hundred ms per snapshot, which is negligible against
+  the 30s default `tick_seconds`.
 - [ ] `BackupTakenEvent` and `BackupFailedEvent` are added in
   `packages/foreman/src/foreman/v4/events.py` as frozen dataclasses
-  with the standard `Event` envelope (`at: dt.datetime`) PLUS:
+  carrying `at: dt.datetime` PLUS:
   * `BackupTakenEvent`: `path: str`, `size_bytes: int`,
     `pruned_count: int`.
   * `BackupFailedEvent`: `phase: Literal["snapshot", "prune"]`,
     `reason: str` (the str() of the swallowed exception, truncated
     to 500 chars to keep the log line tractable).
-  Note: these two events do NOT carry `ticket_id` / `instance_id` /
-  `state_name` / `sequence` — they are daemon-level, not state-machine
-  events. The base `Event` class today is hard-coded with those
-  ticket-scoped fields (see existing event types in `events.py`);
-  add a sibling parent class `DaemonEvent` (also frozen, carries
-  `at: dt.datetime` only) that `BackupTakenEvent` /
-  `BackupFailedEvent` inherit from. Document the split in
-  `events.py`'s top-of-file docstring.
+  These two events do NOT carry `ticket_id` / `instance_id` /
+  `state_name` / `sequence` — they are daemon-level, not
+  state-machine events. The today's `Event` class hard-codes those
+  ticket-scoped fields, so consumers bound to `Event`
+  (`EventBus.publish(event: Event)` at `event_bus.py:44`,
+  `EventListener = Callable[[Event], None]` at `event_bus.py:23`,
+  `_EVENT_NAMES: dict[type[Event], ...]` at `structured_log.py:18`,
+  and every observer's `__call__(event: Event)` signature) cannot
+  flow daemon-level events without a typed widening. **Type-hierarchy
+  resolution**: rename today's `Event` → `TicketEvent` and introduce
+  a new common base class `Event` (frozen, carries only
+  `at: dt.datetime`); `TicketEvent` and `DaemonEvent` both inherit
+  from this new `Event`. `TicketEvent` adds back the
+  `ticket_id` / `instance_id` / `state_name` / `sequence` fields
+  alongside the inherited `at`, so existing state-machine events
+  (`StateEnteredEvent`, `ExecuteStartedEvent`, `ExecuteCompletedEvent`,
+  `StateExitedEvent`, `StateFailedEvent`) just change their parent
+  from `Event` to `TicketEvent` and keep all their existing fields.
+  `DaemonEvent` adds no extra fields beyond the inherited `at`;
+  `BackupTakenEvent` / `BackupFailedEvent` inherit from
+  `DaemonEvent`. With this shape, every existing
+  `Event`-typed signature (`EventBus.publish`, `EventListener`,
+  `_EVENT_NAMES`, observer `__call__`) accepts both ticket-scoped
+  and daemon-level events without further widening — type-checking
+  stays green. **Files whose imports change but whose runtime
+  behavior does not**: every file that imports a state-machine
+  event subclass continues to import the same symbol;
+  `EventArchiveObserver` and `MetricsObserver` and
+  `StructuredLogObserver` get the additional `DaemonEvent` /
+  `TicketEvent` imports they need for the `isinstance` guards
+  documented below. Document the split in `events.py`'s
+  top-of-file docstring.
 - [ ] `StructuredLogObserver._EVENT_NAMES` in
   `packages/foreman/src/foreman/v4/observers/structured_log.py`
   gains two new entries:
@@ -165,6 +227,37 @@ file in minutes. Tracks
   `if isinstance(event, DaemonEvent): return` guard at the top of
   `__call__`. The structured-log JSONL is the durable record for
   daemon-level events; the events SQL table stays ticket-scoped.
+- [ ] `MetricsObserver` in
+  `packages/foreman/src/foreman/v4/observers/metrics.py` is
+  modified to NO-OP on `DaemonEvent` subclasses. The existing
+  `__call__` at `metrics.py:40-41` accesses `event.state_name`
+  unconditionally to populate the `tags` dict — that attribute
+  does not exist on `DaemonEvent`, so the first `BackupTakenEvent`
+  would `AttributeError`. Add the same early
+  `if isinstance(event, DaemonEvent): return` guard at the top of
+  `__call__`, ABOVE the `tags = {"state": event.state_name}`
+  line. Daemon-level events have no `state_name` and no metric
+  semantics under the current MetricsObserver shape.
+- [ ] `EventBus.publish` in
+  `packages/foreman/src/foreman/v4/event_bus.py` is widened so its
+  exception-logging path tolerates `DaemonEvent`. The current
+  warning-log at `event_bus.py:51-65` reads `event.ticket_id` and
+  `event.instance_id` unconditionally inside the `except` block;
+  on a `BackupTakenEvent` those attributes do not exist and the
+  inner `AttributeError` would bubble out of `publish`, out of the
+  scheduler (which only swallows `OSError` / `sqlite3.Error`), out
+  of `tick_once`, and tear down `run_forever` via the
+  finally-block shutdown — the first snapshot would crash the
+  daemon. Replace the unconditional `event.ticket_id` /
+  `event.instance_id` lookups with an `isinstance(event,
+  TicketEvent)` guard: when ticket-scoped, log the same
+  rich message that exists today; when daemon-level (the
+  `else` arm), log a degraded message that drops the ticket /
+  instance fields and keeps `type(event).__name__`, the observer
+  name, the exception type, and the exception message. Both arms
+  MUST `_log.warning(...)` and MUST NOT re-raise. The structured
+  `extra={"observer": ..., "exc_type": ..., "exc_message": ...}`
+  payload stays the same in both arms.
 - [ ] `docker-compose.yml` gains a new bind mount on the `daemon`
   service: `${HOME}/.foreman/backups:/foreman/backups` (host →
   container). The mount is NOT a named volume — using a bind mount
@@ -283,14 +376,18 @@ file in minutes. Tracks
     None returned — too soon), advance clock by 31 more
     minutes (>= 1 hour total), call `tick()` (asserts second
     snapshot taken).
-  * `test_scheduler_tick_disabled_returns_none`: construct
-    `BackupScheduler` from a `BackupConfig(enabled=False)`;
-    `tick()` returns None and writes no files.
+  * `test_scheduler_tick_disabled_returns_none`: call
+    `BackupScheduler.from_config(BackupConfig(enabled=False),
+    src_conn=..., bus=...)`; assert the returned object is a
+    `_DisabledBackupScheduler`; call `tick()` and assert it
+    returns None and writes no files.
   * `test_scheduler_swallows_take_snapshot_error_and_logs`:
-    patch `take_snapshot` to raise `OSError("disk full")`;
-    call `tick()`; assert the call returns None (no crash) AND
-    a `BackupFailedEvent(phase="snapshot", reason="disk
-    full")` was published via the injected event bus.
+    construct a real `BackupScheduler` with an injected
+    `EventBus` (subscribe a captor) and an injected
+    `take_snapshot` that raises `OSError("disk full")`; call
+    `tick()`; assert the call returns None (no crash) AND
+    a `BackupFailedEvent(phase="snapshot", reason="disk full")`
+    was published on the injected bus (captor received it).
 - [ ] New test file `packages/foreman/tests/v4/cli/test_restore.py`
   covering, at minimum:
   * `test_restore_round_trip`: take a snapshot of a live DB,
@@ -325,12 +422,16 @@ file in minutes. Tracks
     blocks).
 - [ ] `packages/foreman/tests/v4/test_daemon.py` gains
   `test_tick_once_calls_backup_scheduler`: construct a `Daemon`
-  with a stub `BackupScheduler` whose `tick()` is a `MagicMock`;
+  with a stub scheduler whose `tick()` is a `MagicMock`;
   call `daemon.tick_once()`; assert the stub's `tick()` was
   called exactly once. A second test
-  `test_tick_once_runs_when_backup_scheduler_is_none` constructs
-  the daemon WITHOUT a scheduler (defaulted kwarg) and asserts
-  `tick_once()` does not raise.
+  `test_tick_once_runs_with_disabled_scheduler_default` constructs
+  the daemon WITHOUT explicitly passing `backup_scheduler=` (so the
+  default `_DisabledBackupScheduler` sentinel is used) and asserts
+  `tick_once()` does not raise AND no snapshot files are written
+  to disk. This matches the "default kwarg is the sentinel, not
+  None" choice on `Daemon.__init__` above; there is no None-guard
+  on the call site to test.
 - [ ] `docs/RUNBOOK.md` gains a new section titled "Backups and
   restoration" placed BETWEEN "Daily operations" and "Recovery:
   daemon won't start" (mirrors the layout pattern used by
@@ -515,54 +616,86 @@ unconditional. Single shape, single test, no drift.
    `load_config` to forward the `[backup]` block when present
    (mirror the existing `if "apps" in raw:` shape at lines
    312–317).
-2. Add `DaemonEvent` parent class + `BackupTakenEvent` +
-   `BackupFailedEvent` in `packages/foreman/src/foreman/v4/events.py`.
-3. Add `StructuredLogObserver` widening (the daemon-event guard)
-   + two new `_EVENT_NAMES` entries +
-   per-event-type branches in
-   `packages/foreman/src/foreman/v4/observers/structured_log.py`.
-4. Add `EventArchiveObserver` no-op guard for `DaemonEvent` in
-   `packages/foreman/src/foreman/v4/observers/event_archive.py`.
-5. Add the new module
+2. Rewire the event class hierarchy in
+   `packages/foreman/src/foreman/v4/events.py`: rename today's
+   `Event` → `TicketEvent`; add a new common base `Event`
+   (only `at`); reparent the five state-machine event subclasses
+   from `Event` to `TicketEvent`; add `DaemonEvent` (only `at`)
+   alongside; add `BackupTakenEvent` + `BackupFailedEvent`
+   inheriting from `DaemonEvent`.
+3. Widen the four `Event`-typed consumers to tolerate
+   `DaemonEvent`:
+   * `StructuredLogObserver` — daemon-event guard at top of
+     `__call__` + two new `_EVENT_NAMES` entries + per-event-type
+     branches in
+     `packages/foreman/src/foreman/v4/observers/structured_log.py`.
+   * `EventArchiveObserver` — `if isinstance(event, DaemonEvent):
+     return` guard at top of `__call__` in
+     `packages/foreman/src/foreman/v4/observers/event_archive.py`.
+   * `MetricsObserver` — same guard at top of `__call__` in
+     `packages/foreman/src/foreman/v4/observers/metrics.py`.
+   * `EventBus.publish` — `isinstance(event, TicketEvent)` branch
+     in the `except` block's warning-log path in
+     `packages/foreman/src/foreman/v4/event_bus.py`.
+4. Add the new module
    `packages/foreman/src/foreman/v4/state_backup.py` with
-   `take_snapshot`, `RetentionPolicy`, `prune_snapshots`, and
-   `BackupScheduler` (real + disabled sentinel via
-   constructor short-circuit).
-6. Rename `cli/daemon.py:_is_pid_alive` → `is_pid_alive` and
-   `_PID_PATH` → `PID_PATH`; update the two existing in-file
-   call sites. (Optional `__all__` addition; either shape is
-   fine.)
-7. Add `packages/foreman/src/foreman/v4/cli/restore.py` with
+   `take_snapshot`, `RetentionPolicy`, `prune_snapshots`,
+   `BackupScheduler` (real), `_DisabledBackupScheduler`
+   (sentinel), the `BackupSchedulerLike` type alias, and the
+   `BackupScheduler.from_config(config, *, src_conn, bus,
+   clock=...)` classmethod factory.
+5. Rename `cli/daemon.py:_is_pid_alive` → `is_pid_alive` and
+   `_PID_PATH` → `PID_PATH`; update the in-file call sites
+   (the rename touches ~12 references in `cli/daemon.py` — every
+   reader/writer of `_PID_PATH` plus the one `_is_pid_alive`
+   call; grep + replace inside the file). Optional `__all__`
+   addition; either shape is fine.
+6. Add `packages/foreman/src/foreman/v4/cli/restore.py` with
    `cmd_restore` per the acceptance shape, importing
    `is_pid_alive` + `PID_PATH` from the renamed symbols in
-   step 6. Register the command in
+   step 5. Register the command in
    `packages/foreman/src/foreman/v4/cli/__init__.py` via
    `app.command("restore")(cmd_restore)`.
-8. Wire `BackupScheduler` through `bootstrap_cli_context` in
-   `packages/foreman/src/foreman/v4/bootstrap.py` (passes
-   `config.backup` + `repo.connection` + an injected event
-   bus) and into `Daemon(..., backup_scheduler=...)`.
-9. Extend `Daemon.__init__` (new kwarg) and `Daemon.tick_once`
-   (one call to `self._backup_scheduler.tick()`) in
+7. Wire the backup scheduler through `bootstrap_cli_context` in
+   `packages/foreman/src/foreman/v4/bootstrap.py` by calling
+   `BackupScheduler.from_config(config.backup,
+   src_conn=repo.connection, bus=bus)` and passing the result
+   to `Daemon(..., backup_scheduler=...)`.
+8. Extend `Daemon.__init__` (new keyword-only kwarg
+   `backup_scheduler: BackupSchedulerLike =
+   field(default_factory=_DisabledBackupScheduler)`) and
+   `Daemon.tick_once` (one unconditional call to
+   `self._backup_scheduler.tick()`) in
    `packages/foreman/src/foreman/v4/daemon.py`.
-10. Add the `~/.foreman/backups → /foreman/backups` bind mount
-    to `docker-compose.yml`.
-11. Add the `[backup]` block to
+9. Add the `~/.foreman/backups → /foreman/backups` bind mount
+   to `docker-compose.yml`.
+10. Add the `[backup]` block to
     `docker/foreman/config.toml.template`.
-12. Write the unit + integration tests enumerated in
+11. Write the unit + integration tests enumerated in
     Acceptance.
-13. Add the RUNBOOK section.
+12. Add the RUNBOOK section.
 
 ## File-level changes
 - `packages/foreman/src/foreman/v4/state_backup.py` — NEW:
   `RetentionPolicy`, `take_snapshot`, `prune_snapshots`,
-  `BackupScheduler` (+ `_DisabledBackupScheduler` sentinel).
+  `BackupScheduler` (with `bus: EventBus` constructor parameter
+  and the `from_config` classmethod factory),
+  `_DisabledBackupScheduler` sentinel, and the
+  `BackupSchedulerLike = BackupScheduler | _DisabledBackupScheduler`
+  type alias.
 - `packages/foreman/src/foreman/v4/config.py` — add
   `BackupConfig` model; add `backup` field on `V4Config`;
   extend `load_config` to forward the `[backup]` block.
-- `packages/foreman/src/foreman/v4/events.py` — add
-  `DaemonEvent` parent + `BackupTakenEvent` +
-  `BackupFailedEvent`.
+- `packages/foreman/src/foreman/v4/events.py` — rename today's
+  `Event` → `TicketEvent`; introduce a new common base `Event`
+  (only `at: dt.datetime`); reparent the five existing
+  state-machine event classes from `Event` to `TicketEvent`; add
+  `DaemonEvent` parent + `BackupTakenEvent` + `BackupFailedEvent`
+  hanging off it.
+- `packages/foreman/src/foreman/v4/event_bus.py` — widen the
+  `publish` exception-logging path to handle `DaemonEvent`
+  (isinstance-guard the ticket-scoped attribute access; degraded
+  log line in the daemon-event arm).
 - `packages/foreman/src/foreman/v4/observers/structured_log.py`
   — add `DaemonEvent` guard at top of `__call__`; add two
   `_EVENT_NAMES` entries; add two per-event-type
@@ -570,14 +703,22 @@ unconditional. Single shape, single test, no drift.
 - `packages/foreman/src/foreman/v4/observers/event_archive.py`
   — add `isinstance(event, DaemonEvent): return` no-op guard
   at top of `__call__`.
-- `packages/foreman/src/foreman/v4/daemon.py` — add
-  `backup_scheduler: BackupScheduler | None = None` kwarg on
-  `__init__`; store; call `self._backup_scheduler.tick()` from
+- `packages/foreman/src/foreman/v4/observers/metrics.py`
+  — add `isinstance(event, DaemonEvent): return` no-op guard
+  at top of `__call__` (above the `event.state_name` access).
+- `packages/foreman/src/foreman/v4/daemon.py` — add keyword-only
+  `backup_scheduler: BackupSchedulerLike =
+  field(default_factory=_DisabledBackupScheduler)` kwarg on
+  `__init__`; import `BackupSchedulerLike` and
+  `_DisabledBackupScheduler` from `state_backup`; store; call
+  `self._backup_scheduler.tick()` (one unconditional call) from
   `tick_once()` after `self._pool.tick()` and before the
   bounded drain.
-- `packages/foreman/src/foreman/v4/bootstrap.py` — construct
-  `BackupScheduler` from `config.backup` + `repo.connection`
-  + `bus`; pass through to `Daemon(...)`.
+- `packages/foreman/src/foreman/v4/bootstrap.py` — call
+  `BackupScheduler.from_config(config.backup,
+  src_conn=repo.connection, bus=bus)` and pass the returned
+  scheduler (real or `_DisabledBackupScheduler`) to
+  `Daemon(...)`.
 - `packages/foreman/src/foreman/v4/cli/__init__.py` — register
   `app.command("restore")(cmd_restore)`.
 - `packages/foreman/src/foreman/v4/cli/daemon.py` — rename
