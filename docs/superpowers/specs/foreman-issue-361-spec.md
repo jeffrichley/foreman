@@ -15,8 +15,16 @@ short Anthropic outages. Tracks
   one new variant: `TRANSIENT_PROVIDER_ERROR = "transient_provider_error"`.
   The class docstring lists it alongside the existing five values, and the
   per-role outcome-kind matrix in
-  `docs/superpowers/specs/foreman-v1-architectural-spec.md` is updated to
-  note that every role-dispatch state may emit it.
+  `docs/superpowers/specs/2026-06-13-foreman-v4-substrate-redesign-design.md`
+  (section `Per-role kind matrix`, currently at line 215 of that file —
+  the matrix does NOT live in `foreman-v1-architectural-spec.md`; that
+  earlier path was wrong) is updated by appending
+  `· TRANSIENT_PROVIDER_ERROR` to EACH of the six rows (Planner,
+  Reviewer-on-spec, Fixer-on-spec, Worker, Reviewer-on-impl,
+  Fixer-on-impl) since every role-dispatch state may emit it. The
+  `outcome.py` docstring already cites that design doc as
+  `"Outcome JSON — role-side reporting contract"`, so the matrix path
+  is also the natural one to reference from the new docstring line.
 - [ ] `ProviderTransientError(ProviderError)` is added in
   `packages/foreman/src/foreman/providers/exceptions.py` with a docstring
   that says: "Anthropic-side transient transport failure — 5xx, 429,
@@ -302,10 +310,78 @@ short Anthropic outages. Tracks
   `next_action_at` is not None AND `> self._clock()`. Tickets whose
   `next_action_at <= now` are enqueued normally (no separate
   clear-on-poll — clearing happens at successful execution; see below).
+- [ ] **CRITICAL — widen `TicketState.next_state` to accept `ctx`
+  (Option A from the Reviewer's two viable shapes).** The transient-
+  retry plumbing needs `ctx.repo` / `ctx.bus` / `ctx.clock` in scope
+  at routing time, but the existing abstract signature at
+  `packages/foreman/src/foreman/v4/state.py:190-192` is
+  `next_state(self, outcome: Outcome) -> TicketState | None` — no
+  `ctx` parameter — and `state.py:313` invokes it as
+  `self.next_state(outcome)`. Concrete edits:
+  1. **`packages/foreman/src/foreman/v4/state.py`** — change the
+     abstract signature to
+     `next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None`
+     and update the call site at `state.py:313` from
+     `next_ = self.next_state(outcome)` to
+     `next_ = self.next_state(ctx, outcome)`. The docstring on the
+     abstract method gains one sentence: "The `ctx` parameter
+     mirrors the other lifecycle hooks (`enter` / `execute` /
+     `verify` / `exit`) and is load-bearing for the
+     `RoleDispatchState` transient-retry intercept (foreman#361)."
+  2. **`packages/foreman/src/foreman/v4/states/role_dispatch.py`** —
+     update the delegating override at `role_dispatch.py:37` to the
+     new signature
+     `next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None`.
+     The body becomes the Template Method described below.
+     `next_state_for(self, outcome)` on subclasses stays unchanged —
+     the new signature only widens the OUTER routing method, not the
+     per-state inner branching, so the six concrete
+     role-dispatch subclasses (`planning.py:14`, `spec_review.py`,
+     `spec_fix.py:13`, `implementing.py:20`, `impl_review.py`,
+     `impl_fix.py:13`) need NO source edit at all — they keep
+     overriding the unchanged `next_state_for`.
+  3. **`packages/foreman/src/foreman/v4/states/queued.py`** —
+     update the concrete `next_state` override at `queued.py:19` to
+     the new `(self, ctx, outcome)` signature. Body unchanged.
+  4. **`packages/foreman/src/foreman/v4/states/merging.py`** —
+     update the concrete `next_state` override at `merging.py:169`
+     to the new `(self, ctx, outcome)` signature. Body unchanged.
+  5. **`packages/foreman/src/foreman/v4/states/terminal.py`** —
+     update the concrete `next_state` override on `_TerminalState`
+     at `terminal.py:26` to the new `(self, ctx, outcome)`
+     signature. Body unchanged (still `return None`). The four
+     concrete terminal subclasses (`DoneState`, `FailedState`,
+     `NeedsHelpState`, `CompletedState`) inherit from
+     `_TerminalState` so they pick up the new signature for free.
+  6. **Tests** — every test fixture that subclasses `TicketState`
+     and defines its own `next_state` must have the signature
+     widened to `(self, ctx, outcome)`. The bodies do not change.
+     Concretely (one-line signature edit each):
+     `packages/foreman/tests/v4/states/test_role_dispatch.py`
+     (the `_Demo` fixture; it overrides `next_state_for` so this
+     file only ripples if it ALSO defines `next_state` — verify
+     during the edit and skip if not),
+     `packages/foreman/tests/v4/test_transition.py` (4 fixtures
+     at lines 44, 57, 92, 452),
+     `packages/foreman/tests/v4/test_transition_events.py`
+     (6 fixtures at lines 31, 44, 116, 207, 332, 428 — note that
+     two are typed as `def next_state(self, outcome):` without
+     annotations; they still need the `ctx` parameter inserted),
+     `packages/foreman/tests/v4/test_state_abc.py` (1 fixture at
+     line 23),
+     `packages/foreman/tests/v4/test_fanout_integration.py`
+     (2 fixtures at lines 27, 40).
+  Why Option A over Option B (override `transition()` on
+  `RoleDispatchState`): symmetry with the existing lifecycle hooks
+  (`enter` / `execute` / `verify` / `exit` all take `ctx` first),
+  no duplication of the ~100-line `transition()` orchestration in
+  the role-dispatch base class, and the per-file diff is purely
+  mechanical — every non-base call site just gains one parameter.
 - [ ] `RoleDispatchState.next_state` in
   `packages/foreman/src/foreman/v4/states/role_dispatch.py` becomes a
   Template Method that intercepts `TRANSIENT_PROVIDER_ERROR` before
-  delegating to `next_state_for`. When the outcome kind is
+  delegating to `next_state_for`. With the widened signature from the
+  previous bullet, `ctx` is in scope. When the outcome kind is
   `TRANSIENT_PROVIDER_ERROR`:
   1. Count consecutive `TRANSIENT_PROVIDER_ERROR` outcomes on this
      ticket via a new repo helper
@@ -322,6 +398,9 @@ short Anthropic outages. Tracks
      `ExecuteCompletedEvent`'s outcome already carries the
      `provider_status` details and the state-machine's existing
      terminal-landing plumbing emits the label.
+  Non-transient outcomes fall through to `return self.next_state_for(outcome)`
+  unchanged — `next_state_for`'s signature stays narrow so concrete
+  subclasses are not touched.
 - [ ] `count_consecutive_transient_provider_errors` is added to the
   `TicketRepository` Protocol and both impls. The implementation walks
   `state_instances` for `ticket_id` ORDER BY `sequence DESC` and counts
@@ -634,11 +713,18 @@ transient pre-check (new) → auth-retry → translator**.
     suspended tickets.
 11. Add `TransientProviderErrorEvent` in `events.py`; wire it into
     `StructuredLogObserver._EVENT_NAMES`.
-12. Modify `RoleDispatchState.next_state` (in
-    `states/role_dispatch.py`) to intercept
+12. Widen `TicketState.next_state` to take `ctx` as first parameter
+    (Option A — symmetric with `enter`/`execute`/`verify`/`exit`).
+    This ripples through `state.py` (abstract def + call site at line
+    313), `states/role_dispatch.py` (delegating override),
+    `states/queued.py` / `states/merging.py` /
+    `states/terminal.py` (signature widening, body unchanged), and
+    the five test files that define `next_state` fixtures. Then
+    modify `RoleDispatchState.next_state` to intercept
     `TRANSIENT_PROVIDER_ERROR` (schedule next attempt OR escalate to
     NeedsHelp) AND clear `next_action_at` on every other outcome
-    kind.
+    kind, using the now-in-scope `ctx`. Concrete-state subclasses'
+    `next_state_for` is NOT touched.
 13. Add the transient catch arm to each of the four role CLIs:
     `planner.py:run_planner_cli`, `reviewer.py:run_reviewer_cli`,
     `worker.py:run_worker_cli`, `fixer.py:run_fixer_cli`.
@@ -693,8 +779,31 @@ transient pre-check (new) → auth-retry → translator**.
   `TransientProviderErrorEvent`.
 - `packages/foreman/src/foreman/v4/observers/structured_log.py` —
   wire the new event class.
+- `packages/foreman/src/foreman/v4/state.py` — widen the abstract
+  `next_state` signature to `(self, ctx: StateContext, outcome: Outcome)`
+  and update the call site at line 313 (`self.next_state(ctx, outcome)`).
+  See the dedicated CRITICAL acceptance bullet above for the rationale
+  (Option A — symmetry with the other ctx-first lifecycle hooks).
 - `packages/foreman/src/foreman/v4/states/role_dispatch.py` —
-  Template Method extension on `next_state`.
+  Template Method extension on `next_state` (now `(self, ctx, outcome)`);
+  delegates non-transient outcomes to the unchanged `next_state_for`.
+- `packages/foreman/src/foreman/v4/states/queued.py` — widen
+  `next_state` override at line 19 to `(self, ctx, outcome)`. Body
+  unchanged.
+- `packages/foreman/src/foreman/v4/states/merging.py` — widen
+  `next_state` override at line 169 to `(self, ctx, outcome)`. Body
+  unchanged.
+- `packages/foreman/src/foreman/v4/states/terminal.py` — widen
+  `_TerminalState.next_state` at line 26 to `(self, ctx, outcome)`.
+  All four concrete terminal subclasses inherit the new signature.
+- `packages/foreman/tests/v4/states/test_role_dispatch.py`,
+  `packages/foreman/tests/v4/test_transition.py`,
+  `packages/foreman/tests/v4/test_transition_events.py`,
+  `packages/foreman/tests/v4/test_state_abc.py`,
+  `packages/foreman/tests/v4/test_fanout_integration.py` — widen
+  the fixture `next_state` signatures to match the abstract
+  method's new shape; bodies do not change. See the CRITICAL
+  acceptance bullet for the per-file line numbers.
 - `packages/foreman/src/foreman/roles/planner.py`,
   `reviewer.py`, `worker.py`, `fixer.py` — transient catch arm
   in each role's `run_*_cli`.
