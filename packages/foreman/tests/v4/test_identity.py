@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-from foreman.auth import InstallationToken
+from foreman.auth import AppMetadata, InstallationToken
 from foreman.v4.config import AppCredentials, AppsConfig, OrchestratorConfig
 from foreman.v4.identity import V4IdentityRegistry
 
@@ -28,6 +28,17 @@ def _apps() -> AppsConfig:
 
 def _orchestrator() -> OrchestratorConfig:
     return OrchestratorConfig(app_id=5, private_key_path="/tmp/orchestrator.pem")
+
+
+def _fake_app_metadata(app_id: int, slug: str) -> AppMetadata:
+    """Convenience builder for ``AppMetadata`` test fixtures.
+
+    Mirrors the v3 ``tests/test_identity.py::_fake_app_metadata`` helper
+    so the v4 ``get_role_bot_logins`` tests below stay shape-identical
+    to their v3 counterparts (foreman#335 — pin the same three contracts
+    on the v4 surface).
+    """
+    return AppMetadata(app_id=app_id, slug=slug, name="x")
 
 
 class _MutableClock:
@@ -380,3 +391,107 @@ def test_orchestrator_uses_same_installation_repo():
         (5, "owner/the-project"),  # orchestrator's app_id, installation_repo
         (1, "owner/the-project"),  # planner's app_id, same repo
     ]
+
+
+# ---------------------------------------------------------------------
+# V4IdentityRegistry.get_role_bot_logins — foreman#335.
+#
+# Added in PR #333 to satisfy the merged-in
+# ``filter_bot_self_comments(comments, identity_registry.get_role_bot_logins())``
+# call sites in the three spec-side role dispatchers (Planner / Reviewer-
+# on-spec / Fixer-on-spec). The method has no direct unit coverage on
+# main; foreman#335 mirrors the v3 trio at
+# ``packages/foreman/tests/test_identity.py:586-643`` onto this surface
+# to pin the three contracts:
+#
+# 1. ``slug-collapse``: when all four roles share one slug, the returned
+#    set has exactly one ``{slug}[bot]`` entry (set semantics
+#    deduplicate accidental slug collisions).
+# 2. ``per-role-distinct``: when each role's App resolves to a distinct
+#    slug, all four bot logins appear in the set.
+# 3. ``cache-amortized``: repeated calls reuse the per-role metadata
+#    cache — the first invocation fires four ``GET /app`` calls (one
+#    per role); subsequent invocations fire zero.
+# ---------------------------------------------------------------------
+
+
+def test_get_role_bot_logins_returns_one_login_per_role_when_slugs_collapse() -> None:
+    """Default fixture: ``fetch_app_metadata`` returns the same
+    ``AppMetadata`` regardless of which role asks. Set semantics
+    deduplicate the four ``"foreman-planner[bot]"`` entries to one.
+
+    The deduplication is desirable when projects accidentally share a
+    slug across roles (the foreman daemon's "single GitHub App per
+    role" assumption can drift in test fixtures); the rendered filter
+    set stays correct."""
+    fake_meta = _fake_app_metadata(app_id=1, slug="foreman-planner")
+    with patch(
+        "foreman.v4.identity.fetch_app_metadata", return_value=fake_meta,
+    ):
+        registry = V4IdentityRegistry(
+            apps=_apps(),
+            orchestrator=_orchestrator(),
+            installation_repo="owner/project",
+        )
+        logins = registry.get_role_bot_logins()
+    assert logins == {"foreman-planner[bot]"}
+
+
+def test_get_role_bot_logins_returns_all_four_when_slugs_differ() -> None:
+    """When each role's App resolves to a distinct slug, all four entries
+    appear in the returned set. Pins the per-role metadata fetch +
+    enumeration behavior so a deployment running four distinct
+    foreman-* GitHub Apps gets the right filter scope."""
+
+    def _meta_per_role(app_id: int, _key_path: object) -> AppMetadata:
+        # Map app_id (which uniquely identifies each role in ``_apps``)
+        # back to the role's slug. ``_apps`` assigns planner=1,
+        # reviewer=2, fixer=3, worker=4.
+        per_id_slug = {
+            1: "foreman-planner",
+            2: "foreman-reviewer",
+            3: "foreman-fixer",
+            4: "foreman-worker",
+        }
+        return AppMetadata(app_id=app_id, slug=per_id_slug[app_id], name="x")
+
+    with patch(
+        "foreman.v4.identity.fetch_app_metadata", side_effect=_meta_per_role,
+    ):
+        registry = V4IdentityRegistry(
+            apps=_apps(),
+            orchestrator=_orchestrator(),
+            installation_repo="owner/project",
+        )
+        logins = registry.get_role_bot_logins()
+    assert logins == {
+        "foreman-planner[bot]",
+        "foreman-reviewer[bot]",
+        "foreman-fixer[bot]",
+        "foreman-worker[bot]",
+    }
+
+
+def test_get_role_bot_logins_caches_metadata_per_role() -> None:
+    """Repeated calls must NOT re-fetch ``GET /app`` for the same role —
+    ``_get_app_metadata`` caches per-role metadata for the registry's
+    lifetime so the four-call cost is amortized across the daemon's
+    runtime.
+
+    First invocation: 4 ``fetch_app_metadata`` calls (one per role).
+    Subsequent invocations: 0 — every entry comes from
+    ``_app_meta_cache``.
+    """
+    fake_meta = _fake_app_metadata(app_id=1, slug="foreman-planner")
+    with patch(
+        "foreman.v4.identity.fetch_app_metadata", return_value=fake_meta,
+    ) as mock_fetch:
+        registry = V4IdentityRegistry(
+            apps=_apps(),
+            orchestrator=_orchestrator(),
+            installation_repo="owner/project",
+        )
+        registry.get_role_bot_logins()
+        registry.get_role_bot_logins()
+        registry.get_role_bot_logins()
+    assert mock_fetch.call_count == 4
