@@ -2,9 +2,8 @@
 # Foreman daemon container entrypoint.
 #
 # Responsibility:
-#  1. Copy the Compose-mounted Claude credentials secret into the
-#     directory the claude_agent_sdk expects, with 0600 perms so the
-#     SDK can refresh tokens.
+#  1. Validate that the Anthropic OAuth token env var is set (fail loud
+#     at startup rather than crashing on first API call).
 #  2. Print a startup banner naming the image SHA and the
 #     --allow-dirty flag (loud audit per the design's --allow-dirty
 #     visibility item).
@@ -14,7 +13,13 @@
 #     cleanly).
 #
 # Inputs (from compose):
-#   /run/secrets/claude_credentials — Max OAuth token JSON
+#   CLAUDE_CODE_OAUTH_TOKEN — long-lived Anthropic Max OAuth token
+#       (generate via `docker run --rm -it foreman:dev claude setup-token`;
+#       persist in .env as FOREMAN_CLAUDE_OAUTH_TOKEN; lasts ~1 year)
+#   CLAUDE_CONFIG_DIR — path the container's claude CLI uses for any
+#       private state writes (compose sets /root/.claude-container).
+#       Isolates the container from /root/.claude/ which carries the
+#       image-baked CLAUDE.md, settings.json, .mcp.json, skills, plugins.
 #   FOREMAN_LOG_DIR, FOREMAN_STATE_DIR, FOREMAN_*_APP_ID, etc.
 #   FOREMAN_CONFIG_TEMPLATE — path to the baked envsubst-able TOML
 #       (default /etc/foreman/config.toml.template). Rendered at startup
@@ -26,41 +31,30 @@
 #   non-zero — daemon crashed or setup failed
 set -euo pipefail
 
-# --- Claude credentials plumbing ----------------------------------------
-# Compose secrets default to 0400 root-only. Copy to the SDK's expected
-# location with 0600 so it can write a refreshed token.
-#
-# foreman#227 (2026-06-08): the initial copy goes stale after the host
-# rotates the OAuth token (~hourly). Background a refresh loop that
-# re-copies from the live bind-mounted secret whenever the host file is
-# newer than our local copy. Runs every 5 minutes; cheap (one stat +
-# possibly one copy). The reactive layer that handles in-flight 401s
-# lives in providers/anthropic_sdk.py — this is just the proactive belt.
-CLAUDE_DIR=/root/.claude
-CLAUDE_SECRET=/run/secrets/claude_credentials
-if [[ -r "$CLAUDE_SECRET" ]]; then
-    mkdir -p "$CLAUDE_DIR"
-    install -m 0600 "$CLAUDE_SECRET" "$CLAUDE_DIR/.credentials.json"
-else
-    echo "ERROR: $CLAUDE_SECRET not readable — Compose secret missing or perms wrong" >&2
+# --- Anthropic auth validation ------------------------------------------
+# foreman#392: the container authenticates entirely via the
+# CLAUDE_CODE_OAUTH_TOKEN env var, NOT via a shared credentials.json
+# file. Fail loud at startup if the token is missing so operators see
+# the cause immediately instead of debugging a 401 on the first role
+# dispatch ~minutes into the run.
+if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+    cat >&2 <<'ERR'
+ERROR: CLAUDE_CODE_OAUTH_TOKEN is not set.
+
+The container authenticates to Anthropic via a long-lived OAuth token
+(superseded the prior shared-credentials.json shape; see foreman#392).
+
+To generate one:
+    docker run --rm -it foreman:dev claude setup-token
+
+Paste the printed token into your .env file as:
+    FOREMAN_CLAUDE_OAUTH_TOKEN=<paste-token-here>
+
+Then restart the daemon:
+    docker compose up -d daemon
+ERR
     exit 1
 fi
-
-# Background periodic refresh. Detached via `&` and `disown` so SIGTERM
-# from `docker stop` cascades to the daemon (PID 1 child) and this loop
-# dies when the container does. Single-line JSON output lets the daemon's
-# structured log driver pick up refresh events.
-(
-    while true; do
-        if [[ "$CLAUDE_SECRET" -nt "$CLAUDE_DIR/.credentials.json" ]]; then
-            install -m 0600 "$CLAUDE_SECRET" "$CLAUDE_DIR/.credentials.json"
-            printf '{"event":"creds_refreshed","at":"%s"}\n' \
-                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
-        fi
-        sleep 300
-    done
-) &
-disown
 
 # --- Render the v4 config from the template -----------------------------
 # v4 ``V4Config`` (foreman.v4.config) takes integer ``app_id`` values

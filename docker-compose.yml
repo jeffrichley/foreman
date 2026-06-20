@@ -43,15 +43,31 @@ services:
     env_file:
       - .env
 
-    # Compose secrets — Max credentials + 5 GitHub App pem keys.
+    # Compose secrets — 5 GitHub App pem keys.
     # tmpfs-mounted at /run/secrets/<name>, read-only, never persisted in image.
+    #
+    # Anthropic auth is intentionally NOT a Compose secret. The container's
+    # claude CLI authenticates via the CLAUDE_CODE_OAUTH_TOKEN env var
+    # (below); a CLAUDE_CONFIG_DIR override points its private state at a
+    # path the host's claude session can't touch. This replaces the prior
+    # `claude_credentials` Compose-secret shape that created a shared-file
+    # race between the host's interactive claude session and the
+    # container's role subprocesses (see foreman#392).
     secrets:
       - planner_pem
       - reviewer_pem
       - fixer_pem
       - worker_pem
       - orchestrator_pem
-      - claude_credentials
+
+    # Anthropic Max auth — long-lived OAuth token generated via
+    # `docker run --rm -it foreman:dev claude setup-token`. Lives ~1 year;
+    # rotate annually. CLAUDE_CONFIG_DIR isolates the container's claude
+    # state directory so any refresh writes stay inside the container and
+    # never touch the host's ~/.claude/. See README for setup steps.
+    environment:
+      CLAUDE_CODE_OAUTH_TOKEN: ${FOREMAN_CLAUDE_OAUTH_TOKEN}
+      CLAUDE_CONFIG_DIR: /root/.claude-container
 
     # Persistent state volumes. NOT visible from the Windows host — inspect
     # via `docker exec foreman-daemon ls /foreman/...` or `docker cp`.
@@ -128,5 +144,3 @@ secrets:
     file: ${HOME}/.foreman/keys/worker.pem
   orchestrator_pem:
     file: ${HOME}/.foreman/keys/orchestrator.pem
-  claude_credentials:
-    file: ${HOME}/.claude/.credentials.json
