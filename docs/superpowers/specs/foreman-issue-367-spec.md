@@ -127,6 +127,18 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
   field, required iff `confidence == 'low'` (Reviewer never
   self-escalates to NEEDS_HELP; its surface is low-confidence on
   CLEAN / NEEDS_FIX). Validator enforces presence in that case.
+- [ ] **Validator placement guidance.** Where the role's
+  schema file already has a `model_validator(mode="after")`
+  method that enforces outcome-driven required fields, EXTEND
+  the existing method rather than adding a new one. The
+  existing methods are:
+  * `ReviewerOutput._enforce_finding_contract` at
+    `packages/foreman/src/foreman/schemas/reviewer.py:97`
+  * `WorkerOutput._enforce_outcome_required_fields` at
+    `packages/foreman/src/foreman/schemas/worker.py:282`
+  The Planner and Fixer schemas do NOT have an existing combined
+  validator; add a new `model_validator(mode="after")` method
+  named `_enforce_escalation_comment_required` for those two.
 
 ### Role prompts (six files)
 
@@ -148,8 +160,18 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
   help · What scope guardrails would unblock". The Reviewer's tool
   surface includes Bash but only for read-only recon; the section
   forbids direct comment posting via Bash.
-- [ ] `packages/foreman/src/foreman/prompts/reviewer_impl.md` gains the
-  same section (impl-side mirror).
+- [ ] `packages/foreman/src/foreman/prompts/reviewer_impl.md` gains
+  the same content requirement as `reviewer.md` BUT uses a Markdown
+  heading rather than an XML tag — `reviewer_impl.md` has zero
+  `<process>` / `<self_review>` / `<output_schema>` tag sections
+  (verify with `grep -c "^<process>\|^<self_review>\|^<output_schema>"
+  reviewer_impl.md` — returns 0). Insertion site: a new
+  `## Escalation comment` Markdown section inserted between the
+  existing `## Output` heading (line 143) and the existing
+  `## Identity` heading (line 178). The body's content is identical
+  to the XML-tag version in `reviewer.md` minus the angle-bracket
+  wrappers (the body text is identical Markdown either way; only the
+  heading style changes to match each file's existing convention).
 - [ ] `packages/foreman/src/foreman/prompts/fixer.md` gains an
   `<escalation_comment>` section gated on
   `outcome == 'incomplete'` OR `confidence == 'low'`. Content requirement
@@ -158,8 +180,16 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
   guardrails I'm applying". The Fixer's Bash tool MUST NOT be used to
   call `gh issue comment` — comments are routed via the structured
   field; the section names this explicitly.
-- [ ] `packages/foreman/src/foreman/prompts/fixer_impl.md` gains the
-  same section (impl-side mirror).
+- [ ] `packages/foreman/src/foreman/prompts/fixer_impl.md` gains
+  the same content requirement as `fixer.md` BUT uses a Markdown
+  heading rather than an XML tag — `fixer_impl.md` has zero
+  `<process>` / `<self_review>` / `<output_schema>` tag sections
+  (verify with `grep -c "^<process>\|^<self_review>\|^<output_schema>"
+  fixer_impl.md` — returns 0). Insertion site: a new
+  `## Escalation comment` Markdown section inserted between the
+  existing `## Output` heading (line 169) and the existing
+  `## Identity` heading (line 221). The body is identical to the
+  XML-tag version in `fixer.md` minus the angle-bracket wrappers.
 - [ ] `packages/foreman/src/foreman/prompts/worker.md` gains an
   `<escalation_comment>` section gated on
   `outcome in {'incomplete', 'spec_invalid'}`. Content requirement:
@@ -169,17 +199,46 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
 
 ### Role core wiring (Python-side post + fallback)
 
+- [ ] **State-instance id plumbing (prerequisite for the per-run
+  dedup key).** Before the per-role wiring below can satisfy the
+  spec's idempotency invariant ("re-emitting the same outcome on the
+  same ticket does NOT post a duplicate comment within the same
+  state-attempt sequence"), the dispatcher MUST thread the current
+  state-instance id into the role subprocess. Concrete contract:
+  * `WorkerPool._run_transition` (the call site that holds the
+    `StateInstanceRecord` after `repo.start_state_instance`) passes
+    the new instance's `id: int` into
+    `SubprocessRoleDispatcher.dispatch` as a new keyword arg
+    `state_instance_id: int`.
+  * `SubprocessRoleDispatcher.dispatch` injects it into the
+    subprocess environment as `FOREMAN_STATE_INSTANCE_ID=<id>`
+    (alongside the existing `GH_TOKEN` env var set at
+    `subprocess_dispatcher.py:238`). Env var route — not a CLI
+    flag — because the existing role CLIs (`run_planner_cli`,
+    `run_reviewer_cli`, `run_fixer_cli`, `run_worker_cli`) all
+    take only `project: str` + `issue_number: int` keyword args
+    today; adding a flag means touching every CLI signature.
+    Env var keeps the change additive.
+  * Each role core (`_run_planner_core` / `_run_reviewer_core` /
+    `_run_fixer_core` / `_run_worker_core`) reads the env var via
+    `state_instance_id = os.environ.get("FOREMAN_STATE_INSTANCE_ID")`
+    at the top of the function. When unset (legacy / direct CLI
+    invocation outside the dispatcher), falls back to the literal
+    string `"unknown"` and the per-source dedup key becomes
+    `f"state-instance-unknown-{<role-specific suffix>}"`. The
+    fallback is intentionally NOT random: under direct-CLI
+    invocation an operator IS running the role once, and a stable
+    fallback prevents accidental double-post if they invoke twice.
 - [ ] `_run_planner_core` in
   `packages/foreman/src/foreman/roles/planner.py` calls
   `post_escalation_comment` whenever `llm_output.confidence == 'low'`
   (i.e., the run is about to emit a `NEEDS_HELP` outcome from
   `run_planner_cli`). `source="role:planner"`,
-  `key=f"state-instance-{<see below>}"`. Because the role subprocess
-  does not know its `state_instance_id`, the per-run key uses the spec
-  PR number when available and falls back to
-  `f"run-{int(start_time*1000)}"` (a deterministic-within-run number) so
-  the marker is unique per role run. If `escalation_comment is None`
-  on the LLM's output (slip), the helper posts the fallback shape with
+  `key=f"state-instance-{state_instance_id}"` where
+  `state_instance_id` is read from the
+  `FOREMAN_STATE_INSTANCE_ID` env var per the plumbing contract
+  above. If `escalation_comment is None` on the LLM's output
+  (slip), the helper posts the fallback shape with
   `fallback_reason="planner LLM produced confidence=low but did not
   populate escalation_comment"`. The post happens BEFORE
   `log_planner_run` so a comment-post failure is visible in the daemon
@@ -188,15 +247,17 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
   `packages/foreman/src/foreman/roles/reviewer.py` calls
   `post_escalation_comment` whenever `llm_output.confidence == 'low'`.
   `source="role:reviewer-<target>"` (`spec_pr` or `impl_pr`),
-  `key=f"pr-{pr_number}-{llm_output.outcome}"`. Fallback applies
-  identically.
+  `key=f"state-instance-{state_instance_id}-pr-{pr_number}-{llm_output.outcome}"`
+  (state-instance prefix keeps the dedup contract uniform across
+  roles; the PR number + outcome suffix preserves the per-attempt
+  fingerprint the Reviewer needs). Fallback applies identically.
 - [ ] `_run_fixer_core` in
   `packages/foreman/src/foreman/roles/fixer.py` calls
   `post_escalation_comment` whenever
   `llm_output.outcome == 'incomplete'` OR
   `llm_output.confidence == 'low'`.
   `source="role:fixer-<target>"`,
-  `key=f"pr-{pr_number}-{llm_output.outcome}"`.
+  `key=f"state-instance-{state_instance_id}-pr-{pr_number}-{llm_output.outcome}"`.
   **Additionally**, BEFORE invoking `provider.run_agent`, the Fixer's
   core posts a pre-dispatch "received rejection" comment with
   `source="fixer-received-rejection"`,
@@ -214,8 +275,8 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
   `post_escalation_comment` whenever
   `final_outcome in {'incomplete', 'spec_invalid'}`.
   `source="role:worker"`,
-  `key=f"attempt-{attempt}-{final_outcome}"`. Fallback applies
-  identically.
+  `key=f"state-instance-{state_instance_id}-attempt-{attempt}-{final_outcome}"`.
+  Fallback applies identically.
 
 ### Sustained-BLOCKED observer (new module)
 
@@ -225,11 +286,31 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
   (the only event whose payload carries the `Outcome`). On every
   `BLOCKED`-outcome event:
   1. Compute the "blocked-reason signal" — for v1 this is
-     `outcome.summary` truncated to its first 80 chars
-     (`outcome.summary` is the human-readable BLOCKED cause; existing
-     emitters produce stable strings like "impl PR open, CI still in
-     flight" / "impl PR not yet mergeable (CI pending or merge
-     conflict)").
+     `outcome.summary` truncated to its first 80 chars. The stability
+     contract holds because there are exactly TWO `OutcomeKind.BLOCKED`
+     emit sites in the codebase (verify with
+     `grep -rn "OutcomeKind.BLOCKED" packages/foreman/src/ | grep -v "outcome_kind ==" | grep -v "OutcomeKind.BLOCKED.value"`),
+     both of which emit stable per-cause strings:
+     * `merging.py:164-165` →
+       `"impl PR not yet mergeable (CI pending or merge conflict)"`
+     * `worker.py:1666-1668` →
+       `"impl PR open, CI in flight"` (default) OR the upstream
+       `getattr(result, "summary", None)` value, which on the
+       BLOCKED path is the stable string built at `worker.py:1560`
+       (`"impl PR open, check still in flight"`).
+     The per-attempt-varying summary at `worker.py:1563`
+     (`f"{llm.outcome} (attempt {core_result.attempt})"`) belongs
+     to the `give_up` status path, which emits `OutcomeKind.NEEDS_HELP`
+     at `worker.py:1675-1677` — NOT BLOCKED — so it never reaches
+     the SustainedBlockedObserver. **Forward-compatibility rule**:
+     new BLOCKED emitters introduced by future tickets MUST emit a
+     summary that is stable across poll ticks for the same logical
+     cause (the SustainedBlockedObserver's contract requires this).
+     A regression test in
+     `packages/foreman/tests/v4/observers/test_sustained_blocked_observer.py`
+     asserts that the two current emitters produce stable strings
+     across two simulated ticks; future emitters should be added
+     to the same test as they land.
   2. Walk the ticket's `state_instances` via
      `repo.list_state_instances_for_ticket(ticket_id)` in reverse
      sequence; collect the contiguous suffix whose
@@ -340,25 +421,56 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
   receives `LabelObservabilityObserver` /
   `StructuredLogObserver` / `EventArchiveObserver` /
   `MetricsObserver`. The `host_for_project` callable is built from
-  the existing `per_project_providers` map (each value is already a
-  built `PyGithubGitProvider`; we need its sibling
-  `GitHostProvider` — the bootstrap currently constructs the v4
-  `GitProvider` only, so add a parallel
+  a NEW parallel
   `per_project_git_hosts: dict[str, GitHostProvider]` map keyed by
-  project name, built by calling
-  `build_role_resources(role="orchestrator",
-  app_id=config.orchestrator.app_id,
-  private_key_path=config.orchestrator.private_key_path, ...)`
-  per project. NOTE: unlike the four role cores (Planner / Reviewer /
-  Fixer / Worker), which read their App credentials from
-  `config.apps.<role>.app_id` / `config.apps.<role>.private_key_path`,
-  the orchestrator's credentials live at the TOP-LEVEL `config.orchestrator`
-  block — there is no `config.apps.orchestrator` (see
-  `v4/config.py:308` and `v4/identity.py:247-249`). Do NOT copy the
-  role-core call shape verbatim or it will crash at startup.
-  If the orchestrator identity is not configured for a given project,
-  the helper logs a warning and skips wiring the observer for that
-  project; this preserves the existing "additive change" discipline.
+  project name. **Type correction**: the existing
+  `per_project_providers` map at `bootstrap.py:61` holds v4
+  `foreman.v4.git_provider.GitProvider` instances, NOT v3
+  `PyGithubGitProvider` (the `PyGithubGitProvider` class lives at
+  `packages/foreman/src/foreman/v4/pygithub_git_provider.py` and is
+  the concrete factory the production
+  `git_provider_factory` happens to construct, but the dict's
+  declared element type is the v4 `GitProvider` Protocol). The
+  v4 `GitProvider` Protocol does NOT include the
+  `get_issue_comments` / `post_issue_comment` methods we need;
+  those live on the v3-shape `GitHostProvider`. So the new map is
+  genuinely a separate construction, not a downcast.
+  * **Identity plumbing for `build_role_resources`.** The helper
+    signature at `foreman/roles/__init__.py:210-216` is
+    `build_role_resources(*, registry: Any, role: str, app_id: int,
+    private_key_path: str)`. The `registry` parameter expects an
+    object with `get_role_token(role) -> str`. The
+    `bootstrap_cli_context` signature accepts an `IdentityProvider`
+    Protocol (`bootstrap.py:32-33`) whose only declared method is
+    `get_role_token(role: str) -> str` — structurally compatible
+    with the `registry` shape `build_role_resources` requires. The
+    spec change: pass the existing `identity` parameter through to
+    `build_role_resources` as `registry=identity` directly; the
+    Protocol contract is already satisfied by duck typing (and by
+    production's actual `V4IdentityRegistry`, which is the canonical
+    implementor of the same one-method contract). No widening of
+    the Protocol is required.
+  * **Orchestrator credentials location.** Per-project iteration
+    calls `build_role_resources(registry=identity, role="orchestrator",
+    app_id=config.orchestrator.app_id,
+    private_key_path=config.orchestrator.private_key_path)`. NOTE:
+    unlike the four role cores (Planner / Reviewer / Fixer / Worker),
+    which read their App credentials from
+    `config.apps.<role>.app_id` / `config.apps.<role>.private_key_path`,
+    the orchestrator's credentials live at the TOP-LEVEL
+    `config.orchestrator` block — there is no
+    `config.apps.orchestrator` (see `v4/config.py:308` and
+    `v4/identity.py:247-249`). Do NOT copy the role-core call
+    shape verbatim or it will crash at startup.
+  * **Optional configuration.** If `config.orchestrator` is not
+    configured (e.g., zero-orchestrator-Apps deployments used for
+    integration tests), the helper logs a warning, leaves
+    `per_project_git_hosts` empty for that project, and the
+    observers' `host_for_project` callable returns `None` for that
+    project. Both observers MUST treat a `None` host as a no-op
+    (logger.warning + skip) so the deployment continues without the
+    comment surface; this preserves the existing "additive change"
+    discipline.
 
 ### Subprocess crash / timeout fallback (Python-side, NOT in-role)
 
@@ -420,18 +532,63 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
     expand. Precedent: the Reviewer's findings JSON uses the same
     `<details><summary>` fold in `roles/reviewer.py` (the
     `FINDINGS_BEGIN_MARKER` block).
-  * Log path is computed in the observer using the same
-    `_fs_safe_iso_utc` helper exported from
-    `subprocess_dispatcher.py` and the role's `started_at` derived
-    from the prior `state_instances` row's `dispatched_at`. Reusing
-    the dispatcher's helper guarantees the path the observer names
-    matches the file the dispatcher actually wrote.
-- [ ] The subprocess log path
-  (`<log_dir>/<role-base>/<ticket_id>__<iso>.log`) is mentioned in
-  the terminal-landing comment's `extra_context` so operators can
-  pull the full stderr without spelunking. The path is computed
-  identically to `subprocess_dispatcher._fs_safe_iso_utc` —
-  reusing the constants ensures the comment names the actual log file.
+  * Log path is computed in the observer by GLOBBING the role's log
+    directory and picking the most-recently-modified file for the
+    ticket. Concrete contract:
+    1. The role-base directory is `<log_dir>/<role-base>` where
+       `<role-base>` is the suffix-stripped role name
+       (`reviewer-spec` / `reviewer-impl` → `reviewer`,
+       `fixer-spec` / `fixer-impl` → `fixer`, etc.). The observer
+       imports `_base_role` from
+       `foreman.v4.subprocess_dispatcher` — the same helper the
+       dispatcher uses at `subprocess_dispatcher.py:241` — so the
+       observer's directory naming and the dispatcher's directory
+       naming cannot drift.
+    2. The role name comes from the prior `state_instances` row's
+       `state_name` (e.g., `Planning` → `planner`,
+       `SpecReview` → `reviewer-spec`, `Fixing` → `fixer-spec`,
+       `Implementing` → `worker`) via a new module-level
+       `_STATE_NAME_TO_ROLE` map in
+       `terminal_landing.py` that mirrors the inverse of
+       `subprocess_dispatcher._ROLE_TO_INVOCATION`.
+    3. Glob is `role_log_dir.glob(f"{ticket_id}__*.log")`; pick the
+       file with the highest `Path.stat().st_mtime`. The dispatcher
+       writes log lines as the role runs (`buffering=1` per
+       `subprocess_dispatcher.py:253-255`), so the most-recently
+       modified file is the one whose role just crashed.
+    4. When the glob returns zero matches (e.g., the role crashed
+       before opening the log file, or the log directory was rotated
+       out of band), the observer logs `logger.warning("no log file
+       found for ticket %s under %s", ticket_id, role_log_dir)` and
+       sets `log_path = None`. The comment is still posted; the
+       `extra_context` block renders `(log file not found)` for the
+       path and `(log file missing or unreadable)` for the tail.
+    5. The glob-by-mtime strategy is preferred over reconstructing
+       the iso timestamp from `state_instances` because
+       `StateInstanceRecord` (`packages/foreman/src/foreman/v4/records.py:45-58`)
+       has NO `dispatched_at` field — only `entered_at` /
+       `execute_started_at` / `execute_completed_at` / `exited_at` —
+       AND because the dispatcher captures its OWN
+       `started_at = dt.datetime.now(dt.UTC)` at
+       `subprocess_dispatcher.py:240` (never persisted) while the
+       state-machine clock wired in `bootstrap.py:78` is
+       `dt.datetime.now` (naive local time). Even if a future
+       schema migration adds `dispatched_at` to
+       `state_instances`, the two clocks would still differ; the
+       glob-by-mtime strategy is robust against this mismatch by
+       construction. The trade-off: when two ticket attempts dispatch
+       within the same daemon tick (vanishingly rare; the dispatcher
+       holds the SQLite write lock between attempts), the glob may
+       resolve to a sibling attempt's log. We accept that — the
+       sibling attempt's log is still SOMETHING the operator can
+       triage, vs. an exact-match strategy that hands the operator
+       a `FileNotFoundError`.
+- [ ] The subprocess log path resolved per the strategy above is
+  mentioned in the terminal-landing comment's `extra_context` so
+  operators can pull the full stderr without spelunking. When the
+  glob returns no match, the comment names the role's log directory
+  (`<log_dir>/<role-base>`) instead so operators have a starting
+  point.
 - [ ] **Retry-cap-trip recovery (failure_reason is generic on this
   path).** On the subprocess-crash → retry-cap → NeedsHelp path,
   `state_instances[-2]`'s `failure_reason` is the generic "state X
@@ -442,7 +599,15 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
   "execute"` AND whose `failure_reason` matches the regex
   `r"exited \d+"` (i.e., the actual crash row, not the cap-trip
   row). Use that crash row's `failure_reason` as the input to
-  `extract_subprocess_failure_signals`. When no such row is found
+  `extract_subprocess_failure_signals`. **Log path on this fallback
+  path**: the observer names the log file resolved by the
+  glob-by-mtime strategy above — which is the MOST RECENT log file
+  for the ticket under the role directory — NOT the earliest
+  crash row's log. The most-recent log is the operator's best
+  starting point because each attempt's crash signal is logged
+  fresh; the earliest crash's exit code is informational for
+  triage, but the operator typically wants to pull the most
+  recent attempt's output. When no `r"exited \d+"` row is found
   (e.g., the cap was tripped by some other failure phase),
   `exit_code` falls back to `None` and the comment names "(retry
   cap exhausted; original crash exit code not recoverable — see
@@ -596,30 +761,38 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
   threshold, and `foreman:retry` as the standard re-dispatch verb.
 
 ## Approach
-**Pattern naming (Decision 4 — calibrated lens).** Three patterns
-apply, plus one Google principle:
+**Pattern naming (Decision 4 — calibrated lens).** One GoF pattern,
+one Google principle, plus one project-local idiom that is
+explicitly NOT a pattern:
 
 1. **Observer Pattern (GoF)** — `SustainedBlockedObserver` and
    `TerminalLandingObserver` are new observers on the existing
    `EventBus`, sibling to `LabelObservabilityObserver` and
    `StructuredLogObserver`. The mechanism is already in place; we're
    adding two new subscribers, not inventing a notification surface.
-2. **Marker-fenced idempotency** — every posted comment carries an
-   HTML-comment marker (`<!-- foreman:escalation:begin
-   ticket=...:source=...:key=... -->`). Existence-check is a literal
-   substring scan over `host.get_issue_comments(...)`. Direct precedent:
-   the Reviewer's `FINDINGS_BEGIN_MARKER` / `FINDINGS_END_MARKER`
-   handshake in `roles/reviewer.py:105-106` and
-   `roles/fixer.py:75-80`. The substring shape generalizes the
-   Reviewer's pattern (the Reviewer's markers are static; ours embed
-   the dedup key) without inventing a new mechanism.
-3. **"Make the right thing easy" (Google SRE)** — comment
+2. **"Make the right thing easy" (Google SRE)** — comment
    construction lives in ONE module
    (`roles/_escalation_comment.py`); the four role cores + two
    observers + Fixer pre-dispatch all call
    `post_escalation_comment` with their own `source` / `key` /
    `payload`. A future operator who wants to tune the body skeleton,
    the marker shape, or the post-then-skip semantics edits one file.
+3. **No GoF pattern applies for the HTML-comment-marker dedup
+   mechanism — this is a project-local idiom.** Per `CLAUDE.md`'s
+   calibration rule ("if neither GoF nor a Google principle applies
+   cleanly, say so explicitly — pattern-fishing produces worse code
+   than no pattern at all"), the marker-fenced dedup mechanism is
+   reused from the existing precedent in the Foreman codebase:
+   the Reviewer's `FINDINGS_BEGIN_MARKER` / `FINDINGS_END_MARKER`
+   handshake in `roles/reviewer.py:105-106` and
+   `roles/fixer.py:75-80`. Our shape generalizes the Reviewer's
+   markers (which are static) by embedding the dedup key inside the
+   begin marker (`<!-- foreman:escalation:begin
+   ticket=...:source=...:key=... -->`) so the existence check
+   remains a literal substring scan over
+   `host.get_issue_comments(...)`. Reusing the local convention
+   beats inventing a new one, even though it does not map to a
+   canonical pattern name.
 
 **Why the LLM populates `escalation_comment` as structured output
 rather than posting via Bash directly.** The Planner and Reviewer
@@ -662,15 +835,19 @@ true even when the role-side path is dead.
 **Why `outcome.summary` as the sustained-BLOCKED reason signal
 rather than `outcome.kind` alone.** `OutcomeKind.BLOCKED` is one
 value; the SAME `BLOCKED` outcome means different things in
-different states (Implementing-BLOCKED → "CI in flight on impl
-PR"; Merging-BLOCKED → "PR not mergeable, polling"). The
-threshold-crossing semantics differ — operators care about whether
-the underlying signal is making progress, not whether the state
-machine is polling. The `summary` field is the human-readable
-signal; existing emitters produce stable strings (verified in
-`states/implementing.py` + `states/merging.py`); hashing the
-first 80 chars gives a stable per-reason key without coupling to
-the `details` dict's per-state shape.
+different states (Implementing-BLOCKED → "impl PR open, CI in
+flight"; Merging-BLOCKED → "impl PR not yet mergeable (CI pending
+or merge conflict)"). The threshold-crossing semantics differ —
+operators care about whether the underlying signal is making
+progress, not whether the state machine is polling. The `summary`
+field is the human-readable signal; only TWO BLOCKED emitters
+exist today (enumerated in the SustainedBlockedObserver
+acceptance criterion above, both with stable strings); hashing
+the first 80 chars gives a stable per-reason key without coupling
+to the `details` dict's per-state shape. The forward-compatibility
+contract requires new BLOCKED emitters to also produce stable
+summaries; the SustainedBlockedObserver regression test catches
+drift.
 
 **Why both observers wire from `bootstrap_cli_context` rather than
 auto-registering at module load.** The observers need per-project
@@ -692,23 +869,33 @@ attached today.
    validator presence check.
 3. Update the six role prompts (`planner.md` / `reviewer.md` /
    `reviewer_impl.md` / `fixer.md` / `fixer_impl.md` / `worker.md`)
-   with the new `<escalation_comment>` section.
-4. Wire `_run_planner_core` to call `post_escalation_comment` on the
-   low-confidence path. Add the fallback shape for the missing-field
-   slip.
-5. Wire `_run_reviewer_core` identically on its low-confidence path.
-6. Wire `_run_fixer_core` on incomplete / low-confidence, AND add the
+   with the new `<escalation_comment>` section / `## Escalation
+   comment` Markdown section per each file's existing convention.
+4. **State-instance id plumbing.** Extend
+   `SubprocessRoleDispatcher.dispatch` to accept
+   `state_instance_id: int` and inject it as
+   `FOREMAN_STATE_INSTANCE_ID` in the subprocess env. Extend
+   `WorkerPool._run_transition` to forward
+   `StateInstanceRecord.id` into the dispatcher call. This step
+   MUST land before the role-core wiring so the env var is
+   available at every dedup-key construction site.
+5. Wire `_run_planner_core` to call `post_escalation_comment` on the
+   low-confidence path, reading
+   `FOREMAN_STATE_INSTANCE_ID` per the plumbing above. Add the
+   fallback shape for the missing-field slip.
+6. Wire `_run_reviewer_core` identically on its low-confidence path.
+7. Wire `_run_fixer_core` on incomplete / low-confidence, AND add the
    pre-dispatch "received rejection" post.
-7. Wire `_run_worker_core` on incomplete / spec_invalid.
-8. Add `SustainedBlockedObserver` consuming `ExecuteCompletedEvent`
+8. Wire `_run_worker_core` on incomplete / spec_invalid.
+9. Add `SustainedBlockedObserver` consuming `ExecuteCompletedEvent`
    with the per-reason scan + 15-minute threshold + marker dedup.
-9. Add `TerminalLandingObserver` consuming `StateEnteredEvent` for
-   `NeedsHelp` / `Failed` with the 5-minute role-comment window
-   heuristic.
-10. Extend `bootstrap_cli_context` to construct + wire both
+10. Add `TerminalLandingObserver` consuming `StateEnteredEvent` for
+    `NeedsHelp` / `Failed` with the 5-minute role-comment window
+    heuristic and the glob-by-mtime log-path resolution.
+11. Extend `bootstrap_cli_context` to construct + wire both
     observers (and the `per_project_git_hosts` map they need).
-11. Write the unit + integration tests enumerated in Acceptance.
-12. Add the RUNBOOK section.
+12. Write the unit + integration tests enumerated in Acceptance.
+13. Add the RUNBOOK section.
 
 ## File-level changes
 - `packages/foreman/src/foreman/roles/_escalation_comment.py` —
@@ -747,6 +934,15 @@ attached today.
 - `packages/foreman/src/foreman/v4/observers/terminal_landing.py` —
   NEW: `TerminalLandingObserver` + 5-minute window constant.
 - `packages/foreman/src/foreman/v4/observers/__init__.py` — re-export.
+- `packages/foreman/src/foreman/v4/subprocess_dispatcher.py` — extend
+  `SubprocessRoleDispatcher.dispatch` signature with a new
+  `state_instance_id: int` keyword arg; inject
+  `FOREMAN_STATE_INSTANCE_ID=<id>` into the subprocess env alongside
+  the existing `GH_TOKEN`.
+- `packages/foreman/src/foreman/v4/worker_pool.py` — extend
+  `WorkerPool._run_transition` to forward the active
+  `StateInstanceRecord.id` to `dispatcher.dispatch` as the new
+  `state_instance_id` arg.
 - `packages/foreman/src/foreman/v4/bootstrap.py` — construct +
   wire both observers; build `per_project_git_hosts` map.
 - `packages/foreman/tests/v4/roles/test_escalation_comment.py` —
