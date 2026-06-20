@@ -26,35 +26,143 @@ short Anthropic outages. Tracks
   `packages/foreman/src/foreman/providers/__init__.py` (`__all__`) so role
   runners import it via `from foreman.providers import
   ProviderTransientError`.
-- [ ] `_translate_sdk_exception` in
-  `packages/foreman/src/foreman/providers/anthropic_sdk.py` classifies the
-  following as `ProviderTransientError` BEFORE the existing fallthrough to
-  `ProviderUnknownError`:
-  * Any exception whose `str(exc)` starts with the existing
-    `_SDK_AUTH_ERROR_PREFIX` constant (defined at
-    `anthropic_sdk.py:63` as `"Claude Code returned an error result"`)
-    AND contains any of the substrings
-    `"429"`, `"rate_limit"`, `"rate limit"`, `"overloaded"`, `"503"`,
-    `"502"`, `"504"`, `"500"`, `"connection refused"`,
-    `"connection reset"`, `"connection aborted"`,
-    `"timeout"` (case-insensitive on the substring search; the
-    prefix check stays case-sensitive). Note: the constant name
-    `_SDK_AUTH_ERROR_PREFIX` is now misleading because it covers
-    both auth and transport failures, but renaming it is
-    explicitly out of scope here — the existing auth-retry guards
-    at lines 167 / 272 / 299 reference it by name, and a rename
-    would balloon the diff without semantic gain. Leave the name
-    alone and document the dual role in the function docstring.
-  * Best-effort `isinstance` check against `anthropic.APIConnectionError`,
-    `anthropic.RateLimitError`, `anthropic.APITimeoutError`, and
+- [ ] **Transient classifier helper (single source of truth).** Add a
+  module-level helper
+  `_is_transient_sdk_error(exc: BaseException) -> bool` in
+  `packages/foreman/src/foreman/providers/anthropic_sdk.py` placed
+  adjacent to (and BEFORE) `_translate_sdk_exception` near line 145
+  so both `_translate_sdk_exception` AND the auth-retry guards in
+  `run_agent` can call it. The substrings list lives in one
+  module-level `_TRANSIENT_PATTERNS: tuple[str, ...]` tuple so
+  future operators tuning the classifier have exactly one place
+  to edit (Approach: "make the right thing easy"). The helper
+  returns True iff EITHER:
+  * `isinstance(exc, Exception)` AND `str(exc)` starts with
+    `_SDK_AUTH_ERROR_PREFIX` (defined at `anthropic_sdk.py:63`
+    as `"Claude Code returned an error result"`) AND
+    `str(exc).lower()` contains any of `_TRANSIENT_PATTERNS`,
+    whose contents are: `"429"`, `"rate_limit"`, `"rate limit"`,
+    `"overloaded"`, `"503"`, `"502"`, `"504"`, `"500"`,
+    `"connection refused"`, `"connection reset"`,
+    `"connection aborted"`, `"timeout"` (the prefix check stays
+    case-sensitive; only the substring search lowercases the
+    haystack). Note: the constant name `_SDK_AUTH_ERROR_PREFIX`
+    is now misleading because it covers both auth and transport
+    failures, but renaming it is explicitly out of scope here —
+    the existing auth-retry guards at lines 167 / 272 / 299
+    reference it by name and a rename would balloon the diff
+    without semantic gain. Leave the name alone and document the
+    dual role in `_is_transient_sdk_error`'s docstring.
+  * OR best-effort `isinstance` check against
+    `anthropic.APIConnectionError`, `anthropic.RateLimitError`,
+    `anthropic.APITimeoutError`, or
     `anthropic.InternalServerError`. Import is guarded by
     `try: import anthropic` at module load; if `anthropic` isn't
-    importable (test stub environments) the isinstance branch is a no-op
-    and only the string-pattern path is active.
-  * `asyncio.TimeoutError` keeps mapping to `ProviderTimeoutError`
-    (existing behavior); the new transient classifier is a **second**
-    branch placed AFTER the timeout branch and BEFORE the auth-prefix
-    branch — order is documented in the function docstring.
+    importable (test stub environments) the isinstance branch is
+    a no-op and only the string-pattern path is active.
+- [ ] `_translate_sdk_exception` in
+  `packages/foreman/src/foreman/providers/anthropic_sdk.py` classifies
+  exceptions matching `_is_transient_sdk_error(exc)` as
+  `ProviderTransientError(str(exc))` as a NEW branch placed
+  AFTER the existing `asyncio.TimeoutError` branch and BEFORE the
+  existing auth-prefix branch. `asyncio.TimeoutError` keeps mapping
+  to `ProviderTimeoutError` (existing behavior). The final branch
+  order in `_translate_sdk_exception` becomes (documented verbatim
+  in the function docstring):
+  1. `asyncio.TimeoutError` → `ProviderTimeoutError` (existing).
+  2. `_is_transient_sdk_error(exc)` → `ProviderTransientError`
+     (NEW — covers the case where a transient slips past the
+     `run_agent`-level pre-check, e.g. an `_iterate_query`-internal
+     raise that re-enters translation without going through the
+     auth-retry block).
+  3. `str(exc).startswith(_SDK_AUTH_ERROR_PREFIX)` →
+     `ProviderAuthError` (existing).
+  4. Default → `ProviderUnknownError` (existing).
+- [ ] **CRITICAL — auth-retry control flow short-circuits transients
+  upstream (foreman#361 Reviewer-identified gap).**
+  `AnthropicSDKProvider.run_agent` in `anthropic_sdk.py` has two
+  prefix-match decision points (lines 272 and 299) that currently
+  send every exception starting with `_SDK_AUTH_ERROR_PREFIX` down
+  the credential-refresh / auth-retry path. Without the edits
+  below, a Claude-Code-wrapped 5xx/429
+  (`"Claude Code returned an error result: 503 ..."`) matches the
+  prefix and never reaches `_translate_sdk_exception`, so the
+  role's `except ProviderTransientError` arm never fires for the
+  common scenario described in the issue. Concrete edits:
+  1. **At `anthropic_sdk.py:272`** (the outer `except Exception
+     as e:` arm in `run_agent`, right after the recovery-chain
+     short-circuit at line 269 AND BEFORE the existing
+     `if not str(e).startswith(_SDK_AUTH_ERROR_PREFIX):` branch
+     at 272), insert:
+     ```python
+     # foreman#361: classify transient transport failures BEFORE
+     # the auth-retry decision. A Claude-Code-wrapped 5xx/429 also
+     # starts with _SDK_AUTH_ERROR_PREFIX, so without this guard
+     # the auth-retry block at 274 would swallow it, refresh
+     # credentials, re-run the query (burning wall-clock + budget
+     # while Anthropic is already failing), and ultimately
+     # mis-classify as ProviderAuthError.
+     if _is_transient_sdk_error(e):
+         raise ProviderTransientError(str(e)) from e
+     ```
+     so prefix-matching transients skip the credential-refresh
+     dance entirely.
+  2. **At `anthropic_sdk.py:299`** (the inner `except Exception
+     as retry_exc:` arm after the auth-retry, right after the
+     recovery-chain short-circuit at 296 AND BEFORE the existing
+     `if str(retry_exc).startswith(_SDK_AUTH_ERROR_PREFIX):`
+     branch at 299), insert the same shape:
+     ```python
+     # foreman#361: see line 272 comment. The post-retry path
+     # also needs to classify transients BEFORE raising the
+     # "auth failed twice" ProviderAuthError.
+     if _is_transient_sdk_error(retry_exc):
+         raise ProviderTransientError(str(retry_exc)) from retry_exc
+     ```
+     so a post-retry transient still surfaces as
+     `ProviderTransientError`, not as the misleading "auth failed
+     twice" `ProviderAuthError`.
+  3. The existing comment block at `anthropic_sdk.py:231–252`
+     (the one that explains the recovery-chain → auth-retry →
+     translator ordering) is rewritten to insert the transient
+     pre-check between "recovery chain" and "auth-retry". The
+     new documented order is **recovery chain → transient
+     pre-check (new) → auth-retry → translator**. The comment
+     additionally explains *why* the transient pre-check sits
+     BEFORE the auth-retry rather than after: a Claude-Code-wrapped
+     503 looks identical to an auth error at the prefix level, and
+     the auth-retry would (a) needlessly refresh credentials,
+     (b) re-run the entire query — burning wall-clock + Anthropic
+     budget while the API is already transient-failing, (c)
+     ultimately raise `ProviderAuthError` and mis-route the failure
+     to NeedsHelp instead of the backoff scheduler. Pre-checking
+     transients keeps the auth-retry path meaning exactly what it
+     says: "this exception is plausibly an auth issue, retry once
+     after refreshing creds".
+- [ ] **Regression tests at the `run_agent` integration boundary**
+  (NOT just `_translate_sdk_exception` in isolation). Append two
+  tests to the new file
+  `packages/foreman/tests/providers/test_translate_sdk_transient.py`
+  (the same NEW file the unit tests are specced into):
+  * `test_run_agent_classifies_wrapped_transient_as_transient`:
+    drive a fake SDK whose `query()` raises
+    `Exception("Claude Code returned an error result: 503 Service
+    Unavailable")` from the first `_iterate_query` call. Assert
+    `AnthropicSDKProvider().run_agent(...)` raises
+    `ProviderTransientError` (NOT `ProviderAuthError`, NOT
+    `ProviderUnknownError`) AND that no credential-refresh
+    attempt was made (patch `_maybe_refresh_container_creds` to a
+    `MagicMock`; assert `mock.assert_not_called()`).
+  * `test_run_agent_classifies_wrapped_429_post_retry_as_transient`:
+    drive a fake SDK whose first call raises a non-transient
+    prefix-matching exception (forcing the auth-retry path) and
+    whose retry call raises a prefix-matching 429
+    (`"Claude Code returned an error result: 429 ..."`). Assert
+    `run_agent` raises `ProviderTransientError` rather than the
+    "auth failed twice" `ProviderAuthError`.
+  Both tests exercise the auth-retry control-flow short-circuit at
+  lines 272 and 299, not just `_translate_sdk_exception` in
+  isolation, and would FAIL against the unfixed control flow.
 - [ ] All four role CLI entry points in `packages/foreman/src/foreman/roles/`
   (`planner.py:run_planner_cli`, `reviewer.py:run_reviewer_cli`,
   `worker.py:run_worker_cli`, `fixer.py:run_fixer_cli`) catch
@@ -306,31 +414,44 @@ short Anthropic outages. Tracks
   drives benign-looking strings (`"Claude Code returned an error
   result: success"`, plain `"some random failure"`) and asserts the
   return type is NOT `ProviderTransientError`.
-- [ ] New test file
-  `packages/foreman/tests/roles/test_planner_transient_outcome.py`:
-  patches `_run_planner_for_v4` to raise `ProviderTransientError`,
-  calls `run_planner_cli`, asserts the emitted FOREMAN_OUTCOME JSON
+- [ ] **New test file (Planner)**
+  `packages/foreman/tests/v4/roles/test_planner_transient_outcome.py`
+  (note: alongside the existing
+  `tests/v4/roles/test_planner_outcome.py` — the
+  `packages/foreman/tests/v4/roles/` directory is the established
+  location for role-CLI tests; `packages/foreman/tests/roles/`
+  does NOT exist and must not be created). Patches
+  `_run_planner_for_v4` to raise `ProviderTransientError`, calls
+  `run_planner_cli`, asserts the emitted FOREMAN_OUTCOME JSON
   parses to `kind="transient_provider_error"` with `details`
-  populated AND the exit code is `0`. Repeat the test shape for the
-  Reviewer and Fixer CLIs in their existing test modules
-  (`tests/roles/test_reviewer.py`, `tests/roles/test_fixer.py`).
-- [ ] New test for the Worker that EXERCISES the inner-arm split:
-  add `test_worker_transient_outcome` in
-  `packages/foreman/tests/roles/test_worker.py` (or a new sibling
-  file `test_worker_transient_outcome.py`). Patch
-  `provider.run_agent` to raise `ProviderTransientError` from
-  inside `_run_worker_core`; assert (a) the inner arm at
-  `worker.py:1051` re-raises (the synthesized
+  populated AND the exit code is `0`.
+- [ ] **Additions to existing role-CLI test modules** for
+  Reviewer and Fixer transient cases — append a
+  `test_<role>_transient_outcome` function (same shape as the
+  Planner test) into the existing
+  `packages/foreman/tests/v4/roles/test_reviewer_outcome.py` and
+  `packages/foreman/tests/v4/roles/test_fixer_outcome.py`. These
+  files already exercise the OutcomeKind round-trip for each
+  role's normal outcome paths; the new transient cases sit
+  naturally alongside them.
+- [ ] **New test file (Worker) that EXERCISES the inner-arm split**:
+  add `test_worker_transient_outcome` in a new file
+  `packages/foreman/tests/v4/roles/test_worker_transient_outcome.py`
+  (alongside the existing `test_worker_outcome.py` and
+  `test_worker_core.py`). Patch `provider.run_agent` to raise
+  `ProviderTransientError` from inside `_run_worker_core`; assert
+  (a) the inner arm at `worker.py:1051` re-raises (the synthesized
   `WorkerOutput(outcome='incomplete')` path is NOT taken),
   (b) the outer `run_worker_cli` `except ProviderTransientError`
   arm fires, (c) the FOREMAN_OUTCOME JSON parses to
   `kind="transient_provider_error"` with `details` populated AND
   the exit code is `0`. A second test
   `test_worker_non_transient_provider_error_still_swallowed`
-  patches `provider.run_agent` to raise a non-transient
-  `ProviderError`; asserts the existing `incomplete`-shaped
-  `WorkerOutput` path is preserved (regression guard for the
-  documented foreman#266 inner-arm behavior).
+  in the same file patches `provider.run_agent` to raise a
+  non-transient `ProviderError`; asserts the existing
+  `incomplete`-shaped `WorkerOutput` path is preserved
+  (regression guard for the documented foreman#266 inner-arm
+  behavior).
 - [ ] New test file
   `packages/foreman/tests/v4/states/test_role_dispatch_transient.py`
   (one module, parametrized over Planning + Implementing + ImplFix as
@@ -354,11 +475,13 @@ short Anthropic outages. Tracks
   assert `qm.enqueue` was NOT called for that ticket. Then advance
   the clock past `next_action_at` and re-tick; assert the ticket is
   enqueued.
-- [ ] New test `test_retry_clears_next_action_at` in
-  `packages/foreman/tests/v4/cli/test_mutations.py`: invoke
-  `cmd_retry` against a ticket with non-null `next_action_at`;
-  assert `next_action_at` is None afterwards and the WorkItem was
-  enqueued.
+- [ ] New test `test_retry_clears_next_action_at` appended to
+  `packages/foreman/tests/v4/cli/test_mutation_commands.py` (note:
+  the file is named `test_mutation_commands.py`, NOT
+  `test_mutations.py` — the latter does not exist in the
+  `tests/v4/cli/` directory): invoke `cmd_retry` against a ticket
+  with non-null `next_action_at`; assert `next_action_at` is None
+  afterwards and the WorkItem was enqueued.
 - [ ] `docs/RUNBOOK.md` gains a new section between "Daily operations"
   and "Recovery: daemon won't start" titled "Provider transient
   failures and backoff suspension" documenting (a) what
@@ -436,7 +559,7 @@ to enqueue. Adding the `next_action_at > now` filter there is one
 line at the natural decision point and preserves the
 QueueManager's pure-set-semantics invariant.
 
-**Granular pattern detection in `_translate_sdk_exception`.** The
+**Granular pattern detection via `_is_transient_sdk_error`.** The
 Anthropic SDK exposes the transport through Claude Code as a
 subprocess, so most transport errors surface as
 `Exception("Claude Code returned an error result: ...")` strings.
@@ -447,7 +570,34 @@ catches the rare case where a raw SDK exception leaks past the CLI
 boundary (some `claude_agent_sdk` paths re-raise the underlying
 `anthropic` exception directly); `try: import anthropic` guards
 make this best-effort so test environments without `anthropic`
-installed don't break import.
+installed don't break import. The classifier is extracted into a
+module-level `_is_transient_sdk_error(exc)` helper so it has ONE
+implementation and `_translate_sdk_exception` + the auth-retry
+guards in `run_agent` both call the same function — no drift risk
+between the two sites.
+
+**Why the auth-retry block calls the classifier directly (control-
+flow short-circuit).** A subtle but load-bearing point the Reviewer
+caught: `run_agent` has TWO prefix-match decision points (lines 272
+and 299) that intercept exceptions whose `str()` starts with
+`_SDK_AUTH_ERROR_PREFIX` *before* `_translate_sdk_exception` is
+ever called. Without an upstream short-circuit, a Claude-Code-
+wrapped 5xx/429 — which DOES start with that prefix — would be
+routed into the credential-refresh / auth-retry dance instead of
+classified as transient. The auth-retry would (a) needlessly burn
+a credential refresh, (b) re-run the query while Anthropic is
+already failing, (c) ultimately raise `ProviderAuthError` and
+mis-route the failure to NeedsHelp instead of the backoff
+scheduler. The fix is one `_is_transient_sdk_error(e)` check at
+each of the two decision points, raising `ProviderTransientError`
+directly when matched. The classifier still lives inside
+`_translate_sdk_exception` as a defense-in-depth (covers
+`_iterate_query`-internal raises that bypass the outer
+`except Exception`), but the operational path for the common case
+in the issue runs through the `run_agent`-level short-circuits.
+Documented control-flow order in the rewritten
+`anthropic_sdk.py:231–252` comment block: **recovery chain →
+transient pre-check (new) → auth-retry → translator**.
 
 ## Sub-requests (topologically sorted)
 1. Add `OutcomeKind.TRANSIENT_PROVIDER_ERROR` in
@@ -456,10 +606,18 @@ installed don't break import.
 2. Add `ProviderTransientError` in
    `packages/foreman/src/foreman/providers/exceptions.py`; re-export
    from `providers/__init__.py.__all__`.
-3. Extend `_translate_sdk_exception` in
-   `packages/foreman/src/foreman/providers/anthropic_sdk.py` with the
-   transient-classification branch (string patterns + best-effort
-   `isinstance(anthropic.*)`).
+3. In `packages/foreman/src/foreman/providers/anthropic_sdk.py`:
+   (a) add the `_is_transient_sdk_error(exc)` helper +
+   `_TRANSIENT_PATTERNS` tuple; (b) extend `_translate_sdk_exception`
+   to call the helper as a NEW branch between the timeout branch and
+   the auth-prefix branch; (c) **CRITICAL — short-circuit transients
+   upstream of the auth-retry** at lines 272 and 299 of `run_agent`
+   so prefix-matching transient errors never enter the credential-
+   refresh path (without this the transient mechanism is dead code
+   for Claude-Code-wrapped 5xx/429, per Reviewer-identified gap);
+   (d) update the `anthropic_sdk.py:231–252` comment block to
+   document the new control-flow order **recovery chain → transient
+   pre-check → auth-retry → translator**.
 4. Add new `backoff.py` module with `BACKOFF_SCHEDULE_SECONDS` +
    `next_retry_delay(attempt)`.
 5. Add nullable `next_action_at TEXT` to `tickets` in `schema.sql`.
@@ -507,7 +665,15 @@ installed don't break import.
 - `packages/foreman/src/foreman/providers/__init__.py` — export
   `ProviderTransientError` in `__all__`.
 - `packages/foreman/src/foreman/providers/anthropic_sdk.py` —
-  extend `_translate_sdk_exception` classifier.
+  add `_is_transient_sdk_error` helper +
+  `_TRANSIENT_PATTERNS` tuple; extend `_translate_sdk_exception`
+  with a new transient branch (between timeout and auth-prefix);
+  **short-circuit transients in `run_agent`'s auth-retry block
+  at lines 272 and 299** (CRITICAL — without this the
+  prefix-matching path swallows wrapped 5xx/429); rewrite the
+  comment block at lines 231–252 to document the new
+  control-flow order **recovery chain → transient pre-check →
+  auth-retry → translator**.
 - `packages/foreman/src/foreman/v4/backoff.py` — NEW: the
   backoff schedule constant + helper.
 - `packages/foreman/src/foreman/v4/schema.sql` — add
@@ -540,16 +706,34 @@ installed don't break import.
   `next_action_at` column to the `cmd_ps` row dict so the
   suspension surfaces in table / json / yaml output.
 - `packages/foreman/tests/providers/test_translate_sdk_transient.py`
-  — NEW classifier tests.
-- `packages/foreman/tests/roles/test_planner_transient_outcome.py`
-  — NEW role-CLI outcome test (and analogous additions to the
-  existing reviewer/worker/fixer CLI test modules).
+  — NEW: `_translate_sdk_exception` unit tests AND
+  `run_agent`-level integration tests for the auth-retry
+  control-flow short-circuit (see the regression-test
+  acceptance bullet above).
+- `packages/foreman/tests/v4/roles/test_planner_transient_outcome.py`
+  — NEW role-CLI outcome test for the Planner. (Note: the actual
+  role-CLI test directory is `packages/foreman/tests/v4/roles/`,
+  NOT `packages/foreman/tests/roles/` — the latter does not exist.)
+- `packages/foreman/tests/v4/roles/test_reviewer_outcome.py` —
+  EXTEND with `test_reviewer_transient_outcome` (existing file;
+  do NOT create a new module).
+- `packages/foreman/tests/v4/roles/test_fixer_outcome.py` — EXTEND
+  with `test_fixer_transient_outcome` (existing file; do NOT
+  create a new module).
+- `packages/foreman/tests/v4/roles/test_worker_transient_outcome.py`
+  — NEW: hosts both `test_worker_transient_outcome` (exercises
+  the inner-arm split at `worker.py:1051`) and
+  `test_worker_non_transient_provider_error_still_swallowed`
+  (regression guard for the existing foreman#266 inner-arm
+  behavior). Sits alongside the existing
+  `test_worker_outcome.py` and `test_worker_core.py`.
 - `packages/foreman/tests/v4/states/test_role_dispatch_transient.py`
   — NEW state-machine routing + backoff + escalation tests.
 - `packages/foreman/tests/v4/test_poller.py` — append
   `test_poller_skips_suspended_ticket`.
-- `packages/foreman/tests/v4/cli/test_mutations.py` — append
-  `test_retry_clears_next_action_at`.
+- `packages/foreman/tests/v4/cli/test_mutation_commands.py` —
+  append `test_retry_clears_next_action_at`. (Note: file is
+  `test_mutation_commands.py`, NOT `test_mutations.py`.)
 - `packages/foreman/tests/v4/test_schema.py` — extend
   `test_tickets_table_columns` to include `next_action_at`.
 - `docs/RUNBOOK.md` — new "Provider transient failures and
