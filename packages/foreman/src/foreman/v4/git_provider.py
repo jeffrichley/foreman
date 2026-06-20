@@ -46,6 +46,15 @@ class PRState:
     merged: bool
     mergeable: bool
     ci_passing: bool
+    # The PR's base branch ref (e.g. "main"). Populated by
+    # ``PyGithubGitProvider.get_pr_state`` from ``pr.base.ref``.
+    # MergingState compares this against
+    # ``ProjectConfig.dev_base_branch`` before calling ``merge_pr`` so a
+    # wrong-base impl PR (foreman#341 / #347 / #357) can't silently
+    # merge into the spec branch. Default ``""`` keeps existing test
+    # fixtures that construct ``PRState`` without the field compatible;
+    # in production the PyGithub path always populates it.
+    base_ref: str = ""
 
 
 class GitProvider(Protocol):
@@ -197,7 +206,10 @@ class FakeGitProvider:
         """
         existing = self.get_pr_state(project=project, pr_number=pr_number)
         self._prs[(project, pr_number)] = PRState(
-            merged=True, mergeable=existing.mergeable, ci_passing=existing.ci_passing,
+            merged=True,
+            mergeable=existing.mergeable,
+            ci_passing=existing.ci_passing,
+            base_ref=existing.base_ref,
         )
         self.merge_pr_calls.add((project, pr_number))
 

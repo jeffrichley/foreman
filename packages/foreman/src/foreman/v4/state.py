@@ -17,7 +17,7 @@ from __future__ import annotations
 import datetime as dt
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from foreman.v4.event_bus import EventBus
@@ -34,6 +34,7 @@ from foreman.v4.repository import TicketRepository
 from foreman.v4.role_dispatcher import RoleDispatcher
 
 if TYPE_CHECKING:
+    from foreman.v4.config import ProjectConfig
     from foreman.v4.git_provider import GitProvider
 
 
@@ -60,6 +61,16 @@ class StateContext:
     role_dispatcher: RoleDispatcher | None = None
     git: GitProvider | None = None
     max_state_attempts: int = 3
+    # foreman#357: per-project config map keyed by ``ProjectConfig.name``.
+    # MergingState reads ``ProjectConfig.dev_base_branch`` from this map
+    # to enforce the impl PR's base ref matches the project's configured
+    # dev branch before merging. Default empty dict keeps headless tests
+    # (and legacy direct-StateContext constructors) green; production
+    # populates the map via ``bootstrap_cli_context`` → ``Daemon`` →
+    # ``WorkerPool._run_transition``. When ``ctx.ticket.project`` isn't
+    # in the map, MergingState logs a warning and skips the guard so the
+    # change stays additive.
+    project_configs: dict[str, ProjectConfig] = field(default_factory=dict)
 
 
 def _publish(ctx: StateContext, event_type: type, **kwargs: Any) -> None:

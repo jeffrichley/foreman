@@ -17,6 +17,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from foreman.v4.event_bus import EventBus
 from foreman.v4.git_provider import GitProvider
@@ -25,6 +26,9 @@ from foreman.v4.queue_manager import QueueManager
 from foreman.v4.repository import TicketRepository
 from foreman.v4.role_dispatcher import RoleDispatcher
 from foreman.v4.worker_pool import WorkerPool
+
+if TYPE_CHECKING:
+    from foreman.v4.config import ProjectConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +67,7 @@ class Daemon:
         config: DaemonConfig,
         clock: Callable[[], dt.datetime],
         bus: EventBus | None = None,
+        project_configs: dict[str, ProjectConfig] | None = None,
     ) -> None:
         self._repo = repo
         self._git = git
@@ -70,6 +75,11 @@ class Daemon:
         self._config = config
         self._clock = clock
         self._bus = bus
+        # foreman#357: per-project config map forwarded to WorkerPool so
+        # MergingState's base-ref guard can read dev_base_branch. Default
+        # None → empty dict keeps test-only ``Daemon(...)`` constructions
+        # working without the kwarg.
+        self._project_configs: dict[str, ProjectConfig] = project_configs or {}
         self._qm = QueueManager(repo=repo, max_in_flight=config.max_in_flight)
         # Wire the shared QM into every Poller that was constructed without one.
         self._pollers = [self._with_qm(p) for p in pollers]
@@ -77,6 +87,7 @@ class Daemon:
             repo=repo, qm=self._qm, dispatcher=dispatcher,
             git=git, bus=bus, clock=clock,
             max_state_attempts=config.max_state_attempts,
+            project_configs=self._project_configs,
         )
         self._stop = threading.Event()
 

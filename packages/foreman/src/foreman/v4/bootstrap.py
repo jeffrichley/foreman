@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Protocol
 
 from foreman.v4.cli.context import CliContext, build_cli_context
-from foreman.v4.config import V4Config
+from foreman.v4.config import ProjectConfig, V4Config
 from foreman.v4.daemon import Daemon, DaemonConfig
 from foreman.v4.event_bus import EventBus
 from foreman.v4.git_provider import GitProvider
@@ -108,6 +108,16 @@ def bootstrap_cli_context(
         ))
     bus.subscribe(MetricsObserver())
 
+    # foreman#357: per-project ProjectConfig map keyed by name. Mirrors
+    # the shape of ``per_project_providers`` above — config resolution
+    # happens at startup, the state machine receives a flat dict it can
+    # look up by ticket.project. MergingState reads
+    # ``dev_base_branch`` from this map to gate the impl-PR merge on
+    # base-ref match.
+    project_configs: dict[str, ProjectConfig] = {
+        pc.name: pc for pc in config.projects
+    }
+
     daemon = Daemon(
         repo=repo,
         git=git_for_cross_project,  # type: ignore[arg-type]
@@ -120,6 +130,7 @@ def bootstrap_cli_context(
         ),
         clock=dt.datetime.now,
         bus=bus,
+        project_configs=project_configs,
     )
 
     return build_cli_context(

@@ -88,7 +88,13 @@ def test_full_boot_from_toml_to_done(tmp_path: Path, monkeypatch):
     )
     git.set_pr_state(
         project="p", pr_number=42,
-        state=PRState(merged=False, mergeable=True, ci_passing=True),
+        # foreman#357: ``base_ref="main"`` matches the project's default
+        # ``dev_base_branch`` (None → DEFAULT_DEV_BASE_BRANCH ("main")
+        # per merging.py), so MergingState's base-ref guard passes
+        # through and the ticket reaches Done as before.
+        state=PRState(
+            merged=False, mergeable=True, ci_passing=True, base_ref="main",
+        ),
     )
 
     dispatcher = FakeRoleDispatcher(responses={
