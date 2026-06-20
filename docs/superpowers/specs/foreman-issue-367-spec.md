@@ -205,11 +205,17 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
   same ticket does NOT post a duplicate comment within the same
   state-attempt sequence"), the dispatcher MUST thread the current
   state-instance id into the role subprocess. Concrete contract:
-  * `WorkerPool._run_transition` (the call site that holds the
-    `StateInstanceRecord` after `repo.start_state_instance`) passes
-    the new instance's `id: int` into
-    `SubprocessRoleDispatcher.dispatch` as a new keyword arg
-    `state_instance_id: int`.
+  * `RoleDispatchState.execute` in
+    `packages/foreman/src/foreman/v4/states/role_dispatch.py:30-41`
+    is the call site that invokes
+    `ctx.role_dispatcher.dispatch(...)`. The `StateInstanceRecord`
+    is already on `ctx.instance` (built upstream by
+    `WorkerPool._run_transition` via `repo.open_state_instance`
+    at `worker_pool.py:125` — no edits to `worker_pool.py` are
+    required because `ctx.instance` already carries the field).
+    Extend the existing call at `role_dispatch.py:35-40` to pass
+    `state_instance_id=ctx.instance.id` as a new keyword arg into
+    `SubprocessRoleDispatcher.dispatch`.
   * `SubprocessRoleDispatcher.dispatch` injects it into the
     subprocess environment as `FOREMAN_STATE_INSTANCE_ID=<id>`
     (alongside the existing `GH_TOKEN` env var set at
@@ -385,6 +391,24 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
      already produced operator-visible context. The 5-minute window
      is a defensive heuristic; document it in the observer's
      docstring.
+     **Consequence for the inline exit-code + log-tail block.** The
+     `extra_context` block defined under "Inline exit code + last
+     500 chars of stderr" below is, by design, ONLY rendered on
+     subprocess-crash / TIMEOUT / retry-cap-trip paths — i.e., the
+     paths where the role subprocess died WITHOUT producing
+     structured output, and therefore the in-role
+     `post_escalation_comment` could not run. On the common
+     Worker-self-reports-`incomplete` / `spec_invalid` path the
+     in-role helper posts `source="role:worker"`, the terminal
+     observer's 5-minute heuristic skips, and no inline exit code
+     is rendered (correctly — the Worker subprocess exited 0 with
+     a structured "I couldn't finish" outcome; there is no crash
+     exit code to surface). This matches the issue body's table,
+     which scopes the "Role · timestamp · exit code · last 500
+     chars of stderr" requirement to the
+     "All roles: subprocess crash / timeout (Python-side fallback)"
+     row, distinct from the self-escalation rows that only require
+     "Why · What tried · What would unblock".
   4. Reads the ticket's most recent `state_instances` row via
      `repo.list_state_instances_for_ticket(ticket_id)[-2]` (the
      LANDING row is `[-1]` from the just-fired event; the cause is
@@ -708,7 +732,23 @@ addresses the concrete instance [foreman#357](https://github.com/jeffrichley/for
     writes a real log file to the resolved path; asserts the
     posted comment body contains the literal `exit code: 137` AND
     contains the log file's last 500 chars inside the
-    `<details>` fold.
+    `<details>` fold. The test seeds an EMPTY comment list (i.e.,
+    no recent `source^="role:"` marker) so the 5-minute heuristic
+    does NOT skip — the test scope is the subprocess-crash path
+    where the in-role helper never ran.
+  * `test_recent_role_comment_path_skips_inline_exit_code_block` —
+    regression guard for the scoping decision in the terminal
+    observer's docstring. Seeds the issue's comment list with a
+    `source=role:worker` marker posted 30 seconds ago AND a prior
+    `state_instances` row whose `failure_reason` carries an
+    `exited 137` substring; asserts the observer's host-mock was
+    NOT called (terminal post is suppressed by the 5-minute
+    heuristic) AND that the existing `source=role:worker` comment
+    body does NOT contain the inline `exit code: ` literal. This
+    locks in the documented scoping: the inline exit-code +
+    log-tail block lives on the terminal-landing surface only;
+    the in-role self-report carries `why` / `what_tried` /
+    `what_would_unblock` and nothing else.
   * `test_failed_landing_retry_cap_walks_back_to_crash_row` —
     seeds a sequence of `state_instances`:
     `(execute, "exited 1, see log...")` → `(execute, "exited 1,
@@ -875,9 +915,13 @@ attached today.
    `SubprocessRoleDispatcher.dispatch` to accept
    `state_instance_id: int` and inject it as
    `FOREMAN_STATE_INSTANCE_ID` in the subprocess env. Extend
-   `WorkerPool._run_transition` to forward
-   `StateInstanceRecord.id` into the dispatcher call. This step
-   MUST land before the role-core wiring so the env var is
+   `RoleDispatchState.execute` (the actual dispatch call site at
+   `packages/foreman/src/foreman/v4/states/role_dispatch.py:35`)
+   to forward `ctx.instance.id` into the dispatcher call.
+   `WorkerPool._run_transition` does NOT need editing —
+   `ctx.instance` already carries the `StateInstanceRecord` built
+   via `repo.open_state_instance` at `worker_pool.py:125`. This
+   step MUST land before the role-core wiring so the env var is
    available at every dedup-key construction site.
 5. Wire `_run_planner_core` to call `post_escalation_comment` on the
    low-confidence path, reading
@@ -939,10 +983,14 @@ attached today.
   `state_instance_id: int` keyword arg; inject
   `FOREMAN_STATE_INSTANCE_ID=<id>` into the subprocess env alongside
   the existing `GH_TOKEN`.
-- `packages/foreman/src/foreman/v4/worker_pool.py` — extend
-  `WorkerPool._run_transition` to forward the active
-  `StateInstanceRecord.id` to `dispatcher.dispatch` as the new
-  `state_instance_id` arg.
+- `packages/foreman/src/foreman/v4/states/role_dispatch.py` — extend
+  `RoleDispatchState.execute` to forward `ctx.instance.id` to
+  `ctx.role_dispatcher.dispatch(...)` as the new
+  `state_instance_id` arg. (This is the actual dispatch call site;
+  `WorkerPool._run_transition` does NOT call `dispatcher.dispatch`
+  and does NOT need editing — `ctx.instance` already carries the
+  `StateInstanceRecord` built by `repo.open_state_instance` at
+  `worker_pool.py:125`.)
 - `packages/foreman/src/foreman/v4/bootstrap.py` — construct +
   wire both observers; build `per_project_git_hosts` map.
 - `packages/foreman/tests/v4/roles/test_escalation_comment.py` —
