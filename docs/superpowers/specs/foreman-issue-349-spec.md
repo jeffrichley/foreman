@@ -49,35 +49,70 @@ can land without polluting the operator command surface
   the default-branch path.
 - `foreman contrib sign-commits --force` skips the interactive
   pushed-commit safety prompt (described below). Does not skip the
-  dirty-tree or detached-HEAD checks.
-- **Safety checks, all of which print a clear stderr message and exit
-  non-zero (exit 2) before doing any work:**
-  - Refuse to run if the working tree has uncommitted changes (run
+  dirty-tree, detached-HEAD, signoff-identity, or merge-in-range
+  checks.
+- **Safety checks.** Each prints a clear stderr message and exits
+  non-zero (exit 2) before doing any work. They are scoped to the
+  command path they apply to: the rewriting path (`sign-commits`
+  without `--check`) runs **all four**; the read-only path
+  (`sign-commits --check` and the `check-signoff` alias) runs only
+  the **signoff-identity** check, because a dry-run cannot damage
+  history and we want it to work in detached-HEAD checkouts (the
+  common shape under GitHub Actions and other CI runners) and on
+  dirty trees (pre-push hooks routinely fire mid-edit).
+  - **Dirty tree** — applies to: `sign-commits` rewriting path only.
+    Refuse if the working tree has uncommitted changes (run
     `git status --porcelain` — if stdout is non-empty, refuse with
     "working tree is dirty; commit or stash first").
-  - Refuse to run if HEAD is detached (run
-    `git symbolic-ref --short -q HEAD` — if it exits non-zero, refuse
-    with "HEAD is detached; check out a branch first").
-  - Refuse to run if `git config user.name` or `git config user.email`
-    is unset (the `-s` trailer would be empty/invalid). Message:
-    "git config user.name / user.email must be set; sign-off trailer
-    would be invalid".
-  - Refuse to run if the commit range `<base>..HEAD` contains any
-    merge commits (`git log --merges <base>..HEAD` non-empty). Message:
-    "range contains merge commits; rebase --exec would break history.
-    Rewrite by hand or rebase out the merge first." (Without this
-    guard, a `rebase --exec` over a merge will silently linearize
-    history — a destructive surprise this command must not cause.)
+  - **Detached HEAD** — applies to: `sign-commits` rewriting path
+    only. Refuse if HEAD is detached (run
+    `git symbolic-ref --short -q HEAD` — if it exits non-zero,
+    refuse with "HEAD is detached; check out a branch first").
+    Deliberately not run on the `--check` / `check-signoff` path:
+    CI checkouts (GitHub Actions et al.) are detached by default,
+    and `<base>..HEAD` resolves fine from a detached HEAD; firing
+    the guard there would break the advertised "suitable for CI /
+    pre-push hooks" use case.
+  - **Signoff identity** — applies to: both paths. Refuse if
+    `git config user.name` or `git config user.email` is unset.
+    (On the read-only path: without `user.email` we cannot match
+    trailer email values, so the check is meaningless. On the
+    rewrite path: the `-s` trailer would be empty/invalid.)
+    Message: "git config user.name / user.email must be set;
+    sign-off trailer would be invalid".
+  - **Merge commits in range** — applies to: `sign-commits`
+    rewriting path only. Refuse if the commit range `<base>..HEAD`
+    contains any merge commits (`git log --merges <base>..HEAD`
+    non-empty). Message: "range contains merge commits; rebase
+    --exec would break history. Rewrite by hand or rebase out the
+    merge first." (Without this guard, a `rebase --exec` over a
+    merge will silently linearize history — a destructive surprise
+    this command must not cause. Read-only paths do no rebase, so
+    the check does not apply.)
 - **Pushed-commit warning:** before the rebase, run
   `git for-each-ref --format='%(upstream:short)' refs/heads/$(git
-  symbolic-ref --short HEAD)`. If an upstream is configured, run
-  `git rev-list --count <base>..HEAD ^@{upstream}` to count commits in
-  the rebase range that the upstream already has. If non-zero, print
-  a warning: "N commits in `<base>..HEAD` have already been pushed to
-  `<upstream>`. After rebase you'll need `git push --force-with-lease`
-  to update the remote. Continue? [y/N]" — abort on `n`/default,
-  proceed on `y`. The `--force` flag skips this prompt (and the
-  warning still prints, so the contributor knows to force-push after).
+  symbolic-ref --short HEAD)`. If an upstream is configured, count
+  the commits in the rebase range that the upstream already has —
+  i.e. the intersection of `<base>..HEAD` with `@{upstream}`'s
+  ancestry. The common case is `@{upstream}` is in HEAD's ancestry
+  (linear local progress after a push), in which case
+  `git rev-list --count <base>..@{upstream}` gives the answer
+  directly. The divergent case (`@{upstream}` not in HEAD's
+  ancestry — local rebase + remote moved) requires the merge-base:
+  `git merge-base @{upstream} HEAD` → `<mb>`, then
+  `git rev-list --count <base>..<mb>`. Implementation detail
+  for the Worker: run `git merge-base --is-ancestor @{upstream}
+  HEAD` to branch between the two; if it exits 0, use the simple
+  `<base>..@{upstream}` count, otherwise compute via merge-base.
+  Either way, **do not use** `git rev-list --count <base>..HEAD
+  ^@{upstream}` — that counts the inverse (local-only commits not
+  yet pushed) and would fire the warning backwards. If the
+  intersection count is non-zero, print a warning: "N commits in
+  `<base>..HEAD` have already been pushed to `<upstream>`. After
+  rebase you'll need `git push --force-with-lease` to update the
+  remote. Continue? [y/N]" — abort on `n`/default, proceed on
+  `y`. The `--force` flag skips this prompt (and the warning
+  still prints, so the contributor knows to force-push after).
 - All git subprocess calls use the same env-handling discipline as
   `packages/foreman/src/foreman/worktree.py` (route through
   `foreman._env_filter.filtered_subprocess_env` so leaked
@@ -124,15 +159,19 @@ can land without polluting the operator command surface
   the warning message present in stdout. A second test invokes with
   `--force` and confirms the rewrite proceeds (the warning still
   prints).
-- `CONTRIBUTING.md`'s "Signing a commit" section (lines 88-90) is
-  updated. The existing snippet:
+- `CONTRIBUTING.md`'s "Signing a commit" section is updated: only
+  the single-paragraph body at **line 90** (the paragraph under the
+  `### Signing a commit` header at line 88, separated by the blank
+  line at line 89) is rewritten. The `### Signing a commit` header
+  itself is preserved verbatim. The existing line-90 paragraph reads:
 
   > `git commit -s` appends the `Signed-off-by:` trailer using the
   > `user.name` / `user.email` from your git config. To amend a commit
-  > that's missing the trailer:
-  > `git commit --amend -s --no-edit`.
+  > that's missing the trailer: `git commit --amend -s --no-edit`. The
+  > DCO CI check fails the PR if any commit (except synthetic merge
+  > commits) lacks it.
 
-  becomes:
+  and becomes:
 
   > `git commit -s` appends the `Signed-off-by:` trailer using the
   > `user.name` / `user.email` from your git config. If you forgot
@@ -140,7 +179,15 @@ can land without polluting the operator command surface
   > recovery is `foreman contrib sign-commits` (or
   > `foreman contrib check-signoff` to dry-run + see which commits
   > are missing the trailer). For a single-commit amend without
-  > rebase: `git commit --amend -s --no-edit`.
+  > rebase: `git commit --amend -s --no-edit`. The DCO CI check
+  > fails the PR if any commit (except synthetic merge commits)
+  > lacks it.
+
+  The closing "DCO CI check fails the PR…" sentence is load-bearing
+  context (it explains what the CI gate does to non-compliant PRs)
+  and must survive the rewrite. The Worker should leave the
+  surrounding header and blank line untouched and edit only the
+  paragraph body.
 
 - `just check` exits zero (ruff + mypy + lint-imports + pytest).
   `new_failures_count == 0` on a fresh run.
@@ -258,12 +305,27 @@ the docs reference is forward-looking but harmless.
      `--check` path prints this list).
    - `_count_pushed_commits_in_range(cwd: Path, base: str) -> int |
      None` — resolves `@{upstream}`; if no upstream, returns `None`.
-     Otherwise returns the count of commits in `<base>..HEAD`
-     reachable from `@{upstream}` (i.e. already pushed).
+     Otherwise returns the count of commits in `<base>..HEAD` that
+     are also reachable from `@{upstream}` (i.e. already pushed).
+     Implementation: first try `git merge-base --is-ancestor
+     @{upstream} HEAD`. If it exits 0 (the common linear case where
+     local commits sit on top of what was pushed),
+     `git rev-list --count <base>..@{upstream}` returns the
+     intersection directly. If it exits non-zero (divergent: local
+     rebase + remote moved), compute
+     `git merge-base @{upstream} HEAD` → `<mb>`, then return
+     `git rev-list --count <base>..<mb>`. **Do not** implement
+     this as `git rev-list --count <base>..HEAD ^@{upstream}` —
+     that returns the inverse (local-only commits not yet pushed)
+     and would fire the force-push warning backwards.
 
 3. Implement `_check_signoff(base: str, cwd: Path) -> int`:
-   - Runs `_assert_branch_not_detached`,
-     `_assert_signoff_identity`, then `_list_unsigned_commits`.
+   - Runs `_assert_signoff_identity` only (read-only path; see the
+     scoping rules in the "Safety checks" acceptance bullet — the
+     dirty-tree, detached-HEAD, and merge-in-range checks
+     deliberately do NOT fire here so the command works in CI
+     detached-HEAD checkouts and pre-push hooks on dirty trees).
+     Then calls `_list_unsigned_commits`.
    - If list is empty: prints "All commits in `<base>..HEAD` are
      signed off." and returns 0.
    - Otherwise: prints "Unsigned commits in `<base>..HEAD`:" + one
@@ -358,7 +420,7 @@ the docs reference is forward-looking but harmless.
 | `packages/foreman/src/foreman/v4/cli/__init__.py` | Import `contrib_app`; register via `app.add_typer(contrib_app)` after the existing `daemon_app` block at line 93. |
 | `packages/foreman/tests/v4/cli/test_contrib_sign_commits.py` | New file. Fake-repo fixture + the seven scenarios in acceptance criteria (check / sign / --base / detached / dirty / merge-in-range / missing-email) + the two pushed-warning scenarios. |
 | `packages/foreman/tests/v4/cli/test_contrib_check_signoff.py` | New file. Alias-path tests asserting `check-signoff` matches `sign-commits --check` exit code + stdout shape. |
-| `CONTRIBUTING.md` | Update "Signing a commit" section (lines 88-90) to point at `foreman contrib sign-commits` for multi-commit recovery; preserve the `git commit --amend -s --no-edit` snippet for the single-commit case. |
+| `CONTRIBUTING.md` | Rewrite only the paragraph body at line 90 under the `### Signing a commit` header (header at line 88, blank at line 89, paragraph at line 90 — leave the header and blank line untouched). Point at `foreman contrib sign-commits` for multi-commit recovery; preserve the `git commit --amend -s --no-edit` snippet for the single-commit case; preserve the closing "DCO CI check fails the PR…" sentence. |
 
 ## Alternatives considered
 
