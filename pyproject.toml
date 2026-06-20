@@ -32,6 +32,30 @@ dev = [
     # cross-cutting modules promoted to survival can't silently re-acquire
     # v3-substrate deps. See [tool.importlinter] below.
     "import-linter>=2.0",
+    # foreman#336 step 1/7 — pytest-cov for coverage measurement.
+    "pytest-cov>=5.0",
+    # foreman#336 step 2/7 — pytest-clarity for better assertion-failure diffs.
+    "pytest-clarity>=1.0",
+    # foreman#336 step 3/7 — pytest-timeout enforces a 60s wallclock cap
+    # per test. ``timeout_method = "thread"`` (set below) is required for
+    # compatibility with pytest-xdist's worker processes.
+    "pytest-timeout>=2.3",
+    # foreman#336 step 4/7 — hypothesis for property-based testing.
+    # Usage guidance lives in ``.claude/rules/testing.md`` (path-scoped
+    # to tests/) so the rule loads only when working on test files.
+    "hypothesis>=6.100",
+    # foreman#336 step 5/7 — pytest-xdist for parallel test execution.
+    # ``--dist=loadscope`` (set below) keeps tests within the same
+    # module/class on a single worker so module-scoped fixtures share
+    # one instance per worker rather than getting duplicated.
+    "pytest-xdist>=3.6",
+    # foreman#336 step 6/7 — pytest-randomly shuffles test order each
+    # run. Catches inter-test ordering bugs (fixture pollution, shared
+    # module state) that fixed-order suites silently mask.
+    "pytest-randomly>=3.15",
+    # foreman#336 step 7/7 — diff-cover gates patch coverage at 80% on
+    # PRs (consumed by .github/workflows/ci.yml; not invoked locally).
+    "diff-cover>=9.0",
 ]
 
 [tool.ruff]
@@ -206,7 +230,12 @@ testpaths = [
     "packages/foreman/tests",
 ]
 asyncio_mode = "auto"
-addopts = "--import-mode=importlib"
+# foreman#336: 60s per-test cap stops a hung test from burning the
+# runner. ``thread`` method works with pytest-xdist worker processes;
+# ``signal`` (the default) does not.
+timeout = 60
+timeout_method = "thread"
+addopts = "--import-mode=importlib --cov=packages/foreman/src --cov-branch --cov-report=term-missing --cov-report=xml:coverage.xml --cov-fail-under=78 -n auto --dist=loadscope"
 
 # Custom marker pattern (madrigal-style). Uncomment + edit when you have
 # tests that require expensive external resources (GPU, real cloud API,

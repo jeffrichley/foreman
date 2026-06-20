@@ -62,3 +62,11 @@ def reset_logging() -> None:
         for handler in list(logger.handlers):
             logger.removeHandler(handler)
             handler.close()
+        # foreman#336: ``configure_logging`` sets ``propagate = False``
+        # to keep v4 records out of the root logger's stream. Restore
+        # the default so a follow-up ``configure_logging`` re-applies
+        # the flag deliberately, and so test suites that share the
+        # logger registry (caplog, pytest-randomly orderings) see a
+        # genuine clean slate. Removing handlers without restoring
+        # propagate leaves the logger silently muted from the root.
+        logger.propagate = True
