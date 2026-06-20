@@ -25,6 +25,7 @@ from foreman.v4.observers.structured_log import StructuredLogObserver
 from foreman.v4.poller import Poller
 from foreman.v4.routing_git_provider import RoutingGitProvider
 from foreman.v4.sqlite_repository import SqliteTicketRepository
+from foreman.v4.state_backup import BackupScheduler
 from foreman.v4.subprocess_dispatcher import SubprocessRoleDispatcher
 
 
@@ -119,6 +120,18 @@ def bootstrap_cli_context(
         pc.name: pc for pc in config.projects
     }
 
+    # Issue #360: the BackupScheduler is the daemon-internal periodic
+    # SQLite snapshot job. ``BackupScheduler.from_config`` returns a
+    # real scheduler when ``config.backup.enabled`` is True and a
+    # ``_DisabledBackupScheduler`` no-op sentinel when False. Both
+    # share the ``tick() -> Path | None`` shape so the daemon's call
+    # site stays unconditional.
+    backup_scheduler = BackupScheduler.from_config(
+        config.backup,
+        src_conn=repo.connection,
+        bus=bus,
+    )
+
     daemon = Daemon(
         repo=repo,
         git=git_for_cross_project,  # type: ignore[arg-type]
@@ -132,6 +145,7 @@ def bootstrap_cli_context(
         clock=dt.datetime.now,
         bus=bus,
         project_configs=project_configs,
+        backup_scheduler=backup_scheduler,
     )
 
     return build_cli_context(

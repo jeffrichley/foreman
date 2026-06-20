@@ -408,6 +408,15 @@ def test_project_max_impl_attempts_override(tmp_path: Path):
     assert config.projects[0].max_impl_attempts == 5
 
 
+# Imports required by the helpers in this section. Lazy-named at this
+# point in the file so the top-level imports stay minimal.
+from foreman.v4.config import (  # noqa: E402
+    AppCredentials,
+    AppsConfig,
+    OrchestratorConfig,
+)
+
+
 def test_project_attempt_caps_reject_zero(tmp_path: Path):
     """Phase 8b.2 ge=1 constraint: matches v3 ProjectConfig validation.
 
@@ -735,11 +744,66 @@ def test_resolve_operator_both_overridden():
     assert op.signer.name == "Proj Sign"
 
 
-# Imports required by the helper above. We import these lazily-named at
-# the bottom of the file so the existing tests' top-level imports remain
-# minimal.
-from foreman.v4.config import (  # noqa: E402
-    AppCredentials,
-    AppsConfig,
-    OrchestratorConfig,
-)
+# ---------------------------------------------------------------------------
+# Issue #360: [backup] block — periodic SQLite snapshot scheduler config.
+# ---------------------------------------------------------------------------
+
+
+def test_backup_block_defaulted_when_absent(tmp_path: Path):
+    """Issue #360: ``[backup]`` is optional. A config without one MUST
+    still load, and ``config.backup`` MUST take the documented defaults
+    (enabled=True, hourly schedule, 24/7/4 retention)."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[daemon]\n"
+        'db_path = "/tmp/foreman.db"\n'
+        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+    )
+    config = load_config(config_path)
+    assert config.backup.enabled is True
+    assert config.backup.dir == "/foreman/backups"
+    assert config.backup.interval_seconds == 3600
+    assert config.backup.retention_hourly == 24
+    assert config.backup.retention_daily == 7
+    assert config.backup.retention_weekly == 4
+
+
+def test_backup_block_validated_when_present(tmp_path: Path):
+    """Issue #360: ``interval_seconds = 30`` MUST raise — the ge=60
+    floor is runaway defense against a misconfigured ``0`` snapshot
+    interval that would fill disk in minutes."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[daemon]\n"
+        'db_path = "/tmp/foreman.db"\n'
+        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[backup]\n"
+        "interval_seconds = 30\n"
+        "[[projects]]\n"
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+    )
+    with pytest.raises(ValidationError):
+        load_config(config_path)
+
+
+def test_backup_block_extras_forbidden(tmp_path: Path):
+    """Issue #360: ``extra='forbid'`` mirrors the other config blocks.
+    An unknown field MUST raise rather than silently drop on the
+    floor."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[daemon]\n"
+        'db_path = "/tmp/foreman.db"\n'
+        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[backup]\n"
+        'mystery_field = "boom"\n'
+        "[[projects]]\n"
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+    )
+    with pytest.raises(ValidationError):
+        load_config(config_path)
