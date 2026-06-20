@@ -41,6 +41,8 @@ def test_tickets_table_columns(db: sqlite3.Connection):
         "held_by",
         "held_at",
         "held_reason",
+        # foreman#361: transient-provider-error backoff suspension.
+        "next_action_at",
     } <= cols
 
 

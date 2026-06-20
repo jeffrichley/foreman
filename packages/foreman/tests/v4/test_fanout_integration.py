@@ -24,7 +24,7 @@ class _DoneState(TicketState):
             summary="all set",
         )
 
-    def next_state(self, outcome: Outcome) -> TicketState | None:
+    def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:
         return None
 
 
@@ -37,7 +37,7 @@ class _DemoState(TicketState):
             summary="demo ok",
         )
 
-    def next_state(self, outcome: Outcome) -> TicketState | None:
+    def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:
         return _DoneState()
 
 

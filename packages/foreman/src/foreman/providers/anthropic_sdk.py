@@ -42,9 +42,20 @@ from foreman.providers._usage import build_usage_info as _build_usage_info
 from foreman.providers.exceptions import (
     ProviderError,
     ProviderTimeoutError,
+    ProviderTransientError,
     ProviderUnknownError,
 )
 from foreman.providers.recovery import PartialResult, RecoveryChain
+
+# foreman#361: best-effort isinstance check against the live anthropic
+# SDK exception types. Guarded so test stub environments without
+# ``anthropic`` installed don't break import; in that case the
+# isinstance branch is a no-op and only the string-pattern path is
+# active in :func:`_is_transient_sdk_error`.
+try:  # pragma: no cover - import guard
+    import anthropic as _anthropic  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - import guard
+    _anthropic = None
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -142,6 +153,86 @@ def _describe_envelope(message: Any) -> str:
     return type(message).__name__
 
 
+# foreman#361: substrings the transient-classifier looks for in the
+# Claude-Code-wrapped error string. One module-level tuple so future
+# operators tuning the classifier have exactly one place to edit
+# (Approach: "make the right thing easy"). Membership check
+# lowercases the haystack before matching, so the patterns here are
+# already lowercased.
+_TRANSIENT_PATTERNS: tuple[str, ...] = (
+    "429",
+    "rate_limit",
+    "rate limit",
+    "overloaded",
+    "503",
+    "502",
+    "504",
+    "500",
+    "connection refused",
+    "connection reset",
+    "connection aborted",
+    "timeout",
+)
+
+
+def _is_transient_sdk_error(exc: BaseException) -> bool:
+    """Classify ``exc`` as an Anthropic-side transient transport failure.
+
+    foreman#361 single source of truth for the transient classifier.
+    Called from BOTH :func:`_translate_sdk_exception` (defense in
+    depth for translator-only paths) AND the auth-retry guards in
+    :meth:`AnthropicSDKProvider.run_agent` (the operational
+    short-circuit path for Claude-Code-wrapped 5xx/429). Sharing one
+    helper avoids drift between the two sites.
+
+    The constant :data:`_SDK_AUTH_ERROR_PREFIX` is misleadingly named —
+    it covers both auth and transport failures now (a Claude-Code-
+    wrapped 5xx string also starts with that prefix). Renaming is
+    out of scope for foreman#361 because three call sites
+    (lines 167 / 272 / 299, pre-#361 numbering) reference it by
+    name; a rename would balloon the diff without semantic gain.
+    The dual role is documented here so the next reader knows
+    what's going on.
+
+    Returns ``True`` iff either:
+
+    * ``exc`` is an :class:`Exception` whose ``str(exc)`` starts
+      with :data:`_SDK_AUTH_ERROR_PREFIX` (case-sensitive prefix
+      check) AND ``str(exc).lower()`` contains any pattern from
+      :data:`_TRANSIENT_PATTERNS` (lowercased substring search).
+    * OR (best-effort) ``exc`` is an instance of one of the live
+      Anthropic SDK transient types
+      (:class:`anthropic.APIConnectionError`,
+      :class:`anthropic.RateLimitError`,
+      :class:`anthropic.APITimeoutError`,
+      :class:`anthropic.InternalServerError`). Guarded by the
+      module-level ``try: import anthropic`` — when the SDK isn't
+      installed (test stubs), only the string-pattern path is
+      active.
+    """
+    if isinstance(exc, Exception):
+        message = str(exc)
+        if message.startswith(_SDK_AUTH_ERROR_PREFIX):
+            haystack = message.lower()
+            for needle in _TRANSIENT_PATTERNS:
+                if needle in haystack:
+                    return True
+    if _anthropic is not None:
+        sdk_transient_types: tuple[type, ...] = tuple(
+            t
+            for t in (
+                getattr(_anthropic, "APIConnectionError", None),
+                getattr(_anthropic, "RateLimitError", None),
+                getattr(_anthropic, "APITimeoutError", None),
+                getattr(_anthropic, "InternalServerError", None),
+            )
+            if t is not None
+        )
+        if sdk_transient_types and isinstance(exc, sdk_transient_types):
+            return True
+    return False
+
+
 def _translate_sdk_exception(exc: BaseException) -> ProviderError:
     """Translate an SDK-level exception into the corresponding domain
     :class:`ProviderError` subclass.
@@ -150,13 +241,22 @@ def _translate_sdk_exception(exc: BaseException) -> ProviderError:
     lives here. Role runners catch the ``ProviderError`` family; SDK
     types do not leak past this function.
 
-    Mapping:
+    Branch order (documented so the foreman#361 transient pre-check
+    in :meth:`AnthropicSDKProvider.run_agent` and this translator
+    stay aligned):
 
-    * Message starts with :data:`_SDK_AUTH_ERROR_PREFIX` →
-      :class:`ProviderAuthError` (the foreman#227 auth-failure shape).
-    * :class:`asyncio.TimeoutError` (or any subclass) →
-      :class:`ProviderTimeoutError`.
-    * Anything else → :class:`ProviderUnknownError(str(exc))`.
+    1. :class:`asyncio.TimeoutError` (or subclass) →
+       :class:`ProviderTimeoutError` (existing behavior).
+    2. ``_is_transient_sdk_error(exc)`` →
+       :class:`ProviderTransientError` (foreman#361 — covers the
+       case where a transient slips past the ``run_agent``-level
+       pre-check, e.g. an ``_iterate_query``-internal raise that
+       re-enters translation without going through the auth-retry
+       block).
+    3. ``str(exc).startswith(_SDK_AUTH_ERROR_PREFIX)`` →
+       :class:`ProviderAuthError` (existing — foreman#227
+       auth-failure shape).
+    4. Default → :class:`ProviderUnknownError(str(exc))`.
 
     The caller re-raises the returned exception via
     ``raise translated from exc`` so the original SDK exception is
@@ -164,6 +264,8 @@ def _translate_sdk_exception(exc: BaseException) -> ProviderError:
     """
     if isinstance(exc, asyncio.TimeoutError):
         return ProviderTimeoutError(str(exc) or "provider transport timed out")
+    if _is_transient_sdk_error(exc):
+        return ProviderTransientError(str(exc))
     if isinstance(exc, Exception) and str(exc).startswith(_SDK_AUTH_ERROR_PREFIX):
         return ProviderAuthError(str(exc))
     return ProviderUnknownError(str(exc))
@@ -239,6 +341,12 @@ class AnthropicSDKProvider(ProviderFacade):
             # ``ProviderAuthError``. Non-auth exceptions propagate
             # unchanged.
             #
+            # Control-flow order (documented as the load-bearing
+            # invariant for the exception-handling block below):
+            #
+            #     recovery chain  →  transient pre-check (foreman#361)
+            #                     →  auth-retry  →  translator
+            #
             # foreman#266: the recovery chain runs FIRST so the
             # foreman#230 ``Exception("success")`` shape gets a proper
             # recovery before the auth-retry branch even considers
@@ -247,9 +355,29 @@ class AnthropicSDKProvider(ProviderFacade):
             # with a valid ResultMessage already captured; foreman#227
             # is ``Exception("Claude Code returned an error result:
             # ...")`` with no recoverable payload) — they do not
-            # overlap in practice. Translation runs LAST so any
-            # surviving SDK exception surfaces as a typed ProviderError
-            # at the boundary.
+            # overlap in practice.
+            #
+            # foreman#361: the transient pre-check sits BEFORE the
+            # auth-retry rather than after for a load-bearing reason.
+            # A Claude-Code-wrapped 503 / 429 looks IDENTICAL to an
+            # auth error at the prefix level — both start with
+            # ``_SDK_AUTH_ERROR_PREFIX``. Without the pre-check the
+            # auth-retry would (a) needlessly refresh credentials,
+            # (b) re-run the entire query while Anthropic is already
+            # transient-failing — burning wall-clock + Anthropic
+            # budget for nothing, (c) ultimately raise
+            # ``ProviderAuthError`` and mis-route the failure to
+            # NeedsHelp instead of the backoff scheduler in the
+            # state machine. Pre-checking transients keeps the
+            # auth-retry path meaning exactly what it says: "this
+            # exception is plausibly an auth issue, retry once after
+            # refreshing creds".
+            #
+            # Translation runs LAST so any surviving SDK exception
+            # surfaces as a typed ProviderError at the boundary;
+            # ``_translate_sdk_exception`` includes its own transient
+            # branch as defense in depth for ``_iterate_query``-
+            # internal raises that bypass the outer ``except``.
             try:
                 return await self._iterate_query(
                     user_prompt=user_prompt,
@@ -269,6 +397,17 @@ class AnthropicSDKProvider(ProviderFacade):
                 recovered = self._recovery.try_recover(e, partial)
                 if recovered is not None:
                     return recovered
+                # foreman#361: classify transient transport failures BEFORE
+                # the auth-retry decision. A Claude-Code-wrapped 5xx/429
+                # also starts with _SDK_AUTH_ERROR_PREFIX, so without this
+                # guard the auth-retry block below would swallow it,
+                # refresh credentials, re-run the query (burning wall-clock
+                # + budget while Anthropic is already failing), and
+                # ultimately mis-classify as ProviderAuthError. See the
+                # recovery chain → transient pre-check → auth-retry →
+                # translator comment block above.
+                if _is_transient_sdk_error(e):
+                    raise ProviderTransientError(str(e)) from e
                 if not str(e).startswith(_SDK_AUTH_ERROR_PREFIX):
                     raise _translate_sdk_exception(e) from e
                 refreshed = _maybe_refresh_container_creds()
@@ -296,6 +435,12 @@ class AnthropicSDKProvider(ProviderFacade):
                     recovered = self._recovery.try_recover(retry_exc, partial)
                     if recovered is not None:
                         return recovered
+                    # foreman#361: see the pre-retry comment above.
+                    # The post-retry path also needs to classify
+                    # transients BEFORE raising the "auth failed twice"
+                    # ProviderAuthError.
+                    if _is_transient_sdk_error(retry_exc):
+                        raise ProviderTransientError(str(retry_exc)) from retry_exc
                     if str(retry_exc).startswith(_SDK_AUTH_ERROR_PREFIX):
                         raise ProviderAuthError(
                             "Anthropic Agent SDK failed authentication twice "

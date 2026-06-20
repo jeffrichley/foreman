@@ -26,7 +26,12 @@ def _o(kind: OutcomeKind) -> Outcome:
     ],
 )
 def test_routing(kind, expected_state_name):
-    next_state = ImplementingState().next_state(_o(kind))
+    # foreman#361: per-state routing lives on ``next_state_for``;
+    # ``next_state`` is now the Template Method (intercepts
+    # TRANSIENT_PROVIDER_ERROR, otherwise delegates). The unit test
+    # for routing keeps calling the underlying ``next_state_for``
+    # so it doesn't need a real ``StateContext``.
+    next_state = ImplementingState().next_state_for(_o(kind))
     assert next_state is not None
     assert next_state.state_name == expected_state_name
 
@@ -34,7 +39,7 @@ def test_routing(kind, expected_state_name):
 def test_blocked_returns_new_implementing_instance():
     """Same logical state, new instance — Poller picks it up next tick."""
     state = ImplementingState()
-    next_state = state.next_state(_o(OutcomeKind.BLOCKED))
+    next_state = state.next_state_for(_o(OutcomeKind.BLOCKED))
     assert isinstance(next_state, ImplementingState)
     assert next_state is not state
 
@@ -121,7 +126,7 @@ def test_implementing_retry_with_blocked_does_not_transition_to_failed():
         f"first dispatch must produce BLOCKED, got {outcome_1.kind}"
     )
     assert outcome_1.artifacts.pr_number == 9001
-    next_state_1 = state_1.next_state(outcome_1)
+    next_state_1 = state_1.next_state(ctx, outcome_1)
     assert isinstance(next_state_1, ImplementingState), (
         f"BLOCKED must route back to ImplementingState, got "
         f"{type(next_state_1).__name__}"
@@ -137,7 +142,7 @@ def test_implementing_retry_with_blocked_does_not_transition_to_failed():
         f"{outcome_2.kind} — this is the foreman#342 regression."
     )
     assert outcome_2.kind != OutcomeKind.ERROR
-    next_state_2 = next_state_1.next_state(outcome_2)
+    next_state_2 = next_state_1.next_state(ctx, outcome_2)
     assert isinstance(next_state_2, ImplementingState), (
         f"second BLOCKED must also route back to ImplementingState, "
         f"never FailedState. Got {type(next_state_2).__name__}"

@@ -42,3 +42,16 @@ class ProviderUnknownError(ProviderError):
     ``__cause__`` (via the adapter's ``raise ... from exc``). Role
     runners that need the original type can introspect ``__cause__``.
     """
+
+
+class ProviderTransientError(ProviderError):
+    """Anthropic-side transient transport failure — 5xx, 429, connection
+    refused, transport-level timeout. Re-raised at the provider
+    boundary; roles must surface it as
+    ``Outcome(kind=TRANSIENT_PROVIDER_ERROR)``, not ``ERROR``.
+
+    foreman#361: distinguished from :class:`ProviderUnknownError` so
+    the v4 state machine can exempt these from the
+    ``max_state_attempts`` runaway-defense cap and schedule a delayed
+    retry on an exponential-backoff schedule.
+    """

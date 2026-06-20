@@ -52,3 +52,21 @@ class StateFailedEvent(Event):
     """A lifecycle hook raised. ``failure_phase`` matches the failed hook."""
     failure_phase: str
     failure_reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class TransientProviderErrorEvent(Event):
+    """A role-dispatch state observed a ``TRANSIENT_PROVIDER_ERROR`` outcome.
+
+    Emitted by :meth:`RoleDispatchState.next_state` (foreman#361) when
+    the state machine schedules a backoff retry OR (with
+    ``next_retry_at=None``) when the schedule has exhausted and the
+    state is escalating to ``NeedsHelp``. Operators surface this as
+    "Anthropic was unreachable from 14:22:14 to 14:23:01" via the
+    structured log; the suspension itself is on the ticket row
+    (``next_action_at``).
+    """
+
+    attempt: int
+    next_retry_at: dt.datetime | None
+    provider_status: str

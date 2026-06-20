@@ -39,6 +39,14 @@ def _ticket_row_to_record(row: sqlite3.Row) -> TicketRecord:
     updated_at = _from_iso(row["updated_at"])
     assert created_at is not None  # NOT NULL in schema
     assert updated_at is not None  # NOT NULL in schema
+    # foreman#361: next_action_at is nullable + added by the additive
+    # migration in __init__. Use a defensive lookup so a pre-migration
+    # cursor row (no such column) doesn't crash; the ALTER TABLE in
+    # __init__ guarantees the column exists by the time we read.
+    try:
+        next_action_at_raw = row["next_action_at"]
+    except (KeyError, IndexError):
+        next_action_at_raw = None
     return TicketRecord(
         id=row["id"],
         project=row["project"],
@@ -50,6 +58,7 @@ def _ticket_row_to_record(row: sqlite3.Row) -> TicketRecord:
         held_at=_from_iso(row["held_at"]),
         held_reason=row["held_reason"],
         depends_on=list(json.loads(row["depends_on"])),
+        next_action_at=_from_iso(next_action_at_raw),
     )
 
 
@@ -102,6 +111,21 @@ class SqliteTicketRepository:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.commit()
+        # foreman#361: additive ``next_action_at`` migration. SQLite's
+        # ``CREATE TABLE IF NOT EXISTS`` (used by executescript above)
+        # is a no-op when the table already exists, so a pre-existing
+        # on-disk DB created against the old schema would NEVER get
+        # the new column from the inline declaration alone — the
+        # ALTER TABLE is load-bearing for forward compatibility. No
+        # existing additive-migration precedent exists in this repo
+        # (the depends_on column was added by inline schema
+        # declaration BEFORE any production DB existed); this ticket
+        # introduces the pattern. Future column adds should mirror
+        # this shape.
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(tickets)")}
+        if "next_action_at" not in cols:
+            conn.execute("ALTER TABLE tickets ADD COLUMN next_action_at TEXT")
+            conn.commit()
         self._conn = conn
         # RLock serializes every public method. WAL alone isn't enough on
         # :memory: (it silently falls back to "memory" journal mode), and
@@ -219,6 +243,24 @@ class SqliteTicketRepository:
                 "UPDATE tickets SET held_by = NULL, held_at = NULL, held_reason = NULL, "
                 "updated_at = ? WHERE id = ?",
                 (_to_iso(now), ticket_id),
+            )
+            self._conn.commit()
+
+    def set_next_action_at(self, ticket_id: int, *, when: dt.datetime) -> None:
+        with self._lock:
+            ts = _to_iso(when)
+            self._conn.execute(
+                "UPDATE tickets SET next_action_at = ?, updated_at = ? WHERE id = ?",
+                (ts, ts, ticket_id),
+            )
+            self._conn.commit()
+
+    def clear_next_action_at(self, ticket_id: int) -> None:
+        with self._lock:
+            now_ts = _to_iso(dt.datetime.now(dt.UTC))
+            self._conn.execute(
+                "UPDATE tickets SET next_action_at = NULL, updated_at = ? WHERE id = ?",
+                (now_ts, ticket_id),
             )
             self._conn.commit()
 
@@ -395,9 +437,50 @@ class SqliteTicketRepository:
                 # and escalate the ticket to NeedsHelp.
                 if row["outcome_kind"] == OutcomeKind.BLOCKED.value:
                     continue
+                # foreman#361 — transient-provider self-loops are not
+                # runaway-defense signal. Same precedent as the
+                # BLOCKED skip above: the role hit an Anthropic-side
+                # blip, the state machine's backoff scheduler owns
+                # the retry budget, and a short outage must not trip
+                # the cap and escalate by the wrong path.
+                if row["outcome_kind"] == OutcomeKind.TRANSIENT_PROVIDER_ERROR.value:
+                    continue
                 if row["state_name"] == state:
                     count += 1
                 else:
+                    break
+            return count
+
+    def count_consecutive_transient_provider_errors(self, ticket_id: int) -> int:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT failure_phase, outcome_kind "
+                "FROM state_instances "
+                "WHERE ticket_id = ? "
+                "ORDER BY sequence DESC",
+                (ticket_id,),
+            ).fetchall()
+            count = 0
+            for row in rows:
+                # foreman#361: same precedent as
+                # count_consecutive_same_state — can_run failures
+                # don't count and don't break.
+                if row["failure_phase"] == "can_run":
+                    continue
+                # foreman#361 CRITICAL: skip the in-flight row.
+                # ``RoleDispatchState.next_state`` is called BEFORE
+                # ``mark_execute_completed`` writes the outcome_kind,
+                # so the most-recent row has outcome_kind=NULL when
+                # we walk from inside the Template Method. Without
+                # this skip, every call would see "current row,
+                # NULL outcome, break" and return 0 — the backoff
+                # would never advance past 30s.
+                if row["outcome_kind"] is None:
+                    continue
+                if row["outcome_kind"] == OutcomeKind.TRANSIENT_PROVIDER_ERROR.value:
+                    count += 1
+                else:
+                    # Any other completed outcome breaks the run.
                     break
             return count
 

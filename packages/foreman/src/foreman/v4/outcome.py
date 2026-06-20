@@ -23,6 +23,17 @@ class OutcomeKind(StrEnum):
     BLOCKED = "blocked"
     NEEDS_HELP = "needs_help"
     ERROR = "error"
+    # foreman#361: emitted by the role CLIs when the failure is
+    # classified as an Anthropic-side transient transport blip
+    # (5xx / 429 / connection refused / transport-level timeout).
+    # The state machine treats this kind specially — see the
+    # ``RoleDispatchState`` Template Method override and the
+    # exempted skip in ``count_consecutive_same_state``. Per-role
+    # matrix is documented in
+    # ``docs/superpowers/specs/2026-06-13-foreman-v4-substrate-redesign-design.md``
+    # (section ``Per-role kind matrix``); every role-dispatch state
+    # may emit it.
+    TRANSIENT_PROVIDER_ERROR = "transient_provider_error"
 
 
 class OutcomeConfidence(StrEnum):

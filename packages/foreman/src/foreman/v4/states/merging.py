@@ -166,7 +166,7 @@ class MergingState(TicketState):
             artifacts=OutcomeArtifacts(pr_number=pr_number),
         )
 
-    def next_state(self, outcome: Outcome) -> TicketState | None:
+    def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:
         from foreman.v4.states.terminal import DoneState, NeedsHelpState
         if outcome.kind == OutcomeKind.CLEAN:
             return DoneState()

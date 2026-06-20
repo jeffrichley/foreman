@@ -88,3 +88,36 @@ def test_dedup_across_repeated_ticks():
     poller.tick()
     assert qm.dequeue() == WorkItem(ticket_id=t.id, state_name="Planning")
     assert qm.dequeue() is None
+
+
+def test_poller_skips_suspended_ticket():
+    """foreman#361: a ticket whose ``next_action_at`` is in the future
+    MUST NOT be enqueued. Once the clock advances past
+    ``next_action_at``, the next tick enqueues normally.
+    """
+    repo = SqliteTicketRepository.in_memory()
+    t = repo.create_ticket(project="p", issue_number=1, now=_T0)
+    repo.set_ticket_state(t.id, "Planning", now=_T0)
+    suspend_until = _T0 + dt.timedelta(minutes=5)
+    repo.set_next_action_at(t.id, when=suspend_until)
+    git = FakeGitProvider()
+
+    # First tick: clock is at _T0 (before suspend_until) → no enqueue.
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    early_poller = Poller(
+        repo=repo, qm=qm, git=git,
+        project="p", trigger_label="foreman:plan",
+        clock=lambda: _T0,
+    )
+    early_poller.tick()
+    assert qm.dequeue() is None
+
+    # Second tick: clock advanced past suspend_until → enqueued.
+    later_qm = QueueManager(repo=repo, max_in_flight=4)
+    later_poller = Poller(
+        repo=repo, qm=later_qm, git=git,
+        project="p", trigger_label="foreman:plan",
+        clock=lambda: suspend_until + dt.timedelta(seconds=1),
+    )
+    later_poller.tick()
+    assert later_qm.dequeue() == WorkItem(ticket_id=t.id, state_name="Planning")

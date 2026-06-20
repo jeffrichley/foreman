@@ -93,6 +93,32 @@ def test_fixer_exception_emits_error(capsys):
     assert "push rejected" in outcome.summary
 
 
+def test_fixer_transient_outcome(capsys):
+    """foreman#361: ``ProviderTransientError`` from the fixer core
+    emits ``TRANSIENT_PROVIDER_ERROR`` with details populated, AND
+    exits 0 (the outcome JSON carries the signal; non-zero would
+    trip ``RoleSubprocessError`` in the dispatcher and lose the
+    discriminator).
+    """
+    from foreman.providers import ProviderTransientError
+
+    original_cause = Exception(
+        "Claude Code returned an error result: 429 Too Many Requests"
+    )
+    transient = ProviderTransientError(str(original_cause))
+    transient.__cause__ = original_cause
+    with patch(
+        "foreman.roles.fixer._run_fixer_for_v4",
+        side_effect=transient,
+    ):
+        exit_code = run_fixer_cli(project="p", issue_number=1, target="impl")
+    assert exit_code == 0
+    outcome = parse_outcome_from_stdout(capsys.readouterr().out)
+    assert outcome.kind == OutcomeKind.TRANSIENT_PROVIDER_ERROR
+    assert "429" in outcome.details["provider_status"]
+    assert outcome.details["exception_class"] == "Exception"
+
+
 # --- Phase 8d.17 / foreman#315 ---------------------------------------
 
 

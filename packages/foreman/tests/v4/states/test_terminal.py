@@ -41,7 +41,7 @@ def test_terminal_state_returns_clean_outcome_and_no_next_state(state_class, exp
     assert state.state_name == expected_name
     outcome = state.execute(ctx)
     assert outcome.kind == OutcomeKind.CLEAN
-    assert state.next_state(outcome) is None
+    assert state.next_state(ctx, outcome) is None
 
 
 def test_terminal_transition_persists_outcome(ctx_for):

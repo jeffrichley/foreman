@@ -87,6 +87,32 @@ def test_reviewer_exception_emits_error(capsys):
     assert "rate limit" in outcome.summary
 
 
+def test_reviewer_transient_outcome(capsys):
+    """foreman#361: ``ProviderTransientError`` from the reviewer core
+    emits ``TRANSIENT_PROVIDER_ERROR`` with details populated, AND
+    exits 0 (the outcome JSON carries the signal; non-zero would trip
+    ``RoleSubprocessError`` in the dispatcher and lose the
+    discriminator).
+    """
+    from foreman.providers import ProviderTransientError
+
+    original_cause = Exception(
+        "Claude Code returned an error result: 503 Service Unavailable"
+    )
+    transient = ProviderTransientError(str(original_cause))
+    transient.__cause__ = original_cause
+    with patch(
+        "foreman.roles.reviewer._run_reviewer_for_v4",
+        side_effect=transient,
+    ):
+        exit_code = run_reviewer_cli(project="p", issue_number=1, target="spec")
+    assert exit_code == 0
+    outcome = parse_outcome_from_stdout(capsys.readouterr().out)
+    assert outcome.kind == OutcomeKind.TRANSIENT_PROVIDER_ERROR
+    assert "503" in outcome.details["provider_status"]
+    assert outcome.details["exception_class"] == "Exception"
+
+
 # --- Phase 8d.17 / foreman#315 ---------------------------------------
 
 
