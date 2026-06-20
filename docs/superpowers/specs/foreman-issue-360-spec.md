@@ -98,8 +98,17 @@ file in minutes. Tracks
   `take_snapshot` or `prune_snapshots` and structured-log the failure
   via a NEW event class (see `BackupFailedEvent` below) — a transient
   disk-full or read-only-FS failure must not crash the daemon loop.
-  Successful snapshots emit a `BackupTakenEvent` carrying
-  `(path: Path, size_bytes: int, pruned: list[Path])`.
+  Successful snapshots emit
+  `BackupTakenEvent(at=..., path=str(snapshot_path),
+  size_bytes=snapshot_path.stat().st_size,
+  pruned_count=len(pruned_paths))` — the field shape exactly matches
+  the `BackupTakenEvent` dataclass criterion below (`path: str`,
+  `size_bytes: int`, `pruned_count: int`); the scheduler MUST
+  convert the `Path` returned by `take_snapshot` to `str` and the
+  `list[Path]` returned by `prune_snapshots` to its length at the
+  publication site, so the event itself never carries non-portable
+  `Path` objects across the bus (matches the pure-data convention
+  the rest of `events.py` follows).
 - [ ] `BackupConfig` is added to `packages/foreman/src/foreman/v4/config.py`
   as a `pydantic.BaseModel` with `model_config =
   ConfigDict(extra="forbid")` (same shape as the existing
@@ -882,6 +891,53 @@ sentinel across every `Daemon(...)` construction is fine.
    missing snapshot. The retention algorithm is small and
    well-tested in the snapshot world (Time Machine,
    restic); the cost of implementing it is low.
+6. **Log backup outcomes directly via
+   `logging.getLogger("foreman.v4.transitions")` instead of
+   routing through `EventBus`.** The simpler shape would be:
+   `BackupScheduler.tick()` calls
+   `logging.getLogger("foreman.v4.transitions").info(json.dumps(
+   {"event": "backup_taken", "at": ..., "path": ..., ...}))`
+   on success and the corresponding `.error(...)` on failure;
+   `logging_config.py:20-24` already attaches `JsonLinesHandler`
+   to the `foreman.v4.transitions` logger, so the same JSON line
+   would land in `transitions.jsonl` without renaming
+   `Event` → `TicketEvent`, without adding `DaemonEvent`,
+   without widening `EventBus.publish`, and without the
+   four-observer `isinstance` guards (`StructuredLogObserver`,
+   `EventArchiveObserver`, `MetricsObserver`,
+   `EventBus.publish`'s exception path) the current design
+   requires. Rejected because the cost the simpler shape buys
+   isn't free — it creates two parallel observability paths.
+   Today every emission of every state-machine event flows
+   `EventBus.publish(event)` → `observer(event)` →
+   `StructuredLogObserver` (JSONL) + `EventArchiveObserver`
+   (SQL) + `MetricsObserver` (counters). A direct
+   `logging.getLogger(...).info(...)` from
+   `BackupScheduler.tick()` would land in JSONL but NOT in
+   any of the other two observers, which means: (a) a future
+   metrics observer that wants to count
+   `backup_failed_total` has to subscribe to TWO sources
+   (the bus AND the logger), and (b) the next reader who
+   looks at the events SQL table to answer "what happened in
+   the last 24 hours?" sees no backup events at all and has
+   to learn that backups use a separate path. The cross-cutting
+   refactor cost is real but bounded (one rename + four
+   isinstance guards, each three lines) and is paid once;
+   the two-paths cost is paid every time someone reasons
+   about observability or adds a new observer. The
+   `isinstance(event, DaemonEvent): return` guards added in
+   the three existing observers are also a documented
+   pattern that lints itself — adding a new observer that
+   forgets the guard will `AttributeError` on the first
+   `BackupTakenEvent`, which is loud and immediately
+   debuggable (a test against any state-machine event will
+   pass while the first daemon-event run fails), not a
+   silent drift. The widened `EventBus.publish` exception
+   path is also a one-time correctness fix — without it,
+   ANY future daemon-level event class that an observer
+   raises on would crash the publish loop, not just the two
+   backup events. Net: pay the structural cost once, keep
+   one observability path, keep the future surface uniform.
 
 ## Open questions
 None. The retention algorithm, file naming, schedule, restore
