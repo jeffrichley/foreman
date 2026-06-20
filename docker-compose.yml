@@ -52,6 +52,12 @@ services:
       - foreman-repos:/foreman/repos
       - foreman-state:/foreman/state
       - foreman-logs:/foreman/logs
+      # foreman#360: backups land on a host BIND MOUNT (not a named
+      # volume) so they survive `docker compose down -v`. The whole
+      # point of this directory is to protect against the failure
+      # mode that `down -v` causes; putting backups on the same
+      # named volume they're protecting defeats the purpose.
+      - ${HOME}/.foreman/backups:/foreman/backups
 
     # Docker json-file driver: rotation at 10MB × 5 files (≈50MB ceiling).
     # Without this it grows forever inside the WSL2 VM.

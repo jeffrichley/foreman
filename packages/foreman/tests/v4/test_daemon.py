@@ -4,6 +4,8 @@ from __future__ import annotations
 import datetime as dt
 import threading
 import time
+from pathlib import Path
+from unittest.mock import MagicMock
 
 from foreman.v4.daemon import Daemon, DaemonConfig
 from foreman.v4.git_provider import FakeGitProvider
@@ -172,3 +174,50 @@ def test_daemon_shutdown_is_idempotent():
     daemon.shutdown(wait=True)
     daemon.shutdown(wait=True)  # must not raise
     assert daemon.qm.in_flight_count() == 0
+
+
+# --- Issue #360: backup scheduler wiring on tick_once -------------------
+
+
+def test_tick_once_calls_backup_scheduler():
+    """tick_once must invoke the injected scheduler exactly once."""
+    repo = SqliteTicketRepository.in_memory()
+    stub_scheduler = MagicMock()
+    stub_scheduler.tick.return_value = None
+    poller = Poller(
+        repo=repo, qm=None, git=FakeGitProvider(),
+        project="p", trigger_label="foreman:plan",
+        clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
+    )
+    daemon = Daemon(
+        repo=repo, git=FakeGitProvider(),
+        dispatcher=FakeRoleDispatcher(responses={}),
+        pollers=[poller],
+        config=DaemonConfig(tick_seconds=0, max_in_flight=4),
+        clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
+        backup_scheduler=stub_scheduler,
+    )
+    daemon.tick_once()
+    assert stub_scheduler.tick.call_count == 1
+
+
+def test_tick_once_runs_with_disabled_scheduler_default(tmp_path: Path):
+    """No explicit ``backup_scheduler=`` kwarg → sentinel default.
+    ``tick_once`` must not raise AND must not write any files to
+    ``tmp_path`` (the sentinel writes nowhere)."""
+    repo = SqliteTicketRepository.in_memory()
+    poller = Poller(
+        repo=repo, qm=None, git=FakeGitProvider(),
+        project="p", trigger_label="foreman:plan",
+        clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
+    )
+    daemon = Daemon(
+        repo=repo, git=FakeGitProvider(),
+        dispatcher=FakeRoleDispatcher(responses={}),
+        pollers=[poller],
+        config=DaemonConfig(tick_seconds=0, max_in_flight=4),
+        clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
+    )
+    daemon.tick_once()
+    # Sentinel writes no files — tmp_path stays empty.
+    assert list(tmp_path.iterdir()) == []

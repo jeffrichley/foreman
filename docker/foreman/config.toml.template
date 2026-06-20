@@ -23,6 +23,23 @@ max_in_flight = 1
 role_timeout_seconds = 1800
 max_state_attempts = 3
 
+# Issue #360: periodic SQLite snapshot scheduler.
+# - `dir` MUST match the container side of the docker-compose bind
+#   mount (`${HOME}/.foreman/backups:/foreman/backups`); changing it
+#   here without changing the mount strands snapshots in a non-
+#   persistent layer.
+# - `interval_seconds = 3600` → hourly. Floor is 60 (runaway defense).
+# - Retention: 24 hourly + 7 daily + 4 weekly ≈ 35 files at any time.
+#   Each gzipped snapshot is a few MB; total disk footprint is in the
+#   low tens of MB.
+[backup]
+enabled = true
+dir = "/foreman/backups"
+interval_seconds = 3600
+retention_hourly = 24
+retention_daily = 7
+retention_weekly = 4
+
 [apps]
 planner = { app_id = ${FOREMAN_PLANNER_APP_ID}, private_key_path = "/run/secrets/planner_pem" }
 reviewer = { app_id = ${FOREMAN_REVIEWER_APP_ID}, private_key_path = "/run/secrets/reviewer_pem" }

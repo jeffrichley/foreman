@@ -248,6 +248,90 @@ intentionally skipped.
 
 ---
 
+## Backups and restoration
+
+Issue #360 added a daemon-internal scheduler that takes online SQLite
+snapshots of `/foreman/state/foreman.sqlite` and writes them gzip-
+compressed to a host bind mount at `~/.foreman/backups/`. The bind
+mount is load-bearing: `docker compose down -v` deletes named volumes
+(the whole failure mode the backups protect against) but leaves
+host-bind directories alone.
+
+### What exists
+
+- Path: `~/.foreman/backups/foreman-<YYYYMMDDTHHMMSSZ>.sqlite.gz`
+- Schedule: hourly by default (`config.toml.template` `[backup]`
+  `interval_seconds = 3600`).
+- Retention: 24 hourly + 7 daily + 4 weekly survivors ≈ 35 files
+  at any time. Each file is a few MB after gzip; total footprint
+  is in the low tens of MB.
+
+### Verify a backup is non-corrupt
+
+Before restoring, sanity-check the snapshot with `PRAGMA
+integrity_check`:
+
+```bash
+gunzip -c ~/.foreman/backups/foreman-<ts>.sqlite.gz > /tmp/check.sqlite
+sqlite3 /tmp/check.sqlite "PRAGMA integrity_check;"
+# should print: ok
+```
+
+If the result is anything other than `ok`, pick the next-older
+snapshot and re-verify.
+
+### Restore procedure
+
+**MANDATORY: stop the daemon FIRST.** The `foreman restore` PID-file
+check is best-effort inside Docker — the one-off `docker compose run`
+container cannot see the daemon container's PID file (it lives in
+the daemon's writable layer, not on a shared volume), so the check
+will say "safe to proceed" even if the daemon is actively writing
+the DB. Running restore against a live DB will corrupt either the
+live DB or the restored one.
+
+```bash
+# MANDATORY first step — stop writers before the swap.
+docker compose stop daemon
+
+# One-off container mounts the same volumes/binds as `up`, so
+# `db_path` (inside `foreman-state`) and the bind-mounted backup
+# file are both resolvable inside the one-off container.
+docker compose run --rm daemon \
+    foreman restore /foreman/backups/foreman-<ts>.sqlite.gz
+
+# Bring the daemon back online.
+docker compose up -d daemon
+```
+
+The restore command writes a "pre-restore" snapshot of the live DB
+next to it as `foreman.pre-restore-<ts>.sqlite.gz` BEFORE swapping
+in the requested snapshot. Use it as a one-step undo if you
+restored the wrong file: another `foreman restore` invocation
+against the pre-restore path swaps it back into place.
+
+### Tuning
+
+Edit `[backup]` in `docker/foreman/config.toml.template` (or your
+own deployed `config.toml`) to change the cadence or retention:
+
+```toml
+[backup]
+enabled = true              # set to false to turn snapshots off
+dir = "/foreman/backups"
+interval_seconds = 3600     # ge=60 floor; 0 is rejected at load
+retention_hourly = 24
+retention_daily = 7
+retention_weekly = 4
+```
+
+Operators with a small WSL2 disk who don't want backups at all can
+set `enabled = false`; the scheduler returns a no-op sentinel and
+writes no files. Operators with a bigger disk who want longer
+horizons can grow the three `retention_*` knobs.
+
+---
+
 ## Recovery: daemon won't start
 
 1. Check the daemon-log file directly (no need for the container to be
