@@ -30,12 +30,21 @@ short Anthropic outages. Tracks
   `packages/foreman/src/foreman/providers/anthropic_sdk.py` classifies the
   following as `ProviderTransientError` BEFORE the existing fallthrough to
   `ProviderUnknownError`:
-  * Any exception whose `str(exc)` matches the
-    `_SDK_CLAUDE_CODE_PREFIX` envelope AND contains any of the substrings
+  * Any exception whose `str(exc)` starts with the existing
+    `_SDK_AUTH_ERROR_PREFIX` constant (defined at
+    `anthropic_sdk.py:63` as `"Claude Code returned an error result"`)
+    AND contains any of the substrings
     `"429"`, `"rate_limit"`, `"rate limit"`, `"overloaded"`, `"503"`,
     `"502"`, `"504"`, `"500"`, `"connection refused"`,
     `"connection reset"`, `"connection aborted"`,
-    `"timeout"` (case-insensitive).
+    `"timeout"` (case-insensitive on the substring search; the
+    prefix check stays case-sensitive). Note: the constant name
+    `_SDK_AUTH_ERROR_PREFIX` is now misleading because it covers
+    both auth and transport failures, but renaming it is
+    explicitly out of scope here — the existing auth-retry guards
+    at lines 167 / 272 / 299 reference it by name, and a rename
+    would balloon the diff without semantic gain. Leave the name
+    alone and document the dual role in the function docstring.
   * Best-effort `isinstance` check against `anthropic.APIConnectionError`,
     `anthropic.RateLimitError`, `anthropic.APITimeoutError`, and
     `anthropic.InternalServerError`. Import is guarded by
@@ -59,6 +68,73 @@ short Anthropic outages. Tracks
   type(exc).__name__})` and returns exit code `0` (the outcome carries
   the signal; non-zero would trip `RoleSubprocessError` in the dispatcher
   and lose the discriminator).
+- [ ] **Worker inner-arm split (foreman#361 critical fix —
+  Reviewer-identified gap).** The Worker's `_run_worker_core` has an
+  inner `except ProviderError as exc:` arm at
+  `packages/foreman/src/foreman/roles/worker.py:1051` that swallows
+  `ProviderError`, synthesizes an `incomplete`-shaped `WorkerOutput`,
+  and falls through to post-check verification — i.e. it does NOT
+  re-raise. So without an explicit split, the `except
+  ProviderTransientError` arm added to `run_worker_cli` literally
+  cannot fire for the Worker. The fix: edit the inner arm at
+  `worker.py:1051` so the FIRST line of its body is
+  `if isinstance(exc, ProviderTransientError): raise` — re-raising
+  the transient subclass past the swallow so the outer
+  `except ProviderError` arm at `worker.py:1302` (and from there
+  `run_worker_cli`'s `except ProviderTransientError` arm) sees it.
+  Non-transient `ProviderError` keeps the existing
+  `WorkerOutput(outcome='incomplete', ...)` path. Add an inline
+  comment naming this finding so the intent is grep-able. The
+  outer `except ProviderError` arm at `worker.py:1302` is verified
+  to re-raise (no need to re-edit it), but the spec's role-CLI
+  acceptance criterion above already covers `run_worker_cli`
+  catching `ProviderTransientError` ahead of `except Exception`.
+- [ ] **Suppress redundant issue comments on transient retries
+  (foreman#361 important fix — Reviewer-identified gap).** The
+  Planner / Reviewer / Fixer inner `except ProviderError as exc:`
+  arms at `planner.py:435`, `reviewer.py:636`, `fixer.py:748` call
+  `_on_failure(exc)` before re-raising; `_on_failure` invokes
+  `handle_unhandled_role_exception` (defined in
+  `packages/foreman/src/foreman/roles/__init__.py:120`) which posts
+  a traceback comment on the originating GitHub issue
+  (foreman#229 runaway-burn defense). With the 4-attempt /
+  ~40-minute backoff schedule added by this spec, a single
+  Anthropic outage would post up to 4 redundant tracebacks per
+  ticket per outage. Decision (option (a) from the Reviewer's
+  three choices): the inner handler short-circuits on
+  `ProviderTransientError` BEFORE calling `_on_failure`. Concrete
+  edit: change each inner arm body to
+  ```python
+  except ProviderError as exc:
+      if isinstance(exc, ProviderTransientError):
+          # foreman#361: transient failures are retried by the
+          # state machine with backoff; suppress the
+          # runaway-burn issue comment so a 40-min outage does
+          # not carpet the issue with redundant tracebacks.
+          raise
+      _on_failure(exc)
+      raise
+  ```
+  Applies identically at `planner.py:435`, `reviewer.py:636`,
+  `fixer.py:748`. The Worker's inner arm at `worker.py:1051` does
+  NOT call `_on_failure` (it synthesizes a `WorkerOutput` and falls
+  through), but with the inner-arm split above the
+  `ProviderTransientError` subclass re-raises past 1051 and is
+  caught by the OUTER `except ProviderError` at
+  `worker.py:1302`, which DOES call `_on_failure` (`worker.py:883`
+  → `handle_unhandled_role_exception` → issue comment). So the
+  outer arm at `worker.py:1302` needs the SAME short-circuit:
+  ```python
+  except ProviderError as exc:
+      if isinstance(exc, ProviderTransientError):
+          # foreman#361: see inner-arm comment above.
+          raise
+      _on_failure(exc)
+      raise
+  ```
+  `handle_unhandled_role_exception` itself is NOT modified —
+  keeping the existing v3-era behavior intact for genuine role
+  crashes, where the comment is still the right surface.
 - [ ] `BACKOFF_SCHEDULE_SECONDS = (30, 120, 600, 1800)` is defined as a
   module-level constant in a new file
   `packages/foreman/src/foreman/v4/backoff.py` along with a pure helper
@@ -73,11 +149,26 @@ short Anthropic outages. Tracks
   must not enqueue this ticket until at least this wall-clock time").
 - [ ] `SqliteTicketRepository.__init__` in
   `packages/foreman/src/foreman/v4/sqlite_repository.py` runs a one-shot
-  additive migration AFTER `executescript`: query
-  `PRAGMA table_info(tickets)`; if `next_action_at` is missing, execute
-  `ALTER TABLE tickets ADD COLUMN next_action_at TEXT`. This mirrors the
-  pattern intended for the `depends_on` column add and keeps existing
-  on-disk DBs forward-compatible.
+  additive migration AFTER the existing `executescript` + WAL pragma
+  block (lines 92–104), and BEFORE assigning `self._conn`. The exact
+  shape:
+  ```python
+  cols = {row["name"] for row in conn.execute("PRAGMA table_info(tickets)")}
+  if "next_action_at" not in cols:
+      conn.execute("ALTER TABLE tickets ADD COLUMN next_action_at TEXT")
+      conn.commit()
+  ```
+  Rationale: SQLite's `CREATE TABLE IF NOT EXISTS` (used by
+  `executescript`) is a no-op when the table already exists, so a
+  pre-existing on-disk DB created against the old schema would NEVER
+  get the new column from the inline declaration alone — the
+  `ALTER TABLE` is load-bearing for forward compatibility. There is
+  NO existing additive-migration precedent in the repo (the
+  `depends_on` column was added by inline schema declaration BEFORE
+  any production DB existed at `schema.sql:20` with `NOT NULL DEFAULT
+  '[]'`, no `ALTER TABLE` shim was ever written). This ticket
+  introduces the pattern; future column adds should mirror this
+  shape.
 - [ ] `TicketRecord` in `packages/foreman/src/foreman/v4/records.py`
   gains `next_action_at: dt.datetime | None = None` (defaulted so the
   many test fixtures that build `TicketRecord` directly without the
@@ -158,8 +249,26 @@ short Anthropic outages. Tracks
   `packages/foreman/src/foreman/v4/observers/structured_log.py` gets
   one new entry:
   `TransientProviderErrorEvent: ("transient_provider_error", logging.WARNING)`.
-  The `__call__` body already serializes any `dataclass.fields(event)`
-  it walks; verify the new fields surface in the JSON payload.
+  ADDITIONALLY (Reviewer-identified gap): the `__call__` body does NOT
+  walk `dataclass.fields(event)` — it hard-codes per-event-type field
+  emission via explicit `isinstance` branches at lines 47–54 (the
+  existing `ExecuteCompletedEvent` and `StateFailedEvent` arms). So
+  add a NEW `isinstance(event, TransientProviderErrorEvent)` branch
+  after the `StateFailedEvent` branch that writes:
+  ```python
+  payload["attempt"] = event.attempt
+  payload["next_retry_at"] = (
+      event.next_retry_at.isoformat() if event.next_retry_at else None
+  )
+  payload["provider_status"] = event.provider_status
+  ```
+  Without this branch the three new fields would be silently dropped
+  from the JSONL output and the runbook-promised
+  `transient_provider_error` log lines would be missing their
+  attempt / backoff / cause-string detail. Also add
+  `TransientProviderErrorEvent` to the top-of-file `from
+  foreman.v4.events import (...)` block alongside the other
+  imported event types.
 - [ ] `LabelObservabilityObserver` is NOT modified — the state label
   on the GitHub issue stays at `foreman:state-planning` (or whichever
   role-dispatch state is suspended), which truthfully reflects the
@@ -171,11 +280,23 @@ short Anthropic outages. Tracks
   `qm.enqueue(...)` so an operator-forced retry bypasses any active
   suspension. Output line gains a parenthetical
   `"(cleared next_action_at)"` when a suspension was active.
-- [ ] `cmd_show` in `packages/foreman/src/foreman/v4/cli/queue.py`
-  (and any matching `cmd_ps`) renders `next_action_at` when non-null
-  as e.g. `suspended until 2026-06-20T14:25:00Z (provider-throttled,
-  attempt 2/4)`. The "attempt N/4" hint comes from a fresh call to
-  `count_consecutive_transient_provider_errors(ticket_id)`.
+- [ ] `cmd_show` in `packages/foreman/src/foreman/v4/cli/show.py`
+  (function defined at `show.py:20`) renders `next_action_at` when
+  non-null as a tree child off the ticket header, e.g. `[yellow]
+  suspended until 2026-06-20T14:25:00Z (provider-throttled,
+  attempt 2/4)[/yellow]`. The "attempt N/4" hint comes from a
+  fresh call to
+  `count_consecutive_transient_provider_errors(ticket_id)`. The
+  `cmd_show` body builds a `rich.Tree` (it does not go through
+  the Formatter Strategy — see file docstring); add the suspension
+  line as another `tree.add(...)` before the per-instance loop.
+- [ ] `cmd_ps` in `packages/foreman/src/foreman/v4/cli/ps.py`
+  (function defined at `ps.py:16`) gains a `next_action_at` column
+  in its row dict (formatted as ISO 8601 or empty string when
+  None) so the suspension surfaces alongside `state` / `updated`
+  in the Formatter Strategy output. Update the table/json/yaml
+  formatter callers transparently — the dict shape is the
+  contract.
 - [ ] New test file
   `packages/foreman/tests/providers/test_translate_sdk_transient.py`:
   one parametrized test that drives `_translate_sdk_exception` with
@@ -191,7 +312,25 @@ short Anthropic outages. Tracks
   calls `run_planner_cli`, asserts the emitted FOREMAN_OUTCOME JSON
   parses to `kind="transient_provider_error"` with `details`
   populated AND the exit code is `0`. Repeat the test shape for the
-  three other role CLIs in their existing test modules.
+  Reviewer and Fixer CLIs in their existing test modules
+  (`tests/roles/test_reviewer.py`, `tests/roles/test_fixer.py`).
+- [ ] New test for the Worker that EXERCISES the inner-arm split:
+  add `test_worker_transient_outcome` in
+  `packages/foreman/tests/roles/test_worker.py` (or a new sibling
+  file `test_worker_transient_outcome.py`). Patch
+  `provider.run_agent` to raise `ProviderTransientError` from
+  inside `_run_worker_core`; assert (a) the inner arm at
+  `worker.py:1051` re-raises (the synthesized
+  `WorkerOutput(outcome='incomplete')` path is NOT taken),
+  (b) the outer `run_worker_cli` `except ProviderTransientError`
+  arm fires, (c) the FOREMAN_OUTCOME JSON parses to
+  `kind="transient_provider_error"` with `details` populated AND
+  the exit code is `0`. A second test
+  `test_worker_non_transient_provider_error_still_swallowed`
+  patches `provider.run_agent` to raise a non-transient
+  `ProviderError`; asserts the existing `incomplete`-shaped
+  `WorkerOutput` path is preserved (regression guard for the
+  documented foreman#266 inner-arm behavior).
 - [ ] New test file
   `packages/foreman/tests/v4/states/test_role_dispatch_transient.py`
   (one module, parametrized over Planning + Implementing + ImplFix as
@@ -273,9 +412,14 @@ An in-memory schedule loses every pending suspension across a
 restart, which is precisely the wrong behavior — a daemon that
 restarts mid-Anthropic-outage would resume every suspended ticket
 immediately, hammer the API, and trip its own cap. Persistence is
-load-bearing. The schema migration is additive (nullable column with
-an `ALTER TABLE ADD COLUMN` guarded by `PRAGMA table_info`), matching
-the precedent for how `depends_on` was added later.
+load-bearing. The schema migration is additive (nullable column
+declared in `schema.sql` and gated by a `PRAGMA table_info`-driven
+`ALTER TABLE ADD COLUMN` in `SqliteTicketRepository.__init__` —
+needed because `CREATE TABLE IF NOT EXISTS` is a no-op against a
+pre-existing on-disk DB and would NOT pick up an inline column
+addition alone). No prior additive-migration precedent exists in
+the repo; this ticket introduces the pattern and future column adds
+should mirror its shape.
 
 **Why exit code 0 from the role CLI on transient.** The
 `SubprocessRoleDispatcher` treats any non-zero exit + missing
@@ -340,8 +484,17 @@ installed don't break import.
 13. Add the transient catch arm to each of the four role CLIs:
     `planner.py:run_planner_cli`, `reviewer.py:run_reviewer_cli`,
     `worker.py:run_worker_cli`, `fixer.py:run_fixer_cli`.
+    Additionally split the Worker's inner `except ProviderError`
+    arm at `worker.py:1051` so `ProviderTransientError` re-raises
+    past the swallow (see the Worker inner-arm acceptance
+    criterion above); also short-circuit Planner / Reviewer /
+    Fixer inner arms (`planner.py:435`, `reviewer.py:636`,
+    `fixer.py:748`) so `ProviderTransientError` bypasses
+    `_on_failure` (see the issue-comment-suppression criterion
+    below).
 14. Extend `cmd_retry` (`v4/cli/mutations.py`) to call
-    `clear_next_action_at` first; extend `cmd_show` to display
+    `clear_next_action_at` first; extend `cmd_show`
+    (`v4/cli/show.py`) and `cmd_ps` (`v4/cli/ps.py`) to display
     suspensions.
 15. Write the unit/integration tests enumerated in Acceptance.
 16. Add the RUNBOOK section.
@@ -381,8 +534,11 @@ installed don't break import.
   in each role's `run_*_cli`.
 - `packages/foreman/src/foreman/v4/cli/mutations.py` —
   extend `cmd_retry`.
-- `packages/foreman/src/foreman/v4/cli/queue.py` — display
-  `next_action_at` in `cmd_show` / `cmd_ps`.
+- `packages/foreman/src/foreman/v4/cli/show.py` — display
+  `next_action_at` in `cmd_show` (rendered as a tree child).
+- `packages/foreman/src/foreman/v4/cli/ps.py` — add a
+  `next_action_at` column to the `cmd_ps` row dict so the
+  suspension surfaces in table / json / yaml output.
 - `packages/foreman/tests/providers/test_translate_sdk_transient.py`
   — NEW classifier tests.
 - `packages/foreman/tests/roles/test_planner_transient_outcome.py`
