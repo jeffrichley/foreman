@@ -58,6 +58,54 @@ if TYPE_CHECKING:
     from github import Github
     from github.Repository import Repository
 
+
+def _resolve_merge_method(
+    repo: Repository, preferred: str | None = None,
+) -> str:
+    """Pick the merge method to pass to ``pr.merge(merge_method=...)``.
+
+    Reads the three repo-level allow booleans (``allow_squash_merge``,
+    ``allow_rebase_merge``, ``allow_merge_commit``) and selects a method
+    that the target repo will accept. Preference order when ``preferred``
+    is not given (or given but disallowed): squash → rebase → merge.
+
+    Parameters
+    ----------
+    repo:
+        PyGithub :class:`~github.Repository.Repository` handle for the
+        target repo. Must expose the three ``allow_*`` boolean attributes.
+    preferred:
+        Caller-supplied preference (e.g. from ``ProjectConfig.merge_method``
+        in a future follow-up). If the method is allowed on this repo the
+        preferred value is returned; otherwise the function falls back to
+        the first allowed method in the preference order.
+
+    Raises
+    ------
+    ValueError
+        If none of the three repo flags are ``True`` — which should not
+        happen on a real GitHub repo, but raises a descriptive error rather
+        than letting ``pr.merge()`` produce a cryptic 405.
+    """
+    allowed: dict[str, bool] = {
+        "squash": bool(repo.allow_squash_merge),
+        "rebase": bool(repo.allow_rebase_merge),
+        "merge": bool(repo.allow_merge_commit),
+    }
+    if preferred is not None and allowed.get(preferred):
+        return preferred
+    for method in ("squash", "rebase", "merge"):
+        if allowed[method]:
+            return method
+    raise ValueError(
+        f"repo has no allowed merge method "
+        f"(allow_squash_merge={allowed['squash']}, "
+        f"allow_rebase_merge={allowed['rebase']}, "
+        f"allow_merge_commit={allowed['merge']}); "
+        f"cannot call pr.merge()"
+    )
+
+
 #: GitHub PR ``mergeable_state`` values that we treat as "CI passing"
 #: for the purposes of v4 routing decisions. Public (no underscore) so
 #: other modules — notably ``foreman.roles.worker`` for the BLOCKED-retry
@@ -192,9 +240,16 @@ class PyGithubGitProvider:
         Callers (specifically MergingState) gate this call on a
         ``get_pr_state`` check that confirms the PR is mergeable + CI
         passing, so the failure modes are limited.
+
+        The merge method is resolved automatically from the repo's allowed
+        merge methods via ``_resolve_merge_method`` (preference order:
+        squash → rebase → merge). This avoids HTTP 405 on squash-only
+        repos like ``jeffrichley/agent_core`` where PyGithub's default
+        ``"merge"`` method is disabled.
         """
-        pr = self._repo.get_pull(pr_number)
-        pr.merge()
+        repo = self._repo
+        pr = repo.get_pull(pr_number)
+        pr.merge(merge_method=_resolve_merge_method(repo))
 
     def list_open_issues_with_label(
         self, *, project: str, label: str,
