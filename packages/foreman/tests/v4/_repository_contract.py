@@ -508,3 +508,23 @@ class RepositoryContract:
     def test_delete_ticket_missing_raises(self, repo: TicketRepository) -> None:
         with pytest.raises(TicketNotFoundError):
             repo.delete_ticket(9999)
+
+    def test_append_event_round_trips(self, repo: TicketRepository) -> None:
+        now = dt.datetime(2026, 6, 21, 12, 0, tzinfo=dt.UTC)
+        ticket = repo.create_ticket(project="p", issue_number=1, now=now)
+        inst = repo.open_state_instance(
+            ticket_id=ticket.id, state_name="Queued", sequence=0, now=now
+        )
+        repo.append_event(
+            ticket_id=ticket.id,
+            instance_id=inst.id,
+            event_type="StateEntered",
+            state_name="Queued",
+            sequence=0,
+            at=now,
+            payload={"foo": "bar"},
+        )
+        events = repo.list_events_for_ticket(ticket.id)
+        assert len(events) == 1
+        assert events[0]["event_type"] == "StateEntered"
+        assert events[0]["payload"] == {"foo": "bar"}

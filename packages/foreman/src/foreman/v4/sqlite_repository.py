@@ -161,9 +161,7 @@ class SqliteTicketRepository:
 
     # --- Ticket CRUD ---
 
-    def create_ticket(
-        self, *, project: str, issue_number: int, now: dt.datetime
-    ) -> TicketRecord:
+    def create_ticket(self, *, project: str, issue_number: int, now: dt.datetime) -> TicketRecord:
         with self._lock:
             ts = _to_iso(now)
             try:
@@ -180,16 +178,12 @@ class SqliteTicketRepository:
 
     def get_ticket(self, ticket_id: int) -> TicketRecord:
         with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM tickets WHERE id = ?", (ticket_id,)
-            ).fetchone()
+            row = self._conn.execute("SELECT * FROM tickets WHERE id = ?", (ticket_id,)).fetchone()
             if row is None:
                 raise TicketNotFoundError(str(ticket_id))
             return _ticket_row_to_record(row)
 
-    def get_ticket_by_issue(
-        self, *, project: str, issue_number: int
-    ) -> TicketRecord:
+    def get_ticket_by_issue(self, *, project: str, issue_number: int) -> TicketRecord:
         with self._lock:
             row = self._conn.execute(
                 "SELECT * FROM tickets WHERE project = ? AND issue_number = ?",
@@ -210,14 +204,10 @@ class SqliteTicketRepository:
 
     def list_all_tickets(self) -> list[TicketRecord]:
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM tickets ORDER BY id"
-            ).fetchall()
+            rows = self._conn.execute("SELECT * FROM tickets ORDER BY id").fetchall()
             return [_ticket_row_to_record(r) for r in rows]
 
-    def set_ticket_state(
-        self, ticket_id: int, new_state: str, *, now: dt.datetime
-    ) -> None:
+    def set_ticket_state(self, ticket_id: int, new_state: str, *, now: dt.datetime) -> None:
         with self._lock:
             self._conn.execute(
                 "UPDATE tickets SET current_state = ?, updated_at = ? WHERE id = ?",
@@ -225,9 +215,7 @@ class SqliteTicketRepository:
             )
             self._conn.commit()
 
-    def hold_ticket(
-        self, ticket_id: int, *, held_by: str, reason: str, now: dt.datetime
-    ) -> None:
+    def hold_ticket(self, ticket_id: int, *, held_by: str, reason: str, now: dt.datetime) -> None:
         with self._lock:
             ts = _to_iso(now)
             self._conn.execute(
@@ -267,7 +255,8 @@ class SqliteTicketRepository:
     def delete_ticket(self, ticket_id: int) -> None:
         with self._lock, self._conn:
             cur = self._conn.execute(
-                "SELECT 1 FROM tickets WHERE id = ?", (ticket_id,),
+                "SELECT 1 FROM tickets WHERE id = ?",
+                (ticket_id,),
             )
             if cur.fetchone() is None:
                 raise TicketNotFoundError(str(ticket_id))
@@ -276,7 +265,8 @@ class SqliteTicketRepository:
                 (ticket_id,),
             )
             self._conn.execute(
-                "DELETE FROM tickets WHERE id = ?", (ticket_id,),
+                "DELETE FROM tickets WHERE id = ?",
+                (ticket_id,),
             )
 
     # --- State-instance journal ---
@@ -372,7 +362,8 @@ class SqliteTicketRepository:
             return [_instance_row_to_record(r) for r in rows]
 
     def list_state_instances_for_ticket(
-        self, ticket_id: int,
+        self,
+        ticket_id: int,
     ) -> list[StateInstanceRecord]:
         with self._lock:
             rows = self._conn.execute(
@@ -380,6 +371,41 @@ class SqliteTicketRepository:
                 (ticket_id,),
             ).fetchall()
             return [_instance_row_to_record(r) for r in rows]
+
+    def append_event(
+        self,
+        *,
+        ticket_id: int,
+        instance_id: int,
+        event_type: str,
+        state_name: str,
+        sequence: int,
+        at: dt.datetime,
+        payload: dict[str, Any],
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO events (ticket_id, instance_id, event_type, "
+                "state_name, sequence, at, payload) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    ticket_id,
+                    instance_id,
+                    event_type,
+                    state_name,
+                    sequence,
+                    _to_iso(at),
+                    json.dumps(payload),
+                ),
+            )
+            self._conn.commit()
+
+    def list_events_for_ticket(self, ticket_id: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM events WHERE ticket_id = ? ORDER BY at",
+                (ticket_id,),
+            ).fetchall()
+        return [{**dict(r), "payload": json.loads(r["payload"])} for r in rows]
 
     # --- Helpers used by states / WorkerPool / QueueManager ---
 
@@ -406,9 +432,7 @@ class SqliteTicketRepository:
             ).fetchone()
             return int(row["n"])
 
-    def count_consecutive_same_state(
-        self, *, ticket_id: int, state: str
-    ) -> int:
+    def count_consecutive_same_state(self, *, ticket_id: int, state: str) -> int:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT state_name, failure_phase, outcome_kind "
@@ -498,7 +522,8 @@ class SqliteTicketRepository:
     def get_ticket_dependencies(self, ticket_id: int) -> list[int]:
         with self._lock:
             row = self._conn.execute(
-                "SELECT depends_on FROM tickets WHERE id = ?", (ticket_id,),
+                "SELECT depends_on FROM tickets WHERE id = ?",
+                (ticket_id,),
             ).fetchone()
             if row is None:
                 raise TicketNotFoundError(str(ticket_id))

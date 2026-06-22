@@ -388,6 +388,44 @@ class PostgresTicketRepository:
             ).fetchall()
         return [_instance_from_row(r) for r in rows]
 
+    def append_event(
+        self,
+        *,
+        ticket_id: int,
+        instance_id: int,
+        event_type: str,
+        state_name: str,
+        sequence: int,
+        at: dt.datetime,
+        payload: dict[str, Any],
+    ) -> None:
+        from psycopg.types.json import Jsonb
+
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO events (ticket_id, instance_id, event_type, "
+                "state_name, sequence, at, payload) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (
+                    ticket_id,
+                    instance_id,
+                    event_type,
+                    state_name,
+                    sequence,
+                    _to_db(at),
+                    Jsonb(payload),
+                ),
+            )
+            conn.commit()
+
+    def list_events_for_ticket(self, ticket_id: int) -> list[dict[str, Any]]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM events WHERE ticket_id = %s ORDER BY at",
+                (ticket_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     # --- Helpers used by states / WorkerPool / QueueManager ---
 
     def latest_pr_number_for_ticket(self, ticket_id: int) -> int | None:
