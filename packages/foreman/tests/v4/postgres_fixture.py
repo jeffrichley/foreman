@@ -11,11 +11,21 @@ no daemon), so the suite degrades gracefully instead of erroring.
 
 from __future__ import annotations
 
+import os
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
 import psycopg
 import pytest
+
+# Windows dev boxes: testcontainers' Ryuk reaper sidecar fails its port-
+# mapping lookup under Docker Desktop, erroring every Postgres test. The
+# fixture's `with PostgresContainer(...)` context manager already cleans up
+# the container deterministically, so disabling Ryuk here is safe. Scoped to
+# Windows only — Linux CI keeps Ryuk (guaranteed cleanup even on hard crash).
+if sys.platform == "win32":
+    os.environ.setdefault("TESTCONTAINERS_RYUK_DISABLED", "true")
 
 _SCHEMA = Path(__file__).parents[2] / "src" / "foreman" / "v4" / "postgres_schema.sql"
 
