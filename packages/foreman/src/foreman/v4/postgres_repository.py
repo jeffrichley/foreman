@@ -372,3 +372,69 @@ class PostgresTicketRepository:
                 (ticket_id,),
             ).fetchall()
         return [_instance_from_row(r) for r in rows]
+
+    # --- Helpers used by states / WorkerPool / QueueManager ---
+
+    def latest_pr_number_for_ticket(self, ticket_id: int) -> int | None:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT outcome_payload FROM state_instances "
+                "WHERE ticket_id = %s ORDER BY sequence DESC",
+                (ticket_id,),
+            ).fetchall()
+        for row in rows:
+            payload = row["outcome_payload"]
+            if not payload:
+                continue
+            pr_number = (payload or {}).get("artifacts", {}).get("pr_number")
+            if pr_number is not None:
+                return int(pr_number)
+        return None
+
+    def count_state_instances_for_ticket(self, ticket_id: int) -> int:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM state_instances WHERE ticket_id = %s",
+                (ticket_id,),
+            ).fetchone()
+        assert row is not None
+        return int(row["n"])
+
+    def count_consecutive_same_state(self, *, ticket_id: int, state: str) -> int:
+        # Mirror InMemoryTicketRepository.count_consecutive_same_state exactly:
+        # walk newest-first, skip can_run-failed / BLOCKED /
+        # TRANSIENT_PROVIDER_ERROR rows (neither count nor break), count
+        # matching state_name rows, break on first non-matching.
+        instances = self.list_state_instances_for_ticket(ticket_id)
+        instances.reverse()  # sequence DESC
+        count = 0
+        for inst in instances:
+            if inst.failure_phase == "can_run":
+                continue
+            if inst.outcome_kind == OutcomeKind.BLOCKED:
+                continue
+            if inst.outcome_kind == OutcomeKind.TRANSIENT_PROVIDER_ERROR:
+                continue
+            if inst.state_name == state:
+                count += 1
+            else:
+                break
+        return count
+
+    def count_consecutive_transient_provider_errors(self, ticket_id: int) -> int:
+        # Mirror InMemoryTicketRepository exactly: skip can_run-failed rows
+        # and the in-flight (outcome_kind IS NULL) row; count consecutive
+        # TRANSIENT_PROVIDER_ERROR; break on any other completed outcome.
+        instances = self.list_state_instances_for_ticket(ticket_id)
+        instances.reverse()
+        count = 0
+        for inst in instances:
+            if inst.failure_phase == "can_run":
+                continue
+            if inst.outcome_kind is None:
+                continue
+            if inst.outcome_kind == OutcomeKind.TRANSIENT_PROVIDER_ERROR:
+                count += 1
+            else:
+                break
+        return count
