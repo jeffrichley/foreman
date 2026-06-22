@@ -107,7 +107,7 @@ def bootstrap_cli_context(
     # Daemon ticks.
     bus = EventBus()
     bus.subscribe(StructuredLogObserver())
-    bus.subscribe(EventArchiveObserver(conn=repo.connection))
+    bus.subscribe(EventArchiveObserver(repo=repo))
     if git_for_cross_project is not None:
         # No projects ⇒ no GitProvider ⇒ nothing to write labels with.
         # The bus still gets the other three observers so the rest of
