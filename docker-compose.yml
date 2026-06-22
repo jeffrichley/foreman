@@ -46,7 +46,7 @@ services:
     container_name: foreman-daemon
 
     # v5: wait for postgres to be healthy before starting the daemon so that
-    # the asyncpg pool creation at bootstrap doesn't race against pg startup.
+    # the psycopg pool creation at bootstrap doesn't race against pg startup.
     depends_on:
       postgres:
         condition: service_healthy
