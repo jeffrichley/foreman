@@ -81,7 +81,9 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Basic RFC-5321-ish email-shape regex per issue #347 spec. The schema
 # only validates SHAPE — semantic validity (LDAP, GitHub account exists,
@@ -262,6 +264,31 @@ class BackupConfig(BaseModel):
     retention_weekly: int = Field(default=4, ge=0)
 
 
+class StorageConfig(BaseModel):
+    """Persistence engine selection. Defaulted so configs without a
+    ``[storage]`` block keep the historical SQLite behavior.
+
+    ``engine = "sqlite"`` (default) uses ``SqliteTicketRepository`` at
+    ``V4Config.db_path``. ``engine = "postgres"`` uses
+    ``PostgresTicketRepository`` at ``dsn`` with a thread-safe
+    connection pool sized ``[pool_min, pool_max]``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    engine: Literal["sqlite", "postgres"] = "sqlite"
+    dsn: str | None = None
+    pool_min: int = Field(default=2, ge=1)
+    pool_max: int = Field(default=10, ge=1)
+
+    @model_validator(mode="after")
+    def _dsn_required_for_postgres(self) -> StorageConfig:
+        if self.engine == "postgres" and not self.dsn:
+            raise ValueError('dsn is required when engine = "postgres"')
+        if self.pool_max < self.pool_min:
+            raise ValueError("pool_max must be >= pool_min")
+        return self
+
+
 class OrchestratorConfig(BaseModel):
     """Orchestrator-level (non-role) GitHub App identity.
 
@@ -319,6 +346,9 @@ class V4Config(BaseModel):
     required) so configs without a ``[backup]`` block continue to load —
     backups default to ON with the documented hourly schedule + 24/7/4
     retention totalling ~35 files."""
+    storage: StorageConfig = Field(default_factory=StorageConfig)
+    """v5: persistence engine selection. Defaulted so pre-v5 configs
+    (no [storage] block) keep loading with SQLite at db_path."""
 
 
 def load_config(path: Path) -> V4Config:
@@ -349,6 +379,8 @@ def load_config(path: Path) -> V4Config:
         payload["operator"] = raw["operator"]
     if "backup" in raw:
         payload["backup"] = raw["backup"]
+    if "storage" in raw:
+        payload["storage"] = raw["storage"]
     return V4Config.model_validate(payload)
 
 

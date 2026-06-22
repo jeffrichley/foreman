@@ -807,3 +807,68 @@ def test_backup_block_extras_forbidden(tmp_path: Path):
     )
     with pytest.raises(ValidationError):
         load_config(config_path)
+
+
+# ---------------------------------------------------------------------------
+# Task 2 (v5): [storage] block — PostgreSQL opt-in with sqlite default.
+# ---------------------------------------------------------------------------
+
+
+def test_storage_defaults_to_sqlite_when_section_absent(tmp_path: Path):
+    """Task 2 (v5): A config with no [storage] block keeps the historical
+    sqlite behavior. engine defaults to "sqlite" and dsn is None."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[daemon]\n"
+        'db_path = "/tmp/foreman.db"\n'
+        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+    )
+    cfg = load_config(config_path)
+    assert cfg.storage.engine == "sqlite"
+    assert cfg.storage.dsn is None
+
+
+def test_storage_postgres_requires_dsn(tmp_path: Path):
+    """Task 2 (v5): engine = "postgres" without a dsn MUST raise. The
+    daemon cannot construct a connection pool without a connection string,
+    so refusing at load time is correct."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[daemon]\n"
+        'db_path = "/tmp/foreman.db"\n'
+        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+        "\n[storage]\n"
+        'engine = "postgres"\n'
+    )
+    with pytest.raises(ValidationError, match="dsn is required when engine"):
+        load_config(config_path)
+
+
+def test_storage_postgres_accepts_dsn_and_pool_sizes(tmp_path: Path):
+    """Task 2 (v5): A full postgres storage block round-trips through
+    pydantic — engine, dsn, pool_min, pool_max all readable."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[daemon]\n"
+        'db_path = "/tmp/foreman.db"\n'
+        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+        "\n[storage]\n"
+        'engine = "postgres"\n'
+        'dsn = "postgresql://foreman:pw@postgres:5432/foreman"\n'
+        "pool_min = 2\n"
+        "pool_max = 10\n"
+    )
+    cfg = load_config(config_path)
+    assert cfg.storage.engine == "postgres"
+    assert cfg.storage.dsn == "postgresql://foreman:pw@postgres:5432/foreman"
+    assert cfg.storage.pool_min == 2
+    assert cfg.storage.pool_max == 10
