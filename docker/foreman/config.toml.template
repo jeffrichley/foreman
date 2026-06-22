@@ -32,6 +32,20 @@ max_state_attempts = 3
 # - Retention: 24 hourly + 7 daily + 4 weekly ≈ 35 files at any time.
 #   Each gzipped snapshot is a few MB; total disk footprint is in the
 #   low tens of MB.
+# v5 (#issue): persistence engine selection. The entrypoint defaults
+# ${FOREMAN_STORAGE_ENGINE} to "sqlite" and ${FOREMAN_PG_DSN} to "" BEFORE
+# envsubst runs (envsubst has no default-value syntax), so an operator who
+# sets nothing gets the historical SQLite behavior at [daemon].db_path.
+# Select postgres by setting FOREMAN_STORAGE_ENGINE=postgres + FOREMAN_PG_DSN
+# in .env (docker-compose already passes FOREMAN_PG_DSN to the daemon).
+# An empty dsn string is accepted by StorageConfig when engine = "sqlite";
+# the validator only requires a dsn when engine = "postgres".
+[storage]
+engine = "${FOREMAN_STORAGE_ENGINE}"
+dsn = "${FOREMAN_PG_DSN}"
+pool_min = 2
+pool_max = 10
+
 [backup]
 enabled = true
 dir = "/foreman/backups"

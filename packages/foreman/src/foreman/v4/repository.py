@@ -37,13 +37,17 @@ class TicketRepository(Protocol):
 
     # --- Ticket CRUD ---
 
-    def create_ticket(self, *, project: str, issue_number: int, now: dt.datetime) -> TicketRecord: ...
+    def create_ticket(
+        self, *, project: str, issue_number: int, now: dt.datetime
+    ) -> TicketRecord: ...
     def get_ticket(self, ticket_id: int) -> TicketRecord: ...
     def get_ticket_by_issue(self, *, project: str, issue_number: int) -> TicketRecord: ...
     def list_open_tickets(self) -> list[TicketRecord]: ...
     def list_all_tickets(self) -> list[TicketRecord]: ...
     def set_ticket_state(self, ticket_id: int, new_state: str, *, now: dt.datetime) -> None: ...
-    def hold_ticket(self, ticket_id: int, *, held_by: str, reason: str, now: dt.datetime) -> None: ...
+    def hold_ticket(
+        self, ticket_id: int, *, held_by: str, reason: str, now: dt.datetime
+    ) -> None: ...
     def resume_ticket(self, ticket_id: int, *, now: dt.datetime) -> None: ...
     def delete_ticket(self, ticket_id: int) -> None: ...
     # foreman#361: schedule + clear the transient-provider-error
@@ -78,8 +82,21 @@ class TicketRepository(Protocol):
     ) -> None: ...
     def list_in_flight_state_instances(self) -> list[StateInstanceRecord]: ...
     def list_state_instances_for_ticket(
-        self, ticket_id: int,
+        self,
+        ticket_id: int,
     ) -> list[StateInstanceRecord]: ...
+    def append_event(
+        self,
+        *,
+        ticket_id: int,
+        instance_id: int,
+        event_type: str,
+        state_name: str,
+        sequence: int,
+        at: dt.datetime,
+        payload: dict[str, Any],
+    ) -> None: ...
+    def list_events_for_ticket(self, ticket_id: int) -> list[dict[str, Any]]: ...
 
     # --- Helpers used by states / WorkerPool / QueueManager ---
 
@@ -122,9 +139,8 @@ class TicketRepository(Protocol):
         not ``TRANSIENT_PROVIDER_ERROR.value`` breaks the run.
         """
         ...
-    def count_consecutive_same_state(
-        self, *, ticket_id: int, state: str
-    ) -> int:
+
+    def count_consecutive_same_state(self, *, ticket_id: int, state: str) -> int:
         """Return the number of consecutive ``state_instances`` rows for
         ``ticket_id`` whose ``state_name`` matches ``state``, walking
         back from the latest sequence. Stops at the first row whose
@@ -181,6 +197,7 @@ class InMemoryTicketRepository:
         self._instances: dict[int, StateInstanceRecord] = {}
         self._next_ticket_id = 1
         self._next_instance_id = 1
+        self._events: list[dict[str, Any]] = []
 
     # --- Ticket CRUD ---
 
@@ -280,8 +297,7 @@ class InMemoryTicketRepository:
         del self._by_issue[(existing.project, existing.issue_number)]
         # Cascade — drop every state-instance row tied to this ticket.
         self._instances = {
-            iid: inst for iid, inst in self._instances.items()
-            if inst.ticket_id != ticket_id
+            iid: inst for iid, inst in self._instances.items() if inst.ticket_id != ticket_id
         }
 
     # --- State-instance journal ---
@@ -360,20 +376,43 @@ class InMemoryTicketRepository:
         return [i for i in self._instances.values() if i.is_in_flight]
 
     def list_state_instances_for_ticket(
-        self, ticket_id: int,
+        self,
+        ticket_id: int,
     ) -> list[StateInstanceRecord]:
-        matches = [
-            i for i in self._instances.values() if i.ticket_id == ticket_id
-        ]
+        matches = [i for i in self._instances.values() if i.ticket_id == ticket_id]
         matches.sort(key=lambda i: i.sequence)
         return matches
+
+    def append_event(
+        self,
+        *,
+        ticket_id: int,
+        instance_id: int,
+        event_type: str,
+        state_name: str,
+        sequence: int,
+        at: dt.datetime,
+        payload: dict[str, Any],
+    ) -> None:
+        self._events.append(
+            {
+                "ticket_id": ticket_id,
+                "instance_id": instance_id,
+                "event_type": event_type,
+                "state_name": state_name,
+                "sequence": sequence,
+                "at": at,
+                "payload": dict(payload),
+            }
+        )
+
+    def list_events_for_ticket(self, ticket_id: int) -> list[dict[str, Any]]:
+        return [e for e in self._events if e["ticket_id"] == ticket_id]
 
     # --- Helpers used by states / WorkerPool / QueueManager ---
 
     def latest_pr_number_for_ticket(self, ticket_id: int) -> int | None:
-        candidates = [
-            i for i in self._instances.values() if i.ticket_id == ticket_id
-        ]
+        candidates = [i for i in self._instances.values() if i.ticket_id == ticket_id]
         candidates.sort(key=lambda i: i.sequence, reverse=True)
         for inst in candidates:
             if not inst.outcome_payload:
@@ -386,12 +425,8 @@ class InMemoryTicketRepository:
     def count_state_instances_for_ticket(self, ticket_id: int) -> int:
         return sum(1 for i in self._instances.values() if i.ticket_id == ticket_id)
 
-    def count_consecutive_same_state(
-        self, *, ticket_id: int, state: str
-    ) -> int:
-        matches = [
-            i for i in self._instances.values() if i.ticket_id == ticket_id
-        ]
+    def count_consecutive_same_state(self, *, ticket_id: int, state: str) -> int:
+        matches = [i for i in self._instances.values() if i.ticket_id == ticket_id]
         matches.sort(key=lambda i: i.sequence, reverse=True)
         count = 0
         for inst in matches:
@@ -426,9 +461,7 @@ class InMemoryTicketRepository:
         return count
 
     def count_consecutive_transient_provider_errors(self, ticket_id: int) -> int:
-        matches = [
-            i for i in self._instances.values() if i.ticket_id == ticket_id
-        ]
+        matches = [i for i in self._instances.values() if i.ticket_id == ticket_id]
         matches.sort(key=lambda i: i.sequence, reverse=True)
         count = 0
         for inst in matches:

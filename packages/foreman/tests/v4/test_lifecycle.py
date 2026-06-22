@@ -82,7 +82,7 @@ def test_happy_path_queued_to_done():
         ("reviewer-impl", "p", 1):  _canned("clean", pr_number=42),
     })
     bus = EventBus()
-    bus.subscribe(EventArchiveObserver(conn=repo._conn))
+    bus.subscribe(EventArchiveObserver(repo=repo))
     bus.subscribe(StructuredLogObserver())
 
     # Drive the ticket. MergingState now calls pr.merge() directly

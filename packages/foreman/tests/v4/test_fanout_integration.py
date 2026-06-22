@@ -71,7 +71,7 @@ def test_one_transition_reaches_all_four_observers(caplog):
     writer = _RecordingWriter()
     bus.subscribe(StructuredLogObserver(logger_name="foreman.v4.transitions"))
     bus.subscribe(LabelObservabilityObserver(writer=writer, repo=repo))
-    bus.subscribe(EventArchiveObserver(conn=repo._conn))
+    bus.subscribe(EventArchiveObserver(repo=repo))
     bus.subscribe(MetricsObserver())
 
     ctx = StateContext(

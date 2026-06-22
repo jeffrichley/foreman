@@ -31,6 +31,7 @@ from foreman.v4.cli.daemon import (
 from foreman.v4.cli.doctor import cmd_doctor
 from foreman.v4.cli.init import cmd_init
 from foreman.v4.cli.log import cmd_log
+from foreman.v4.cli.migrate import cmd_migrate_v4_to_v5
 from foreman.v4.cli.mutations import (
     cmd_drop,
     cmd_enqueue,
@@ -59,7 +60,9 @@ app = typer.Typer(
 def _root(
     ctx: typer.Context,
     version: bool = typer.Option(
-        False, "--version", help="Print version and exit",
+        False,
+        "--version",
+        help="Print version and exit",
     ),
 ) -> None:
     if version:
@@ -88,6 +91,7 @@ app.command("enqueue")(cmd_enqueue)
 app.command("reset")(cmd_reset)
 app.command("restore")(cmd_restore)
 app.command("doctor")(cmd_doctor)
+app.command("migrate-v4-to-v5")(cmd_migrate_v4_to_v5)
 
 
 daemon_app = typer.Typer(name="daemon", help="Daemon lifecycle")
@@ -122,9 +126,13 @@ def cmd_review(
     target: str = typer.Option(..., "--target", help="spec|impl"),
 ) -> None:
     """Run the v4 Reviewer (target-aware): emit FOREMAN_OUTCOME; exit code carries verdict."""
-    raise typer.Exit(code=run_reviewer_cli(
-        project=project, issue_number=issue_number, target=target,
-    ))
+    raise typer.Exit(
+        code=run_reviewer_cli(
+            project=project,
+            issue_number=issue_number,
+            target=target,
+        )
+    )
 
 
 @app.command("fix")
@@ -134,9 +142,13 @@ def cmd_fix(
     target: str = typer.Option(..., "--target", help="spec|impl"),
 ) -> None:
     """Run the v4 Fixer (target-aware): emit FOREMAN_OUTCOME; exit code carries verdict."""
-    raise typer.Exit(code=run_fixer_cli(
-        project=project, issue_number=issue_number, target=target,
-    ))
+    raise typer.Exit(
+        code=run_fixer_cli(
+            project=project,
+            issue_number=issue_number,
+            target=target,
+        )
+    )
 
 
 @app.command("implement")
@@ -145,9 +157,12 @@ def cmd_implement(
     issue_number: int = typer.Option(..., "--issue-number"),
 ) -> None:
     """Run the v4 Worker: emit FOREMAN_OUTCOME; exit code carries verdict."""
-    raise typer.Exit(code=run_worker_cli(
-        project=project, issue_number=issue_number,
-    ))
+    raise typer.Exit(
+        code=run_worker_cli(
+            project=project,
+            issue_number=issue_number,
+        )
+    )
 
 
 _DEFAULT_CONFIG = Path.home() / ".foreman" / "v4" / "config.toml"

@@ -9,9 +9,6 @@ isolates the exception; the journal stays correct.
 
 from __future__ import annotations
 
-import json
-import sqlite3
-
 from foreman.v4.events import (
     DaemonEvent,
     Event,
@@ -22,13 +19,14 @@ from foreman.v4.events import (
     StateFailedEvent,
     TicketEvent,
 )
+from foreman.v4.repository import TicketRepository
 
 _EVENT_TYPE_NAMES = {
-    StateEnteredEvent:     "state_entered",
-    ExecuteStartedEvent:   "execute_started",
+    StateEnteredEvent: "state_entered",
+    ExecuteStartedEvent: "execute_started",
     ExecuteCompletedEvent: "execute_completed",
-    StateExitedEvent:      "state_exited",
-    StateFailedEvent:      "state_failed",
+    StateExitedEvent: "state_exited",
+    StateFailedEvent: "state_failed",
 }
 
 
@@ -60,8 +58,8 @@ def _payload_for(event: TicketEvent) -> dict:
 
 
 class EventArchiveObserver:
-    def __init__(self, *, conn: sqlite3.Connection) -> None:
-        self._conn = conn
+    def __init__(self, *, repo: TicketRepository) -> None:
+        self._repo = repo
 
     def __call__(self, event: Event) -> None:
         # Issue #360: the events table requires ``ticket_id INTEGER NOT
@@ -77,14 +75,15 @@ class EventArchiveObserver:
             f"unrecognized Event subclass: {type(event).__name__}"
         )
         event_type = _EVENT_TYPE_NAMES.get(type(event), "unknown")
-        self._conn.execute(
-            "INSERT INTO events"
-            "(ticket_id, instance_id, event_type, state_name, sequence, at, payload) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                event.ticket_id, event.instance_id, event_type,
-                event.state_name, event.sequence, event.at.isoformat(),
-                json.dumps(_payload_for(event), sort_keys=True),
-            ),
+        # foreman#314: write through the repo seam so event archival is
+        # storage-agnostic (SQLite today, Postgres next). The repo owns
+        # JSON serialization of ``payload`` — pass the dict directly.
+        self._repo.append_event(
+            ticket_id=event.ticket_id,
+            instance_id=event.instance_id,
+            event_type=event_type,
+            state_name=event.state_name,
+            sequence=event.sequence,
+            at=event.at,
+            payload=_payload_for(event),
         )
-        self._conn.commit()

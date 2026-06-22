@@ -56,6 +56,7 @@ dev = [
     # foreman#336 step 7/7 — diff-cover gates patch coverage at 80% on
     # PRs (consumed by .github/workflows/ci.yml; not invoked locally).
     "diff-cover>=9.0",
+    "testcontainers[postgres]>=4.0",
 ]
 
 [tool.ruff]
