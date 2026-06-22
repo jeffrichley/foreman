@@ -68,6 +68,17 @@ fi
 FOREMAN_CONFIG_TEMPLATE="${FOREMAN_CONFIG_TEMPLATE:-/etc/foreman/config.toml.template}"
 FOREMAN_V4_CONFIG="${FOREMAN_V4_CONFIG:-/foreman/state/config.toml}"
 mkdir -p "$(dirname "$FOREMAN_V4_CONFIG")"
+
+# v5 [storage] selection. envsubst has NO default-value syntax, so an
+# unset ${FOREMAN_STORAGE_ENGINE} would render `engine = ""` — which
+# Pydantic rejects (not a valid Literal["sqlite","postgres"]). Establish
+# safe defaults HERE, before envsubst runs, so the SQLite path stays the
+# zero-config default and only an explicit env opt-in selects postgres.
+# Both must be exported: envsubst only substitutes EXPORTED vars.
+: "${FOREMAN_STORAGE_ENGINE:=sqlite}"
+: "${FOREMAN_PG_DSN:=}"
+export FOREMAN_STORAGE_ENGINE FOREMAN_PG_DSN
+
 envsubst < "$FOREMAN_CONFIG_TEMPLATE" > "$FOREMAN_V4_CONFIG"
 export FOREMAN_V4_CONFIG
 
