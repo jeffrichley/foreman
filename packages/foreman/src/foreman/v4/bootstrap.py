@@ -28,9 +28,10 @@ from foreman.v4.observers.structured_log import StructuredLogObserver
 from foreman.v4.observers.sustained_blocked import SustainedBlockedObserver
 from foreman.v4.observers.terminal_landing import TerminalLandingObserver
 from foreman.v4.poller import Poller
+from foreman.v4.repository import TicketRepository
 from foreman.v4.routing_git_provider import RoutingGitProvider
 from foreman.v4.sqlite_repository import SqliteTicketRepository
-from foreman.v4.state_backup import BackupScheduler
+from foreman.v4.state_backup import BackupScheduler, _DisabledBackupScheduler
 from foreman.v4.subprocess_dispatcher import SubprocessRoleDispatcher
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,18 @@ def bootstrap_cli_context(
     a FakeGitProvider.
     """
     configure_logging(log_dir=Path(config.log_dir), level=config.log_level)
-    repo = SqliteTicketRepository.at_path(Path(config.db_path))
+    repo: TicketRepository
+    if config.storage.engine == "postgres":
+        from foreman.v4.postgres_repository import PostgresTicketRepository
+
+        assert config.storage.dsn is not None  # StorageConfig validator guarantees
+        repo = PostgresTicketRepository.from_dsn(
+            config.storage.dsn,
+            pool_min=config.storage.pool_min,
+            pool_max=config.storage.pool_max,
+        )
+    else:
+        repo = SqliteTicketRepository.at_path(Path(config.db_path))
 
     dispatcher = SubprocessRoleDispatcher(
         foreman_cli=foreman_cli or ["foreman"],
@@ -75,15 +87,19 @@ def bootstrap_cli_context(
         # together for any cross-project consumer.
         git_for_project = git_provider_factory(project_config.repo)
         per_project_providers[project_config.name] = git_for_project
-        pollers.append(Poller(
-            # Pollers always operate on ONE project — they take their
-            # own per-project provider directly. Routing through the
-            # dispatcher would be an unnecessary hop.
-            repo=repo, qm=None, git=git_for_project,
-            project=project_config.name,
-            trigger_label=project_config.trigger_label,
-            clock=dt.datetime.now,
-        ))
+        pollers.append(
+            Poller(
+                # Pollers always operate on ONE project — they take their
+                # own per-project provider directly. Routing through the
+                # dispatcher would be an unnecessary hop.
+                repo=repo,
+                qm=None,
+                git=git_for_project,
+                project=project_config.name,
+                trigger_label=project_config.trigger_label,
+                clock=dt.datetime.now,
+            )
+        )
 
     # Cross-project consumers (Daemon's state machine, the label
     # observer) need a single GitProvider that respects the ``project=``
@@ -94,8 +110,7 @@ def bootstrap_cli_context(
     # wired into the Daemon + observer, so every other project's writes
     # silently hit project[0]'s repo (404 best case, mis-label worst case).
     git_for_cross_project: GitProvider | None = (
-        RoutingGitProvider(providers=per_project_providers)
-        if per_project_providers else None
+        RoutingGitProvider(providers=per_project_providers) if per_project_providers else None
     )
 
     # EventBus + standard observer set. Wiring lives here (not in
@@ -112,9 +127,12 @@ def bootstrap_cli_context(
         # No projects ⇒ no GitProvider ⇒ nothing to write labels with.
         # The bus still gets the other three observers so the rest of
         # the surface is testable in zero-project configs.
-        bus.subscribe(LabelObservabilityObserver(
-            writer=git_for_cross_project, repo=repo,
-        ))
+        bus.subscribe(
+            LabelObservabilityObserver(
+                writer=git_for_cross_project,
+                repo=repo,
+            )
+        )
     bus.subscribe(MetricsObserver())
 
     # foreman#367: per-project v3-shape GitHostProvider map keyed by
@@ -176,15 +194,19 @@ def bootstrap_cli_context(
         slugs=per_project_repo_slug,
     )
 
-    bus.subscribe(SustainedBlockedObserver(
-        repo=repo,
-        host_for_project=host_for_project,
-    ))
-    bus.subscribe(TerminalLandingObserver(
-        repo=repo,
-        host_for_project=host_for_project,
-        log_dir=Path(config.log_dir),
-    ))
+    bus.subscribe(
+        SustainedBlockedObserver(
+            repo=repo,
+            host_for_project=host_for_project,
+        )
+    )
+    bus.subscribe(
+        TerminalLandingObserver(
+            repo=repo,
+            host_for_project=host_for_project,
+            log_dir=Path(config.log_dir),
+        )
+    )
 
     # foreman#357: per-project ProjectConfig map keyed by name. Mirrors
     # the shape of ``per_project_providers`` above — config resolution
@@ -192,9 +214,7 @@ def bootstrap_cli_context(
     # look up by ticket.project. MergingState reads
     # ``dev_base_branch`` from this map to gate the impl-PR merge on
     # base-ref match.
-    project_configs: dict[str, ProjectConfig] = {
-        pc.name: pc for pc in config.projects
-    }
+    project_configs: dict[str, ProjectConfig] = {pc.name: pc for pc in config.projects}
 
     # Issue #360: the BackupScheduler is the daemon-internal periodic
     # SQLite snapshot job. ``BackupScheduler.from_config`` returns a
@@ -202,11 +222,25 @@ def bootstrap_cli_context(
     # ``_DisabledBackupScheduler`` no-op sentinel when False. Both
     # share the ``tick() -> Path | None`` shape so the daemon's call
     # site stays unconditional.
-    backup_scheduler = BackupScheduler.from_config(
-        config.backup,
-        src_conn=repo.connection,
-        bus=bus,
-    )
+    backup_scheduler: BackupScheduler | _DisabledBackupScheduler
+    if config.storage.engine == "postgres":
+        # File-snapshot backups are SQLite-specific (they copy the .db
+        # file via ``sqlite3.Connection.backup()``). Under Postgres,
+        # backups are an ops concern (pg_dump / WAL archiving), out of
+        # scope for the daemon. Use the disabled sentinel so the daemon's
+        # unconditional ``tick()`` call stays a no-op. ``repo`` here is a
+        # PostgresTicketRepository with no ``.connection`` attribute, so
+        # this branch must NOT reference it.
+        backup_scheduler = _DisabledBackupScheduler()
+    else:
+        # SQLite branch: ``repo`` is a SqliteTicketRepository which
+        # exposes ``.connection`` for the snapshot source.
+        assert isinstance(repo, SqliteTicketRepository)
+        backup_scheduler = BackupScheduler.from_config(
+            config.backup,
+            src_conn=repo.connection,
+            bus=bus,
+        )
 
     daemon = Daemon(
         repo=repo,
