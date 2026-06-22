@@ -103,11 +103,13 @@ services:
     environment:
       CLAUDE_CODE_OAUTH_TOKEN: ${FOREMAN_CLAUDE_OAUTH_TOKEN}
       CLAUDE_CONFIG_DIR: /root/.claude-container
-      # v5 Postgres DSN. The daemon reads ~/.foreman/v5/config.toml whose
-      # [storage] block must set engine = "postgres"; this env var supplies
-      # the DSN so operators can override it without rebuilding the image.
+      # v5 storage selection. This compose stack ships a postgres sidecar the
+      # daemon depends_on, so it runs on postgres by default. The entrypoint
+      # renders the [storage] block from these two vars via envsubst (engine
+      # defaults to sqlite when unset — set explicitly here to select postgres).
       # "postgres" hostname resolves via Docker's internal DNS to the sibling
-      # postgres service above. See docs/runbooks (Task 15) for V5Config shape.
+      # postgres service above. See docs/runbooks/postgres-migration.md.
+      FOREMAN_STORAGE_ENGINE: postgres
       FOREMAN_PG_DSN: postgresql://foreman:${FOREMAN_PG_PASSWORD}@postgres:5432/foreman
 
     # Persistent state volumes. NOT visible from the Windows host — inspect
