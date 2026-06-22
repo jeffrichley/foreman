@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 import psycopg
-from psycopg.rows import dict_row
+from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
 from foreman.v4.outcome import OutcomeKind
@@ -70,14 +70,28 @@ def _from_db(value: dt.datetime | None) -> dt.datetime | None:
     return value
 
 
+def _from_db_required(value: dt.datetime) -> dt.datetime:
+    """Strip tzinfo from a NOT NULL TIMESTAMPTZ column read.
+
+    ``created_at`` / ``updated_at`` / ``entered_at`` are NOT NULL in the
+    schema, so the row value is always a datetime. This narrows the
+    optional ``_from_db`` return for those required columns, keeping the
+    record dataclass fields (which type them as non-optional
+    ``dt.datetime``) accurately typed without a cast.
+    """
+    if value.tzinfo is not None:
+        value = value.astimezone(dt.UTC).replace(tzinfo=None)
+    return value
+
+
 def _ticket_from_row(row: dict[str, Any]) -> TicketRecord:
     return TicketRecord(
         id=row["id"],
         project=row["project"],
         issue_number=row["issue_number"],
         current_state=row["current_state"],
-        created_at=_from_db(row["created_at"]),
-        updated_at=_from_db(row["updated_at"]),
+        created_at=_from_db_required(row["created_at"]),
+        updated_at=_from_db_required(row["updated_at"]),
         held_by=row["held_by"],
         held_at=_from_db(row["held_at"]),
         held_reason=row["held_reason"],
@@ -93,7 +107,7 @@ def _instance_from_row(row: dict[str, Any]) -> StateInstanceRecord:
         ticket_id=row["ticket_id"],
         state_name=row["state_name"],
         sequence=row["sequence"],
-        entered_at=_from_db(row["entered_at"]),
+        entered_at=_from_db_required(row["entered_at"]),
         execute_started_at=_from_db(row["execute_started_at"]),
         execute_completed_at=_from_db(row["execute_completed_at"]),
         exited_at=_from_db(row["exited_at"]),
@@ -109,7 +123,7 @@ _TERMINAL_STATES = ("Done", "Failed")
 
 
 class PostgresTicketRepository:
-    def __init__(self, pool: ConnectionPool) -> None:
+    def __init__(self, pool: ConnectionPool[psycopg.Connection[DictRow]]) -> None:
         self._pool = pool
         with self._pool.connection() as conn:
             conn.execute(_SCHEMA.read_text(encoding="utf-8"))
@@ -119,10 +133,11 @@ class PostgresTicketRepository:
     def from_dsn(
         cls, dsn: str, *, pool_min: int = 2, pool_max: int = 10
     ) -> PostgresTicketRepository:
-        pool = ConnectionPool(
+        pool: ConnectionPool[psycopg.Connection[DictRow]] = ConnectionPool(
             dsn,
             min_size=pool_min,
             max_size=pool_max,
+            connection_class=psycopg.Connection[DictRow],
             kwargs={"row_factory": dict_row, "autocommit": False},
             open=True,
         )
