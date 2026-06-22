@@ -125,11 +125,11 @@ The dashboard runs as one of three sibling containers in `docker-compose.yml`, d
 
 ### Auth model
 
-v0 ships with three supported configurations:
+v0 ships with three supported configurations. **Tailnet is the documented happy-path** (resolved 2026-06-21 — Jeff checks in from his laptop, so off-host access is the common case):
 
-1. **Localhost only** (default): dashboard binds `127.0.0.1:8000`. Operator SSHes or runs the browser on the same host.
-2. **Tailnet**: dashboard binds `0.0.0.0:8000` behind Tailscale's network ACLs. The daemon's shared-secret config gates mutations; reads are unauthenticated if the operator opts.
-3. **Tailscale Funnel** (public HTTPS): same shape as tailnet, but exposed via Tailscale Funnel for off-network access. **Not recommended for v0** — explicit warning in the runbook. Requires the daemon's `auth_reads_too = true` setting.
+1. **Tailnet** (recommended happy-path): dashboard binds `0.0.0.0:8000` behind Tailscale's network ACLs. The daemon's shared-secret config gates mutations; reads are unauthenticated (the Tailscale ACL is the read perimeter, consistent with the rest of the agent-core fleet). The runbook leads with this setup.
+2. **Localhost only**: dashboard binds `127.0.0.1:8000`. Operator SSHes or runs the browser on the same host. Supported for single-host operation.
+3. **Tailscale Funnel** (public HTTPS): same shape as tailnet, but exposed via Tailscale Funnel for off-network access. **Not recommended for v0** — explicit warning in the runbook. Requires the daemon's `auth_reads_too = true` setting. (See the adversarial-review note on Funnel + SSE below.)
 
 The dashboard reuses the daemon's auth model exactly. If a mutation request to the daemon requires `Authorization: Bearer <secret>`, the dashboard adds it from its own env (`FOREMAN_API_SECRET`).
 
@@ -209,15 +209,15 @@ The dashboard is a sibling package, not a sub-package of foreman. Rationale: it 
 15. **Operator runbook** at `packages/foreman-dashboard/README.md`. Covers cold start, auth configuration, version-mismatch error troubleshooting.
 16. **Adversarial-review PR pass** before merge per the standing rule.
 
-## Open questions for Jeff's spec review
+## Resolved decisions (2026-06-21 spec review)
 
-Resolve before transition to writing-plans:
+All open questions resolved by Jeff during the spec review:
 
-1. **Metric tile provenance.** Pepper's mockup lists four metric tiles (`PRs merged`, `Runs total`, `Fixer retries`, `Lead time p50`). The v5 spec adds aggregation in `packages/foreman/src/foreman/v5/metrics.py`. Confirm the four tiles are the right starting set; nothing in the brainstorm contradicted them, but I want to lock the list before the implementation plan codifies it.
-2. **Repo switcher.** The dropdown in Pepper's header lets the operator jump to a project. v0 question: include every project in the config (3 today), or only projects with detail pages (also 3 today)? Recommend including all configured projects since the auto-discovery rule makes "configured but no activity" possible; the dropdown then naturally surfaces them.
-3. **Hold-mid-tick semantics.** When the operator clicks `Hold` on a ticket whose current state is mid-execution (e.g. the Worker is actively running), what happens? The foreman v4 `Hold` behavior is "the next tick observes the hold and stops dispatching new work"; in-flight role processes complete normally. Confirm this is acceptable for v0 (the alternative is killing the role subprocess, which I'd defer to v1+ as a separate "Cancel" verb).
-4. **Auth default for v0.** Default is `127.0.0.1` localhost. For the way Jeff actually uses this (one operator, one host, optional tailnet for remote check-ins from his laptop), is the default right, or should v0 ship with the tailnet config as the documented happy-path?
-5. **Auto-deletion of completed tickets from the "recently merged" section.** No explicit retention rule today. Recommend showing the last 10 merged-in-the-last-7-days; older entries fall off. Confirm or override.
+1. **Metric tiles — locked to Pepper's four.** `PRs merged` (24h), `Runs total`, `Fixer retries` (24h), `Lead time p50`. The v5 `metrics.py` aggregation codifies exactly these four. No additions for v0.
+2. **Repo switcher — all configured projects.** Every project in `~/.foreman/v5/config.toml` appears in the dropdown, including zero-activity ones. Consistent with auto-discovery: a newly-added project surfaces immediately.
+3. **Hold-mid-tick — finish current role, then halt.** Confirmed: this is foreman v4's existing `Hold` behavior (the `held_by`/`held_at`/`held_reason` columns; the daemon observes the hold on its next tick and stops dispatching new work; the in-flight role subprocess completes normally). Preserved verbatim in v5; the HTTP `POST /tickets/{id}/hold` wraps the same handler. Kill-mid-run is deferred to v1+ as a separate "Cancel" verb.
+4. **Auth default — tailnet as happy-path.** Jeff checks in from his laptop, so off-host access is the common case. The runbook leads with the tailnet config (0.0.0.0 behind Tailscale ACLs + shared secret on mutations). Localhost-only remains supported.
+5. **Recently-merged retention — last 10 in the last 7 days.** Older entries fall off. Tunable later; not a v0 config knob.
 
 ## Adversarial review (self)
 
