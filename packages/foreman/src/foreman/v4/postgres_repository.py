@@ -34,6 +34,7 @@ from psycopg_pool import ConnectionPool
 from foreman.v4.outcome import OutcomeKind
 from foreman.v4.records import StateInstanceRecord, TicketRecord
 from foreman.v4.repository import (
+    StateInstanceNotFoundError,
     TicketAlreadyExistsError,
     TicketNotFoundError,
 )
@@ -259,3 +260,115 @@ class PostgresTicketRepository:
                 (ticket_id,),
             )
             conn.commit()
+
+    # --- State-instance journal ---
+
+    def open_state_instance(
+        self, *, ticket_id: int, state_name: str, sequence: int, now: dt.datetime
+    ) -> StateInstanceRecord:
+        with self._pool.connection() as conn:
+            # FK enforces ticket existence; surface a clean error first.
+            exists = conn.execute("SELECT 1 FROM tickets WHERE id = %s", (ticket_id,)).fetchone()
+            if exists is None:
+                conn.rollback()
+                raise TicketNotFoundError(str(ticket_id))
+            row = conn.execute(
+                """
+                INSERT INTO state_instances
+                    (ticket_id, state_name, sequence, entered_at)
+                VALUES (%s, %s, %s, %s)
+                RETURNING *
+                """,
+                (ticket_id, state_name, sequence, _to_db(now)),
+            ).fetchone()
+            conn.commit()
+            assert row is not None
+            return _instance_from_row(row)
+
+    def get_state_instance(self, instance_id: int) -> StateInstanceRecord:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM state_instances WHERE id = %s", (instance_id,)
+            ).fetchone()
+        if row is None:
+            raise StateInstanceNotFoundError(str(instance_id))
+        return _instance_from_row(row)
+
+    def mark_execute_started(self, instance_id: int, *, now: dt.datetime) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE state_instances SET execute_started_at = %s WHERE id = %s",
+                (_to_db(now), instance_id),
+            )
+            conn.commit()
+
+    def mark_execute_completed(
+        self,
+        instance_id: int,
+        *,
+        now: dt.datetime,
+        outcome_kind: OutcomeKind,
+        outcome_payload: dict[str, Any],
+        next_state: str,
+    ) -> None:
+        from psycopg.types.json import Jsonb
+
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                UPDATE state_instances
+                   SET execute_completed_at = %s, outcome_kind = %s,
+                       outcome_payload = %s, next_state = %s
+                 WHERE id = %s
+                """,
+                (
+                    _to_db(now),
+                    outcome_kind.value,
+                    Jsonb(outcome_payload),
+                    next_state,
+                    instance_id,
+                ),
+            )
+            conn.commit()
+
+    def close_state_instance(self, instance_id: int, *, now: dt.datetime) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE state_instances SET exited_at = %s WHERE id = %s",
+                (_to_db(now), instance_id),
+            )
+            conn.commit()
+
+    def record_failure(
+        self,
+        instance_id: int,
+        *,
+        now: dt.datetime,
+        failure_phase: str,
+        failure_reason: str,
+    ) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                UPDATE state_instances
+                   SET failure_phase = %s, failure_reason = %s
+                 WHERE id = %s
+                """,
+                (failure_phase, failure_reason, instance_id),
+            )
+            conn.commit()
+
+    def list_in_flight_state_instances(self) -> list[StateInstanceRecord]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM state_instances WHERE exited_at IS NULL ORDER BY id"
+            ).fetchall()
+        return [_instance_from_row(r) for r in rows]
+
+    def list_state_instances_for_ticket(self, ticket_id: int) -> list[StateInstanceRecord]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM state_instances WHERE ticket_id = %s ORDER BY sequence",
+                (ticket_id,),
+            ).fetchall()
+        return [_instance_from_row(r) for r in rows]
