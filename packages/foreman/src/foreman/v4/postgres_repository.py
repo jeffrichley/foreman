@@ -438,3 +438,29 @@ class PostgresTicketRepository:
             else:
                 break
         return count
+
+    # --- Dependency tracking ---
+
+    def set_ticket_dependencies(self, ticket_id: int, *, deps: list[int]) -> None:
+        from psycopg.types.json import Jsonb
+
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "UPDATE tickets SET depends_on = %s WHERE id = %s",
+                (Jsonb(list(deps)), ticket_id),
+            )
+            if cur.rowcount == 0:
+                conn.rollback()
+                raise TicketNotFoundError(str(ticket_id))
+            conn.commit()
+
+    def get_ticket_dependencies(self, ticket_id: int) -> list[int]:
+        return list(self.get_ticket(ticket_id).depends_on)
+
+    def list_unmet_dependencies(self, ticket_id: int) -> list[int]:
+        deps = self.get_ticket_dependencies(ticket_id)
+        unmet: list[int] = []
+        for dep in deps:
+            if self.get_ticket(dep).current_state != "Done":
+                unmet.append(dep)
+        return unmet
