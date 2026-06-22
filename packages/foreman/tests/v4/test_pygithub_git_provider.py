@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, call
 import pytest
 
 from foreman.v4.git_provider import PRNotFoundError, PRState
-from foreman.v4.pygithub_git_provider import PyGithubGitProvider
+from foreman.v4.pygithub_git_provider import PyGithubGitProvider, _resolve_merge_method
 
 
 @pytest.fixture()
@@ -94,7 +94,7 @@ def test_merge_pr_calls_merge(mock_github, mock_repo):
         github_factory=lambda: mock_github, repo_full_name="owner/p",
     )
     provider.merge_pr(project="p", pr_number=5)
-    mock_pr.merge.assert_called_once()
+    mock_pr.merge.assert_called_once_with(merge_method="squash")
 
 
 def test_add_labels_calls_add_to_labels_with_sorted_names(mock_github, mock_repo):
@@ -502,6 +502,57 @@ def test_find_open_pr_by_head_branch_returns_none_on_empty(
     assert provider.find_open_pr_by_head_branch(
         project="ignored", branch_name="foreman/issue-180",
     ) is None
+
+
+# ---------------------------------------------------------------------------
+# _resolve_merge_method unit tests (issue #399)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_merge_method_squash_only():
+    """Squash-only repo (only allow_squash_merge=True) → 'squash'."""
+    repo = MagicMock()
+    repo.allow_squash_merge = True
+    repo.allow_rebase_merge = False
+    repo.allow_merge_commit = False
+    assert _resolve_merge_method(repo) == "squash"
+
+
+def test_resolve_merge_method_all_allowed_no_preferred_returns_squash():
+    """All three methods allowed, no preferred → 'squash' (first in order)."""
+    repo = MagicMock()
+    repo.allow_squash_merge = True
+    repo.allow_rebase_merge = True
+    repo.allow_merge_commit = True
+    assert _resolve_merge_method(repo) == "squash"
+
+
+def test_resolve_merge_method_none_allowed_raises():
+    """No allowed methods → ValueError with a descriptive message."""
+    repo = MagicMock()
+    repo.allow_squash_merge = False
+    repo.allow_rebase_merge = False
+    repo.allow_merge_commit = False
+    with pytest.raises(ValueError, match="no allowed merge method"):
+        _resolve_merge_method(repo)
+
+
+def test_resolve_merge_method_preferred_allowed_returns_preferred():
+    """preferred='rebase', rebase allowed → 'rebase' (not overridden)."""
+    repo = MagicMock()
+    repo.allow_squash_merge = True
+    repo.allow_rebase_merge = True
+    repo.allow_merge_commit = True
+    assert _resolve_merge_method(repo, preferred="rebase") == "rebase"
+
+
+def test_resolve_merge_method_preferred_disallowed_falls_back():
+    """preferred='rebase', rebase NOT allowed → 'squash' (first allowed)."""
+    repo = MagicMock()
+    repo.allow_squash_merge = True
+    repo.allow_rebase_merge = False
+    repo.allow_merge_commit = True
+    assert _resolve_merge_method(repo, preferred="rebase") == "squash"
 
 
 def test_get_issue_labels_returns_label_names(mock_github, mock_repo):
