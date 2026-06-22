@@ -1,20 +1,55 @@
 # Foreman daemon container orchestration.
 # Per the Docker design spec; see docs/superpowers/specs/2026-06-05-foreman-docker-runtime-design.md
+# v5 addition: postgres sidecar; see docs/superpowers/specs/2026-06-21-foreman-v5-postgres-http-design.md
 #
 # Lifecycle:
-#   docker compose up -d daemon       # start (detached)
+#   docker compose up -d postgres     # start postgres only (optional first-time bootstrap)
+#   docker compose up -d daemon       # start daemon (waits for postgres healthy)
 #   docker compose stop daemon        # stop (preserves state)
 #   docker compose logs -f daemon     # tail structured JSON-lines
-#   docker compose down               # remove container (volumes survive)
-#   docker compose down -v            # DESTRUCTIVE: wipes all state
+#   docker compose down               # remove containers (volumes survive)
+#   docker compose down -v            # DESTRUCTIVE: wipes all state including pg data
 
 services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16 — v5 substrate. Named volume survives `down`; only wiped by
+  # `down -v`. Set FOREMAN_PG_PASSWORD in .env (see .env.example).
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: foreman-postgres
+    environment:
+      POSTGRES_USER: foreman
+      POSTGRES_PASSWORD: ${FOREMAN_PG_PASSWORD:?set FOREMAN_PG_PASSWORD in .env}
+      POSTGRES_DB: foreman
+    volumes:
+      - foreman-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U foreman -d foreman"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # Postgres does not need to be publicly reachable; only the daemon
+    # container connects (via the internal Docker network by service name).
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   daemon:
     build:
       context: .
       dockerfile: Dockerfile
     image: ghcr.io/jeffrichley/foreman:dev
     container_name: foreman-daemon
+
+    # v5: wait for postgres to be healthy before starting the daemon so that
+    # the asyncpg pool creation at bootstrap doesn't race against pg startup.
+    depends_on:
+      postgres:
+        condition: service_healthy
 
     # Watchtower-scope label: the foreman-watchtower sidecar below
     # (WATCHTOWER_SCOPE=foreman) only manages containers carrying
@@ -68,6 +103,12 @@ services:
     environment:
       CLAUDE_CODE_OAUTH_TOKEN: ${FOREMAN_CLAUDE_OAUTH_TOKEN}
       CLAUDE_CONFIG_DIR: /root/.claude-container
+      # v5 Postgres DSN. The daemon reads ~/.foreman/v5/config.toml whose
+      # [storage] block must set engine = "postgres"; this env var supplies
+      # the DSN so operators can override it without rebuilding the image.
+      # "postgres" hostname resolves via Docker's internal DNS to the sibling
+      # postgres service above. See docs/runbooks (Task 15) for V5Config shape.
+      FOREMAN_PG_DSN: postgresql://foreman:${FOREMAN_PG_PASSWORD}@postgres:5432/foreman
 
     # Persistent state volumes. NOT visible from the Windows host — inspect
     # via `docker exec foreman-daemon ls /foreman/...` or `docker cp`.
@@ -81,6 +122,16 @@ services:
       # mode that `down -v` causes; putting backups on the same
       # named volume they're protecting defeats the purpose.
       - ${HOME}/.foreman/backups:/foreman/backups
+      # v5: bind-mount ~/.foreman so the daemon can read v5/config.toml
+      # (V5Config) from the host, and so operator key files remain
+      # accessible at the same paths the secrets block references.
+      # Container path: /root/.foreman (daemon user is root in the image).
+      # Windows note: ${HOME} resolves in WSL2/Git-Bash Docker contexts but
+      # may not expand on native Windows cmd.exe. On Windows, override with
+      # an explicit path in a local docker-compose.override.yml, e.g.:
+      #   volumes:
+      #     - C:/Users/<you>/.foreman:/root/.foreman
+      - ${HOME}/.foreman:/root/.foreman
 
     # Docker json-file driver: rotation at 10MB × 5 files (≈50MB ceiling).
     # Without this it grows forever inside the WSL2 VM.
@@ -131,6 +182,9 @@ volumes:
   foreman-repos:
   foreman-state:
   foreman-logs:
+  # v5: postgres data volume. Persists across container restarts and `down`.
+  # Only destroyed by `docker compose down -v` (explicit operator intent).
+  foreman-pg-data:
 
 # Secrets sourced from the host's protected user directory.
 secrets:
