@@ -30,10 +30,15 @@ ENV IMAGE_SHA=${IMAGE_SHA} \
 # git: clone + worktree ops
 # ca-certs + curl: HTTPS to github.com + anthropic
 # nodejs + npm: the `claude` CLI claude_agent_sdk shells out to
+# just: the command runner the Worker's `check_command` defaults to
+#   ("just check") AND that target repos' `.githooks/pre-push` invoke.
+#   Without it, role git pushes (when a clone has core.hooksPath set) and
+#   the Worker's ground-truth check fail with "just: not found".
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git ca-certificates curl gnupg \
         nodejs npm \
         gettext-base \
+        just \
     && rm -rf /var/lib/apt/lists/*
 # gettext-base provides ``envsubst``; the entrypoint uses it to expand
 # ${FOREMAN_*_APP_ID} placeholders in /etc/foreman/config.toml.template
