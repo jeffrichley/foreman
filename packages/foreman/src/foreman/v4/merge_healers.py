@@ -42,7 +42,7 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from foreman.v4.git_provider import PRState
+    from foreman.v4.git_provider import GitProvider, PRState
 
 
 class HealResult(Enum):
@@ -71,13 +71,17 @@ class HealResult(Enum):
 class _HealContext(Protocol):
     """Structural shape a healer needs from the merge state's context.
 
-    Only the ``git`` provider is required today. A Protocol (rather than
-    importing ``StateContext`` directly) keeps ``merge_healers`` free of a
-    state-layer import and lets the healer tests pass a tiny stand-in.
+    Only the ``git`` provider is required today. Using a Protocol (rather
+    than importing ``StateContext``) keeps ``merge_healers`` free of a
+    state-layer import and lets the healer tests pass a tiny stand-in. The
+    real :class:`~foreman.v4.state.StateContext` satisfies this structurally
+    — it has a ``git: GitProvider | None`` attribute — and ``attempt_merge``
+    passes it as the ``ctx`` argument to ``heal``. This IS the annotated
+    param type below, so the shape is load-bearing, not decorative.
     """
 
     @property
-    def git(self) -> object: ...
+    def git(self) -> GitProvider | None: ...
 
 
 @runtime_checkable
@@ -120,7 +124,10 @@ class BehindBranchHealer:
     def heal(
         self, ctx: _HealContext, *, project: str, pr_number: int, pr: PRState,
     ) -> HealResult:
-        ctx.git.update_branch(project=project, pr_number=pr_number)  # type: ignore[attr-defined]
+        # attempt_merge guarantees ctx.git is non-None before reaching any
+        # healer (it raises otherwise); narrow for the type checker.
+        assert ctx.git is not None
+        ctx.git.update_branch(project=project, pr_number=pr_number)
         return HealResult.RETRY
 
 

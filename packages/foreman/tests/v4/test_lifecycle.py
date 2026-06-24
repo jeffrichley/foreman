@@ -183,6 +183,95 @@ def test_behind_spec_pr_heals_then_reaches_implementing_and_done():
     assert "Implementing" in state_order
 
 
+def test_spec_pr_heal_then_ci_pending_then_heal_reaches_done_not_needs_help():
+    """foreman#416 regression e2e: a spec PR that heals, then sits in
+    CI-pending BLOCKED for several polls, then goes behind again and heals
+    a SECOND time must still reach Done — NOT escalate to NeedsHelp.
+
+    The heal bound counts ONLY heal-acted cycles (2 here), not the
+    interleaved CI-pending polls. Before the bound-counting fix, the
+    combined BLOCKED-row total (2 heals + N CI-pending) would trip the
+    bound and wrongly escalate. The scripted git below walks PR #42 through
+    behind → (heal) clean-but-CI-pending → CI-pending×3 → behind → (heal)
+    clean+green.
+    """
+    repo = SqliteTicketRepository.in_memory()
+    ticket = repo.create_ticket(project="p", issue_number=4, now=dt.datetime(2026, 6, 13))
+
+    # Scripted mergeable_state walk for PR #42. Each SpecMerging poll calls
+    # get_pr_state once and consumes one script entry (the script advances
+    # per poll). The last entry (clean+green) persists so the impl-phase
+    # MergingState — which also reads PR 42 — sees a coherent state.
+    class _ScriptedGit(FakeGitProvider):
+        def __init__(self):
+            super().__init__()
+            # (mergeable, ci_passing, mergeable_state) per SpecMerging poll.
+            self._script = [
+                (False, True, "behind"),     # poll 1: heal #1
+                (False, False, "blocked"),   # poll 2: CI pending
+                (False, False, "blocked"),   # poll 3: CI pending
+                (False, False, "blocked"),   # poll 4: CI pending
+                (False, True, "behind"),     # poll 5: heal #2
+                (True, True, "clean"),       # poll 6: merge
+            ]
+            self._idx = 0
+
+        def get_pr_state(self, *, project, pr_number):
+            cur = super().get_pr_state(project=project, pr_number=pr_number)
+            # Once merged, freeze — never resurrect a merged PR (the impl
+            # MergingState phase also reads PR 42 and must see merged=True).
+            if pr_number == 42 and not cur.merged:
+                # Consume the next script entry; clamp at the last so reads
+                # after the script is exhausted stay on clean+green.
+                entry = self._script[min(self._idx, len(self._script) - 1)]
+                mergeable, ci, ms = entry
+                self.set_pr_state(
+                    project=project, pr_number=pr_number,
+                    state=PRState(
+                        merged=False, mergeable=mergeable, ci_passing=ci,
+                        base_ref="main", mergeable_state=ms,
+                    ),
+                )
+                if self._idx < len(self._script):
+                    self._idx += 1
+            return super().get_pr_state(project=project, pr_number=pr_number)
+
+    git = _ScriptedGit()
+    git.set_pr_state(
+        project="p", pr_number=42,
+        state=PRState(
+            merged=False, mergeable=False, ci_passing=True,
+            base_ref="main", mergeable_state="behind",
+        ),
+    )
+    dispatcher = FakeRoleDispatcher(responses={
+        ("planner", "p", 4):        _canned("clean", pr_number=42),
+        ("reviewer-spec", "p", 4):  _canned("clean", pr_number=42),
+        ("worker", "p", 4):         _canned("clean", pr_number=42),
+        ("reviewer-impl", "p", 4):  _canned("clean", pr_number=42),
+    })
+
+    final = _run_until_terminal(
+        repo, ticket.id, dispatcher=dispatcher, git=git, bus=EventBus(),
+    )
+    assert final.current_state == "Done"
+    # Two genuine heals — and crucially NOT a NeedsHelp landing.
+    assert git.update_branch_calls == [("p", 42), ("p", 42)]
+    assert ("p", 42) in git.merge_pr_calls
+    state_order = [
+        r["state_name"]
+        for r in repo._conn.execute(
+            "SELECT state_name FROM state_instances WHERE ticket_id = ? "
+            "ORDER BY sequence",
+            (ticket.id,),
+        ).fetchall()
+    ]
+    assert "NeedsHelp" not in state_order
+    # SpecMerging polled 6 times (2 heals + 3 CI-pending + 1 merge).
+    assert state_order.count("SpecMerging") == 6
+    assert "Implementing" in state_order
+
+
 def test_needs_fix_loop_spec_review_to_spec_fix_back():
     """When Reviewer rejects spec, we loop through SpecFix back to SpecReview."""
     repo = SqliteTicketRepository.in_memory()

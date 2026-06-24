@@ -59,20 +59,38 @@ if TYPE_CHECKING:
 MAX_HEAL_ACTIONS = 5
 
 
-def _prior_blocked_heal_count(ctx: StateContext) -> int:
-    """Count completed BLOCKED instances of the current state on the ticket.
+#: Marker key written into a heal-acted BLOCKED outcome's ``details`` (value
+#: = the healer name). The heal bound counts ONLY rows carrying this marker.
+HEAL_ACTION_DETAIL_KEY = "heal_action"
 
-    Each heal-then-poll cycle records exactly one BLOCKED row for the merge
-    state (``MergingState`` / ``SpecMerging``). Counting them gives the
-    number of heal actions already taken without reaching a merge.
+
+def _prior_blocked_heal_count(ctx: StateContext) -> int:
+    """Count prior heal-ACTED BLOCKED instances of the current state.
+
+    Two BLOCKED outcomes journal identically (``outcome_kind == BLOCKED``):
+
+    * a healer acted (behind → ``update_branch``), tagged with
+      ``details[HEAL_ACTION_DETAIL_KEY]``; and
+    * plain wait-for-CI (no healer applied), with no such tag.
+
+    The bound must count ONLY the first kind — counting CI-pending polls
+    would falsely escalate a PR that legitimately polls BLOCKED while CI
+    runs (Phase 8d.18). ``mark_execute_completed`` persists
+    ``outcome.model_dump(mode="json")`` into ``outcome_payload``, so the
+    marker survives in ``outcome_payload["details"]`` and is read back
+    here.
     """
     rows = ctx.repo.list_state_instances_for_ticket(ctx.ticket.id)
-    return sum(
-        1
-        for r in rows
-        if r.state_name == ctx.instance.state_name
-        and r.outcome_kind == OutcomeKind.BLOCKED
-    )
+    count = 0
+    for r in rows:
+        if r.state_name != ctx.instance.state_name:
+            continue
+        if r.outcome_kind != OutcomeKind.BLOCKED:
+            continue
+        details = (r.outcome_payload or {}).get("details") or {}
+        if details.get(HEAL_ACTION_DETAIL_KEY):
+            count += 1
+    return count
 
 
 def attempt_merge(
@@ -165,6 +183,8 @@ def attempt_merge(
                 },
             )
         # RETRY / PROCEED → BLOCKED so the Poller re-evaluates next tick.
+        # Tag the outcome with the heal-action marker so the bound counts
+        # this cycle (and ONLY heal-acted cycles, not CI-pending polls).
         return Outcome(
             kind=OutcomeKind.BLOCKED, confidence=OutcomeConfidence.HIGH,
             summary=(
@@ -172,6 +192,11 @@ def attempt_merge(
                 f"re-polling"
             ),
             artifacts=OutcomeArtifacts(pr_number=pr_number),
+            details={
+                HEAL_ACTION_DETAIL_KEY: healer.name,
+                "mergeable_state": state.mergeable_state,
+                "pr_number": pr_number,
+            },
         )
 
     # No healer applied: the plain "wait for CI" case — unchanged.
