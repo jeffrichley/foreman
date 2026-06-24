@@ -547,6 +547,9 @@ def test_run_init_creates_all_v4_labels_on_empty_repo(tmp_path: Path) -> None:
         "foreman:state-implementing",
         "foreman:state-impl-review",
         "foreman:state-impl-fix",
+        # foreman#418: parked state for an approved impl PR awaiting
+        # human merge (when auto_merge_impl is False).
+        "foreman:state-impl-approved",
         "foreman:state-merging",
         "foreman:state-done",
         "foreman:state-failed",

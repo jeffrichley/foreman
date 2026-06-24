@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime as dt
 import time
 
+from foreman.v4.config import ProjectConfig
 from foreman.v4.git_provider import FakeGitProvider, PRState
 from foreman.v4.poller import Poller
 from foreman.v4.queue_manager import QueueManager
@@ -40,7 +41,11 @@ def test_three_concurrent_tickets_with_one_dep_blocked():
     for pr in (101, 102, 103):
         git.set_pr_state(
             project="p", pr_number=pr,
-            state=PRState(merged=False, mergeable=True, ci_passing=True),
+            # foreman#357: base_ref="main" passes MergingState's base-ref
+            # guard once a project_config is present (added for #418).
+            state=PRState(
+                merged=False, mergeable=True, ci_passing=True, base_ref="main",
+            ),
         )
 
     # FakeRoleDispatcher: every role+issue tuple returns CLEAN. The PR number
@@ -61,6 +66,14 @@ def test_three_concurrent_tickets_with_one_dep_blocked():
     pool = WorkerPool(
         repo=repo, qm=qm, dispatcher=dispatcher, git=git, bus=None,
         clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
+        # foreman#418: opt in to auto-merge so the impl PR reaches Done
+        # (default parks at ImplApproved for human merge).
+        project_configs={
+            "p": ProjectConfig(
+                name="p", repo="o/p", local_clone_path="/tmp/p",
+                auto_merge_impl=True,
+            )
+        },
     )
     try:
         # First tick adopts the 3 tickets. Set ticket 3's dep AFTER adoption.

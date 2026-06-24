@@ -32,7 +32,7 @@ from .postgres_fixture import (  # noqa: F401  (fixture imports)
     clean_postgres_dsn,
     postgres_dsn,
 )
-from .test_lifecycle import _canned, _run_until_terminal
+from .test_lifecycle import _auto_merge_configs, _canned, _run_until_terminal
 
 
 def test_happy_path_queued_to_done_on_postgres(clean_postgres_dsn):  # noqa: F811
@@ -43,7 +43,7 @@ def test_happy_path_queued_to_done_on_postgres(clean_postgres_dsn):  # noqa: F81
     git.set_pr_state(
         project="p",
         pr_number=42,
-        state=PRState(merged=False, mergeable=True, ci_passing=True),
+        state=PRState(merged=False, mergeable=True, ci_passing=True, base_ref="main"),
     )
     dispatcher = FakeRoleDispatcher(
         responses={
@@ -57,7 +57,10 @@ def test_happy_path_queued_to_done_on_postgres(clean_postgres_dsn):  # noqa: F81
     bus.subscribe(EventArchiveObserver(repo=repo))
     bus.subscribe(StructuredLogObserver())
 
-    final = _run_until_terminal(repo, ticket.id, dispatcher=dispatcher, git=git, bus=bus)
+    final = _run_until_terminal(
+        repo, ticket.id, dispatcher=dispatcher, git=git, bus=bus,
+        project_configs=_auto_merge_configs(),
+    )
     assert final.current_state == "Done"
 
     # PR #42 ended merged — both the spec PR and impl PR merge through the

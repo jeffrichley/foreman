@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+from foreman.v4.config import ProjectConfig
 from foreman.v4.event_bus import EventBus
 from foreman.v4.git_provider import FakeGitProvider, PRState
 from foreman.v4.observers.event_archive import EventArchiveObserver
@@ -17,6 +18,23 @@ from foreman.v4.sqlite_repository import SqliteTicketRepository
 from foreman.v4.state import StateContext
 from foreman.v4.states.merging import MergingState
 from foreman.v4.states.registry import build_state
+
+
+def _auto_merge_configs() -> dict[str, ProjectConfig]:
+    """foreman#418: the happy-path lifecycle test drives the ticket all
+    the way to Done, which requires the impl PR to auto-merge. That now
+    only happens when the project opts in to ``auto_merge_impl`` — so
+    the lifecycle test threads a config map with the flag set. With the
+    default (False), the ticket would correctly park at ImplApproved
+    awaiting human merge (covered by the gating unit tests)."""
+    return {
+        "p": ProjectConfig(
+            name="p",
+            repo="o/p",
+            local_clone_path="/tmp/p",
+            auto_merge_impl=True,
+        )
+    }
 
 
 def _canned(kind: str, *, pr_number: int | None = None) -> str:
@@ -30,7 +48,7 @@ def _canned(kind: str, *, pr_number: int | None = None) -> str:
 _TERMINAL_STATES = ("Done", "Failed", "NeedsHelp")
 
 
-def _run_until_terminal(repo, ticket_id, *, dispatcher, git, bus):
+def _run_until_terminal(repo, ticket_id, *, dispatcher, git, bus, project_configs=None):
     """Drive the ticket one transition at a time until it reaches a terminal.
 
     Terminal landings (Done/Failed/NeedsHelp) are synthesized inline by
@@ -56,6 +74,7 @@ def _run_until_terminal(repo, ticket_id, *, dispatcher, git, bus):
             ticket=ticket, instance=instance, repo=repo,
             clock=lambda seq=seq: dt.datetime(2026, 6, 13, 12, seq, 0),
             bus=bus, role_dispatcher=dispatcher, git=git,
+            project_configs=project_configs or {},
         )
         # MergingState needs a pr_number; in real wiring it reads from the
         # ticket's most recent outcome_payload. For the lifecycle test we
@@ -73,7 +92,7 @@ def test_happy_path_queued_to_done():
     git = FakeGitProvider()
     git.set_pr_state(
         project="p", pr_number=42,
-        state=PRState(merged=False, mergeable=True, ci_passing=True),
+        state=PRState(merged=False, mergeable=True, ci_passing=True, base_ref="main"),
     )
     dispatcher = FakeRoleDispatcher(responses={
         ("planner", "p", 1):        _canned("clean", pr_number=42),
@@ -88,7 +107,10 @@ def test_happy_path_queued_to_done():
     # Drive the ticket. MergingState now calls pr.merge() directly
     # when GitHub reports the PR mergeable + CI green — no MergeQueue
     # polling. The seeded PRState satisfies the merge gate immediately.
-    final = _run_until_terminal(repo, ticket.id, dispatcher=dispatcher, git=git, bus=bus)
+    final = _run_until_terminal(
+        repo, ticket.id, dispatcher=dispatcher, git=git, bus=bus,
+        project_configs=_auto_merge_configs(),
+    )
     assert final.current_state == "Done"
 
     # PR #42 ended merged. SpecReviewState.verify() merged the spec PR
@@ -159,11 +181,12 @@ def test_needs_fix_loop_spec_review_to_spec_fix_back():
     # to 42, so register PR #42 in the fake git too.
     git.set_pr_state(
         project="p", pr_number=42,
-        state=PRState(merged=False, mergeable=True, ci_passing=True),
+        state=PRState(merged=False, mergeable=True, ci_passing=True, base_ref="main"),
     )
 
     final = _run_until_terminal(
         repo, ticket.id, dispatcher=_ScriptedDispatcher(), git=git, bus=EventBus(),
+        project_configs=_auto_merge_configs(),
     )
     assert final.current_state == "Done"
 
