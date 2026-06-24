@@ -17,6 +17,7 @@ from foreman.v4.states.merging import MergingState
 from foreman.v4.states.planning import PlanningState
 from foreman.v4.states.queued import QueuedState
 from foreman.v4.states.spec_fix import SpecFixState
+from foreman.v4.states.spec_merging import SpecMerging
 from foreman.v4.states.spec_review import SpecReviewState
 from foreman.v4.states.terminal import DoneState, FailedState, NeedsHelpState
 
@@ -25,6 +26,7 @@ STATE_REGISTRY: dict[str, Callable[[], TicketState]] = {
     "Planning": PlanningState,
     "SpecReview": SpecReviewState,
     "SpecFix": SpecFixState,
+    "SpecMerging": SpecMerging,
     "Implementing": ImplementingState,
     "ImplReview": ImplReviewState,
     "ImplFix": ImplFixState,
