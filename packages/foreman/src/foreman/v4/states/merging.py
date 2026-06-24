@@ -39,7 +39,9 @@ tracks the proper fix.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
+from foreman.v4.git_provider import PRState
 from foreman.v4.outcome import (
     Outcome,
     OutcomeArtifacts,
@@ -48,6 +50,7 @@ from foreman.v4.outcome import (
 )
 from foreman.v4.repository import MissingPRNumberError
 from foreman.v4.state import StateContext, TicketState
+from foreman.v4.states.merge_helper import attempt_merge
 
 logger = logging.getLogger(__name__)
 
@@ -77,29 +80,38 @@ class MergingState(TicketState):
             )
         return pr
 
-    def execute(self, ctx: StateContext) -> Outcome:
-        if ctx.git is None:
-            raise RuntimeError("MergingState requires git in StateContext")
-        pr_number = self._pr_number_for(ctx)
-        state = ctx.git.get_pr_state(
-            project=ctx.ticket.project, pr_number=pr_number,
-        )
-        # foreman#357: defense-in-depth gate. Before either the already-
-        # merged short-circuit or the merge call, verify the PR's base
-        # ref matches the project's configured dev_base_branch. The
-        # Worker is supposed to open the impl PR against
-        # dev_base_branch; foreman#341 (logic bug) and foreman#347
-        # (stale binary) both produced wrong-base impl PRs that
-        # MergingState happily merged into the spec branch. The check
-        # runs BEFORE the merged short-circuit so an externally-merged
-        # PR with the wrong base also surfaces as NEEDS_HELP — the rare
-        # "operator click-merged through the UI" case shouldn't be
-        # silently accepted either. When the project_configs map is
-        # empty or doesn't contain this ticket's project (legacy tests;
-        # misconfigured production), the guard logs a warning and
-        # skips — additive over the existing behavior.
-        project_config = ctx.project_configs.get(ctx.ticket.project)
-        if project_config is not None:
+    def _base_ref_guard(
+        self, ctx: StateContext, pr_number: int,
+    ) -> Callable[[PRState], Outcome | None]:
+        """Build the foreman#357 base-ref guard hook for ``attempt_merge``.
+
+        Defense-in-depth gate. Before either the already-merged
+        short-circuit or the merge call, verify the PR's base ref matches
+        the project's configured dev_base_branch. The Worker is supposed
+        to open the impl PR against dev_base_branch; foreman#341 (logic
+        bug) and foreman#347 (stale binary) both produced wrong-base impl
+        PRs that MergingState happily merged into the spec branch. The
+        check runs BEFORE the merged short-circuit so an externally-merged
+        PR with the wrong base also surfaces as NEEDS_HELP — the rare
+        "operator click-merged through the UI" case shouldn't be silently
+        accepted either. When the project_configs map is empty or doesn't
+        contain this ticket's project (legacy tests; misconfigured
+        production), the guard logs a warning and skips — additive over
+        the existing behavior.
+
+        Returns an Outcome (NEEDS_HELP) to short-circuit, or None to
+        proceed with the merge.
+        """
+
+        def guard(state: PRState) -> Outcome | None:
+            project_config = ctx.project_configs.get(ctx.ticket.project)
+            if project_config is None:
+                logger.warning(
+                    "MergingState: no project_config for project=%s; "
+                    "skipping base-ref guard for ticket=%d pr=%d",
+                    ctx.ticket.project, ctx.ticket.id, pr_number,
+                )
+                return None
             expected_base = (
                 project_config.dev_base_branch or DEFAULT_DEV_BASE_BRANCH
             )
@@ -124,46 +136,33 @@ class MergingState(TicketState):
                         "ticket_issue_number": ctx.ticket.issue_number,
                     },
                 )
-        else:
-            logger.warning(
-                "MergingState: no project_config for project=%s; "
-                "skipping base-ref guard for ticket=%d pr=%d",
-                ctx.ticket.project, ctx.ticket.id, pr_number,
-            )
-        if state.merged:
-            # Already-merged branch: close the originating issue too.
-            # Idempotent at the REST API level — if an external merge
-            # also closed the issue, this is a no-op.
-            ctx.git.close_issue(
+            return None
+
+        return guard
+
+    def execute(self, ctx: StateContext) -> Outcome:
+        if ctx.git is None:
+            raise RuntimeError("MergingState requires git in StateContext")
+        pr_number = self._pr_number_for(ctx)
+        git = ctx.git
+
+        def on_merge_success() -> None:
+            # Close the originating issue on BOTH success branches
+            # (already-merged + just-merged). Idempotent at the REST API
+            # level — if an external merge also closed the issue, this is
+            # a no-op. On the just-merged branch attempt_merge calls this
+            # AFTER merge_pr confirms, so the close is tied to the merge
+            # succeeding — never a premature close on a still-unmerged PR.
+            git.close_issue(
                 project=ctx.ticket.project,
                 issue_number=ctx.ticket.issue_number,
             )
-            return Outcome(
-                kind=OutcomeKind.CLEAN, confidence=OutcomeConfidence.HIGH,
-                summary="impl PR already merged; issue closed",
-                artifacts=OutcomeArtifacts(pr_number=pr_number),
-            )
-        if state.mergeable and state.ci_passing:
-            ctx.git.merge_pr(
-                project=ctx.ticket.project, pr_number=pr_number,
-            )
-            # Close issue AFTER the merge confirms — never before. A
-            # premature close on a still-unmerged PR would orphan the
-            # issue from its work; this ordering ties the close to the
-            # merge succeeding.
-            ctx.git.close_issue(
-                project=ctx.ticket.project,
-                issue_number=ctx.ticket.issue_number,
-            )
-            return Outcome(
-                kind=OutcomeKind.CLEAN, confidence=OutcomeConfidence.HIGH,
-                summary="impl PR merged; issue closed",
-                artifacts=OutcomeArtifacts(pr_number=pr_number),
-            )
-        return Outcome(
-            kind=OutcomeKind.BLOCKED, confidence=OutcomeConfidence.HIGH,
-            summary="impl PR not yet mergeable (CI pending or merge conflict)",
-            artifacts=OutcomeArtifacts(pr_number=pr_number),
+
+        return attempt_merge(
+            ctx,
+            pr_number=pr_number,
+            on_merge_success=on_merge_success,
+            pre_merge_guard=self._base_ref_guard(ctx, pr_number),
         )
 
     def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:
