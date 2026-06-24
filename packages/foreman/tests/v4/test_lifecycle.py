@@ -193,6 +193,7 @@ def test_behind_spec_pr_heals_then_reaches_implementing_and_done():
 
     final = _run_until_terminal(
         repo, ticket.id, dispatcher=dispatcher, git=git, bus=EventBus(),
+        project_configs=_auto_merge_configs(),
     )
     assert final.current_state == "Done"
     # The heal happened exactly once before the spec PR merged.
@@ -282,6 +283,7 @@ def test_spec_pr_heal_then_ci_pending_then_heal_reaches_done_not_needs_help():
 
     final = _run_until_terminal(
         repo, ticket.id, dispatcher=dispatcher, git=git, bus=EventBus(),
+        project_configs=_auto_merge_configs(),
     )
     assert final.current_state == "Done"
     # Two genuine heals — and crucially NOT a NeedsHelp landing.
