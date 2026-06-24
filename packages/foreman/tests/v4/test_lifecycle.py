@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+from foreman.v4.config import ProjectConfig
 from foreman.v4.event_bus import EventBus
 from foreman.v4.git_provider import FakeGitProvider, PRState
 from foreman.v4.observers.event_archive import EventArchiveObserver
@@ -19,6 +20,23 @@ from foreman.v4.states.merging import MergingState
 from foreman.v4.states.registry import build_state
 
 
+def _auto_merge_configs() -> dict[str, ProjectConfig]:
+    """foreman#418: the happy-path lifecycle test drives the ticket all
+    the way to Done, which requires the impl PR to auto-merge. That now
+    only happens when the project opts in to ``auto_merge_impl`` — so
+    the lifecycle test threads a config map with the flag set. With the
+    default (False), the ticket would correctly park at ImplApproved
+    awaiting human merge (covered by the gating unit tests)."""
+    return {
+        "p": ProjectConfig(
+            name="p",
+            repo="o/p",
+            local_clone_path="/tmp/p",
+            auto_merge_impl=True,
+        )
+    }
+
+
 def _canned(kind: str, *, pr_number: int | None = None) -> str:
     artifacts = f',"artifacts":{{"pr_number":{pr_number}}}' if pr_number else ""
     return (
@@ -27,10 +45,14 @@ def _canned(kind: str, *, pr_number: int | None = None) -> str:
     )
 
 
-_TERMINAL_STATES = ("Done", "Failed", "NeedsHelp")
+# foreman#418: ``ImplApproved`` is terminal-for-the-machine (the
+# WorkerPool won't re-enqueue it) — the driver stops there too, exactly
+# like the production loop, so a parked ticket can be resumed via the
+# operator path in a separate driver run.
+_TERMINAL_STATES = ("Done", "Failed", "NeedsHelp", "ImplApproved")
 
 
-def _run_until_terminal(repo, ticket_id, *, dispatcher, git, bus):
+def _run_until_terminal(repo, ticket_id, *, dispatcher, git, bus, project_configs=None):
     """Drive the ticket one transition at a time until it reaches a terminal.
 
     Terminal landings (Done/Failed/NeedsHelp) are synthesized inline by
@@ -41,7 +63,10 @@ def _run_until_terminal(repo, ticket_id, *, dispatcher, git, bus):
     ticket state at the top of each iteration and returns as soon as
     the ticket lands on a terminal.
     """
-    seq = 0
+    # Resume-safe: continue the sequence after any rows already in the
+    # journal (a parked ticket resumed by the operator path re-enters this
+    # driver with prior state_instances rows present).
+    seq = repo.count_state_instances_for_ticket(ticket_id)
     while True:
         ticket = repo.get_ticket(ticket_id)
         if ticket.current_state in _TERMINAL_STATES:
@@ -56,6 +81,7 @@ def _run_until_terminal(repo, ticket_id, *, dispatcher, git, bus):
             ticket=ticket, instance=instance, repo=repo,
             clock=lambda seq=seq: dt.datetime(2026, 6, 13, 12, seq, 0),
             bus=bus, role_dispatcher=dispatcher, git=git,
+            project_configs=project_configs or {},
         )
         # MergingState needs a pr_number; in real wiring it reads from the
         # ticket's most recent outcome_payload. For the lifecycle test we
@@ -73,7 +99,7 @@ def test_happy_path_queued_to_done():
     git = FakeGitProvider()
     git.set_pr_state(
         project="p", pr_number=42,
-        state=PRState(merged=False, mergeable=True, ci_passing=True),
+        state=PRState(merged=False, mergeable=True, ci_passing=True, base_ref="main"),
     )
     dispatcher = FakeRoleDispatcher(responses={
         ("planner", "p", 1):        _canned("clean", pr_number=42),
@@ -88,7 +114,10 @@ def test_happy_path_queued_to_done():
     # Drive the ticket. MergingState now calls pr.merge() directly
     # when GitHub reports the PR mergeable + CI green — no MergeQueue
     # polling. The seeded PRState satisfies the merge gate immediately.
-    final = _run_until_terminal(repo, ticket.id, dispatcher=dispatcher, git=git, bus=bus)
+    final = _run_until_terminal(
+        repo, ticket.id, dispatcher=dispatcher, git=git, bus=bus,
+        project_configs=_auto_merge_configs(),
+    )
     assert final.current_state == "Done"
 
     # PR #42 ended merged. foreman#416: the spec-PR merge moved out of
@@ -164,6 +193,7 @@ def test_behind_spec_pr_heals_then_reaches_implementing_and_done():
 
     final = _run_until_terminal(
         repo, ticket.id, dispatcher=dispatcher, git=git, bus=EventBus(),
+        project_configs=_auto_merge_configs(),
     )
     assert final.current_state == "Done"
     # The heal happened exactly once before the spec PR merged.
@@ -253,6 +283,7 @@ def test_spec_pr_heal_then_ci_pending_then_heal_reaches_done_not_needs_help():
 
     final = _run_until_terminal(
         repo, ticket.id, dispatcher=dispatcher, git=git, bus=EventBus(),
+        project_configs=_auto_merge_configs(),
     )
     assert final.current_state == "Done"
     # Two genuine heals — and crucially NOT a NeedsHelp landing.
@@ -311,11 +342,12 @@ def test_needs_fix_loop_spec_review_to_spec_fix_back():
     # to 42, so register PR #42 in the fake git too.
     git.set_pr_state(
         project="p", pr_number=42,
-        state=PRState(merged=False, mergeable=True, ci_passing=True),
+        state=PRState(merged=False, mergeable=True, ci_passing=True, base_ref="main"),
     )
 
     final = _run_until_terminal(
         repo, ticket.id, dispatcher=_ScriptedDispatcher(), git=git, bus=EventBus(),
+        project_configs=_auto_merge_configs(),
     )
     assert final.current_state == "Done"
 
@@ -329,3 +361,80 @@ def test_needs_fix_loop_spec_review_to_spec_fix_back():
     assert "SpecFix" in state_order
     # SpecReview appears twice -- once rejecting, once accepting:
     assert state_order.count("SpecReview") == 2
+
+
+def test_impl_approved_operator_resume_to_done():
+    """foreman#418 exit-path: a ticket parked at ImplApproved (the
+    default, auto_merge_impl=False) can be resumed by an operator and
+    driven all the way to Done.
+
+    This proves the gate's core promise end-to-end: foreman parks the
+    approved impl PR for human merge, the human moves the ticket to
+    Merging via the real ``foreman set-state`` operator command, and the
+    next driver pass merges the PR and lands on Done. Without this the
+    parked state would be a dead end.
+
+    Stage 1: drive Queued -> ... -> ImplApproved with NO auto_merge_impl
+             opt-in (empty project_configs == default-safe park). Assert
+             merge_pr was NOT called and the ticket is parked at
+             ImplApproved.
+    Stage 2: operator runs ``set-state <id> Merging`` (real CLI command).
+    Stage 3: drive again — MergingState merges PR #42 (mergeable + CI
+             green + base_ref main) -> Done. Assert merge_pr WAS called,
+             the issue was closed, and the ticket reached Done.
+    """
+    from typer.testing import CliRunner
+
+    from foreman.v4.cli import app
+    from foreman.v4.cli.context import build_cli_context
+
+    repo = SqliteTicketRepository.in_memory()
+    ticket = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
+    git = FakeGitProvider()
+    git.set_pr_state(
+        project="p", pr_number=42,
+        state=PRState(merged=False, mergeable=True, ci_passing=True, base_ref="main"),
+    )
+    dispatcher = FakeRoleDispatcher(responses={
+        ("planner", "p", 1):        _canned("clean", pr_number=42),
+        ("reviewer-spec", "p", 1):  _canned("clean", pr_number=42),
+        ("worker", "p", 1):         _canned("clean", pr_number=42),
+        ("reviewer-impl", "p", 1):  _canned("clean", pr_number=42),
+    })
+    bus = EventBus()
+
+    # Stage 1: park at ImplApproved. No auto_merge_impl opt-in => default
+    # gate => the approved impl PR parks for human merge.
+    parked = _run_until_terminal(
+        repo, ticket.id, dispatcher=dispatcher, git=git, bus=bus,
+        project_configs={},  # default-safe: no project => park
+    )
+    assert parked.current_state == "ImplApproved"
+    # The whole point of the gate: foreman did NOT take the impl-merge
+    # close-out path while parked. MergingState is the ONLY state that
+    # closes the originating issue (after merging the impl PR), so the
+    # issue staying OPEN proves the impl PR was not auto-merged here. (The
+    # spec PR shares pr_number 42 with the impl PR in this test and was
+    # merged by SpecReviewState.verify(), so merge_pr_calls is not a clean
+    # impl-merge signal — closed_issues is.)
+    assert git.closed_issues == set()
+
+    # Stage 2: operator resumes the parked ticket via the real CLI command.
+    runner = CliRunner()
+    result = runner.invoke(
+        app, ["set-state", str(ticket.id), "Merging"],
+        obj=build_cli_context(repo=repo),
+    )
+    assert result.exit_code == 0, result.output
+    assert repo.get_ticket(ticket.id).current_state == "Merging"
+
+    # Stage 3: drive the resumed ticket — MergingState merges and lands Done.
+    final = _run_until_terminal(
+        repo, ticket.id, dispatcher=dispatcher, git=git, bus=bus,
+        project_configs={},
+    )
+    assert final.current_state == "Done"
+    # Now the merge actually happened, driven by the operator resume.
+    assert ("p", 42) in git.merge_pr_calls
+    assert git.get_pr_state(project="p", pr_number=42).merged is True
+    assert ("p", 1) in git.closed_issues

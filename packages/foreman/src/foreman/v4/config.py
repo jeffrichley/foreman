@@ -72,6 +72,9 @@ Schema:
     dev_base_branch   - alternate base branch for spec worktrees (None → origin/default)
     max_fix_attempts  - max fix cycles before NeedsHelp escalation (default 3)
     max_impl_attempts - max impl cycles before NeedsHelp escalation (default 3)
+    auto_merge_impl   - when False (default), an approved impl PR parks at
+                        ImplApproved for human merge; when True, foreman
+                        auto-merges the impl PR (the historic behavior)
 """
 
 from __future__ import annotations
@@ -204,6 +207,19 @@ class ProjectConfig(BaseModel):
     ``operator.supervisor`` / ``operator.signer`` may be set; unset
     fields inherit from the top-level identity via
     :func:`resolve_operator`. Issue #347."""
+
+    auto_merge_impl: bool = False
+    """foreman#418: the impl-merge gate.
+
+    When ``False`` (the default), an approved impl PR does NOT
+    auto-merge — the ticket parks at ``ImplApproved`` (a
+    terminal-for-the-machine holding state) so a human can review and
+    merge the PR themselves. When ``True``, foreman auto-merges the
+    approved impl PR via ``MergingState`` — the historic behavior.
+
+    Default-safe: an operator must explicitly opt in per project to
+    re-enable autonomous impl merging. Spec PRs are unaffected by this
+    flag — they keep auto-merging."""
 
 
 class AppCredentials(BaseModel):

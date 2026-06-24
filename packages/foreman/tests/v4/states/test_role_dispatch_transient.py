@@ -23,6 +23,7 @@ from foreman.v4.outcome import (
 from foreman.v4.repository import InMemoryTicketRepository
 from foreman.v4.state import StateContext
 from foreman.v4.states.impl_fix import ImplFixState
+from foreman.v4.states.impl_review import ImplReviewState
 from foreman.v4.states.implementing import ImplementingState
 from foreman.v4.states.planning import PlanningState
 from foreman.v4.states.terminal import NeedsHelpState
@@ -365,3 +366,60 @@ def test_role_dispatch_clean_clears_stale_next_action_at(fake_clock) -> None:
 
     cleared = repo.get_ticket(ticket.id)
     assert cleared.next_action_at is None
+
+
+def test_impl_review_override_preserves_transient_intercept(fake_clock) -> None:
+    """foreman#418: ImplReviewState overrides ``next_state`` to add the
+    impl-merge gate on CLEAN. That override must NOT swallow the
+    foreman#361 TRANSIENT_PROVIDER_ERROR intercept — every non-CLEAN
+    outcome is delegated to ``super().next_state`` (RoleDispatchState),
+    where the backoff machinery lives.
+
+    Drive a single TRANSIENT_PROVIDER_ERROR through the override and
+    assert the intercept still fires: it re-enters ImplReview (self-loop,
+    not Failed/Merging/ImplApproved), schedules ``next_action_at`` so the
+    Poller suspends the ticket, and emits ``TransientProviderErrorEvent``.
+    """
+    repo = InMemoryTicketRepository()
+    ticket = repo.create_ticket(project="p", issue_number=1, now=fake_clock.now)
+
+    bus = EventBus()
+    received: list[Event] = []
+    bus.subscribe(received.append)
+
+    instance = _open_in_flight(
+        repo=repo,
+        state_class=ImplReviewState,
+        ticket_id=ticket.id,
+        sequence=1,
+        clock=fake_clock.now,
+    )
+    current_ticket = repo.get_ticket(ticket.id)
+    ctx = _make_ctx(
+        repo=repo,
+        ticket=current_ticket,
+        instance=instance,
+        clock_callable=fake_clock,
+        bus=bus,
+    )
+
+    next_state = ImplReviewState().next_state(ctx, _transient_outcome())
+
+    # Self-loop back into ImplReview — the transient intercept re-enters
+    # the same state rather than routing to a terminal or merge state.
+    assert isinstance(next_state, ImplReviewState)
+
+    # The Poller suspension was scheduled — proving super().next_state's
+    # backoff branch ran through the override.
+    suspended = repo.get_ticket(ticket.id)
+    assert suspended.next_action_at is not None
+    expected_delay = BACKOFF_SCHEDULE_SECONDS[0]
+    assert (suspended.next_action_at - fake_clock.now).total_seconds() == expected_delay
+
+    # And the structured event fired with a real retry time (attempt 0).
+    transient_events = [
+        ev for ev in received if isinstance(ev, TransientProviderErrorEvent)
+    ]
+    assert len(transient_events) == 1
+    assert transient_events[0].next_retry_at is not None
+    assert transient_events[0].attempt == 0

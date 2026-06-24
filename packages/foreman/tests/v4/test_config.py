@@ -367,6 +367,38 @@ def test_project_dev_base_branch_override(tmp_path: Path):
     assert config.projects[0].dev_base_branch == "develop"
 
 
+def test_project_auto_merge_impl_defaults_false():
+    """foreman#418: ``auto_merge_impl`` defaults to False — an approved
+    impl PR parks at ImplApproved for human merge unless the project
+    explicitly opts back in to the historic auto-merge behavior."""
+    p = ProjectConfig(
+        name="voice",
+        repo="jeffrichley/voice",
+        local_clone_path="/tmp/voice",
+    )
+    assert p.auto_merge_impl is False
+
+
+def test_project_auto_merge_impl_round_trip(tmp_path: Path):
+    """foreman#418: ``auto_merge_impl = true`` flows through TOML load.
+
+    Opt-in restores the historic behavior where an approved impl PR
+    auto-merges via MergingState.
+    """
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[daemon]\n"
+        'db_path = "/tmp/foreman.db"\n'
+        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+        "auto_merge_impl = true\n"
+    )
+    config = load_config(config_path)
+    assert config.projects[0].auto_merge_impl is True
+
+
 def test_project_max_fix_attempts_override(tmp_path: Path):
     """Phase 8b.2: per-project ``max_fix_attempts`` flows through.
 

@@ -77,7 +77,10 @@ def test_full_boot_from_toml_to_done(tmp_path: Path, monkeypatch):
         f"[[projects]]\n"
         f'name = "p"\n'
         f'repo = "owner/p"\n'
-        f'local_clone_path = "{(tmp_path / "p").as_posix()}"\n',
+        f'local_clone_path = "{(tmp_path / "p").as_posix()}"\n'
+        # foreman#418: opt in to auto-merge so the impl PR reaches Done
+        # via MergingState (default parks at ImplApproved for human merge).
+        f"auto_merge_impl = true\n",
         encoding="utf-8",
     )
     config = load_config(config_path)
