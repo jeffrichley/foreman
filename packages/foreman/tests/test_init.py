@@ -544,6 +544,9 @@ def test_run_init_creates_all_v4_labels_on_empty_repo(tmp_path: Path) -> None:
         "foreman:state-planning",
         "foreman:state-spec-review",
         "foreman:state-spec-fix",
+        # foreman#416: SpecMerging merges the approved spec PR with the
+        # self-heal framework (moved out of SpecReviewState.verify).
+        "foreman:state-spec-merging",
         "foreman:state-implementing",
         "foreman:state-impl-review",
         "foreman:state-impl-fix",

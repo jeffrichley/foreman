@@ -1,4 +1,10 @@
-"""SpecReviewState — Reviewer-on-spec; CLEAN merges spec PR + → Implementing."""
+"""SpecReviewState — Reviewer-on-spec.
+
+foreman#416: CLEAN no longer merges the spec PR inline — it routes to the
+new ``SpecMerging`` state, which merges with the self-heal framework.
+``verify()`` keeps only the pr_number-present validation (a malformed
+CLEAN fails fast here) and no longer touches git.
+"""
 from __future__ import annotations
 
 import datetime as dt
@@ -28,7 +34,10 @@ def _ctx(*, response_stdout: str, git: FakeGitProvider):
     ), repo
 
 
-def test_clean_outcome_merges_spec_pr_and_advances_to_implementing():
+def test_clean_outcome_advances_to_spec_merging_without_merging():
+    """foreman#416: CLEAN routes to SpecMerging (NOT Implementing) and
+    does NOT merge the spec PR inline anymore — the merge happens
+    downstream in SpecMerging with the self-heal framework."""
     git = FakeGitProvider()
     git.set_pr_state(
         project="p", pr_number=42,
@@ -43,16 +52,17 @@ def test_clean_outcome_merges_spec_pr_and_advances_to_implementing():
     )
     next_state = SpecReviewState().transition(ctx)
     assert next_state is not None
-    assert next_state.state_name == "Implementing"
-    assert git.get_pr_state(project="p", pr_number=42).merged is True
-    assert repo.get_ticket(ctx.ticket.id).current_state == "Implementing"
+    assert next_state.state_name == "SpecMerging"
+    # The spec PR is NOT merged here — that's SpecMerging's job.
+    assert git.get_pr_state(project="p", pr_number=42).merged is False
+    assert ("p", 42) not in git.merge_pr_calls
+    assert repo.get_ticket(ctx.ticket.id).current_state == "SpecMerging"
 
 
-def test_specreview_state_calls_renamed_merge_pr():
-    """Phase 8d.19 rename: ``merge_spec_pr`` → ``merge_pr``. The
-    SpecReviewState verify() hook calls the renamed method on the same
-    code path. The recorder on FakeGitProvider proves the call landed
-    on the new entry point (the old one no longer exists)."""
+def test_specreview_verify_no_longer_calls_merge_pr():
+    """foreman#416: verify() must NOT call merge_pr anymore. The spec PR
+    number is still persisted on this state's outcome (so SpecMerging can
+    find it), but no merge happens at SpecReview."""
     git = FakeGitProvider()
     git.set_pr_state(
         project="p", pr_number=42,
@@ -66,7 +76,10 @@ def test_specreview_state_calls_renamed_merge_pr():
         git=git,
     )
     SpecReviewState().transition(ctx)
-    assert ("p", 42) in git.merge_pr_calls
+    assert git.merge_pr_calls == set()
+    # The pr_number is persisted on the SpecReview outcome so SpecMerging
+    # can discover it via latest_pr_number_for_ticket.
+    assert repo.latest_pr_number_for_ticket(ctx.ticket.id) == 42
 
 
 def test_needs_fix_routes_to_spec_fix_without_merge():

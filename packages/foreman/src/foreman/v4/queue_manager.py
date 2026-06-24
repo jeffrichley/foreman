@@ -28,6 +28,10 @@ from foreman.v4.work import WorkItem
 
 _STATE_PRIORITY = {
     "Merging":      1,
+    # foreman#416: SpecMerging is a fast non-role merge state (like
+    # Merging) that should drain promptly so the spec PR lands and the
+    # build can start — same top priority tier as Merging.
+    "SpecMerging":  1,
     "ImplReview":   2,
     "Implementing": 3,
     "ImplFix":      3,

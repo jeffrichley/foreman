@@ -47,6 +47,31 @@ def test_merge_pr_call_recorder_empty_by_default():
     assert git.merge_pr_calls == set()
 
 
+def test_merge_pr_preserves_mergeable_state():
+    """foreman#416: merge_pr must carry the mergeable_state field through
+    (like base_ref), not silently reset it to ""."""
+    git = FakeGitProvider()
+    git.set_pr_state(
+        project="p", pr_number=1,
+        state=PRState(
+            merged=False, mergeable=True, ci_passing=True,
+            base_ref="main", mergeable_state="clean",
+        ),
+    )
+    git.merge_pr(project="p", pr_number=1)
+    assert git.get_pr_state(project="p", pr_number=1).mergeable_state == "clean"
+
+
+def test_update_branch_records_call_as_list():
+    """foreman#416: update_branch appends to a LIST (not a set) so tests
+    can assert call COUNT — the heal-loop bound depends on counting."""
+    git = FakeGitProvider()
+    assert git.update_branch_calls == []
+    git.update_branch(project="p", pr_number=7)
+    git.update_branch(project="p", pr_number=7)
+    assert git.update_branch_calls == [("p", 7), ("p", 7)]
+
+
 def test_add_labels_records_call_and_is_queryable():
     """A single add_labels call's labels are queryable via get_issue_labels."""
     git = FakeGitProvider()

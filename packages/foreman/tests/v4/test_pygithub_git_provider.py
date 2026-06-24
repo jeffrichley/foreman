@@ -48,6 +48,7 @@ def test_get_pr_state_returns_mapped_fields(mock_github, mock_repo):
     state = provider.get_pr_state(project="p", pr_number=7)
     assert state == PRState(
         merged=False, mergeable=True, ci_passing=True, base_ref="main",
+        mergeable_state="clean",
     )
     mock_repo.get_pull.assert_called_once_with(7)
 
@@ -95,6 +96,20 @@ def test_merge_pr_calls_merge(mock_github, mock_repo):
     )
     provider.merge_pr(project="p", pr_number=5)
     mock_pr.merge.assert_called_once_with(merge_method="squash")
+
+
+def test_update_branch_calls_pr_update_branch(mock_github, mock_repo):
+    """foreman#416: ``update_branch`` maps to ``pr.update_branch()``
+    (PUT .../update-branch). BehindBranchHealer calls this to self-heal a
+    base-advanced PR instead of 405-ing on a merge attempt."""
+    mock_pr = MagicMock()
+    mock_repo.get_pull.return_value = mock_pr
+    provider = PyGithubGitProvider(
+        github_factory=lambda: mock_github, repo_full_name="owner/p",
+    )
+    provider.update_branch(project="p", pr_number=5)
+    mock_repo.get_pull.assert_called_once_with(5)
+    mock_pr.update_branch.assert_called_once_with()
 
 
 def test_add_labels_calls_add_to_labels_with_sorted_names(mock_github, mock_repo):
