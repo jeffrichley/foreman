@@ -98,6 +98,11 @@ class RoutingGitProvider:
             project=project, pr_number=pr_number,
         )
 
+    def update_branch(self, *, project: str, pr_number: int) -> None:
+        self._resolve(project).update_branch(
+            project=project, pr_number=pr_number,
+        )
+
     def add_labels(
         self, *, project: str, issue_number: int, labels: set[str],
     ) -> None:

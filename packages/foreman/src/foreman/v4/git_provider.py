@@ -55,6 +55,18 @@ class PRState:
     # fixtures that construct ``PRState`` without the field compatible;
     # in production the PyGithub path always populates it.
     base_ref: str = ""
+    # foreman#416: GitHub's raw ``pr.mergeable_state`` string (e.g.
+    # "clean", "behind", "dirty", "blocked", "unstable"). Surfaced raw so
+    # the merge-healer registry (``foreman.v4.merge_healers``) can dispatch
+    # on specific corner cases — ``BehindBranchHealer`` keys off
+    # ``mergeable_state == "behind"`` to self-heal a base-advanced PR via
+    # ``update_branch`` instead of escalating to NeedsHelp. ``ci_passing``
+    # stays as-is (derived from ``mergeable_state in
+    # CI_PASSING_MERGEABLE_STATES``); this field is additive. Default ``""``
+    # keeps existing fixtures that construct ``PRState`` without the field
+    # compiling, same pattern as ``base_ref``; production PyGithub always
+    # populates it.
+    mergeable_state: str = ""
 
 
 class GitProvider(Protocol):
@@ -63,6 +75,20 @@ class GitProvider(Protocol):
     ) -> list[int]: ...
     def get_pr_state(self, *, project: str, pr_number: int) -> PRState: ...
     def merge_pr(self, *, project: str, pr_number: int) -> None: ...
+    def update_branch(self, *, project: str, pr_number: int) -> None:
+        """Update the PR's branch from its base (GitHub "Update branch").
+
+        foreman#416: the merge-healer ``BehindBranchHealer`` calls this to
+        self-heal a ``mergeable_state == "behind"`` PR — the base advanced
+        while the PR waited, and merging a behind PR would 405 (spec PRs)
+        or loop BLOCKED forever (impl PRs). PyGithub maps this to
+        ``pr.update_branch()`` (``PUT .../update-branch``). After the
+        update lands the PR is no longer "behind", so a normal BEHIND
+        heals in one cycle; the healer registry's bound (see
+        ``merge_healers`` + ``attempt_merge``) catches pathological
+        base-churn.
+        """
+        ...
     def add_labels(
         self, *, project: str, issue_number: int, labels: set[str]
     ) -> None:
@@ -154,6 +180,12 @@ class FakeGitProvider:
         # of (or in addition to) the PRState transition, since the
         # CLEAN-when-merged-externally case must NOT call merge_pr at all.
         self.merge_pr_calls: set[tuple[str, int]] = set()
+        # foreman#416: recorder for update_branch calls. A LIST (not a set)
+        # so tests can assert the call COUNT — the heal-loop bound in
+        # ``attempt_merge`` cares how many times a perpetually-behind PR
+        # got an update_branch, and the BehindBranchHealer must call it
+        # exactly once per heal. Each entry is (project, pr_number).
+        self.update_branch_calls: list[tuple[str, int]] = []
         self._labeled_issues: dict[tuple[str, str], set[int]] = {}
         # Current label set per (project, issue_number). add_labels
         # unions into this set; remove_labels differences from it.
@@ -210,8 +242,22 @@ class FakeGitProvider:
             mergeable=existing.mergeable,
             ci_passing=existing.ci_passing,
             base_ref=existing.base_ref,
+            mergeable_state=existing.mergeable_state,
         )
         self.merge_pr_calls.add((project, pr_number))
+
+    def update_branch(self, *, project: str, pr_number: int) -> None:
+        """Record the update_branch call.
+
+        foreman#416: mirrors what ``pr.update_branch()`` does observably
+        from the state machine's vantage — the recorder is the sole
+        side-effect. Tests that want a multi-cycle heal (BEHIND → still
+        BEHIND → ... → escalate-on-bound) drive subsequent ``PRState`` via
+        ``set_pr_state`` between transitions; a single update_branch on a
+        Fake does NOT auto-clear "behind" because the Fake has no base to
+        rebase onto. The call recorder lets tests assert exact heal counts.
+        """
+        self.update_branch_calls.append((project, pr_number))
 
     def seed_issue_labels(
         self, *, project: str, issue_number: int, labels: set[str],
