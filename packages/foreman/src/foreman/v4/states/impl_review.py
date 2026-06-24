@@ -7,7 +7,9 @@ On a CLEAN review, the next state is gated by the impl-merge gate
 config or ``auto_merge_impl=False`` both park.
 
 Non-CLEAN routing (NEEDS_FIX → ImplFix, NEEDS_HELP → NeedsHelp,
-else → Failed) is unchanged and lives on ``next_state_for``. The
+else → Failed) is unchanged and lives on ``next_state_for``, which no
+longer handles CLEAN at all — the gate in ``next_state`` intercepts CLEAN
+(and performs the suspension-clear) before any delegation. The
 TRANSIENT_PROVIDER_ERROR intercept + ``next_action_at`` clearing
 (foreman#361) is preserved by delegating to
 ``RoleDispatchState.next_state`` for every outcome except CLEAN.
@@ -54,17 +56,16 @@ class ImplReviewState(RoleDispatchState):
         return super().next_state(ctx, outcome)
 
     def next_state_for(self, outcome: Outcome) -> TicketState | None:
+        # CLEAN is intentionally NOT handled here: the impl-merge gate
+        # (foreman#418) intercepts CLEAN in ``next_state`` above — which
+        # also performs the suspension-clear — and never delegates a CLEAN
+        # outcome down to ``next_state_for``. Handling it here too would be
+        # a foot-gun (a direct caller would get an unconditional
+        # MergingState and skip the suspension-clear). All non-CLEAN
+        # outcomes reach here via ``RoleDispatchState.next_state``.
         from foreman.v4.states.impl_fix import ImplFixState
-        from foreman.v4.states.merging import MergingState
         from foreman.v4.states.terminal import FailedState, NeedsHelpState
 
-        if outcome.kind == OutcomeKind.CLEAN:
-            # Defensive only: the impl-merge gate (next_state) intercepts
-            # CLEAN before delegating here, so this branch is unreachable
-            # from the normal flow. Kept so a direct next_state_for(CLEAN)
-            # call (legacy tests / external callers) still routes to the
-            # historic Merging target rather than crashing.
-            return MergingState()
         if outcome.kind == OutcomeKind.NEEDS_FIX:
             return ImplFixState()
         if outcome.kind == OutcomeKind.NEEDS_HELP:
