@@ -17,8 +17,11 @@ assertion, masking the original bug class.
 
 from __future__ import annotations
 
+import datetime as dt
+
 import pytest
 
+from foreman.git_host import CommentRef
 from foreman.v4.git_provider import FakeGitProvider, PRState
 from foreman.v4.routing_git_provider import (
     RoutingGitProvider,
@@ -256,3 +259,51 @@ def test_get_issue_labels_dispatches_to_per_project_provider():
     )
     router = RoutingGitProvider(providers={"a": a, "b": b})
     assert router.get_issue_labels(project="b", issue_number=1) == {"foreman:plan"}
+
+
+# ---------------------------------------------------------------------------
+# Issue-comment routing (sub-request 3 of issue #410)
+# ---------------------------------------------------------------------------
+
+
+def test_get_issue_comments_dispatches_to_correct_provider() -> None:
+    """get_issue_comments routes by project — only the named provider is read."""
+    a = FakeGitProvider()
+    b = FakeGitProvider()
+    comment = CommentRef(
+        author_login="bot",
+        posted_at=dt.datetime(2026, 6, 20, tzinfo=dt.UTC),
+        body="hello",
+    )
+    b.seed_issue_comments(project="b", issue_number=5, comments=[comment])
+    router = RoutingGitProvider(providers={"a": a, "b": b})
+
+    result = router.get_issue_comments(project="b", issue_number=5)
+    assert result == [comment]
+    # Other project returns empty — no cross-project read.
+    assert router.get_issue_comments(project="a", issue_number=5) == []
+
+
+def test_post_issue_comment_dispatches_to_correct_provider() -> None:
+    """post_issue_comment routes by project — only the named provider is written."""
+    a = FakeGitProvider()
+    b = FakeGitProvider()
+    router = RoutingGitProvider(providers={"a": a, "b": b})
+
+    router.post_issue_comment(project="b", issue_number=7, body="hi there")
+
+    assert b.posted_comments == [("b", 7, "hi there")]
+    # The other provider was NOT written to.
+    assert a.posted_comments == []
+
+
+def test_get_issue_comments_unknown_project_raises() -> None:
+    router = RoutingGitProvider(providers={"a": FakeGitProvider()})
+    with pytest.raises(UnknownProjectError):
+        router.get_issue_comments(project="nope", issue_number=1)
+
+
+def test_post_issue_comment_unknown_project_raises() -> None:
+    router = RoutingGitProvider(providers={"a": FakeGitProvider()})
+    with pytest.raises(UnknownProjectError):
+        router.post_issue_comment(project="nope", issue_number=1, body="x")

@@ -13,8 +13,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
-from foreman.git_host import GitHostProvider
-from foreman.roles import build_role_resources
 from foreman.v4.cli.context import CliContext, build_cli_context
 from foreman.v4.clone_refresh import CloneRefresher
 from foreman.v4.config import ProjectConfig, V4Config
@@ -135,79 +133,25 @@ def bootstrap_cli_context(
             )
         )
     bus.subscribe(MetricsObserver())
-
-    # foreman#367: per-project v3-shape GitHostProvider map keyed by
-    # project name. Built lazily via ``build_role_resources`` with the
-    # orchestrator's App credentials so the observers' comment surface
-    # has the right token attribution. Distinct construction from
-    # ``per_project_providers`` above (which holds v4 GitProvider
-    # instances whose Protocol does NOT include
-    # ``get_issue_comments`` / ``post_issue_comment``).
-    per_project_git_hosts: dict[str, GitHostProvider] = {}
-    per_project_repo_slug: dict[str, str] = {}
-    for project_config in config.projects:
-        per_project_repo_slug[project_config.name] = project_config.repo
-        try:
-            host, _token, _client = build_role_resources(
-                registry=identity,
-                role="orchestrator",
-                app_id=config.orchestrator.app_id,
-                private_key_path=config.orchestrator.private_key_path,
+    if git_for_cross_project is not None:
+        # foreman#410: observers use the refresh-aware v4 GitProvider
+        # (RoutingGitProvider) rather than the legacy per-project
+        # GitHostProvider. The v4 provider's github_factory seam
+        # rebuilds the PyGithub client past 3000s, so these observers
+        # never 401 on a long-running daemon.
+        bus.subscribe(
+            SustainedBlockedObserver(
+                repo=repo,
+                git=git_for_cross_project,
             )
-        except Exception:  # pragma: no cover - defensive
-            logger.warning(
-                "bootstrap: failed to build orchestrator-token host for "
-                "project=%s; SustainedBlockedObserver + "
-                "TerminalLandingObserver will be no-op for this project",
-                project_config.name,
-                exc_info=True,
+        )
+        bus.subscribe(
+            TerminalLandingObserver(
+                repo=repo,
+                git=git_for_cross_project,
+                log_dir=Path(config.log_dir),
             )
-            continue
-        per_project_git_hosts[project_config.name] = host
-
-    class _HostForProject:
-        """Callable shim exposing ``repo_slug_for`` for the observers.
-
-        :class:`SustainedBlockedObserver` /
-        :class:`TerminalLandingObserver` consult ``repo_slug_for`` on
-        the ``host_for_project`` argument to translate project name →
-        owner/repo slug. A plain function with attribute set doesn't
-        survive ``mypy`` strict checks on Callable; a class does.
-        """
-
-        def __init__(
-            self,
-            *,
-            hosts: dict[str, GitHostProvider],
-            slugs: dict[str, str],
-        ) -> None:
-            self._hosts = hosts
-            self._slugs = slugs
-
-        def __call__(self, project: str) -> GitHostProvider | None:
-            return self._hosts.get(project)
-
-        def repo_slug_for(self, project: str) -> str | None:
-            return self._slugs.get(project)
-
-    host_for_project = _HostForProject(
-        hosts=per_project_git_hosts,
-        slugs=per_project_repo_slug,
-    )
-
-    bus.subscribe(
-        SustainedBlockedObserver(
-            repo=repo,
-            host_for_project=host_for_project,
         )
-    )
-    bus.subscribe(
-        TerminalLandingObserver(
-            repo=repo,
-            host_for_project=host_for_project,
-            log_dir=Path(config.log_dir),
-        )
-    )
 
     # foreman#357: per-project ProjectConfig map keyed by name. Mirrors
     # the shape of ``per_project_providers`` above — config resolution

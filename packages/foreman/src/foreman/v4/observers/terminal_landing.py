@@ -33,7 +33,6 @@ import re
 from collections.abc import Callable
 from pathlib import Path
 
-from foreman.git_host import GitHostProvider
 from foreman.roles._escalation_comment import (
     EscalationComment,
     already_posted_for_key,
@@ -42,6 +41,7 @@ from foreman.roles._escalation_comment import (
     extract_subprocess_failure_signals,
 )
 from foreman.v4.events import Event, StateEnteredEvent
+from foreman.v4.git_provider import GitProvider
 from foreman.v4.repository import TicketRepository
 from foreman.v4.subprocess_dispatcher import _base_role
 
@@ -88,13 +88,13 @@ class TerminalLandingObserver:
         self,
         *,
         repo: TicketRepository,
-        host_for_project: Callable[[str], GitHostProvider | None],
+        git: GitProvider,
         log_dir: Path,
         clock: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
         role_comment_window: dt.timedelta = TERMINAL_LANDING_ROLE_COMMENT_WINDOW,
     ) -> None:
         self._repo = repo
-        self._host_for_project = host_for_project
+        self._git = git
         self._log_dir = log_dir
         self._clock = clock
         self._role_comment_window = role_comment_window
@@ -116,32 +116,18 @@ class TerminalLandingObserver:
 
         ticket_id = event.ticket_id
         ticket = self._repo.get_ticket(ticket_id)
-        host = self._host_for_project(ticket.project)
-        if host is None:
-            logger.warning(
-                "TerminalLandingObserver: no host configured for "
-                "project=%s; skipping comment for ticket=%d",
-                ticket.project, ticket_id,
-            )
-            return
-        repo_slug = self._resolve_repo_slug(ticket.project)
-        if repo_slug is None:
-            logger.warning(
-                "TerminalLandingObserver: cannot resolve repo_slug for "
-                "project=%s; skipping comment for ticket=%d",
-                ticket.project, ticket_id,
-            )
-            return
 
         # Fetch existing comments for both dedup checks.
         try:
-            comments = host.get_issue_comments(repo_slug, ticket.issue_number)
+            comments = self._git.get_issue_comments(
+                project=ticket.project, issue_number=ticket.issue_number,
+            )
         except Exception:
             logger.exception(
                 "TerminalLandingObserver: get_issue_comments failed for "
                 "%s#%d; proceeding without dedup (duplicate preferable "
                 "to missing)",
-                repo_slug, ticket.issue_number,
+                ticket.project, ticket.issue_number,
             )
             comments = []
 
@@ -300,24 +286,20 @@ class TerminalLandingObserver:
             summary=summary,
             at=self._clock(),
             payload=payload,
-            ticket_ref=f"{repo_slug}#{ticket.issue_number}",
+            ticket_ref=f"{ticket.project}#{ticket.issue_number}",
             source="terminal-landing",
             key=key,
         )
         try:
-            host.post_issue_comment(repo_slug, ticket.issue_number, body)
+            self._git.post_issue_comment(
+                project=ticket.project,
+                issue_number=ticket.issue_number,
+                body=body,
+            )
         except Exception:
             logger.exception(
                 "TerminalLandingObserver: post_issue_comment failed for "
                 "%s#%d; swallowing (the helper-helper contract treats a "
                 "post failure as non-fatal)",
-                repo_slug, ticket.issue_number,
+                ticket.project, ticket.issue_number,
             )
-
-    def _resolve_repo_slug(self, project: str) -> str | None:
-        """Same shape as ``SustainedBlockedObserver._resolve_repo_slug``."""
-        resolver = getattr(self._host_for_project, "repo_slug_for", None)
-        if callable(resolver):
-            slug = resolver(project)
-            return slug if isinstance(slug, str) and slug else None
-        return project

@@ -1,4 +1,9 @@
-"""Unit tests for :class:`SustainedBlockedObserver`."""
+"""Unit tests for :class:`SustainedBlockedObserver`.
+
+Migrated to use FakeGitProvider (sub-request 11 of issue #410): the
+observer now takes ``git: GitProvider`` instead of a ``host_for_project``
+callable, so tests assert posts via ``fake_git.posted_comments``.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from foreman.v4.events import ExecuteCompletedEvent
+from foreman.v4.git_provider import FakeGitProvider
 from foreman.v4.observers.sustained_blocked import (
     SUSTAINED_BLOCKED_THRESHOLD,
     SustainedBlockedObserver,
@@ -78,16 +84,6 @@ def _repo(history: list[StateInstanceRecord]) -> MagicMock:
     return repo
 
 
-def _host_factory(
-    host: MagicMock | None, *, slug: str = "owner/repo",
-) -> object:
-    def resolver(project: str) -> str:
-        return slug
-    callable_obj = MagicMock(return_value=host)
-    callable_obj.repo_slug_for = resolver
-    return callable_obj
-
-
 # ---------------------------------------------------------------------------
 
 
@@ -103,15 +99,14 @@ def test_first_blocked_event_below_threshold_posts_nothing() -> None:
         ),
     ]
     repo = _repo(history)
-    host = MagicMock()
-    host.get_issue_comments.return_value = []
+    fake_git = FakeGitProvider()
     obs = SustainedBlockedObserver(
         repo=repo,
-        host_for_project=_host_factory(host),
+        git=fake_git,
         clock=lambda: now,
     )
     obs(_event(at=now, outcome=_outcome()))
-    host.post_issue_comment.assert_not_called()
+    assert fake_git.posted_comments == []
 
 
 def test_sustained_blocked_above_threshold_posts_once() -> None:
@@ -130,17 +125,16 @@ def test_sustained_blocked_above_threshold_posts_once() -> None:
             execute_completed_at=sixteen_min_ago + dt.timedelta(seconds=30 * i),
         ))
     repo = _repo(history)
-    host = MagicMock()
-    host.get_issue_comments.return_value = []
+    fake_git = FakeGitProvider()
     obs = SustainedBlockedObserver(
         repo=repo,
-        host_for_project=_host_factory(host),
+        git=fake_git,
         clock=lambda: now,
     )
     # Fire the latest event (cycle 32). The observer scans backward,
     # finds the contiguous BLOCKED suffix, and posts.
     obs(_event(at=now, outcome=_outcome()))
-    assert host.post_issue_comment.call_count == 1
+    assert len(fake_git.posted_comments) == 1
 
 
 def test_clean_outcome_resets_the_run() -> None:
@@ -176,17 +170,15 @@ def test_clean_outcome_resets_the_run() -> None:
         ),
     ]
     repo = _repo(history)
-    host = MagicMock()
-    host.get_issue_comments.return_value = []
+    fake_git = FakeGitProvider()
     obs = SustainedBlockedObserver(
         repo=repo,
-        host_for_project=_host_factory(host),
+        git=fake_git,
         clock=lambda: now,
     )
     obs(_event(at=now, outcome=_outcome()))
-    # The most recent BLOCKED is 1 minute ago → below threshold → no
-    # post.
-    host.post_issue_comment.assert_not_called()
+    # The most recent BLOCKED is 1 minute ago → below threshold → no post.
+    assert fake_git.posted_comments == []
 
 
 def test_distinct_reasons_each_get_one_comment() -> None:
@@ -207,17 +199,16 @@ def test_distinct_reasons_each_get_one_comment() -> None:
         ),
     ]
     repo = _repo(history)
-    host = MagicMock()
-    host.get_issue_comments.return_value = []
+    fake_git = FakeGitProvider()
     obs = SustainedBlockedObserver(
         repo=repo,
-        host_for_project=_host_factory(host),
+        git=fake_git,
         clock=lambda: now,
     )
     # First event: 16 min of CI-in-flight crosses threshold.
     first_event_at = base + dt.timedelta(minutes=16)
     obs(_event(at=first_event_at, outcome=_outcome()))
-    assert host.post_issue_comment.call_count == 1
+    assert len(fake_git.posted_comments) == 1
     # Now a different reason cycle: distinct summary signal forms a
     # new (ticket, reason) pair, gets its own comment. Second reason
     # spans from minute 20 to minute 40 → 20 min on the same signal.
@@ -236,25 +227,25 @@ def test_distinct_reasons_each_get_one_comment() -> None:
         ),
     ]
     repo.list_state_instances_for_ticket.return_value = history2
-    host2 = MagicMock()
-    host2.get_issue_comments.return_value = []
+    fake_git2 = FakeGitProvider()
     obs2 = SustainedBlockedObserver(
         repo=repo,
-        host_for_project=_host_factory(host2),
+        git=fake_git2,
         clock=lambda: now,
     )
     second_event_at = base + dt.timedelta(minutes=40)
     obs2(_event(at=second_event_at, outcome=_outcome("impl PR not yet mergeable")))
     # The reason hash differs → distinct dedup key → post fires.
-    assert host2.post_issue_comment.call_count == 1
+    assert len(fake_git2.posted_comments) == 1
 
 
 def test_handler_swallows_exceptions() -> None:
     repo = MagicMock()
     repo.list_state_instances_for_ticket.side_effect = RuntimeError("boom")
+    fake_git = FakeGitProvider()
     obs = SustainedBlockedObserver(
         repo=repo,
-        host_for_project=_host_factory(None),
+        git=fake_git,
     )
     # Should not raise; observer wraps handler.
     obs(_event(
@@ -265,10 +256,10 @@ def test_handler_swallows_exceptions() -> None:
 
 def test_non_blocked_event_is_ignored() -> None:
     repo = _repo([])
-    host = MagicMock()
+    fake_git = FakeGitProvider()
     obs = SustainedBlockedObserver(
         repo=repo,
-        host_for_project=_host_factory(host),
+        git=fake_git,
     )
     obs(_event(
         at=dt.datetime(2026, 6, 20, tzinfo=dt.UTC),
@@ -278,8 +269,7 @@ def test_non_blocked_event_is_ignored() -> None:
             summary="ok",
         ),
     ))
-    host.get_issue_comments.assert_not_called()
-    host.post_issue_comment.assert_not_called()
+    assert fake_git.posted_comments == []
 
 
 @pytest.mark.parametrize("threshold", [
@@ -290,9 +280,10 @@ def test_threshold_is_configurable(threshold: dt.timedelta) -> None:
     assert isinstance(SUSTAINED_BLOCKED_THRESHOLD, dt.timedelta)
     # Confirm the observer accepts the threshold override.
     repo = _repo([])
+    fake_git = FakeGitProvider()
     obs = SustainedBlockedObserver(
         repo=repo,
-        host_for_project=_host_factory(MagicMock()),
+        git=fake_git,
         threshold=threshold,
     )
     assert obs._threshold == threshold
