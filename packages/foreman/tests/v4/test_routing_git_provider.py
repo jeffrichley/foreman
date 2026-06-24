@@ -227,6 +227,21 @@ def test_find_open_pr_by_head_branch_dispatches_to_per_project_provider():
     ) is None
 
 
+def test_update_branch_dispatches_to_per_project_provider():
+    """foreman#416: update_branch routes by project like every other
+    Protocol method. The asymmetry (other-not-called) is load-bearing."""
+    a = FakeGitProvider()
+    b = FakeGitProvider()
+    b.set_pr_state(
+        project="b", pr_number=42,
+        state=PRState(merged=False, mergeable=False, ci_passing=True),
+    )
+    router = RoutingGitProvider(providers={"a": a, "b": b})
+    router.update_branch(project="b", pr_number=42)
+    assert b.update_branch_calls == [("b", 42)]
+    assert a.update_branch_calls == []
+
+
 def test_delete_branch_unknown_project_raises():
     router = RoutingGitProvider(providers={"a": FakeGitProvider()})
     with pytest.raises(UnknownProjectError):

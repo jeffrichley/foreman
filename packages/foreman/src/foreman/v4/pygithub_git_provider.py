@@ -228,6 +228,10 @@ class PyGithubGitProvider:
             mergeable=bool(pr.mergeable),
             ci_passing=(pr.mergeable_state in CI_PASSING_MERGEABLE_STATES),
             base_ref=pr.base.ref,
+            # foreman#416: surface the raw mergeable_state so the
+            # merge-healer registry can dispatch on "behind" / future
+            # corner cases. ci_passing above stays derived from it.
+            mergeable_state=pr.mergeable_state or "",
         )
 
     def merge_pr(self, *, project: str, pr_number: int) -> None:
@@ -250,6 +254,19 @@ class PyGithubGitProvider:
         repo = self._repo
         pr = repo.get_pull(pr_number)
         pr.merge(merge_method=_resolve_merge_method(repo))
+
+    def update_branch(self, *, project: str, pr_number: int) -> None:
+        """Update the PR's branch from base via ``pr.update_branch()``.
+
+        foreman#416: ``BehindBranchHealer`` calls this to self-heal a
+        ``mergeable_state == "behind"`` PR. PyGithub maps it to
+        ``PUT /repos/{owner}/{repo}/pulls/{n}/update-branch``. ``project``
+        is accepted for Protocol-shape symmetry but unused — this provider
+        is locked to one repo at construction (same pattern as
+        ``merge_pr`` / ``close_issue``).
+        """
+        pr = self._repo.get_pull(pr_number)
+        pr.update_branch()
 
     def list_open_issues_with_label(
         self, *, project: str, label: str,

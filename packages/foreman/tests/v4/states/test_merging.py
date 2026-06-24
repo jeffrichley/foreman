@@ -213,6 +213,47 @@ def test_merging_state_blocked_does_not_close_issue():
     assert git.closed_issues == set()
 
 
+def test_merging_state_behind_impl_pr_updates_branch_and_blocks():
+    """foreman#416: a BEHIND impl PR (base advanced while it waited) used
+    to loop BLOCKED forever — it was never mergeable, so the merge gate
+    never fired and nothing advanced the branch. Now the BehindBranchHealer
+    issues update_branch and the state stays BLOCKED for the next poll.
+    merge_pr MUST NOT be called; the issue stays open.
+    """
+    ctx, _repo, git = _ctx_with_pr(
+        pr_number=99,
+        pr_state=PRState(
+            merged=False, mergeable=False, ci_passing=True, base_ref="main",
+            mergeable_state="behind",
+        ),
+    )
+    next_state = MergingState().transition(ctx)
+    assert next_state is not None
+    assert next_state.state_name == "Merging"
+    assert git.update_branch_calls == [("p", 99)]
+    assert ("p", 99) not in git.merge_pr_calls
+    assert git.closed_issues == set()
+
+
+def test_merging_state_behind_then_healed_merges_and_closes_issue():
+    """Once the behind impl PR heals (next poll reports mergeable + CI
+    green), the normal merge path fires: merge_pr + close issue + Done."""
+    ctx, _repo, git = _ctx_with_pr(
+        pr_number=99,
+        pr_state=PRState(
+            merged=False, mergeable=True, ci_passing=True, base_ref="main",
+            mergeable_state="clean",
+        ),
+    )
+    next_state = MergingState().transition(ctx)
+    assert next_state is not None
+    assert next_state.state_name == "Done"
+    assert ("p", 99) in git.merge_pr_calls
+    assert ("p", 1) in git.closed_issues
+    # The healed path doesn't touch update_branch.
+    assert git.update_branch_calls == []
+
+
 def test_missing_git_provider_routes_through_execute_failure():
     repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
