@@ -27,7 +27,9 @@ from foreman.v4.queue_manager import QueueManager
 from foreman.v4.repository import TicketAlreadyExistsError, TicketRepository
 from foreman.v4.work import WorkItem
 
-_TERMINAL_STATES = frozenset({"Done", "Failed", "NeedsHelp"})
+# foreman#418: ``ImplApproved`` is a parked landing (approved impl PR
+# awaiting human merge) — the Poller must skip it, same as NeedsHelp.
+_TERMINAL_STATES = frozenset({"Done", "Failed", "NeedsHelp", "ImplApproved"})
 
 
 class Poller:

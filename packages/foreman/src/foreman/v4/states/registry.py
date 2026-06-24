@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from foreman.v4.state import TicketState
+from foreman.v4.states.impl_approved import ImplApprovedState
 from foreman.v4.states.impl_fix import ImplFixState
 from foreman.v4.states.impl_review import ImplReviewState
 from foreman.v4.states.implementing import ImplementingState
@@ -28,6 +29,7 @@ STATE_REGISTRY: dict[str, Callable[[], TicketState]] = {
     "Implementing": ImplementingState,
     "ImplReview": ImplReviewState,
     "ImplFix": ImplFixState,
+    "ImplApproved": ImplApprovedState,
     "Merging": MergingState,
     "Done": DoneState,
     "Failed": FailedState,
