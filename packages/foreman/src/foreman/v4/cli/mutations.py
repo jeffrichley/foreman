@@ -21,9 +21,21 @@ from foreman.v4.repository import (
     TicketNotFoundError,
     TicketRepository,
 )
+
+# Single source of truth for which states are terminal (machine-done).
+# Imported rather than duplicated so a new terminal (e.g. ImplApproved)
+# stays in sync here — duplicating the set is exactly how past drift bugs
+# crept in.
+from foreman.v4.state import _TERMINAL_STATE_NAMES
 from foreman.v4.states.registry import STATE_REGISTRY
 from foreman.v4.work import WorkItem
 from foreman.worktree import WorktreeManager
+
+# foreman#414: terminal states an operator can recover via ``retry`` — the
+# command re-dispatches the role that escalated. ``Done`` is a happy
+# terminal (nothing to retry); ``ImplApproved`` is parked awaiting a human
+# merge, not a role re-run, so neither is retryable.
+_RETRYABLE_TERMINALS = frozenset({"NeedsHelp", "Failed"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -327,6 +339,24 @@ def cmd_resume(
     typer.echo(f"ticket {ticket_id} resumed")
 
 
+def _resolve_resume_state(
+    repo: TicketRepository, ticket_id: int
+) -> str | None:
+    """Return the role-state a terminal ticket should resume into.
+
+    foreman#414: a ticket parked in ``NeedsHelp``/``Failed`` carries no
+    actionable work in its *current* state. The state that actually
+    escalated is the most recent non-terminal ``state_instances`` row —
+    walk the trail newest-first and return the first one that isn't
+    terminal. ``None`` when the ticket never ran a non-terminal state
+    (caller refuses rather than enqueuing a no-op).
+    """
+    for instance in reversed(repo.list_state_instances_for_ticket(ticket_id)):
+        if instance.state_name not in _TERMINAL_STATE_NAMES:
+            return instance.state_name
+    return None
+
+
 def cmd_retry(
     ctx: typer.Context,
     ticket_id: int = typer.Argument(...),
@@ -336,6 +366,34 @@ def cmd_retry(
     if qm is None:
         typer.echo("retry requires a queue manager", err=True)
         raise typer.Exit(code=1)
+
+    # foreman#414: a terminal ticket (NeedsHelp/Failed) re-enqueued in its
+    # *current* state is a no-op — terminals don't dispatch a role. Resolve
+    # the role-state that escalated and move the ticket back there first so
+    # the requeued WorkItem actually re-runs the failed role.
+    current = ticket.current_state
+    resume_state = current
+    resumed_from: str | None = None
+    if current in _TERMINAL_STATE_NAMES:
+        if current not in _RETRYABLE_TERMINALS:
+            typer.echo(
+                f"ticket {ticket_id} is in terminal {current}; nothing to retry",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        resolved = _resolve_resume_state(repo, ticket_id)
+        if resolved is None:
+            typer.echo(
+                f"ticket {ticket_id} is in {current} with no prior role-dispatch "
+                f"state to resume; use 'foreman set-state {ticket_id} <State>' "
+                f"then retry",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        resume_state = resolved
+        repo.set_ticket_state(ticket_id, resume_state, now=dt.datetime.now(dt.UTC))
+        resumed_from = current
+
     # foreman#361: an operator-forced retry MUST bypass any active
     # transient-provider-error suspension. Without this clear, the
     # Poller would skip the enqueue + the requeued WorkItem until
@@ -343,11 +401,17 @@ def cmd_retry(
     cleared_suspension = ticket.next_action_at is not None
     if cleared_suspension:
         repo.clear_next_action_at(ticket_id)
-    qm.enqueue(WorkItem(ticket_id=ticket_id, state_name=ticket.current_state))
+    qm.enqueue(WorkItem(ticket_id=ticket_id, state_name=resume_state))
     suspension_note = " (cleared next_action_at)" if cleared_suspension else ""
-    typer.echo(
-        f"ticket {ticket_id} re-enqueued in {ticket.current_state}{suspension_note}"
-    )
+    if resumed_from is not None:
+        typer.echo(
+            f"ticket {ticket_id} resumed {resumed_from} -> {resume_state} "
+            f"and re-enqueued{suspension_note}"
+        )
+    else:
+        typer.echo(
+            f"ticket {ticket_id} re-enqueued in {resume_state}{suspension_note}"
+        )
 
 
 def cmd_set_state(

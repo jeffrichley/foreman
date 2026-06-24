@@ -21,6 +21,25 @@ def _make(state: str = "Planning") -> tuple[SqliteTicketRepository, int]:
     return repo, t.id
 
 
+def _make_with_history(*states: str) -> tuple[SqliteTicketRepository, int]:
+    """Build a ticket with a real state_instances trail.
+
+    Seeds one ``state_instances`` row per name (in order) and parks the
+    ticket at the last one — mirroring how the daemon records a ticket
+    that walked Queued→...→NeedsHelp. ``retry`` resolves the resume
+    target from this trail.
+    """
+    repo = SqliteTicketRepository.in_memory()
+    t = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
+    for seq, name in enumerate(states):
+        repo.open_state_instance(
+            ticket_id=t.id, state_name=name, sequence=seq,
+            now=dt.datetime(2026, 6, 13),
+        )
+    repo.set_ticket_state(t.id, states[-1], now=dt.datetime(2026, 6, 13))
+    return repo, t.id
+
+
 def test_hold_sets_held_columns():
     repo, tid = _make()
     runner = CliRunner()
@@ -74,6 +93,84 @@ def test_retry_clears_next_action_at():
     assert result.exit_code == 0
     assert repo.get_ticket(tid).next_action_at is None
     assert qm.dequeue() == WorkItem(ticket_id=tid, state_name="Planning")
+
+
+def test_retry_needshelp_resumes_escalated_role_state():
+    """foreman#414: retry on a NeedsHelp ticket re-dispatches the role
+    that escalated (the most recent non-terminal state), not a no-op
+    re-enqueue of the terminal NeedsHelp state.
+    """
+    repo, tid = _make_with_history(
+        "Queued", "Planning", "Implementing", "NeedsHelp",
+    )
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    runner = CliRunner()
+    result = runner.invoke(
+        app, ["retry", str(tid)],
+        obj=build_cli_context(repo=repo, qm=qm),
+    )
+    assert result.exit_code == 0, result.output
+    # Ticket moved off the terminal state back to the escalated role-state.
+    assert repo.get_ticket(tid).current_state == "Implementing"
+    # And a WorkItem for that role-state was enqueued (daemon re-runs Worker).
+    assert qm.dequeue() == WorkItem(ticket_id=tid, state_name="Implementing")
+
+
+def test_retry_needshelp_message_names_resumed_state():
+    """The success message reflects the resumed role-state, not NeedsHelp."""
+    repo, tid = _make_with_history("Planning", "Implementing", "NeedsHelp")
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    runner = CliRunner()
+    result = runner.invoke(
+        app, ["retry", str(tid)],
+        obj=build_cli_context(repo=repo, qm=qm),
+    )
+    assert result.exit_code == 0
+    assert "NeedsHelp -> Implementing" in result.output
+
+
+def test_retry_failed_also_resumes_role_state():
+    """Failed is the other operator-recovery terminal (foreman drop);
+    retry resumes the escalated role-state there too.
+    """
+    repo, tid = _make_with_history("Planning", "SpecReview", "Failed")
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    runner = CliRunner()
+    result = runner.invoke(
+        app, ["retry", str(tid)],
+        obj=build_cli_context(repo=repo, qm=qm),
+    )
+    assert result.exit_code == 0, result.output
+    assert repo.get_ticket(tid).current_state == "SpecReview"
+    assert qm.dequeue() == WorkItem(ticket_id=tid, state_name="SpecReview")
+
+
+def test_retry_done_refuses():
+    """Done is a happy terminal — retry has nothing to re-dispatch."""
+    repo, tid = _make_with_history("Planning", "Implementing", "Done")
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    runner = CliRunner()
+    result = runner.invoke(
+        app, ["retry", str(tid)],
+        obj=build_cli_context(repo=repo, qm=qm),
+    )
+    assert result.exit_code != 0
+    assert "nothing to retry" in result.output.lower()
+
+
+def test_retry_needshelp_without_role_history_errors():
+    """NeedsHelp with no prior non-terminal instance can't resolve a
+    resume target — refuse with a set-state hint rather than no-op.
+    """
+    repo, tid = _make_with_history("NeedsHelp")
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    runner = CliRunner()
+    result = runner.invoke(
+        app, ["retry", str(tid)],
+        obj=build_cli_context(repo=repo, qm=qm),
+    )
+    assert result.exit_code != 0
+    assert "set-state" in result.output.lower()
 
 
 def test_set_state_changes_current_state():
