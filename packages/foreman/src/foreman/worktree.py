@@ -730,9 +730,11 @@ def fetch_origin_default_branch(
     contract as the underlying helper: network failures are logged as
     warnings and swallowed.
 
-    Used by :class:`foreman.reconciler.clone_refresh.OnPollFetch`
-    (foreman#291) to keep the container clone's ``origin/<default>`` ref
-    fresh between role dispatches.
+    Called per-poll (throttled) by
+    :class:`foreman.v4.clone_refresh.CloneRefresher` (foreman#407) to keep
+    each project clone's ``origin/<default>`` ref fresh between role
+    dispatches. (Supersedes the v3 ``reconciler.clone_refresh.OnPollFetch``
+    of foreman#291, dropped in the #333 v4 cutover.)
     """
     default = _resolve_default_branch(clone_path, role_token=role_token)
     _fetch_origin_branch(clone_path, default, role_token=role_token)
