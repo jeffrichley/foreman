@@ -29,8 +29,7 @@ from foreman.v4.observers.terminal_landing import TerminalLandingObserver
 from foreman.v4.poller import Poller
 from foreman.v4.repository import TicketRepository
 from foreman.v4.routing_git_provider import RoutingGitProvider
-from foreman.v4.sqlite_repository import SqliteTicketRepository
-from foreman.v4.state_backup import BackupScheduler, _DisabledBackupScheduler
+from foreman.v4.state_backup import _DisabledBackupScheduler
 from foreman.v4.subprocess_dispatcher import SubprocessRoleDispatcher
 
 logger = logging.getLogger(__name__)
@@ -56,17 +55,15 @@ def bootstrap_cli_context(
     """
     configure_logging(log_dir=Path(config.log_dir), level=config.log_level)
     repo: TicketRepository
-    if config.storage.engine == "postgres":
-        from foreman.v4.postgres_repository import PostgresTicketRepository
+    from foreman.v4.postgres_repository import PostgresTicketRepository
 
-        assert config.storage.dsn is not None  # StorageConfig validator guarantees
-        repo = PostgresTicketRepository.from_dsn(
-            config.storage.dsn,
-            pool_min=config.storage.pool_min,
-            pool_max=config.storage.pool_max,
-        )
-    else:
-        repo = SqliteTicketRepository.at_path(Path(config.db_path))
+    # StorageConfig is Postgres-only and its validator guarantees a dsn.
+    assert config.storage.dsn is not None  # StorageConfig validator guarantees
+    repo = PostgresTicketRepository.from_dsn(
+        config.storage.dsn,
+        pool_min=config.storage.pool_min,
+        pool_max=config.storage.pool_max,
+    )
 
     dispatcher = SubprocessRoleDispatcher(
         foreman_cli=foreman_cli or ["foreman"],
@@ -161,31 +158,15 @@ def bootstrap_cli_context(
     # base-ref match.
     project_configs: dict[str, ProjectConfig] = {pc.name: pc for pc in config.projects}
 
-    # Issue #360: the BackupScheduler is the daemon-internal periodic
-    # SQLite snapshot job. ``BackupScheduler.from_config`` returns a
-    # real scheduler when ``config.backup.enabled`` is True and a
-    # ``_DisabledBackupScheduler`` no-op sentinel when False. Both
-    # share the ``tick() -> Path | None`` shape so the daemon's call
-    # site stays unconditional.
-    backup_scheduler: BackupScheduler | _DisabledBackupScheduler
-    if config.storage.engine == "postgres":
-        # File-snapshot backups are SQLite-specific (they copy the .db
-        # file via ``sqlite3.Connection.backup()``). Under Postgres,
-        # backups are an ops concern (pg_dump / WAL archiving), out of
-        # scope for the daemon. Use the disabled sentinel so the daemon's
-        # unconditional ``tick()`` call stays a no-op. ``repo`` here is a
-        # PostgresTicketRepository with no ``.connection`` attribute, so
-        # this branch must NOT reference it.
-        backup_scheduler = _DisabledBackupScheduler()
-    else:
-        # SQLite branch: ``repo`` is a SqliteTicketRepository which
-        # exposes ``.connection`` for the snapshot source.
-        assert isinstance(repo, SqliteTicketRepository)
-        backup_scheduler = BackupScheduler.from_config(
-            config.backup,
-            src_conn=repo.connection,
-            bus=bus,
-        )
+    # Issue #360 / v5 kill-sqlite: the BackupScheduler was the
+    # daemon-internal periodic SQLite file-snapshot job. Persistence is
+    # now Postgres-only, where file-snapshot backups don't apply (backups
+    # are an ops concern: pg_dump / WAL archiving, out of scope for the
+    # daemon). The daemon's ``tick() -> Path | None`` call site stays
+    # unconditional, so we always hand it the ``_DisabledBackupScheduler``
+    # no-op sentinel. ``repo`` is a PostgresTicketRepository with no
+    # ``.connection`` attribute, so the old SQLite snapshot branch is gone.
+    backup_scheduler: _DisabledBackupScheduler = _DisabledBackupScheduler()
 
     # foreman#407: per-poll clone refresher. Builds a ``name -> clone path``
     # map from the project configs and refreshes each clone's

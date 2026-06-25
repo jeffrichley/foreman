@@ -282,17 +282,19 @@ class BackupConfig(BaseModel):
 
 
 class StorageConfig(BaseModel):
-    """Persistence engine selection. Defaulted so configs without a
-    ``[storage]`` block keep the historical SQLite behavior.
+    """Persistence engine selection. Postgres-only.
 
-    ``engine = "sqlite"`` (default) uses ``SqliteTicketRepository`` at
-    ``V4Config.db_path``. ``engine = "postgres"`` uses
-    ``PostgresTicketRepository`` at ``dsn`` with a thread-safe
-    connection pool sized ``[pool_min, pool_max]``.
+    ``engine = "postgres"`` (the only supported value, and the default)
+    uses ``PostgresTicketRepository`` at ``dsn`` with a thread-safe
+    connection pool sized ``[pool_min, pool_max]``. ``dsn`` is required:
+    constructing a ``StorageConfig`` without one raises a
+    ``ValidationError`` (Jeff's "always loud fail" directive — a
+    misconfigured storage block refuses at validation time rather than
+    silently falling back).
     """
 
     model_config = ConfigDict(extra="forbid")
-    engine: Literal["sqlite", "postgres"] = "sqlite"
+    engine: Literal["postgres"] = "postgres"
     dsn: str | None = None
     pool_min: int = Field(default=2, ge=1)
     pool_max: int = Field(default=10, ge=1)
