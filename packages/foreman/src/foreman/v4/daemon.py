@@ -27,6 +27,7 @@ from foreman.v4.event_bus import EventBus
 from foreman.v4.git_provider import GitProvider
 from foreman.v4.poller import Poller
 from foreman.v4.queue_manager import QueueManager
+from foreman.v4.reconcile import reconcile_on_startup
 from foreman.v4.repository import TicketRepository
 from foreman.v4.role_dispatcher import RoleDispatcher
 from foreman.v4.state_backup import (
@@ -179,8 +180,19 @@ class Daemon:
             time.sleep(0.01)
             budget -= 0.01
 
+    def _reconcile_startup(self) -> None:
+        """Close crash-orphaned in-flight rows left by a previous process.
+
+        Runs once, before the first tick, before any worker thread starts.
+        Deliberately NOT in ``bootstrap_cli_context`` — that is built by every
+        CLI command (``foreman ps``, ``foreman show``); reconciliation must
+        fire only when the daemon actually starts processing.
+        """
+        reconcile_on_startup(self._repo, clock=self._clock)
+
     def run_forever(self) -> None:
         """Main loop. Returns when ``stop()`` is called."""
+        self._reconcile_startup()
         try:
             while not self._stop.is_set():
                 self.tick_once()

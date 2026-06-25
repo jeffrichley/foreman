@@ -15,7 +15,11 @@ from pathlib import Path
 from typing import Any
 
 from foreman.v4.outcome import OutcomeKind
-from foreman.v4.records import StateInstanceRecord, TicketRecord
+from foreman.v4.records import (
+    FAILURE_PHASE_CRASH_RECOVERY,
+    StateInstanceRecord,
+    TicketRecord,
+)
 from foreman.v4.repository import (
     StateInstanceNotFoundError,
     TicketAlreadyExistsError,
@@ -450,6 +454,11 @@ class SqliteTicketRepository:
                 # resumed ticket doesn't immediately escalate to
                 # NeedsHelp.
                 if row["failure_phase"] == "can_run":
+                    continue
+                # A daemon restart closed this orphan as crash_recovery; it
+                # is not runaway-defense signal. Skip (neither count nor
+                # break).
+                if row["failure_phase"] == FAILURE_PHASE_CRASH_RECOVERY:
                     continue
                 # Phase 8d.18: BLOCKED-outcome rows record a legitimate
                 # async-polling self-loop (MergingState polling a

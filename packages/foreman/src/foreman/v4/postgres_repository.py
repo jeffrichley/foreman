@@ -32,7 +32,11 @@ from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
 from foreman.v4.outcome import OutcomeKind
-from foreman.v4.records import StateInstanceRecord, TicketRecord
+from foreman.v4.records import (
+    FAILURE_PHASE_CRASH_RECOVERY,
+    StateInstanceRecord,
+    TicketRecord,
+)
 from foreman.v4.repository import (
     StateInstanceNotFoundError,
     TicketAlreadyExistsError,
@@ -463,6 +467,10 @@ class PostgresTicketRepository:
         count = 0
         for inst in instances:
             if inst.failure_phase == "can_run":
+                continue
+            # A daemon restart closed this orphan as crash_recovery; it is
+            # not runaway-defense signal. Skip (neither count nor break).
+            if inst.failure_phase == FAILURE_PHASE_CRASH_RECOVERY:
                 continue
             if inst.outcome_kind == OutcomeKind.BLOCKED:
                 continue
