@@ -41,7 +41,7 @@ from foreman.auto_close import (
     strip_auto_close_keywords as _strip_auto_close_keywords,
 )
 from foreman.branches import spec_branch
-from foreman.git_host import CommentRef, GitHostProvider, IssueRef
+from foreman.git_host import CommentRef, GitHostProvider, IssueRef, PRRef
 from foreman.instructions import load_project_instructions
 from foreman.provider import ProviderFacade, UsageInfo
 from foreman.providers import ProviderError, ProviderTransientError
@@ -51,6 +51,7 @@ from foreman.roles import (
     handle_unhandled_role_exception,
 )
 from foreman.roles._escalation_comment import post_escalation_comment
+from foreman.roles._pr_lookup import find_open_pr_by_head_branch
 from foreman.roles._prompt_helpers import (
     filter_bot_self_comments,
     format_comments_section,
@@ -305,7 +306,7 @@ async def _run_planner_core(
                 f"{project_name!r} configured repo {expected_repo_slug!r}"
             )
 
-        host, planner_token, _planner_client = build_role_resources(
+        host, planner_token, planner_client = build_role_resources(
             registry=identity_registry,
             role="planner",
             app_id=config.apps.planner.app_id,
@@ -377,26 +378,53 @@ async def _run_planner_core(
             f"Supervised-by: {op.supervisor.name} <{op.supervisor.email}>",
             f"Signed-off-by: {op.signer.name} <{op.signer.email}>",
         ]
-        host.commit_files_to_worktree(
-            worktree_path=wt_path,
-            files={_spec_doc_relpath(issue_number): llm_output.spec_doc_content},
-            message=llm_output.pr_title,
-            provenance_trailers=provenance_trailers,
-        )
-        host.push_branch(worktree_path=wt_path, branch=branch)
-        # foreman#63: strip GitHub auto-close keywords (Closes / Fixes /
-        # Resolves + #N) from the PR body before opening. Issue closure
-        # routes through daemon_runners.merge_impl_pr; an auto-close in the
-        # spec PR's body would short-circuit that gate. Defense in depth —
-        # the Planner prompt also forbids these keywords. The original
-        # ``llm_output.pr_body`` is preserved on the audit-log copy.
-        pr = host.open_pull_request(
-            repo_slug=actual_repo_slug,
-            title=llm_output.pr_title,
-            body=_strip_auto_close_keywords(llm_output.pr_body),
-            base=default_branch,
-            head=branch,
-        )
+        # Stage 1b (foreman crash-recovery): probe for an already-open
+        # spec PR on ``foreman/issue-<N>`` BEFORE the commit/push/create
+        # sequence. A daemon crash mid-Planning re-dispatches the Planner
+        # subprocess; if we naively re-run commit + push +
+        # ``open_pull_request``, GitHub returns 422 ("A pull request
+        # already exists ...") and the subprocess crashes, transitioning
+        # the ticket to ``Failed``. The fix mirrors the Worker's existing
+        # impl-PR idempotency (issue #342): when the helper returns a
+        # non-``None`` PullRequest, adopt it and skip commit/push/create
+        # entirely — the prior (crashed) attempt already committed the
+        # spec doc onto the branch and opened the PR. We keep that prior
+        # attempt's spec doc rather than re-pushing the re-run's freshly
+        # generated doc (simplest; consistent with the Worker; avoids
+        # mutating a PR that may already be entering review).
+        repo = planner_client.get_repo(actual_repo_slug)
+        existing_spec_pr = find_open_pr_by_head_branch(repo, owner=owner, branch=branch)
+        if existing_spec_pr is not None:
+            pr = PRRef(
+                number=existing_spec_pr.number,
+                url=existing_spec_pr.html_url,
+                title=existing_spec_pr.title,
+                body=existing_spec_pr.body or "",
+                branch=branch,
+                base_branch=default_branch,
+                repo_slug=actual_repo_slug,
+            )
+        else:
+            host.commit_files_to_worktree(
+                worktree_path=wt_path,
+                files={_spec_doc_relpath(issue_number): llm_output.spec_doc_content},
+                message=llm_output.pr_title,
+                provenance_trailers=provenance_trailers,
+            )
+            host.push_branch(worktree_path=wt_path, branch=branch)
+            # foreman#63: strip GitHub auto-close keywords (Closes / Fixes /
+            # Resolves + #N) from the PR body before opening. Issue closure
+            # routes through daemon_runners.merge_impl_pr; an auto-close in the
+            # spec PR's body would short-circuit that gate. Defense in depth —
+            # the Planner prompt also forbids these keywords. The original
+            # ``llm_output.pr_body`` is preserved on the audit-log copy.
+            pr = host.open_pull_request(
+                repo_slug=actual_repo_slug,
+                title=llm_output.pr_title,
+                body=_strip_auto_close_keywords(llm_output.pr_body),
+                base=default_branch,
+                head=branch,
+            )
         # foreman#235: hoist ``pr_number`` to the outer scope right
         # after ``open_pull_request`` returns. If a later step raises
         # (today there are none, but defense in depth) the spec_failed

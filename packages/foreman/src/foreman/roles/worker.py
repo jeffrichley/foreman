@@ -81,6 +81,7 @@ from foreman.roles._escalation_comment import (
     EscalationComment,
     post_escalation_comment,
 )
+from foreman.roles._pr_lookup import find_open_pr_by_head_branch
 from foreman.schemas.worker import WorkerOutput, WorkerRunResult
 from foreman.stats import log_worker_run
 from foreman.v4.config import OperatorConfig, V4Config, resolve_operator
@@ -493,46 +494,6 @@ def _read_spec_doc_from_branch(
     if result.returncode == 0:
         return result.stdout
     return None
-
-
-def _find_open_pr_by_head_branch(
-    repo: Repository, owner: str, branch: str
-) -> PullRequest | None:
-    """Locate the open PR whose head branch matches ``branch``.
-
-    Generalized from the original spec-PR-only ``_find_spec_pr`` helper
-    so both callers in :func:`_run_worker_core` can reuse it (issue
-    #342):
-
-    - **Spec PR lookup** (the original use): caller passes
-      ``branch=foreman/issue-<N>``. ``None`` means the spec PR has
-      already merged + auto-deleted (the v4 normal path after
-      ``SpecReviewState``), which is fine — the implementation still
-      proceeds against the spec doc on disk; only the impl PR body's
-      "Spec PR: #<N>" reference is omitted. Posting a
-      ``spec_invalid_reason`` without a target PR is harmless (we skip
-      the post and log a warning); the v4 state machine transition
-      still fires.
-    - **Existing impl PR detection** (issue #342, BLOCKED-retry
-      idempotency): caller passes ``branch=foreman/impl-<N>``. A
-      non-``None`` return means a previous Worker dispatch already
-      opened the impl PR and is still polling its CI status; the
-      Python-side push + ``create_pull`` MUST be skipped to avoid a
-      GitHub 422 ("A pull request already exists") which would crash
-      the Worker subprocess and transition the ticket to ``Failed``.
-
-    The helper is a thin wrapper over
-    ``repo.get_pulls(state="open", head=f"{owner}:{branch}")``. The
-    query is stable: GitHub's REST search returns the open PRs whose
-    head ref qualifier matches; for our branch-name conventions
-    (``foreman/issue-<N>`` and ``foreman/impl-<N>``) at most one open
-    PR can match in practice, so taking the first hit is safe.
-    """
-    head_qualifier = f"{owner}:{branch}"
-    pulls = list(repo.get_pulls(state="open", head=head_qualifier))
-    if not pulls:
-        return None
-    return pulls[0]
 
 
 def _is_invalid_base_422(exc: GithubException) -> bool:
@@ -968,7 +929,7 @@ async def _run_worker_core(
         # proceeds either way; the impl PR body's spec-PR reference adapts).
         spec_branch_name = spec_branch(issue_number)
         impl_branch_name = impl_branch(issue_number)
-        spec_pr = _find_open_pr_by_head_branch(repo, owner=owner, branch=spec_branch_name)
+        spec_pr = find_open_pr_by_head_branch(repo, owner=owner, branch=spec_branch_name)
         spec_pr_number = spec_pr.number if spec_pr is not None else None
 
         # Resolve check_command per D2: project override or default.
@@ -1252,7 +1213,7 @@ async def _run_worker_core(
             # push/verify/create + provenance/auto-close-strip amend
             # surface and re-derive ``final_did_check_pass`` from the
             # existing PR's GitHub-reported ``mergeable_state``.
-            existing_impl_pr = _find_open_pr_by_head_branch(
+            existing_impl_pr = find_open_pr_by_head_branch(
                 repo, owner=owner, branch=impl_branch_name
             )
             if existing_impl_pr is None:
