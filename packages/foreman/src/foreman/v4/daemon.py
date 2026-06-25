@@ -19,6 +19,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from foreman.v4.clone_refresh import (
+    CloneRefresherLike,
+    _DisabledCloneRefresher,
+)
 from foreman.v4.event_bus import EventBus
 from foreman.v4.git_provider import GitProvider
 from foreman.v4.poller import Poller
@@ -38,6 +42,12 @@ from foreman.v4.worker_pool import WorkerPool
 # and writes no files) so sharing one instance across every
 # ``Daemon(...)`` construction is safe — see ``state_backup._DisabledBackupScheduler``.
 _DISABLED_BACKUP_SCHEDULER: BackupSchedulerLike = _DisabledBackupScheduler()
+
+# Module-level singleton for the daemon's ``clone_refresher`` default kwarg
+# — same rationale as ``_DISABLED_BACKUP_SCHEDULER`` above (avoids ruff B008
+# function-call-in-default; the sentinel is stateless so sharing one
+# instance across every ``Daemon(...)`` construction is safe). foreman#407.
+_DISABLED_CLONE_REFRESHER: CloneRefresherLike = _DisabledCloneRefresher()
 
 if TYPE_CHECKING:
     from foreman.v4.config import ProjectConfig
@@ -81,6 +91,7 @@ class Daemon:
         bus: EventBus | None = None,
         project_configs: dict[str, ProjectConfig] | None = None,
         backup_scheduler: BackupSchedulerLike = _DISABLED_BACKUP_SCHEDULER,
+        clone_refresher: CloneRefresherLike = _DISABLED_CLONE_REFRESHER,
     ) -> None:
         self._repo = repo
         self._git = git
@@ -111,6 +122,11 @@ class Daemon:
         # ``BackupScheduler.from_config(config.backup, ...)`` in
         # ``bootstrap_cli_context``.
         self._backup_scheduler = backup_scheduler
+        # foreman#407: per-poll project clone refresh. Default is the no-op
+        # ``_DisabledCloneRefresher`` sentinel so test-only ``Daemon(...)``
+        # constructions (and zero-project configs) stay no-ops; production
+        # wires the real refresher in ``bootstrap_cli_context``.
+        self._clone_refresher = clone_refresher
         self._stop = threading.Event()
 
     @property
@@ -138,6 +154,13 @@ class Daemon:
         give the pool time to drain naturally; the explicit drain just
         makes tick_once deterministic.
         """
+        # foreman#407: refresh each project's clone (throttled) BEFORE
+        # polling, so any worktree created off the freshly-enqueued work
+        # this tick branches from an up-to-date origin/<default> ref. The
+        # refresher is interval-throttled internally and swallows
+        # per-project failures, so this call is cheap on most ticks and
+        # cannot crash the loop.
+        self._clone_refresher.tick()
         for poller in self._pollers:
             poller.tick()
         self._pool.tick()
