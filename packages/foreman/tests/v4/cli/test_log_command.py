@@ -8,7 +8,7 @@ from typer.testing import CliRunner
 
 from foreman.v4.cli import app
 from foreman.v4.cli.context import build_cli_context
-from foreman.v4.sqlite_repository import SqliteTicketRepository
+from foreman.v4.repository import InMemoryTicketRepository
 
 
 def _write_log(path: Path, lines: list[dict]) -> None:
@@ -28,7 +28,7 @@ def test_log_prints_recent_lines(tmp_path: Path):
     runner = CliRunner()
     result = runner.invoke(
         app, ["log", "--log-path", str(log_path)],
-        obj=build_cli_context(repo=SqliteTicketRepository.in_memory()),
+        obj=build_cli_context(repo=InMemoryTicketRepository()),
     )
     assert result.exit_code == 0
     assert "state_entered" in result.output
@@ -44,7 +44,7 @@ def test_log_filter_by_ticket(tmp_path: Path):
     runner = CliRunner()
     result = runner.invoke(
         app, ["log", "--log-path", str(log_path), "--ticket", "1"],
-        obj=build_cli_context(repo=SqliteTicketRepository.in_memory()),
+        obj=build_cli_context(repo=InMemoryTicketRepository()),
     )
     assert "Planning" in result.output
     assert "SpecReview" not in result.output
@@ -59,7 +59,7 @@ def test_log_filter_by_state(tmp_path: Path):
     runner = CliRunner()
     result = runner.invoke(
         app, ["log", "--log-path", str(log_path), "--state", "Merging"],
-        obj=build_cli_context(repo=SqliteTicketRepository.in_memory()),
+        obj=build_cli_context(repo=InMemoryTicketRepository()),
     )
     assert "Merging" in result.output
     assert "Planning" not in result.output
@@ -74,6 +74,6 @@ def test_log_limit_caps_output(tmp_path: Path):
     runner = CliRunner()
     result = runner.invoke(
         app, ["log", "--log-path", str(log_path), "--limit", "5"],
-        obj=build_cli_context(repo=SqliteTicketRepository.in_memory()),
+        obj=build_cli_context(repo=InMemoryTicketRepository()),
     )
     assert result.output.count("state_entered") == 5

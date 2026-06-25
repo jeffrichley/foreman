@@ -14,7 +14,7 @@ from foreman.v4.git_provider import FakeGitProvider, PRState
 from foreman.v4.observers.event_archive import EventArchiveObserver
 from foreman.v4.observers.structured_log import StructuredLogObserver
 from foreman.v4.role_dispatcher import FakeRoleDispatcher
-from foreman.v4.sqlite_repository import SqliteTicketRepository
+from foreman.v4.repository import InMemoryTicketRepository
 from foreman.v4.state import StateContext
 from foreman.v4.states.merging import MergingState
 from foreman.v4.states.registry import build_state
@@ -94,7 +94,7 @@ def _run_until_terminal(repo, ticket_id, *, dispatcher, git, bus, project_config
 
 
 def test_happy_path_queued_to_done():
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
     git = FakeGitProvider()
     git.set_pr_state(
@@ -128,21 +128,15 @@ def test_happy_path_queued_to_done():
 
     # Journal records every state transition in order. foreman#416 inserts
     # SpecMerging between SpecReview and Implementing.
-    rows = repo._conn.execute(
-        "SELECT state_name, outcome_kind, next_state FROM state_instances "
-        "WHERE ticket_id = ? ORDER BY sequence",
-        (ticket.id,),
-    ).fetchall()
-    state_order = [r["state_name"] for r in rows]
+    rows = repo.list_state_instances_for_ticket(ticket.id)
+    state_order = [r.state_name for r in rows]
     assert state_order == [
         "Queued", "Planning", "SpecReview", "SpecMerging", "Implementing",
         "ImplReview", "Merging", "Done",
     ]
 
     # Events archived for each transition:
-    event_rows = repo._conn.execute(
-        "SELECT DISTINCT state_name FROM events ORDER BY id"
-    ).fetchall()
+    event_rows = repo.list_events_for_ticket(ticket.id)
     archived_states = [r["state_name"] for r in event_rows]
     assert set(archived_states) >= {
         "Queued", "Planning", "SpecReview", "SpecMerging", "Implementing",
@@ -158,7 +152,7 @@ def test_behind_spec_pr_heals_then_reaches_implementing_and_done():
     to Implementing → … → Done. This is the exact case that used to 405 in
     SpecReviewState.verify() and escalate to NeedsHelp (agent_core#190).
     """
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(project="p", issue_number=3, now=dt.datetime(2026, 6, 13))
 
     # A git wrapper that starts PR #42 BEHIND and flips it to clean the
@@ -201,12 +195,8 @@ def test_behind_spec_pr_heals_then_reaches_implementing_and_done():
     assert ("p", 42) in git.merge_pr_calls
 
     state_order = [
-        r["state_name"]
-        for r in repo._conn.execute(
-            "SELECT state_name FROM state_instances WHERE ticket_id = ? "
-            "ORDER BY sequence",
-            (ticket.id,),
-        ).fetchall()
+        r.state_name
+        for r in repo.list_state_instances_for_ticket(ticket.id)
     ]
     # SpecMerging appears twice: once heals (BLOCKED self-loop), once merges.
     assert state_order.count("SpecMerging") == 2
@@ -225,7 +215,7 @@ def test_spec_pr_heal_then_ci_pending_then_heal_reaches_done_not_needs_help():
     behind → (heal) clean-but-CI-pending → CI-pending×3 → behind → (heal)
     clean+green.
     """
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(project="p", issue_number=4, now=dt.datetime(2026, 6, 13))
 
     # Scripted mergeable_state walk for PR #42. Each SpecMerging poll calls
@@ -290,12 +280,8 @@ def test_spec_pr_heal_then_ci_pending_then_heal_reaches_done_not_needs_help():
     assert git.update_branch_calls == [("p", 42), ("p", 42)]
     assert ("p", 42) in git.merge_pr_calls
     state_order = [
-        r["state_name"]
-        for r in repo._conn.execute(
-            "SELECT state_name FROM state_instances WHERE ticket_id = ? "
-            "ORDER BY sequence",
-            (ticket.id,),
-        ).fetchall()
+        r.state_name
+        for r in repo.list_state_instances_for_ticket(ticket.id)
     ]
     assert "NeedsHelp" not in state_order
     # SpecMerging polled 6 times (2 heals + 3 CI-pending + 1 merge).
@@ -305,7 +291,7 @@ def test_spec_pr_heal_then_ci_pending_then_heal_reaches_done_not_needs_help():
 
 def test_needs_fix_loop_spec_review_to_spec_fix_back():
     """When Reviewer rejects spec, we loop through SpecFix back to SpecReview."""
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(project="p", issue_number=2, now=dt.datetime(2026, 6, 13))
     git = FakeGitProvider()
     git.set_pr_state(
@@ -352,11 +338,8 @@ def test_needs_fix_loop_spec_review_to_spec_fix_back():
     assert final.current_state == "Done"
 
     state_order = [
-        r["state_name"]
-        for r in repo._conn.execute(
-            "SELECT state_name FROM state_instances WHERE ticket_id = ? ORDER BY sequence",
-            (ticket.id,),
-        ).fetchall()
+        r.state_name
+        for r in repo.list_state_instances_for_ticket(ticket.id)
     ]
     assert "SpecFix" in state_order
     # SpecReview appears twice -- once rejecting, once accepting:
@@ -388,7 +371,7 @@ def test_impl_approved_operator_resume_to_done():
     from foreman.v4.cli import app
     from foreman.v4.cli.context import build_cli_context
 
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
     git = FakeGitProvider()
     git.set_pr_state(

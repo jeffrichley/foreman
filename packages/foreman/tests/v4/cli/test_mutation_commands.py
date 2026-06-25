@@ -10,18 +10,18 @@ from foreman.v4.cli import app
 from foreman.v4.cli.context import build_cli_context
 from foreman.v4.queue_manager import QueueManager
 from foreman.v4.repository import TicketNotFoundError
-from foreman.v4.sqlite_repository import SqliteTicketRepository
+from foreman.v4.repository import InMemoryTicketRepository
 from foreman.v4.work import WorkItem
 
 
-def _make(state: str = "Planning") -> tuple[SqliteTicketRepository, int]:
-    repo = SqliteTicketRepository.in_memory()
+def _make(state: str = "Planning") -> tuple[InMemoryTicketRepository, int]:
+    repo = InMemoryTicketRepository()
     t = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
     repo.set_ticket_state(t.id, state, now=dt.datetime(2026, 6, 13))
     return repo, t.id
 
 
-def _make_with_history(*states: str) -> tuple[SqliteTicketRepository, int]:
+def _make_with_history(*states: str) -> tuple[InMemoryTicketRepository, int]:
     """Build a ticket with a real state_instances trail.
 
     Seeds one ``state_instances`` row per name (in order) and parks the
@@ -29,7 +29,7 @@ def _make_with_history(*states: str) -> tuple[SqliteTicketRepository, int]:
     that walked Queued→...→NeedsHelp. ``retry`` resolves the resume
     target from this trail.
     """
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     t = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
     for seq, name in enumerate(states):
         repo.open_state_instance(
@@ -215,7 +215,7 @@ def test_discover_collects_full_state_when_everything_present():
     from foreman.v4.cli.mutations import ResetPlan, _discover
     from foreman.v4.git_provider import FakeGitProvider, PRState
 
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(
         project="agent_core", issue_number=180, now=dt.datetime(2026, 6, 17),
     )
@@ -261,7 +261,7 @@ def test_discover_no_row_no_branches_no_prs_minimal_plan():
     from foreman.v4.cli.mutations import _discover
     from foreman.v4.git_provider import FakeGitProvider
 
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     git = FakeGitProvider()
     # No labels, no branches, no PRs, no ticket row.
     plan = _discover(
@@ -280,7 +280,7 @@ def test_discover_keep_pr_skips_pr_lookup():
     from foreman.v4.cli.mutations import _discover
     from foreman.v4.git_provider import FakeGitProvider, PRState
 
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     git = FakeGitProvider()
     git.set_pr_state(
         project="agent_core", pr_number=19,
@@ -311,7 +311,7 @@ def _full_reset_ctx(tmp_path):
     )
     from foreman.v4.git_provider import FakeGitProvider, PRState
 
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     repo.create_ticket(
         project="agent_core", issue_number=180, now=dt.datetime(2026, 6, 17),
     )

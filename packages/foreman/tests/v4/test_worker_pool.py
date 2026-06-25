@@ -7,7 +7,7 @@ import time
 
 from foreman.v4.queue_manager import QueueManager
 from foreman.v4.role_dispatcher import FakeRoleDispatcher
-from foreman.v4.sqlite_repository import SqliteTicketRepository
+from foreman.v4.repository import InMemoryTicketRepository
 from foreman.v4.work import WorkItem
 from foreman.v4.worker_pool import WorkerPool
 
@@ -25,7 +25,7 @@ def _wait_until_idle(qm: QueueManager, timeout: float = 5.0) -> None:
 
 
 def test_tick_processes_one_workitem():
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
     qm = QueueManager(repo=repo, max_in_flight=4)
     dispatcher = FakeRoleDispatcher(responses={
@@ -48,7 +48,7 @@ def test_tick_processes_one_workitem():
 
 
 def test_tick_returns_zero_when_queue_empty():
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     qm = QueueManager(repo=repo, max_in_flight=4)
     pool = WorkerPool(
         repo=repo, qm=qm,
@@ -64,7 +64,7 @@ def test_tick_returns_zero_when_queue_empty():
 
 def test_three_tickets_dispatch_concurrently():
     """All three tickets reach SpecReview without serializing on a single thread."""
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     tids = []
     for i in (1, 2, 3):
         t = repo.create_ticket(project="p", issue_number=i, now=dt.datetime(2026, 6, 13))
@@ -109,7 +109,7 @@ def test_same_ticket_serialized_across_concurrent_submissions():
     open with an Event so we can observe in_flight_count == 1 and
     submitted == 1 deterministically.
     """
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     t = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
     repo.set_ticket_state(t.id, "Planning", now=dt.datetime(2026, 6, 13))
     qm = QueueManager(repo=repo, max_in_flight=4)

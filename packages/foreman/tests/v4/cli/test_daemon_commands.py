@@ -22,7 +22,7 @@ from foreman.v4.config import (
 )
 from foreman.v4.json_lines_handler import JsonLinesHandler
 from foreman.v4.logging_config import configure_logging, reset_logging
-from foreman.v4.sqlite_repository import SqliteTicketRepository
+from foreman.v4.repository import InMemoryTicketRepository
 
 # Mirrors the private constant in foreman.v4.logging_config. Inlined
 # (not imported) to avoid private-import lint noise; test_bootstrap.py
@@ -40,7 +40,7 @@ def test_status_when_no_pid_file(tmp_path: Path, monkeypatch):
     )
     result = CliRunner().invoke(
         app, ["daemon", "status"],
-        obj=build_cli_context(repo=SqliteTicketRepository.in_memory()),
+        obj=build_cli_context(repo=InMemoryTicketRepository()),
     )
     assert "not running" in result.output
 
@@ -53,7 +53,7 @@ def test_status_when_pid_alive(tmp_path: Path, monkeypatch):
         mock_kill.return_value = None
         result = CliRunner().invoke(
             app, ["daemon", "status"],
-            obj=build_cli_context(repo=SqliteTicketRepository.in_memory()),
+            obj=build_cli_context(repo=InMemoryTicketRepository()),
         )
     assert "running" in result.output
     assert "12345" in result.output
@@ -66,7 +66,7 @@ def test_status_when_pid_stale(tmp_path: Path, monkeypatch):
     with patch("os.kill", side_effect=ProcessLookupError):
         result = CliRunner().invoke(
             app, ["daemon", "status"],
-            obj=build_cli_context(repo=SqliteTicketRepository.in_memory()),
+            obj=build_cli_context(repo=InMemoryTicketRepository()),
         )
     assert "stale" in result.output
 
@@ -81,7 +81,7 @@ def test_stop_when_pid_stale_posix(tmp_path: Path, monkeypatch):
     with patch("os.kill", side_effect=ProcessLookupError):
         result = CliRunner().invoke(
             app, ["daemon", "stop"],
-            obj=build_cli_context(repo=SqliteTicketRepository.in_memory()),
+            obj=build_cli_context(repo=InMemoryTicketRepository()),
         )
     assert result.exit_code == 0
     assert "not running" in result.output
@@ -108,7 +108,7 @@ def test_start_refuses_when_daemon_already_running(tmp_path: Path, monkeypatch):
         result = CliRunner().invoke(
             app, ["daemon", "start"],
             obj=build_cli_context(
-                repo=SqliteTicketRepository.in_memory(), daemon=mock_daemon,
+                repo=InMemoryTicketRepository(), daemon=mock_daemon,
             ),
         )
     assert result.exit_code == 1
@@ -140,7 +140,7 @@ def test_start_overwrites_stale_pid_and_proceeds(tmp_path: Path, monkeypatch):
         result = CliRunner().invoke(
             app, ["daemon", "start"],
             obj=build_cli_context(
-                repo=SqliteTicketRepository.in_memory(), daemon=mock_daemon,
+                repo=InMemoryTicketRepository(), daemon=mock_daemon,
             ),
         )
     assert result.exit_code == 0

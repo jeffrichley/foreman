@@ -23,7 +23,7 @@ from foreman.v4.config import (
     V4Config,
 )
 from foreman.v4.git_provider import FakeGitProvider
-from foreman.v4.sqlite_repository import SqliteTicketRepository
+from foreman.v4.repository import InMemoryTicketRepository
 
 
 def _make_config(tmp_path: Path, project_names: tuple[str, ...] = ("algokit",)) -> V4Config:
@@ -65,7 +65,7 @@ def test_enqueue_creates_queued_ticket_in_sqlite(tmp_path: Path) -> None:
     skip the GitHub round-trip. The FakeGitProvider's mutable state
     should be untouched: empty PRs, empty merge queue, empty labels.
     """
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     git = FakeGitProvider()
     config = _make_config(tmp_path)
     runner = CliRunner()
@@ -98,7 +98,7 @@ def test_enqueue_rejects_duplicate(tmp_path: Path) -> None:
     can investigate (resume? drop? leave alone?) without a separate
     `foreman ps` round-trip.
     """
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     config = _make_config(tmp_path)
     runner = CliRunner()
 
@@ -129,7 +129,7 @@ def test_enqueue_rejects_unknown_project(tmp_path: Path) -> None:
     Operator most-likely typo'd; the message should let them fix it
     without re-reading the config TOML.
     """
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     config = _make_config(tmp_path, project_names=("algokit", "voice"))
     runner = CliRunner()
     result = runner.invoke(

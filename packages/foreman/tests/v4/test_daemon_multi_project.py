@@ -27,7 +27,7 @@ from foreman.v4.observers.label_observability import LabelObservabilityObserver
 from foreman.v4.poller import Poller
 from foreman.v4.role_dispatcher import FakeRoleDispatcher
 from foreman.v4.routing_git_provider import RoutingGitProvider
-from foreman.v4.sqlite_repository import SqliteTicketRepository
+from foreman.v4.repository import InMemoryTicketRepository
 
 
 def _canned(kind: str) -> str:
@@ -46,7 +46,7 @@ def test_tick_polls_every_project_and_advances_each() -> None:
     Queued event would never be observed on the foreman provider, and
     the labeling assertions below would fail.
     """
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
 
     # Per-project providers — the production shape after Phase 8d.16.
     git_voice = FakeGitProvider()
