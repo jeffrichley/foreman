@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from typer.testing import CliRunner
 
@@ -85,6 +86,66 @@ def test_stop_when_pid_stale_posix(tmp_path: Path, monkeypatch):
     assert result.exit_code == 0
     assert "not running" in result.output
     assert not pid_path.exists(), "stale PID file should be unlinked"
+
+
+# --- Single-instance start guard ---------------------------------------
+
+def test_start_refuses_when_daemon_already_running(tmp_path: Path, monkeypatch):
+    """A second daemon must NOT start while the first is alive.
+
+    run_forever's startup reconcile closes every in-flight
+    state_instances row as a crash orphan — correct only under a single
+    instance. Starting a second daemon while the first holds a live PID
+    would close the live daemon's in-flight row, corrupting an
+    actively-running ticket. start must refuse and leave the PID file
+    untouched.
+    """
+    pid_path = tmp_path / "daemon.pid"
+    pid_path.write_text("12345")
+    monkeypatch.setattr("foreman.v4.cli.daemon.PID_PATH", pid_path)
+    mock_daemon = MagicMock()
+    with patch("os.kill", return_value=None):  # PID 12345 reads as alive
+        result = CliRunner().invoke(
+            app, ["daemon", "start"],
+            obj=build_cli_context(
+                repo=SqliteTicketRepository.in_memory(), daemon=mock_daemon,
+            ),
+        )
+    assert result.exit_code == 1
+    assert "already running" in result.output
+    assert "12345" in result.output
+    mock_daemon.run_forever.assert_not_called()
+    assert pid_path.read_text().strip() == "12345"  # not stomped
+
+
+def test_start_overwrites_stale_pid_and_proceeds(tmp_path: Path, monkeypatch):
+    """A stale PID file (prior daemon crashed — the Watchtower-redeploy
+    case) is not a live instance: start overwrites it with the current
+    PID and proceeds into run_forever. We capture the PID written at the
+    moment run_forever is reached (the finally block unlinks it on exit).
+    """
+    pid_path = tmp_path / "daemon.pid"
+    pid_path.write_text("99999")
+    monkeypatch.setattr("foreman.v4.cli.daemon.PID_PATH", pid_path)
+
+    captured: dict[str, str] = {}
+
+    def _capture_pid_then_return() -> None:
+        captured["pid"] = pid_path.read_text().strip()
+
+    mock_daemon = MagicMock()
+    mock_daemon.run_forever.side_effect = _capture_pid_then_return
+
+    with patch("os.kill", side_effect=ProcessLookupError):  # 99999 is dead
+        result = CliRunner().invoke(
+            app, ["daemon", "start"],
+            obj=build_cli_context(
+                repo=SqliteTicketRepository.in_memory(), daemon=mock_daemon,
+            ),
+        )
+    assert result.exit_code == 0
+    mock_daemon.run_forever.assert_called_once()
+    assert captured["pid"] == str(os.getpid())  # stale 99999 overwritten
 
 
 # --- Task 8.5: SIGHUP handler reset+reconfigure logging ----------------
