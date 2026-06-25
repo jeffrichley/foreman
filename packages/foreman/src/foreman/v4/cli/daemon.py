@@ -100,6 +100,21 @@ def cmd_daemon_start(ctx: typer.Context) -> None:
     if daemon is None:
         typer.echo("daemon not configured", err=True)
         raise typer.Exit(code=1)
+    # Single-instance guard. run_forever's startup reconcile closes every
+    # in-flight state_instances row as a crash orphan — correct ONLY if
+    # exactly one daemon exists. A second daemon started while the first is
+    # alive would close the live daemon's legitimately-in-flight row as a
+    # crash orphan, corrupting an actively-running ticket. Refuse to start
+    # if a live daemon already holds the PID file. A stale PID file (the
+    # prior daemon crashed — the common Watchtower-redeploy case) is NOT a
+    # live instance, so it falls through and is overwritten cleanly below.
+    if PID_PATH.exists():
+        existing_pid = int(PID_PATH.read_text().strip())
+        if is_pid_alive(existing_pid):
+            typer.echo(
+                f"daemon already running (pid {existing_pid})", err=True,
+            )
+            raise typer.Exit(code=1)
     PID_PATH.parent.mkdir(parents=True, exist_ok=True)
     PID_PATH.write_text(str(os.getpid()))
     try:
