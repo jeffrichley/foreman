@@ -155,7 +155,7 @@ def _build_planner_scaffold(
     )
 
     # The mock client/host are injected via build_role_resources at call time.
-    mock_host._injected_client = mock_client  # noqa: SLF001 — test wiring marker
+    mock_host._injected_client = mock_client  # test wiring marker
 
     return (
         cfg,
