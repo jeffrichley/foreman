@@ -14,6 +14,12 @@ from typing import Any
 
 from foreman.v4.outcome import OutcomeKind
 
+#: failure_phase value written by the startup reconciliation pass to a
+#: crash-orphaned in-flight row. Exempt from count_consecutive_same_state
+#: (a daemon restart is not a ticket failure). Single source of truth so
+#: the four sites that reference it can't drift (review I3).
+FAILURE_PHASE_CRASH_RECOVERY = "crash_recovery"
+
 
 @dataclass(frozen=True, slots=True)
 class TicketRecord:

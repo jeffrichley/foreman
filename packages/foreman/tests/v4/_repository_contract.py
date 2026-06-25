@@ -397,6 +397,35 @@ class RepositoryContract:
             ticket_id=t.id, state="Merging"
         ) == 1
 
+    def test_crash_recovery_rows_are_exempt_from_consecutive_same_state(
+        self, repo: TicketRepository
+    ):
+        """A reconciled crash-orphan has ``failure_phase='crash_recovery'``,
+        ``outcome_kind=None``. A daemon restart is not a ticket failure, so
+        these rows MUST NOT count toward the runaway-cap counter (and must
+        not break the run). ``count_consecutive_transient_provider_errors``
+        already skips ``outcome_kind is None``, so it covers crash-orphans
+        with no change — assert that too.
+        """
+        now = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+        ticket = repo.create_ticket(project="p", issue_number=1, now=now)
+        # Three crash-orphans on the same state, each closed by reconciliation:
+        for seq in (1, 2, 3):
+            inst = repo.open_state_instance(
+                ticket_id=ticket.id, state_name="Implementing", sequence=seq, now=now,
+            )
+            repo.record_failure(
+                inst.id, now=now,
+                failure_phase="crash_recovery", failure_reason="daemon crash",
+            )
+            repo.close_state_instance(inst.id, now=now)
+        # All three are crash_recovery → none count toward the cap.
+        assert repo.count_consecutive_same_state(
+            ticket_id=ticket.id, state="Implementing",
+        ) == 0
+        # And the transient counter (already None-outcome-skipping) is also 0.
+        assert repo.count_consecutive_transient_provider_errors(ticket.id) == 0
+
     def test_set_and_get_dependencies(self, repo: TicketRepository):
         a = repo.create_ticket(project="p", issue_number=1, now=_now())
         b = repo.create_ticket(project="p", issue_number=2, now=_now())
