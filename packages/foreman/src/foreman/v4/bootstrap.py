@@ -16,6 +16,7 @@ from typing import Protocol
 from foreman.git_host import GitHostProvider
 from foreman.roles import build_role_resources
 from foreman.v4.cli.context import CliContext, build_cli_context
+from foreman.v4.clone_refresh import CloneRefresher
 from foreman.v4.config import ProjectConfig, V4Config
 from foreman.v4.daemon import Daemon, DaemonConfig
 from foreman.v4.event_bus import EventBus
@@ -242,6 +243,16 @@ def bootstrap_cli_context(
             bus=bus,
         )
 
+    # foreman#407: per-poll clone refresher. Builds a ``name -> clone path``
+    # map from the project configs and refreshes each clone's
+    # ``origin/<default>`` ref at most once per ``clone_refresh_seconds``.
+    # ``from_projects`` returns a no-op sentinel for zero-project configs.
+    clone_refresher = CloneRefresher.from_projects(
+        {pc.name: Path(pc.local_clone_path) for pc in config.projects},
+        interval_seconds=config.clone_refresh_seconds,
+        clock=dt.datetime.now,
+    )
+
     daemon = Daemon(
         repo=repo,
         git=git_for_cross_project,  # type: ignore[arg-type]
@@ -256,6 +267,7 @@ def bootstrap_cli_context(
         bus=bus,
         project_configs=project_configs,
         backup_scheduler=backup_scheduler,
+        clone_refresher=clone_refresher,
     )
 
     return build_cli_context(

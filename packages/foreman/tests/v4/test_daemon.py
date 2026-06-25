@@ -221,3 +221,49 @@ def test_tick_once_runs_with_disabled_scheduler_default(tmp_path: Path):
     daemon.tick_once()
     # Sentinel writes no files — tmp_path stays empty.
     assert list(tmp_path.iterdir()) == []
+
+
+# --- Issue #407: clone refresher wiring on tick_once -------------------
+
+
+def test_tick_once_calls_clone_refresher():
+    """foreman#407: tick_once must invoke the injected clone refresher
+    exactly once per tick — proving the per-poll clone refresh runs in
+    the daemon loop, NOT only inside worktree.create()."""
+    repo = SqliteTicketRepository.in_memory()
+    stub_refresher = MagicMock()
+    stub_refresher.tick.return_value = None
+    poller = Poller(
+        repo=repo, qm=None, git=FakeGitProvider(),
+        project="p", trigger_label="foreman:plan",
+        clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
+    )
+    daemon = Daemon(
+        repo=repo, git=FakeGitProvider(),
+        dispatcher=FakeRoleDispatcher(responses={}),
+        pollers=[poller],
+        config=DaemonConfig(tick_seconds=0, max_in_flight=4),
+        clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
+        clone_refresher=stub_refresher,
+    )
+    daemon.tick_once()
+    assert stub_refresher.tick.call_count == 1
+
+
+def test_tick_once_runs_with_disabled_clone_refresher_default():
+    """No explicit ``clone_refresher=`` kwarg → no-op sentinel default;
+    ``tick_once`` must not raise."""
+    repo = SqliteTicketRepository.in_memory()
+    poller = Poller(
+        repo=repo, qm=None, git=FakeGitProvider(),
+        project="p", trigger_label="foreman:plan",
+        clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
+    )
+    daemon = Daemon(
+        repo=repo, git=FakeGitProvider(),
+        dispatcher=FakeRoleDispatcher(responses={}),
+        pollers=[poller],
+        config=DaemonConfig(tick_seconds=0, max_in_flight=4),
+        clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
+    )
+    daemon.tick_once()  # must not raise

@@ -21,6 +21,9 @@ Schema:
     role_timeout_seconds - Subprocess timeout per role invocation
                            (default 600 = 10 min). Phase 7.5 threads
                            this to SubprocessRoleDispatcher.
+    clone_refresh_seconds - Min interval between per-poll origin/<default>
+                           refreshes of each project clone (default 300 =
+                           5 min). foreman#407.
     max_state_attempts   - Maximum consecutive same-state failures
                            before the state machine forces a transition
                            to NeedsHelp instead of running the role
@@ -332,6 +335,17 @@ class V4Config(BaseModel):
     tick_seconds: float = 30.0
     max_in_flight: int = 1
     role_timeout_seconds: int = 600
+    clone_refresh_seconds: int = Field(default=300, ge=0)
+    """foreman#407: minimum wall-clock interval between per-poll
+    ``origin/<default-branch>`` refreshes of each project's local clone.
+    The daemon's clone refresher fetches a project's clone at most once
+    per this many seconds, regardless of how frequently ``tick_seconds``
+    fires. Default 300 (5 min): with the 30s default ``tick_seconds`` that
+    refreshes a clone every ~10th tick — fresh enough that a base ref
+    rarely goes more than a few minutes stale, without hammering
+    ``git fetch`` (and the remote) on every poll. ge=0 because 0 means
+    "refresh every tick" (the v3 per-poll behavior), which is a valid if
+    aggressive choice; negative would be nonsense."""
     max_state_attempts: int = Field(default=3, ge=1)
     """Maximum consecutive same-state failures before the state machine
     forces a transition to NeedsHelp instead of running the role again.
