@@ -11,12 +11,10 @@ Subscribes to :class:`ExecuteCompletedEvent`. On a ``BLOCKED`` outcome:
    ``execute_completed_at`` of the EARLIEST row in that suffix as
    ``first_blocked_at``.
 3. If ``event.at - first_blocked_at > 15 minutes``, post a comment
-   via :func:`post_escalation_comment` with
-   ``source="sustained-blocked"`` and a per-(ticket, reason-hash)
+   with ``source="sustained-blocked"`` and a per-(ticket, reason-hash)
    key so the issue stays clean across a 4-hour CI wait.
 
-POST-failure semantics: comment-post failure is delegated to
-:func:`post_escalation_comment`, which catches and returns ``False``.
+POST-failure semantics: comment-post failure is wrapped in a try/except.
 The observer additionally wraps the entire ``__call__`` body in a
 top-level ``try/except`` that logs and swallows — EventBus dispatch
 must never raise out of this observer.
@@ -33,12 +31,13 @@ import hashlib
 import logging
 from collections.abc import Callable
 
-from foreman.git_host import GitHostProvider
 from foreman.roles._escalation_comment import (
     EscalationComment,
-    post_escalation_comment,
+    already_posted_for_key,
+    build_escalation_comment_body,
 )
 from foreman.v4.events import Event, ExecuteCompletedEvent
+from foreman.v4.git_provider import GitProvider
 from foreman.v4.outcome import OutcomeKind
 from foreman.v4.repository import TicketRepository
 
@@ -71,10 +70,8 @@ class SustainedBlockedObserver:
     Constructed with:
     - ``repo``: :class:`TicketRepository` for ``list_state_instances_for_ticket``
       and ``get_ticket``.
-    - ``host_for_project``: ``Callable[[str], GitHostProvider | None]``
-      returning the per-project GitHostProvider. Returning ``None``
-      means the project does not have an orchestrator-token-backed
-      host configured; the observer treats this as a no-op (logged).
+    - ``git``: v4 :class:`GitProvider` — refresh-aware, routes by project
+      name. Used for ``get_issue_comments`` (dedup) and ``post_issue_comment``.
     - ``threshold``: override for tests (defaults to
       :data:`SUSTAINED_BLOCKED_THRESHOLD`).
     - ``clock``: optional override (defaults to UTC now).
@@ -84,12 +81,12 @@ class SustainedBlockedObserver:
         self,
         *,
         repo: TicketRepository,
-        host_for_project: Callable[[str], GitHostProvider | None],
+        git: GitProvider,
         threshold: dt.timedelta = SUSTAINED_BLOCKED_THRESHOLD,
         clock: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
     ) -> None:
         self._repo = repo
-        self._host_for_project = host_for_project
+        self._git = git
         self._threshold = threshold
         self._clock = clock
 
@@ -139,47 +136,32 @@ class SustainedBlockedObserver:
         if event.at - first_blocked_at <= self._threshold:
             return
 
-        # Threshold crossed. Resolve the host and attempt to post.
+        # Threshold crossed. Resolve the ticket and dedup.
         ticket = self._repo.get_ticket(ticket_id)
-        host = self._host_for_project(ticket.project)
-        if host is None:
-            logger.warning(
-                "SustainedBlockedObserver: no host configured for "
-                "project=%s; skipping comment for ticket=%d",
-                ticket.project, ticket_id,
-            )
-            return
-
-        # Look up the project's repo slug. The TicketRecord carries
-        # ``project`` (a name), not the slug; we cannot derive the
-        # slug from the observer's surface today (no config dep).
-        # ``host.get_issue_comments`` and ``host.post_issue_comment``
-        # both require ``repo_slug``. We obtain it via a lookup
-        # injected on the host adapter (PyGithub providers carry it
-        # implicitly). Use the project name as a best-effort proxy
-        # when the host is the v3-shape GitHostProvider whose methods
-        # accept the slug directly.
-        #
-        # Concrete contract: callers wire ``host_for_project`` to
-        # return a GitHostProvider whose ``get_issue_comments`` /
-        # ``post_issue_comment`` methods accept the slug as the first
-        # arg. The repo_slug is the project's configured repo
-        # (``owner/name``) — the caller resolves this before passing.
-        # The shim wired in bootstrap.py threads the lookup through.
-        repo_slug = self._resolve_repo_slug(ticket.project)
-        if repo_slug is None:
-            logger.warning(
-                "SustainedBlockedObserver: cannot resolve repo_slug for "
-                "project=%s; skipping comment for ticket=%d",
-                ticket.project, ticket_id,
-            )
-            return
 
         reason_hash = _reason_hash(signal)
         key = (
             f"ticket-{ticket_id}-state-{event.state_name}-"
             f"reason-{reason_hash}"
         )
+
+        # Fetch existing comments for dedup check.
+        try:
+            comments = self._git.get_issue_comments(
+                project=ticket.project, issue_number=ticket.issue_number,
+            )
+        except Exception:
+            logger.exception(
+                "SustainedBlockedObserver: get_issue_comments failed for "
+                "%s#%d; proceeding without dedup (duplicate preferable "
+                "to missing)",
+                ticket.project, ticket.issue_number,
+            )
+            comments = []
+
+        if already_posted_for_key(comments, source="sustained-blocked", key=key):
+            return
+
         payload = EscalationComment(
             why=(
                 f"State {event.state_name} has been BLOCKED for ≥"
@@ -198,35 +180,25 @@ class SustainedBlockedObserver:
                 "triage the BLOCKED cause if it is genuinely stuck."
             ),
         )
-        post_escalation_comment(
-            host=host,
-            repo_slug=repo_slug,
-            issue_number=ticket.issue_number,
+        body = build_escalation_comment_body(
             role="daemon",
             outcome_label="BLOCKED",
             summary=f"BLOCKED for ≥{self._threshold}: {signal}",
+            at=self._clock(),
             payload=payload,
+            ticket_ref=f"{ticket.project}#{ticket.issue_number}",
             source="sustained-blocked",
             key=key,
         )
-
-    # Repo-slug lookup is injected via a side channel — the
-    # ``host_for_project`` callable can carry its own slug-resolver if
-    # constructed by ``bootstrap_cli_context``. To keep the observer
-    # surface minimal, we accept an OPTIONAL inner attribute on the
-    # callable. Production wires it directly. Tests may override by
-    # subclassing or by passing a callable that exposes ``repo_slug``.
-    def _resolve_repo_slug(self, project: str) -> str | None:
-        """Resolve a project name to its ``owner/name`` slug.
-
-        The default implementation looks for a ``repo_slug_for`` method
-        on the ``host_for_project`` callable (set by
-        ``bootstrap_cli_context``); when absent, returns the project
-        name unchanged (legacy fallback that lets tests pass slugs
-        directly as project names).
-        """
-        resolver = getattr(self._host_for_project, "repo_slug_for", None)
-        if callable(resolver):
-            slug = resolver(project)
-            return slug if isinstance(slug, str) and slug else None
-        return project
+        try:
+            self._git.post_issue_comment(
+                project=ticket.project,
+                issue_number=ticket.issue_number,
+                body=body,
+            )
+        except Exception:
+            logger.exception(
+                "SustainedBlockedObserver: post_issue_comment failed for "
+                "%s#%d; swallowing (non-fatal)",
+                ticket.project, ticket.issue_number,
+            )

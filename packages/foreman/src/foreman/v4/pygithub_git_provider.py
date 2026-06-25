@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING
 
 from github import GithubException
 
+from foreman.git_host import CommentRef
 from foreman.v4.git_provider import PRNotFoundError, PRState
 
 if TYPE_CHECKING:
@@ -413,3 +414,37 @@ class PyGithubGitProvider:
         """
         issue = self._repo.get_issue(issue_number)
         return {label.name for label in issue.labels}
+
+    def get_issue_comments(
+        self, *, project: str, issue_number: int,
+    ) -> list[CommentRef]:
+        """Fetch the issue's comments in chronological order (oldest first).
+
+        Goes through ``self._repo`` → ``self._gh``, which triggers the
+        time-based token-refresh check. This is the seam that fixes the
+        original 401 bug: the legacy ``GitHostProvider`` took a static
+        client; this method always uses the current refreshed client.
+
+        ``project`` is accepted for Protocol-shape symmetry but unused —
+        the provider is locked to one repo at construction.
+        """
+        issue = self._repo.get_issue(issue_number)
+        return [
+            CommentRef(
+                author_login=c.user.login,
+                posted_at=c.created_at,
+                body=c.body,
+            )
+            for c in issue.get_comments()
+        ]
+
+    def post_issue_comment(
+        self, *, project: str, issue_number: int, body: str,
+    ) -> None:
+        """Post a new comment on the issue via PyGithub.
+
+        Goes through ``self._repo`` → ``self._gh`` (refresh seam).
+        ``project`` is accepted for Protocol-shape symmetry but unused.
+        """
+        issue = self._repo.get_issue(issue_number)
+        issue.create_comment(body)

@@ -1,8 +1,11 @@
 """FakeGitProvider — in-memory implementation of the v4 GitProvider Protocol."""
 from __future__ import annotations
 
+import datetime as dt
+
 import pytest
 
+from foreman.git_host import CommentRef
 from foreman.v4.git_provider import (
     FakeGitProvider,
     PRNotFoundError,
@@ -259,3 +262,70 @@ def test_find_open_pr_by_head_branch_skips_closed_prs():
         project="p", branch_name="foreman/issue-180",
     )
     assert found is None
+
+
+# ---------------------------------------------------------------------------
+# Issue comments — seed_issue_comments, get_issue_comments, post_issue_comment
+# (sub-request 1 of issue #410: add comment surface to FakeGitProvider)
+# ---------------------------------------------------------------------------
+
+
+def _comment(body: str, *, offset_seconds: int = 0) -> CommentRef:
+    """Helper: build a CommentRef with a fixed base timestamp."""
+    return CommentRef(
+        author_login="foreman-bot",
+        posted_at=dt.datetime(2026, 6, 20, 12, 0, offset_seconds, tzinfo=dt.UTC),
+        body=body,
+    )
+
+
+def test_get_issue_comments_returns_empty_by_default() -> None:
+    """get_issue_comments returns [] when no comments have been seeded."""
+    fake = FakeGitProvider()
+    result = fake.get_issue_comments(project="p", issue_number=42)
+    assert result == []
+
+
+def test_seed_issue_comments_populates_get_issue_comments() -> None:
+    """seed_issue_comments makes comments retrievable via get_issue_comments."""
+    fake = FakeGitProvider()
+    comments = [_comment("first"), _comment("second", offset_seconds=1)]
+    fake.seed_issue_comments(project="p", issue_number=42, comments=comments)
+    result = fake.get_issue_comments(project="p", issue_number=42)
+    assert result == comments
+
+
+def test_get_issue_comments_is_per_issue() -> None:
+    """Comments seeded for one (project, issue) don't bleed into another."""
+    fake = FakeGitProvider()
+    fake.seed_issue_comments(
+        project="p", issue_number=1, comments=[_comment("only on 1")],
+    )
+    assert fake.get_issue_comments(project="p", issue_number=2) == []
+    assert fake.get_issue_comments(project="other", issue_number=1) == []
+
+
+def test_post_issue_comment_records_to_posted_comments() -> None:
+    """post_issue_comment appends (project, issue_number, body) to posted_comments."""
+    fake = FakeGitProvider()
+    fake.post_issue_comment(project="p", issue_number=42, body="hello world")
+    assert fake.posted_comments == [("p", 42, "hello world")]
+
+
+def test_post_issue_comment_accumulates_in_order() -> None:
+    """Multiple post_issue_comment calls accumulate in call order."""
+    fake = FakeGitProvider()
+    fake.post_issue_comment(project="p", issue_number=1, body="first")
+    fake.post_issue_comment(project="p", issue_number=2, body="second")
+    fake.post_issue_comment(project="p", issue_number=1, body="third")
+    assert fake.posted_comments == [
+        ("p", 1, "first"),
+        ("p", 2, "second"),
+        ("p", 1, "third"),
+    ]
+
+
+def test_posted_comments_empty_by_default() -> None:
+    """The recorder starts empty so tests can assert no comments were posted."""
+    fake = FakeGitProvider()
+    assert fake.posted_comments == []

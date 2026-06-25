@@ -11,10 +11,12 @@ the bottom exercise the factory + clock seam directly.
 """
 from __future__ import annotations
 
+import datetime as dt
 from unittest.mock import MagicMock, call
 
 import pytest
 
+from foreman.git_host import CommentRef
 from foreman.v4.git_provider import PRNotFoundError, PRState
 from foreman.v4.pygithub_git_provider import PyGithubGitProvider, _resolve_merge_method
 
@@ -590,3 +592,143 @@ def test_get_issue_labels_returns_label_names(mock_github, mock_repo):
     labels = provider.get_issue_labels(project="ignored", issue_number=180)
     assert labels == {"foreman:state-failed", "bug"}
     mock_repo.get_issue.assert_called_once_with(180)
+
+
+# ---------------------------------------------------------------------------
+# Issue-comment methods (sub-request 2 of issue #410)
+#
+# get_issue_comments and post_issue_comment go through self._repo → self._gh,
+# which means they inherit the token-refresh seam automatically. The tests
+# below pin the basic call shape; the refresh regression test (next section)
+# proves the seam fires for comment calls specifically.
+# ---------------------------------------------------------------------------
+
+
+def test_get_issue_comments_returns_sorted_comment_refs(mock_github, mock_repo):
+    """get_issue_comments maps PyGithub IssueComment objects to CommentRef.
+
+    Maps: author_login ← user.login, posted_at ← created_at, body ← body.
+    Returns them in the order PyGithub yields them (chronological from GitHub).
+    """
+    fake_comment_a = MagicMock()
+    fake_comment_a.user.login = "alice"
+    fake_comment_a.created_at = dt.datetime(2026, 6, 20, 10, 0, 0, tzinfo=dt.UTC)
+    fake_comment_a.body = "first comment"
+
+    fake_comment_b = MagicMock()
+    fake_comment_b.user.login = "bob"
+    fake_comment_b.created_at = dt.datetime(2026, 6, 20, 11, 0, 0, tzinfo=dt.UTC)
+    fake_comment_b.body = "second comment"
+
+    fake_issue = MagicMock()
+    fake_issue.get_comments.return_value = [fake_comment_a, fake_comment_b]
+    mock_repo.get_issue.return_value = fake_issue
+
+    provider = PyGithubGitProvider(
+        github_factory=lambda: mock_github,
+        repo_full_name="org/repo",
+    )
+    result = provider.get_issue_comments(project="ignored", issue_number=55)
+
+    assert result == [
+        CommentRef(
+            author_login="alice",
+            posted_at=dt.datetime(2026, 6, 20, 10, 0, 0, tzinfo=dt.UTC),
+            body="first comment",
+        ),
+        CommentRef(
+            author_login="bob",
+            posted_at=dt.datetime(2026, 6, 20, 11, 0, 0, tzinfo=dt.UTC),
+            body="second comment",
+        ),
+    ]
+    mock_repo.get_issue.assert_called_once_with(55)
+    fake_issue.get_comments.assert_called_once_with()
+
+
+def test_post_issue_comment_calls_create_comment(mock_github, mock_repo):
+    """post_issue_comment calls issue.create_comment(body) via PyGithub."""
+    fake_issue = MagicMock()
+    mock_repo.get_issue.return_value = fake_issue
+
+    provider = PyGithubGitProvider(
+        github_factory=lambda: mock_github,
+        repo_full_name="org/repo",
+    )
+    provider.post_issue_comment(project="ignored", issue_number=99, body="test body")
+
+    mock_repo.get_issue.assert_called_once_with(99)
+    fake_issue.create_comment.assert_called_once_with("test body")
+
+
+# ---------------------------------------------------------------------------
+# Refresh regression test for comment methods (sub-request 7 of issue #410)
+#
+# The original bug was that observers used a legacy GitHostProvider whose
+# GitHub client was built once at daemon bootstrap and never refreshed.
+# The fix routes observers through PyGithubGitProvider, which uses the
+# github_factory + _gh time-based rebuild seam. This test proves that a
+# get_issue_comments call past the refresh window picks up the SECOND
+# client — exactly the same seam that existing _repo tests already pin,
+# but exercised through the comment surface.
+# ---------------------------------------------------------------------------
+
+
+def test_get_issue_comments_uses_refreshed_client_past_window():
+    """get_issue_comments goes through _gh → triggers token refresh past window.
+
+    Simulates the production failure scenario: two clients (pre- and
+    post-refresh); the factory returns them in order. After advancing
+    the clock past refresh_after_seconds, the SECOND call to
+    get_issue_comments must use the second (fresh) client, not the
+    stale cached first client.
+    """
+    current_time = [0.0]
+    call_count = [0]
+
+    client_v1 = MagicMock(name="github_v1")
+    client_v2 = MagicMock(name="github_v2")
+    repo_v1 = MagicMock(name="repo_v1")
+    repo_v2 = MagicMock(name="repo_v2")
+    client_v1.get_repo.return_value = repo_v1
+    client_v2.get_repo.return_value = repo_v2
+
+    fake_issue_v1 = MagicMock()
+    fake_issue_v1.get_comments.return_value = []
+    fake_issue_v2 = MagicMock()
+    fake_issue_v2.get_comments.return_value = []
+    repo_v1.get_issue.return_value = fake_issue_v1
+    repo_v2.get_issue.return_value = fake_issue_v2
+
+    def factory():
+        client = [client_v1, client_v2][call_count[0]]
+        call_count[0] += 1
+        return client
+
+    def clock() -> float:
+        return current_time[0]
+
+    provider = PyGithubGitProvider(
+        github_factory=factory,
+        repo_full_name="org/repo",
+        clock=clock,
+        refresh_after_seconds=3000.0,
+    )
+
+    # First call: t=0, client_v1 is built and used.
+    provider.get_issue_comments(project="ignored", issue_number=10)
+    assert call_count[0] == 1
+    repo_v1.get_issue.assert_called_once_with(10)
+    repo_v2.get_issue.assert_not_called()
+
+    # Advance past the refresh window.
+    current_time[0] = 3001.0
+
+    # Second call: must rebuild client (factory call #2) and use client_v2.
+    provider.get_issue_comments(project="ignored", issue_number=10)
+    assert call_count[0] == 2, (
+        "Factory must have been called twice — once at t=0, once at t=3001 "
+        "past the refresh window. call_count==1 means the stale client was "
+        "reused — the 401 bug would recur."
+    )
+    repo_v2.get_issue.assert_called_once_with(10)

@@ -36,6 +36,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from foreman.git_host import CommentRef
+
 
 class PRNotFoundError(LookupError):
     """No PR matching this (project, pr_number)."""
@@ -170,6 +172,29 @@ class GitProvider(Protocol):
         """
         ...
 
+    def get_issue_comments(
+        self, *, project: str, issue_number: int,
+    ) -> list[CommentRef]:
+        """Fetch the issue's comments in chronological order (oldest first).
+
+        Used by ``TerminalLandingObserver`` and ``SustainedBlockedObserver``
+        to perform dedup checks before posting escalation comments. No
+        filtering at this layer — policy (e.g. bot-self-comment filtering)
+        is the caller's responsibility.
+        """
+        ...
+
+    def post_issue_comment(
+        self, *, project: str, issue_number: int, body: str,
+    ) -> None:
+        """Post a new comment on the issue.
+
+        Used by ``TerminalLandingObserver`` and ``SustainedBlockedObserver``
+        to post escalation comments. The caller is responsible for dedup
+        (checking existing comments before calling this method).
+        """
+        ...
+
 
 class FakeGitProvider:
     """In-memory GitProvider for unit + lifecycle tests."""
@@ -207,6 +232,13 @@ class FakeGitProvider:
         # Map of (project, pr_number) → head branch name. set_pr_head_branch
         # populates; find_open_pr_by_head_branch reverse-scans it.
         self._pr_head_branches: dict[tuple[str, int], str] = {}
+        # Seeded comments per (project, issue_number). seed_issue_comments
+        # populates; get_issue_comments reads. Tests seed before exercising
+        # the dedup logic in observers.
+        self._seeded_comments: dict[tuple[str, int], list[CommentRef]] = {}
+        # Recorder for post_issue_comment calls. List preserves call order.
+        # Each entry is (project, issue_number, body).
+        self.posted_comments: list[tuple[str, int, str]] = []
 
     def set_open_issues_with_label(
         self, *, project: str, label: str, issue_numbers: set[int],
@@ -357,3 +389,30 @@ class FakeGitProvider:
                 continue
             return pr_num
         return None
+
+    def seed_issue_comments(
+        self,
+        *,
+        project: str,
+        issue_number: int,
+        comments: list[CommentRef],
+    ) -> None:
+        """Test helper: seed a list of CommentRef for get_issue_comments.
+
+        Observer tests seed comments here before exercising the dedup logic
+        (``already_posted_for_key`` / ``any_recent_marker_with_source_prefix``).
+        Each seed call replaces any previous seed for the same key.
+        """
+        self._seeded_comments[(project, issue_number)] = list(comments)
+
+    def get_issue_comments(
+        self, *, project: str, issue_number: int,
+    ) -> list[CommentRef]:
+        """Return seeded comments for this (project, issue_number), or []."""
+        return list(self._seeded_comments.get((project, issue_number), []))
+
+    def post_issue_comment(
+        self, *, project: str, issue_number: int, body: str,
+    ) -> None:
+        """Record the comment-post call. Tests assert on ``posted_comments``."""
+        self.posted_comments.append((project, issue_number, body))

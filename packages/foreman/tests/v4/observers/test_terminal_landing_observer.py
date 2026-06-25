@@ -1,4 +1,10 @@
-"""Unit tests for :class:`TerminalLandingObserver`."""
+"""Unit tests for :class:`TerminalLandingObserver`.
+
+Migrated to use FakeGitProvider (sub-request 10 of issue #410): the
+observer now takes ``git: GitProvider`` instead of a ``host_for_project``
+callable, so tests seed comments via ``fake_git.seed_issue_comments`` and
+assert posts via ``fake_git.posted_comments``.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +14,7 @@ from unittest.mock import MagicMock
 
 from foreman.git_host import CommentRef
 from foreman.v4.events import StateEnteredEvent
+from foreman.v4.git_provider import FakeGitProvider
 from foreman.v4.observers.terminal_landing import (
     _STATE_NAME_TO_ROLE,
     TerminalLandingObserver,
@@ -75,14 +82,6 @@ def _repo(history: list[StateInstanceRecord]) -> MagicMock:
     return repo
 
 
-def _host_factory(host: MagicMock | None, *, slug: str = "owner/repo") -> object:
-    callable_obj = MagicMock(return_value=host)
-    def resolver(project: str) -> str:
-        return slug
-    callable_obj.repo_slug_for = resolver
-    return callable_obj
-
-
 # ---------------------------------------------------------------------------
 
 
@@ -111,16 +110,15 @@ def test_failed_landing_posts_comment_with_failure_reason(
         _record(seq=2, state_name="Failed"),  # the landing row
     ]
     repo = _repo(history)
-    host = MagicMock()
-    host.get_issue_comments.return_value = []
+    fake_git = FakeGitProvider()
     obs = TerminalLandingObserver(
         repo=repo,
-        host_for_project=_host_factory(host),
+        git=fake_git,
         log_dir=tmp_path,
     )
     obs(_event())
-    assert host.post_issue_comment.call_count == 1
-    posted_body = host.post_issue_comment.mock_calls[0].args[2]
+    assert len(fake_git.posted_comments) == 1
+    posted_body = fake_git.posted_comments[0][2]
     assert "subprocess crash with message Y" in posted_body
 
 
@@ -138,27 +136,31 @@ def test_recent_role_comment_suppresses_terminal_landing_post(
         _record(seq=2, state_name="Failed"),
     ]
     repo = _repo(history)
-    host = MagicMock()
+    fake_git = FakeGitProvider()
     # Seed a recent role:worker marker.
-    host.get_issue_comments.return_value = [
-        CommentRef(
-            author_login="foreman-worker-bot",
-            posted_at=now - dt.timedelta(seconds=30),
-            body=(
-                "<!-- foreman:escalation:begin ticket=owner/repo#42:"
-                "source=role:worker:key=state-instance-99 -->\nbody\n"
-                "<!-- foreman:escalation:end -->"
+    fake_git.seed_issue_comments(
+        project="proj",
+        issue_number=42,
+        comments=[
+            CommentRef(
+                author_login="foreman-worker-bot",
+                posted_at=now - dt.timedelta(seconds=30),
+                body=(
+                    "<!-- foreman:escalation:begin ticket=proj#42:"
+                    "source=role:worker:key=state-instance-99 -->\nbody\n"
+                    "<!-- foreman:escalation:end -->"
+                ),
             ),
-        ),
-    ]
+        ],
+    )
     obs = TerminalLandingObserver(
         repo=repo,
-        host_for_project=_host_factory(host),
+        git=fake_git,
         log_dir=tmp_path,
         clock=lambda: now,
     )
     obs(_event())
-    host.post_issue_comment.assert_not_called()
+    assert fake_git.posted_comments == []
 
 
 def test_same_key_dedup_skips_terminal_landing_repost(
@@ -174,25 +176,29 @@ def test_same_key_dedup_skips_terminal_landing_repost(
         _record(seq=2, state_name="Failed"),
     ]
     repo = _repo(history)
-    host = MagicMock()
-    host.get_issue_comments.return_value = [
-        CommentRef(
-            author_login="foreman-bot",
-            posted_at=dt.datetime(2025, 1, 1, tzinfo=dt.UTC),
-            body=(
-                "<!-- foreman:escalation:begin ticket=owner/repo#42:"
-                "source=terminal-landing:key=ticket-1-instance-99 -->\n"
-                "body\n<!-- foreman:escalation:end -->"
+    fake_git = FakeGitProvider()
+    fake_git.seed_issue_comments(
+        project="proj",
+        issue_number=42,
+        comments=[
+            CommentRef(
+                author_login="foreman-bot",
+                posted_at=dt.datetime(2025, 1, 1, tzinfo=dt.UTC),
+                body=(
+                    "<!-- foreman:escalation:begin ticket=proj#42:"
+                    "source=terminal-landing:key=ticket-1-instance-99 -->\n"
+                    "body\n<!-- foreman:escalation:end -->"
+                ),
             ),
-        ),
-    ]
+        ],
+    )
     obs = TerminalLandingObserver(
         repo=repo,
-        host_for_project=_host_factory(host),
+        git=fake_git,
         log_dir=tmp_path,
     )
     obs(_event())
-    host.post_issue_comment.assert_not_called()
+    assert fake_git.posted_comments == []
 
 
 def test_needshelp_landing_includes_log_path_in_extra_context(
@@ -213,15 +219,15 @@ def test_needshelp_landing_includes_log_path_in_extra_context(
         _record(seq=2, state_name="NeedsHelp"),
     ]
     repo = _repo(history)
-    host = MagicMock()
-    host.get_issue_comments.return_value = []
+    fake_git = FakeGitProvider()
     obs = TerminalLandingObserver(
         repo=repo,
-        host_for_project=_host_factory(host),
+        git=fake_git,
         log_dir=tmp_path,
     )
     obs(_event(state_name="NeedsHelp"))
-    posted_body = host.post_issue_comment.mock_calls[0].args[2]
+    assert len(fake_git.posted_comments) == 1
+    posted_body = fake_git.posted_comments[0][2]
     assert str(log_file) in posted_body
 
 
@@ -248,15 +254,15 @@ def test_failed_landing_renders_exit_code_and_log_tail_inline(
         _record(seq=2, state_name="Failed"),
     ]
     repo = _repo(history)
-    host = MagicMock()
-    host.get_issue_comments.return_value = []
+    fake_git = FakeGitProvider()
     obs = TerminalLandingObserver(
         repo=repo,
-        host_for_project=_host_factory(host),
+        git=fake_git,
         log_dir=tmp_path,
     )
     obs(_event())
-    posted_body = host.post_issue_comment.mock_calls[0].args[2]
+    assert len(fake_git.posted_comments) == 1
+    posted_body = fake_git.posted_comments[0][2]
     assert "exit code: 137" in posted_body
     assert "third line with a long tail" in posted_body
     assert "<details>" in posted_body
@@ -282,28 +288,32 @@ def test_recent_role_comment_path_skips_inline_exit_code_block(
         _record(seq=2, state_name="Failed"),
     ]
     repo = _repo(history)
-    host = MagicMock()
+    fake_git = FakeGitProvider()
     role_marker = (
-        "<!-- foreman:escalation:begin ticket=owner/repo#42:"
+        "<!-- foreman:escalation:begin ticket=proj#42:"
         "source=role:worker:key=state-instance-99 -->\n"
         "body (no exit code surfaced)\n"
         "<!-- foreman:escalation:end -->"
     )
-    host.get_issue_comments.return_value = [
-        CommentRef(
-            author_login="foreman-worker-bot",
-            posted_at=now - dt.timedelta(seconds=30),
-            body=role_marker,
-        ),
-    ]
+    fake_git.seed_issue_comments(
+        project="proj",
+        issue_number=42,
+        comments=[
+            CommentRef(
+                author_login="foreman-worker-bot",
+                posted_at=now - dt.timedelta(seconds=30),
+                body=role_marker,
+            ),
+        ],
+    )
     obs = TerminalLandingObserver(
         repo=repo,
-        host_for_project=_host_factory(host),
+        git=fake_git,
         log_dir=tmp_path,
         clock=lambda: now,
     )
     obs(_event())
-    host.post_issue_comment.assert_not_called()
+    assert fake_git.posted_comments == []
     # The existing role:worker body does NOT contain the inline
     # ``exit code:`` literal — that surface is scoped to the
     # terminal-landing observer only.
@@ -335,15 +345,15 @@ def test_failed_landing_retry_cap_walks_back_to_crash_row(
         _record(seq=4, state_name="NeedsHelp"),
     ]
     repo = _repo(history)
-    host = MagicMock()
-    host.get_issue_comments.return_value = []
+    fake_git = FakeGitProvider()
     obs = TerminalLandingObserver(
         repo=repo,
-        host_for_project=_host_factory(host),
+        git=fake_git,
         log_dir=tmp_path,
     )
     obs(_event(state_name="NeedsHelp"))
-    posted_body = host.post_issue_comment.mock_calls[0].args[2]
+    assert len(fake_git.posted_comments) == 1
+    posted_body = fake_git.posted_comments[0][2]
     # Walks back from [-2] (the cap-trip row) to find the EARLIEST
     # ``exited \d+`` row → exit code 1, not the "consecutive times"
     # message.
@@ -359,12 +369,13 @@ def test_failed_landing_post_failure_does_not_raise(tmp_path: Path) -> None:
         _record(seq=2, state_name="Failed"),
     ]
     repo = _repo(history)
-    host = MagicMock()
-    host.get_issue_comments.return_value = []
-    host.post_issue_comment.side_effect = RuntimeError("github 5xx")
+    # Use a MagicMock that raises on post_issue_comment to simulate failure.
+    fake_git = MagicMock()
+    fake_git.get_issue_comments.return_value = []
+    fake_git.post_issue_comment.side_effect = RuntimeError("github 5xx")
     obs = TerminalLandingObserver(
         repo=repo,
-        host_for_project=_host_factory(host),
+        git=fake_git,
         log_dir=tmp_path,
     )
     # Must not raise.
@@ -373,12 +384,11 @@ def test_failed_landing_post_failure_does_not_raise(tmp_path: Path) -> None:
 
 def test_non_terminal_state_ignored(tmp_path: Path) -> None:
     repo = _repo([])
-    host = MagicMock()
+    fake_git = FakeGitProvider()
     obs = TerminalLandingObserver(
         repo=repo,
-        host_for_project=_host_factory(host),
+        git=fake_git,
         log_dir=tmp_path,
     )
     obs(_event(state_name="Planning"))
-    host.get_issue_comments.assert_not_called()
-    host.post_issue_comment.assert_not_called()
+    assert fake_git.posted_comments == []

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from foreman.git_host import CommentRef
 from foreman.v4.git_provider import GitProvider, PRState
 
 
@@ -146,4 +147,18 @@ class RoutingGitProvider:
     ) -> set[str]:
         return self._resolve(project).get_issue_labels(
             project=project, issue_number=issue_number,
+        )
+
+    def get_issue_comments(
+        self, *, project: str, issue_number: int,
+    ) -> list[CommentRef]:
+        return self._resolve(project).get_issue_comments(
+            project=project, issue_number=issue_number,
+        )
+
+    def post_issue_comment(
+        self, *, project: str, issue_number: int, body: str,
+    ) -> None:
+        self._resolve(project).post_issue_comment(
+            project=project, issue_number=issue_number, body=body,
         )
