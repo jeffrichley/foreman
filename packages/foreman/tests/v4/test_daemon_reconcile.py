@@ -20,8 +20,9 @@ from foreman.v4.sqlite_repository import SqliteTicketRepository
 def test_run_forever_reconciles_before_ticking():
     """An in-flight orphan present at startup must be closed by
     ``run_forever`` (via the startup reconcile pass). We set the stop flag
-    BEFORE calling ``run_forever`` so the loop runs the startup reconcile +
-    at most one tick, then exits — deterministic, no real sleeps/network.
+    BEFORE calling ``run_forever`` so the startup reconcile runs and then the
+    ``while not self._stop.is_set()`` loop body never ticks — isolating the
+    reconcile pass. Deterministic, no real sleeps/network.
     """
     now = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
 
