@@ -192,19 +192,25 @@ type = "forbidden"
 source_modules = ["foreman"]
 forbidden_modules = ["tests"]
 
-# R2: v4 substrate does not import from v3-substrate modules
+# R2: v4 substrate does not import from the (deleted) v3-substrate modules
 # -----------------------------------------------------------------------
-# Locks the boundary established by the foreman v4 substrate redesign.
-# Phase 9 deletes these modules entirely; until then they coexist and
-# foreman.v4.* must never reach into them. Once main is on v4 the rule
-# becomes trivially-satisfied but stays in place: it prevents any future
-# resurrection from putting foreman.v4 back on a path that depends on the
-# old substrate's reconciler / pre-state-machine plumbing.
+# The v3 substrate — the reconciler + pre-state-machine daemon plumbing —
+# was deleted in the v4 cutover (Phase 9). These modules no longer exist
+# in the tree. The rule stays as a permanent ANTI-RESURRECTION guard: if
+# any of these names is ever re-created, foreman.v4.* must not import it.
+# Listing a now-absent module is intentional — a forbidden contract over a
+# missing module is trivially satisfied today and only bites if the module
+# comes back. dispatch_recorder is here because it WAS v3 telemetry
+# plumbing (it pulled reconciler.exec_log).
 #
-# branches.py, stats.py, labels.py are intentionally NOT in this list —
-# they were promoted to survival per foreman#318 because they're
-# cross-cutting infra with no v3-substrate deps. dispatch_recorder is
-# listed because it IS v3 telemetry plumbing (it pulls reconciler.exec_log).
+# Not in this list, by design: the SURVIVAL SET — roles/, auth, git_host,
+# git_hosts/, worktree, branches, stats, labels, init, provider(s),
+# schemas/, prompts/, instructions, auto_close, _env_filter. This is
+# permanent, live production code: the role-execution layer that
+# foreman.v4.* (the orchestration substrate) dispatches into. It lives at
+# top-level foreman.* by design, NOT as residue awaiting deletion.
+# branches/stats/labels were explicitly promoted to survival per
+# foreman#318 (cross-cutting infra with no v3-substrate deps).
 [[tool.importlinter.contracts]]
 name = "R2: foreman.v4 does not import v3-substrate modules"
 type = "forbidden"
