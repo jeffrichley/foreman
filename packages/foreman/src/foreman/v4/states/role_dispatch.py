@@ -20,6 +20,7 @@ from foreman.v4.backoff import next_retry_delay
 from foreman.v4.events import TransientProviderErrorEvent
 from foreman.v4.outcome import Outcome, OutcomeKind, parse_outcome_from_stdout
 from foreman.v4.state import StateContext, TicketState
+from foreman.v4.states.resolve_dispatch import resolve_dispatch
 
 
 class RoleDispatchState(TicketState):
@@ -32,6 +33,21 @@ class RoleDispatchState(TicketState):
             raise RuntimeError(
                 f"{self.state_name}.execute requires a role_dispatcher in StateContext"
             )
+        # Crash-recovery resume arm: decide FRESH vs verified-RESUME before
+        # dispatching. ``self.role`` already uniquely encodes the work shape
+        # (planner / worker / reviewer-spec / reviewer-impl / fixer-spec /
+        # fixer-impl), so ``(role=self.role, target=None)`` is a complete,
+        # consistent work identity. The same ``(role, target)`` arguments are
+        # used here at stamp-time and at the later resume-time — both are this
+        # same state class with the same ``self.role`` — so the stamp/resume
+        # consistency invariant holds by construction. We deliberately do NOT
+        # derive ``target`` separately (that would risk stamp/resume divergence).
+        plan = resolve_dispatch(ctx, role=self.role, target=None)
+        # Persist the id on THIS instance's row so a future crash re-run can
+        # find + verify it. ``execute_started_at`` was already stamped by the
+        # transition lifecycle (state.py: mark_execute_started, before this
+        # execute() call) — that is the routing signal for the next attempt.
+        ctx.repo.set_session_id(ctx.instance.id, plan.session_id)
         stdout = ctx.role_dispatcher.dispatch(
             role=self.role,
             project=ctx.ticket.project,
@@ -41,6 +57,8 @@ class RoleDispatchState(TicketState):
             # dedup-key construction is stable across retries on the
             # same state instance.
             state_instance_id=ctx.instance.id,
+            session_id=plan.session_id,
+            resume=plan.resume,
         )
         return parse_outcome_from_stdout(stdout)
 
