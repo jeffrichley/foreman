@@ -317,15 +317,23 @@ class AnthropicSDKProvider(ProviderFacade):
             )
             if env is not None:
                 options_kwargs["env"] = env
-            # Crash-recovery resume arm (inert until a caller passes these):
-            # pin the session id so a later run can resume the same Claude
-            # conversation. ``ClaudeAgentOptions`` (SDK 0.1.63) exposes both
-            # ``session_id`` and ``resume`` fields; the SDK forwards
-            # ``resume`` as ``claude --resume <id>``.
-            if session_id is not None:
-                options_kwargs["session_id"] = session_id
+            # Crash-recovery resume arm. ``session_id`` and ``resume`` are
+            # MUTUALLY EXCLUSIVE at the claude CLI: ``--session-id <id>`` names
+            # a new session, ``--resume <id>`` resumes an existing one, and the
+            # CLI rejects both together ("--session-id can only be used with
+            # --continue or --resume if --fork-session is also specified") —
+            # and ``--fork-session`` would fork into a NEW session, defeating
+            # the point of resume. So the resume path emits ONLY ``--resume
+            # <id>``; the fresh path emits ONLY ``--session-id <id>``. The
+            # deterministic uuid5 still ties the two runs together: the fresh
+            # dispatch names the session with it, and a later resume passes the
+            # same id to ``--resume`` to continue that exact session. See
+            # foreman#448 (a CLI bump began enforcing this; emitting both
+            # silently broke every crash-recovery resume).
             if resume:
                 options_kwargs["resume"] = session_id
+            elif session_id is not None:
+                options_kwargs["session_id"] = session_id
             options = ClaudeAgentOptions(**options_kwargs)
 
             # foreman#266: the per-call ``PartialResult`` accumulates

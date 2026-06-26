@@ -154,22 +154,26 @@ async def test_run_agent_returns_validated_pydantic_instance(
 # Crash-recovery resume arm: session_id + resume forwarding
 # ----------------------------------------------------------------------
 #
-# The provider forwards ``session_id`` to ``ClaudeAgentOptions.session_id``
-# (pin the session) and, when ``resume`` is True, ``ClaudeAgentOptions.resume``
-# = session_id (the SDK forwards this as ``claude --resume <id>``). Both
-# fields exist on ClaudeAgentOptions (claude_agent_sdk 0.1.63). Behavior is
-# unchanged when both are left at their defaults — covered by every other
-# test in this file, which never passes them and asserts session_id/resume
-# stay None.
+# ``session_id`` (--session-id, names a new session) and ``resume`` (--resume,
+# resumes an existing one) are MUTUALLY EXCLUSIVE at the claude CLI — passing
+# both is rejected unless --fork-session is also given, and forking would spawn
+# a NEW session, defeating resume. So the provider emits exactly one: on
+# ``resume=True`` it sets ONLY ``ClaudeAgentOptions.resume`` (= session_id) and
+# leaves ``session_id`` unset; otherwise it sets ONLY ``session_id``. The
+# deterministic uuid5 still links the runs: fresh names the session, resume
+# replays the same id. See foreman#448 (a CLI bump began enforcing this).
+# Behavior is unchanged when both are left at their defaults — covered by every
+# other test in this file, which asserts session_id/resume stay None.
 
 
 @pytest.mark.asyncio
-async def test_run_agent_forwards_session_id_and_resume_to_options(
+async def test_run_agent_resume_emits_resume_only_not_session_id(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """When ``session_id`` + ``resume=True`` are passed, both land in the
-    ``ClaudeAgentOptions`` handed to the SDK: ``session_id`` pins the
-    session and ``resume`` carries the same id."""
+    """On ``resume=True`` the options carry ONLY ``resume`` (the session id);
+    ``session_id`` is left unset so the SDK emits ``--resume <id>`` alone and
+    never the rejected ``--session-id <id> --resume <id>`` combination
+    (foreman#448)."""
     calls = _patch_query(
         monkeypatch,
         [_make_result(subtype="success", structured_output={"name": "ok", "count": 1})],
@@ -187,8 +191,8 @@ async def test_run_agent_forwards_session_id_and_resume_to_options(
     )
 
     options = calls[0]["options"]
-    assert options.session_id == "s1"
     assert options.resume == "s1"
+    assert options.session_id is None
 
 
 @pytest.mark.asyncio
