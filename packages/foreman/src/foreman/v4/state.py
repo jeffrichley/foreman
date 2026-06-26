@@ -98,10 +98,9 @@ def _publish(ctx: StateContext, event_type: type, **kwargs: Any) -> None:
 #: is intentionally broader than ``repository._TERMINAL_STATES``
 #: ({Done, Failed}) — that constant gates ``list_open_tickets``, which
 #: must keep NeedsHelp visible to operators awaiting human action.
-#: foreman#418: ``ImplApproved`` is the same shape — a parked landing for
-#: an approved impl PR awaiting human merge; it must synthesize its
-#: terminal landing event inline and the WorkerPool must not re-enqueue.
-_TERMINAL_STATE_NAMES = frozenset({"Done", "Failed", "NeedsHelp", "ImplApproved"})
+#: foreman#443: ``ImplApproved`` was removed — it is now a polling-wait
+#: state that re-dispatches each tick until it detects the human merge.
+_TERMINAL_STATE_NAMES = frozenset({"Done", "Failed", "NeedsHelp"})
 
 
 def _enter_terminal(ctx: StateContext, terminal: TicketState) -> None:

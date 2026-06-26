@@ -49,6 +49,27 @@ if TYPE_CHECKING:
     from foreman.v4.git_provider import PRState
     from foreman.v4.state import StateContext
 
+def close_originating_issue(ctx: StateContext) -> None:
+    """Close the originating GitHub issue after a successful impl-PR merge.
+
+    foreman#443: shared helper called by both ``MergingState``
+    (``auto_merge_impl=True`` path) and ``ImplApprovedState``
+    (``auto_merge_impl=False`` / human-merge-detected path). Having a single
+    implementation eliminates the prior drift risk (MergingState had an
+    inline lambda; ImplApprovedState had nothing).
+
+    Idempotent — GitHub's REST API treats closing an already-closed issue as
+    a no-op (HTTP 200, no state change), so calling this twice — e.g.
+    when a human also closes the issue manually — never raises.
+    """
+    if ctx.git is None:
+        raise RuntimeError("close_originating_issue requires git in StateContext")
+    ctx.git.close_issue(
+        project=ctx.ticket.project,
+        issue_number=ctx.ticket.issue_number,
+    )
+
+
 #: Max heal actions (BLOCKED heal cycles) on one merge state before the
 #: helper escalates a still-unhealed PR to NEEDS_HELP. Five is generous —
 #: a normal BEHIND clears in 1–2 cycles; reaching five means the base is

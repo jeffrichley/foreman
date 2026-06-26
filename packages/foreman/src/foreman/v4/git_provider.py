@@ -69,6 +69,15 @@ class PRState:
     # compiling, same pattern as ``base_ref``; production PyGithub always
     # populates it.
     mergeable_state: str = ""
+    # foreman#443: GitHub sets ``pr.state == "closed"`` for BOTH merged PRs
+    # and PRs closed-without-merge. ``ImplApprovedState`` uses this field to
+    # distinguish "PR closed without merge" (needs human intervention) from
+    # "PR still open" (keep polling). Default ``False`` preserves all existing
+    # test fixtures that construct ``PRState`` without the field. In production,
+    # ``PyGithubGitProvider.get_pr_state`` always populates it. A merged PR
+    # has BOTH ``merged=True`` and ``closed=True`` on GitHub; callers must
+    # check ``merged`` first.
+    closed: bool = False
 
 
 class GitProvider(Protocol):
@@ -355,15 +364,30 @@ class FakeGitProvider:
             current.discard(branch_name)
 
     def close_pr(self, *, project: str, pr_number: int) -> None:
-        """Record the close on ``closed_prs``. Idempotent.
+        """Record the close on ``closed_prs`` and mark the stored ``PRState``
+        as ``closed=True``. Idempotent.
 
-        Does NOT mutate :class:`PRState` — there is no ``closed`` field, and
-        ``merged`` is preserved either way (close-without-merge stays False;
-        close on an already-merged PR does NOT undo the merge). The recorder
-        is the sole observable side-effect; consumers that need "did we
-        attempt to close" assert on ``closed_prs``.
+        foreman#443: ``ImplApprovedState`` checks ``PRState.closed`` to
+        distinguish "closed-without-merge" from "still open". When test code
+        calls ``close_pr`` on the Fake (e.g. a ``foreman reset`` scenario
+        that closes the impl PR), subsequent ``get_pr_state`` calls must
+        reflect ``closed=True`` so that ``ImplApprovedState`` correctly
+        routes to NeedsHelp rather than polling forever. Note that
+        close-without-merge preserves ``merged=False``, and closing an
+        already-merged PR does NOT flip ``merged`` back — the stored
+        ``merged`` value is always preserved.
         """
         self.closed_prs.add((project, pr_number))
+        existing = self._prs.get((project, pr_number))
+        if existing is not None:
+            self._prs[(project, pr_number)] = PRState(
+                merged=existing.merged,
+                mergeable=existing.mergeable,
+                ci_passing=existing.ci_passing,
+                base_ref=existing.base_ref,
+                mergeable_state=existing.mergeable_state,
+                closed=True,
+            )
 
     def set_pr_head_branch(
         self, *, project: str, pr_number: int, branch_name: str,

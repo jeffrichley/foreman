@@ -50,7 +50,7 @@ from foreman.v4.outcome import (
 )
 from foreman.v4.repository import MissingPRNumberError
 from foreman.v4.state import StateContext, TicketState
-from foreman.v4.states.merge_helper import attempt_merge
+from foreman.v4.states.merge_helper import attempt_merge, close_originating_issue
 
 logger = logging.getLogger(__name__)
 
@@ -144,19 +144,18 @@ class MergingState(TicketState):
         if ctx.git is None:
             raise RuntimeError("MergingState requires git in StateContext")
         pr_number = self._pr_number_for(ctx)
-        git = ctx.git
 
         def on_merge_success() -> None:
             # Close the originating issue on BOTH success branches
-            # (already-merged + just-merged). Idempotent at the REST API
-            # level — if an external merge also closed the issue, this is
-            # a no-op. On the just-merged branch attempt_merge calls this
-            # AFTER merge_pr confirms, so the close is tied to the merge
-            # succeeding — never a premature close on a still-unmerged PR.
-            git.close_issue(
-                project=ctx.ticket.project,
-                issue_number=ctx.ticket.issue_number,
-            )
+            # (already-merged + just-merged). foreman#443: delegated to
+            # the shared close_originating_issue helper so both MergingState
+            # and ImplApprovedState call one implementation. Idempotent at
+            # the REST API level — if an external merge also closed the
+            # issue, this is a no-op. On the just-merged branch
+            # attempt_merge calls this AFTER merge_pr confirms, so the
+            # close is tied to the merge succeeding — never a premature
+            # close on a still-unmerged PR.
+            close_originating_issue(ctx)
 
         return attempt_merge(
             ctx,

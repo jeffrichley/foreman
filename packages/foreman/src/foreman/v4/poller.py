@@ -27,9 +27,11 @@ from foreman.v4.queue_manager import QueueManager
 from foreman.v4.repository import TicketAlreadyExistsError, TicketRepository
 from foreman.v4.work import WorkItem
 
-# foreman#418: ``ImplApproved`` is a parked landing (approved impl PR
-# awaiting human merge) — the Poller must skip it, same as NeedsHelp.
-_TERMINAL_STATES = frozenset({"Done", "Failed", "NeedsHelp", "ImplApproved"})
+# foreman#443: ``ImplApproved`` was removed — it polls each tick to
+# detect the human merge, so the Poller must re-enqueue it (same as
+# any other non-terminal state). Only the final resolved terminals
+# (Done/Failed/NeedsHelp) are skipped here.
+_TERMINAL_STATES = frozenset({"Done", "Failed", "NeedsHelp"})
 
 
 class Poller:
