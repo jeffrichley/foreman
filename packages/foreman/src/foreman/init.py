@@ -84,8 +84,14 @@ _DEFAULT_CHECK_COMMAND = "just check"
 _DEFAULT_CONFIG_PATH = Path.home() / ".foreman" / "v4" / "config.toml"
 
 # Default v4 daemon paths used when we emit a brand-new config file.
-_DEFAULT_DB_PATH = "~/.foreman/v4/state.db"
 _DEFAULT_LOG_DIR = "~/.foreman/v4/logs"
+
+# Placeholder Postgres DSN written into a brand-new config's [storage]
+# block. Persistence is Postgres-only; the operator must
+# replace this with a real DSN before the daemon will connect. It is a
+# syntactically valid postgresql:// URL so the config loads under the
+# loud-fail StorageConfig validator (which requires a non-empty dsn).
+_DEFAULT_STORAGE_DSN = "postgresql://USER:PASSWORD@HOST:5432/foreman"
 
 
 def _state_label_name(state_name: str) -> str:
@@ -580,13 +586,16 @@ _INITIAL_CONFIG_TEMPLATE = """\
 # to run until the operator wires identity.
 
 [daemon]
-db_path = "{db_path}"
 log_dir = "{log_dir}"
 log_level = "INFO"
 tick_seconds = 30.0
 max_in_flight = 1
 role_timeout_seconds = 600
 max_state_attempts = 3
+
+[storage]
+engine = "postgres"
+dsn = "{storage_dsn}"
 
 [apps.planner]
 app_id = 0
@@ -620,8 +629,8 @@ def _initial_v4_config_text() -> str:
     first ``[[projects]]`` block appears separated.
     """
     return _INITIAL_CONFIG_TEMPLATE.format(
-        db_path=_DEFAULT_DB_PATH,
         log_dir=_DEFAULT_LOG_DIR,
+        storage_dsn=_DEFAULT_STORAGE_DSN,
     )
 
 

@@ -1,9 +1,9 @@
 """The TicketRepository seam.
 
-Two implementations: InMemoryTicketRepository for tests; SqliteTicketRepository
-for production. Domain code talks only to the Protocol — never to sqlite3 or
-to the dict storage directly. This is the only place persistence concerns
-leak into the v4 codebase.
+Two implementations: InMemoryTicketRepository for tests;
+PostgresTicketRepository for production. Domain code talks only to the
+Protocol — never to a database driver or to the dict storage directly.
+This is the only place persistence concerns leak into the v4 codebase.
 """
 
 from __future__ import annotations
@@ -188,9 +188,10 @@ _TERMINAL_STATES = frozenset({"Done", "Failed"})
 class InMemoryTicketRepository:
     """Reference TicketRepository for unit tests.
 
-    Behavior must match SqliteTicketRepository — the same test suite runs
-    against both. If you find a behavior gap, the bug is in whichever impl
-    diverges from the test.
+    Behavior must match the production :class:`PostgresTicketRepository` —
+    the shared :class:`TicketRepository` contract suite runs against both.
+    If you find a behavior gap, the bug is in whichever impl diverges from
+    the contract.
 
     Not thread-safe; single-threaded test use only.
     """
@@ -281,15 +282,13 @@ class InMemoryTicketRepository:
         if existing.next_action_at is None:
             return
         # Use the existing updated_at; in-memory has no notion of
-        # "now" without a clock parameter and SqliteTicketRepository's
-        # variant stamps updated_at via _to_iso(dt.datetime.now). Keep
-        # the two impls behavior-equivalent by mirroring the same
-        # updated_at semantics in the SQL impl (it passes
-        # ``dt.datetime.now(dt.UTC)`` only because it has to give SQL a
-        # value). For the in-memory impl, keeping updated_at unchanged
-        # avoids spurious clock injection in repository tests; the
-        # SQL impl matches the contract because callers always go
-        # through it with explicit clock-based timestamps elsewhere.
+        # "now" without a clock parameter and the production
+        # PostgresTicketRepository stamps updated_at with an explicit
+        # timestamp. Keep the two impls behavior-equivalent: for the
+        # in-memory impl, keeping updated_at unchanged avoids spurious
+        # clock injection in repository tests; the Postgres impl matches
+        # the contract because callers always go through it with explicit
+        # clock-based timestamps elsewhere.
         self._tickets[ticket_id] = dataclasses.replace(
             existing,
             next_action_at=None,

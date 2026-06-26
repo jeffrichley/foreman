@@ -40,14 +40,12 @@ class MetricsObserver:
         self._backend = backend or NoopMetricsBackend()
 
     def __call__(self, event: Event) -> None:
-        # Issue #360: daemon-level events (:class:`DaemonEvent`
-        # subclasses, e.g. BackupTakenEvent / BackupFailedEvent) have
-        # no ``state_name`` and no metric semantics under the current
+        # Daemon-level events (:class:`DaemonEvent` subclasses) have no
+        # ``state_name`` and no metric semantics under the current
         # MetricsObserver shape. Skip them BEFORE the
-        # ``event.state_name`` access below — without this guard the
-        # first BackupTakenEvent would raise AttributeError and the
-        # EventBus would log it but the daemon would still publish a
-        # broken event every tick.
+        # ``event.state_name`` access below — without this guard a
+        # daemon-level event would raise AttributeError on the
+        # ``event.state_name`` access.
         if isinstance(event, DaemonEvent):
             return
         assert isinstance(event, TicketEvent), (

@@ -70,9 +70,8 @@ class EventBus:
                         extra=extra,
                     )
                 else:
-                    # Daemon-level events (BackupTakenEvent /
-                    # BackupFailedEvent — issue #360): no ticket /
-                    # instance fields. Log a degraded message that
+                    # Daemon-level events (DaemonEvent subclasses): no
+                    # ticket / instance fields. Log a degraded message that
                     # keeps the event type, observer, and exception
                     # context. Without this isinstance guard, the
                     # AttributeError on ``event.ticket_id`` would

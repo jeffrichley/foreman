@@ -91,7 +91,7 @@ class WorkerPool:
             #      takes any time.
             #   2. _log_exception surfaces any worker-thread crash — without
             #      it, exceptions raised in _run_transition (e.g.
-            #      TicketNotFoundError, sqlite3.OperationalError) are
+            #      TicketNotFoundError, a psycopg OperationalError) are
             #      silently captured by the future and never reach an
             #      operator, turning a stuck pipeline into guess-and-check.
             def _on_done_mark(

@@ -62,13 +62,11 @@ class EventArchiveObserver:
         self._repo = repo
 
     def __call__(self, event: Event) -> None:
-        # Issue #360: the events table requires ``ticket_id INTEGER NOT
-        # NULL`` (schema.sql:53). Daemon-level events
-        # (:class:`DaemonEvent` subclasses, e.g. BackupTakenEvent /
-        # BackupFailedEvent) have no ticket scope, so writing them
-        # would violate the constraint. Skip them entirely — the
-        # structured-log JSONL is the durable record for daemon-level
-        # events; the events SQL table stays ticket-scoped.
+        # The events table requires a non-null ``ticket_id``. Daemon-level
+        # events (:class:`DaemonEvent` subclasses) have no ticket scope, so
+        # writing them would violate the constraint. Skip them entirely —
+        # the structured-log JSONL is the durable record for daemon-level
+        # events; the events table stays ticket-scoped.
         if isinstance(event, DaemonEvent):
             return
         assert isinstance(event, TicketEvent), (

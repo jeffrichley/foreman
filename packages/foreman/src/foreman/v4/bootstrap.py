@@ -29,7 +29,6 @@ from foreman.v4.observers.terminal_landing import TerminalLandingObserver
 from foreman.v4.poller import Poller
 from foreman.v4.repository import TicketRepository
 from foreman.v4.routing_git_provider import RoutingGitProvider
-from foreman.v4.state_backup import _DisabledBackupScheduler
 from foreman.v4.subprocess_dispatcher import SubprocessRoleDispatcher
 
 logger = logging.getLogger(__name__)
@@ -158,16 +157,6 @@ def bootstrap_cli_context(
     # base-ref match.
     project_configs: dict[str, ProjectConfig] = {pc.name: pc for pc in config.projects}
 
-    # Issue #360 / v5 kill-sqlite: the BackupScheduler was the
-    # daemon-internal periodic SQLite file-snapshot job. Persistence is
-    # now Postgres-only, where file-snapshot backups don't apply (backups
-    # are an ops concern: pg_dump / WAL archiving, out of scope for the
-    # daemon). The daemon's ``tick() -> Path | None`` call site stays
-    # unconditional, so we always hand it the ``_DisabledBackupScheduler``
-    # no-op sentinel. ``repo`` is a PostgresTicketRepository with no
-    # ``.connection`` attribute, so the old SQLite snapshot branch is gone.
-    backup_scheduler: _DisabledBackupScheduler = _DisabledBackupScheduler()
-
     # foreman#407: per-poll clone refresher. Builds a ``name -> clone path``
     # map from the project configs and refreshes each clone's
     # ``origin/<default>`` ref at most once per ``clone_refresh_seconds``.
@@ -191,7 +180,6 @@ def bootstrap_cli_context(
         clock=dt.datetime.now,
         bus=bus,
         project_configs=project_configs,
-        backup_scheduler=backup_scheduler,
         clone_refresher=clone_refresher,
     )
 

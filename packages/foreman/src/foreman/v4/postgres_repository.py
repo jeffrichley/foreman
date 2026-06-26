@@ -1,19 +1,18 @@
 """PostgresTicketRepository — production persistence on PostgreSQL.
 
-Behavioral parity with SqliteTicketRepository — the same
+Behavioral parity with InMemoryTicketRepository — the same
 RepositoryContract test suite runs against both. Synchronous, matching
 v4's ThreadPoolExecutor-based daemon. A psycopg_pool.ConnectionPool
-serves the worker threads; Postgres MVCC removes the write contention
-the SQLite impl serialized with an RLock, so there is no lock here.
+serves the worker threads; Postgres MVCC removes write contention, so
+there is no lock here.
 
 Integer PKs (BIGSERIAL) preserved — the Protocol types ids as int.
 
 Datetime contract: callers pass naive dt.datetime via ``now=`` (the
 contract's ``_now()`` and the literal assertions like
-``dt.datetime(2026, 6, 13, 13)`` are all naive). SqliteTicketRepository
-stores ``value.isoformat()`` and reads it back via
-``dt.datetime.fromisoformat`` — so a naive input round-trips to the
-identical naive datetime, and equality holds. Postgres TIMESTAMPTZ
+``dt.datetime(2026, 6, 13, 13)`` are all naive). The in-memory impl
+round-trips a naive input to the identical naive datetime, so equality
+holds. Postgres TIMESTAMPTZ
 normalizes to UTC and psycopg returns tz-aware datetimes on read, which
 would FAIL ``==`` against the contract's naive literals. To preserve
 exact parity we normalize naive→UTC on write (``_to_db``) and strip the
@@ -50,7 +49,7 @@ def _to_db(value: dt.datetime | None) -> dt.datetime | None:
     """Normalize a caller datetime for TIMESTAMPTZ storage.
 
     Naive datetimes are assumed UTC, so round-tripping is stable and
-    matches the SqliteTicketRepository contract behavior.
+    matches the RepositoryContract behavior.
     """
     if value is None:
         return None
@@ -65,7 +64,7 @@ def _from_db(value: dt.datetime | None) -> dt.datetime | None:
     The contract asserts equality against naive datetimes (the values
     callers passed in). Postgres returns tz-aware UTC datetimes; convert
     to UTC and drop the tzinfo so the round-trip yields the identical
-    naive value SqliteTicketRepository would have returned.
+    naive value the in-memory impl would have returned.
     """
     if value is None:
         return None

@@ -31,7 +31,6 @@ from foreman.v4.cli.daemon import (
 from foreman.v4.cli.doctor import cmd_doctor
 from foreman.v4.cli.init import cmd_init
 from foreman.v4.cli.log import cmd_log
-from foreman.v4.cli.migrate import cmd_migrate_v4_to_v5
 from foreman.v4.cli.mutations import (
     cmd_drop,
     cmd_enqueue,
@@ -44,7 +43,6 @@ from foreman.v4.cli.mutations import (
 )
 from foreman.v4.cli.ps import cmd_ps
 from foreman.v4.cli.queue import cmd_queue
-from foreman.v4.cli.restore import cmd_restore
 from foreman.v4.cli.show import cmd_show
 
 __version__ = "0.4.0"
@@ -89,9 +87,7 @@ app.command("drop")(cmd_drop)
 app.command("set-state")(cmd_set_state)
 app.command("enqueue")(cmd_enqueue)
 app.command("reset")(cmd_reset)
-app.command("restore")(cmd_restore)
 app.command("doctor")(cmd_doctor)
-app.command("migrate-v4-to-v5")(cmd_migrate_v4_to_v5)
 
 
 daemon_app = typer.Typer(name="daemon", help="Daemon lifecycle")
