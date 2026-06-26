@@ -62,6 +62,7 @@ class StateInstanceRecord:
     next_state: str | None
     failure_phase: str | None
     failure_reason: str | None
+    session_id: str | None = None
 
     @property
     def is_in_flight(self) -> bool:

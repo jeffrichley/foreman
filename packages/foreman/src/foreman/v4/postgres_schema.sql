@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS state_instances (
     next_state              TEXT,
     failure_phase           TEXT,
     failure_reason          TEXT,
+    session_id              TEXT,
     UNIQUE (ticket_id, sequence)
 );
 

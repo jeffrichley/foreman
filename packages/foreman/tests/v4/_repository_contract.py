@@ -162,6 +162,17 @@ class RepositoryContract:
         assert fetched.failure_phase == "execute"
         assert fetched.failure_reason == "subprocess timed out"
 
+    def test_set_session_id_round_trips(self, repo: TicketRepository) -> None:
+        t = repo.create_ticket(project="p", issue_number=1, now=_now())
+        inst = repo.open_state_instance(
+            ticket_id=t.id, state_name="Implementing", sequence=1, now=_now()
+        )
+        assert inst.session_id is None
+        repo.set_session_id(inst.id, "sess-abc")
+        rows = repo.list_state_instances_for_ticket(t.id)
+        matching = next(r for r in rows if r.id == inst.id)
+        assert matching.session_id == "sess-abc"
+
     def test_latest_pr_number_for_ticket_returns_most_recent(self, repo: TicketRepository):
         t = repo.create_ticket(project="p", issue_number=1, now=_now())
         # First state has no PR

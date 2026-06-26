@@ -119,6 +119,7 @@ def _instance_from_row(row: dict[str, Any]) -> StateInstanceRecord:
         next_state=row["next_state"],
         failure_phase=row["failure_phase"],
         failure_reason=row["failure_reason"],
+        session_id=row["session_id"],
     )
 
 
@@ -373,6 +374,14 @@ class PostgresTicketRepository:
                  WHERE id = %s
                 """,
                 (failure_phase, failure_reason, instance_id),
+            )
+            conn.commit()
+
+    def set_session_id(self, instance_id: int, session_id: str) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE state_instances SET session_id = %s WHERE id = %s",
+                (session_id, instance_id),
             )
             conn.commit()
 
