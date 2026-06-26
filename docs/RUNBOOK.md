@@ -362,6 +362,67 @@ Edit `WATCHTOWER_POLL_INTERVAL` in the `watchtower:` service block of
 60s; operators who care about GHCR rate-limit quota can raise to 300s.
 The 120s default is the trade-off the foreman#363 spec settled on.
 
+### Watchtower idle-gate
+
+The `foreman gate-update` CLI command acts as a Watchtower pre-update
+lifecycle hook (foreman#412). Watchtower runs it inside the daemon
+container **before** stopping and recreating it for a new image digest.
+
+**How it works:**
+
+| Board state | `foreman gate-update` exit code | Watchtower action |
+|---|---|---|
+| ≥1 open (non-terminal) ticket | **75** (EX_TEMPFAIL) | Defer restart to the next poll cycle |
+| No open tickets (idle) | **0** | Allow restart — pulls new image |
+| Repository unreachable / any error | **0** (fail-open) | Allow restart + WARNING printed to stderr |
+
+The fail-open design is intentional: a bug in the hook must never
+permanently block deploys. The worst case of a spurious restart is a
+ticket landing on `NeedsHelp` and needing a `foreman retry`; the
+worst case of a stuck gate is the daemon running a stale image forever.
+The former is recoverable by operator action; the latter is not.
+
+**Wiring in `docker-compose.yml`:**
+
+```yaml
+# daemon service labels block
+labels:
+  com.centurylinklabs.watchtower.scope: foreman
+  com.centurylinklabs.watchtower.lifecycle.pre-update: "foreman gate-update"
+
+# watchtower service environment block
+environment:
+  WATCHTOWER_LIFECYCLE_HOOKS: "true"
+```
+
+`WATCHTOWER_LIFECYCLE_HOOKS: "true"` is required — without it
+Watchtower ignores all lifecycle labels entirely.
+
+**Operator escape hatch (force a deploy past the gate):**
+
+To force an immediate restart even while tickets are in flight:
+
+```bash
+# Option 1: remove the pre-update label from the running container
+# (takes effect on the next Watchtower poll without a container restart)
+docker label rm foreman-daemon com.centurylinklabs.watchtower.lifecycle.pre-update
+
+# Option 2 (simplest): stop and recreate the daemon manually
+# — bypasses Watchtower entirely
+docker compose stop daemon
+# (temporarily remove or comment out the pre-update label from docker-compose.yml)
+docker compose up -d daemon
+# (restore the label in docker-compose.yml after the image is live)
+```
+
+**Verifying the gate is active:**
+
+```bash
+docker inspect foreman-daemon \
+  --format '{{index .Config.Labels "com.centurylinklabs.watchtower.lifecycle.pre-update"}}'
+# Expected output: foreman gate-update
+```
+
 ---
 
 ## Backups and restoration
