@@ -757,5 +757,5 @@ Decision 7 § How to add a rule.
 
 The image is reproducible from any commit-SHA via `scripts/build-docker.sh`.
 Volume contents are NOT reproducible (they hold cloned project state +
-SQLite + logs from real runs). Treat `down -v` as the destructive
+Postgres data + logs from real runs). Treat `down -v` as the destructive
 command it is.
