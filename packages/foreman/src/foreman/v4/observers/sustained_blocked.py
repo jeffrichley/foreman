@@ -175,8 +175,9 @@ class SustainedBlockedObserver:
             ),
             what_would_unblock=(
                 "Check the external async signal (CI status, "
-                "merge-queue verdict, etc.) and apply the "
-                "`foreman:retry` label once it has converged, OR "
+                "merge-queue verdict, etc.) and run "
+                "`foreman retry <ticket_id>` once it has converged "
+                "(find the id via `foreman ps`), OR "
                 "triage the BLOCKED cause if it is genuinely stuck."
             ),
         )

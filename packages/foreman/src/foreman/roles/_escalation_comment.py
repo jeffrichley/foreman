@@ -234,8 +234,9 @@ def build_escalation_comment_body(
         )
         what_would_unblock = (
             "(role-side prompt did not populate; fallback) — operator "
-            "should review the role's structured outcome and apply the "
-            "`foreman:retry` label once unblocked."
+            "should review the role's structured outcome and run "
+            "`foreman retry <ticket_id>` to re-dispatch (find the id via "
+            "`foreman ps`)."
         )
         extra_context_block = ""
     else:
@@ -263,8 +264,8 @@ def build_escalation_comment_body(
         f"## What would unblock this\n{what_would_unblock}\n"
         f"{extra_context_block}\n"
         "---\n"
-        f"*Auto-posted by foreman-{role}-bot. Do not edit; apply the "
-        "`foreman:retry` label on the issue to re-dispatch.*\n"
+        f"*Auto-posted by foreman-{role}-bot. Do not edit; to re-dispatch, "
+        "run `foreman retry <ticket_id>` (find the id via `foreman ps`).*\n"
         f"{ESCALATION_MARKER_END}"
     )
 

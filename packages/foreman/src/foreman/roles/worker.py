@@ -1096,9 +1096,10 @@ async def _run_worker_core(
                     ),
                     what_would_unblock=(
                         "Operator should inspect the daemon log for the "
-                        "provider exception and apply the `foreman:retry` "
-                        "label once the underlying cause (API key, quota, "
-                        "network) is resolved."
+                        "provider exception and run `foreman retry "
+                        "<ticket_id>` once the underlying cause (API key, "
+                        "quota, network) is resolved (find the id via "
+                        "`foreman ps`)."
                     ),
                 ),
             )
@@ -1141,9 +1142,10 @@ async def _run_worker_core(
                     ),
                     what_would_unblock=(
                         "Operator should inspect the daemon log for the "
-                        "provider exception and apply the `foreman:retry` "
-                        "label once the underlying cause (API key, quota, "
-                        "network) is resolved."
+                        "provider exception and run `foreman retry "
+                        "<ticket_id>` once the underlying cause (API key, "
+                        "quota, network) is resolved (find the id via "
+                        "`foreman ps`)."
                     ),
                 ),
             )
