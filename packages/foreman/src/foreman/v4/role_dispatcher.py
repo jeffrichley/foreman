@@ -24,6 +24,8 @@ class RoleDispatcher(Protocol):
         issue_number: int,
         ticket_id: int,
         state_instance_id: int | None = None,
+        session_id: str | None = None,
+        resume: bool = False,
     ) -> str:
         """Return the role subprocess's stdout. Must contain FOREMAN_OUTCOME:.
 
@@ -32,6 +34,13 @@ class RoleDispatcher(Protocol):
         in the subprocess env so the role-core dedup-key construction is
         stable across retries on the same state instance. Default
         ``None`` for direct-CLI invocation outside the v4 dispatcher.
+
+        ``session_id`` + ``resume`` (crash-recovery resume arm) are the
+        inert plumbing for continuing an interrupted role's Claude
+        session: when ``session_id`` is not None the dispatcher exports
+        ``FOREMAN_SESSION_ID``; when ``resume`` is True it also exports
+        ``FOREMAN_RESUME_SESSION_ID``. Both default off — nothing in this
+        layer decides when to resume.
         """
 
 
@@ -41,6 +50,11 @@ class FakeRoleDispatcher:
     def __init__(self, *, responses: dict[tuple[str, str, int], str]) -> None:
         self._responses = responses
         self.calls: list[tuple[str, str, int, int]] = []
+        # Crash-recovery resume arm: per-call record of the resume
+        # plumbing so tests can assert what the state machine threaded
+        # down. Kept separate from ``calls`` (whose 4-tuple shape existing
+        # equality assertions depend on).
+        self.resume_calls: list[tuple[str | None, bool]] = []
 
     def dispatch(
         self,
@@ -50,9 +64,12 @@ class FakeRoleDispatcher:
         issue_number: int,
         ticket_id: int,
         state_instance_id: int | None = None,
+        session_id: str | None = None,
+        resume: bool = False,
     ) -> str:
         del state_instance_id  # not relevant to the in-memory fake
         self.calls.append((role, project, issue_number, ticket_id))
+        self.resume_calls.append((session_id, resume))
         key = (role, project, issue_number)
         try:
             return self._responses[key]

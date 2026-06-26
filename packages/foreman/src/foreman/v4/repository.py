@@ -84,6 +84,7 @@ class TicketRepository(Protocol):
         failure_phase: str,
         failure_reason: str,
     ) -> None: ...
+    def set_session_id(self, instance_id: int, session_id: str) -> None: ...
     def list_in_flight_state_instances(self) -> list[StateInstanceRecord]: ...
     def list_state_instances_for_ticket(
         self,
@@ -374,6 +375,9 @@ class InMemoryTicketRepository:
             failure_phase=failure_phase,
             failure_reason=failure_reason,
         )
+
+    def set_session_id(self, instance_id: int, session_id: str) -> None:
+        self._replace(instance_id, session_id=session_id)
 
     def list_in_flight_state_instances(self) -> list[StateInstanceRecord]:
         return [i for i in self._instances.values() if i.is_in_flight]

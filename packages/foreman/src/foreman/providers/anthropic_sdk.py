@@ -301,6 +301,8 @@ class AnthropicSDKProvider(ProviderFacade):
         cwd: Path,
         max_turns: int = 1000,
         env: dict[str, str] | None = None,
+        session_id: str | None = None,
+        resume: bool = False,
     ) -> tuple[T, UsageInfo]:
         schema = output_model.model_json_schema()
         hint = cwd.name or "role"
@@ -315,6 +317,15 @@ class AnthropicSDKProvider(ProviderFacade):
             )
             if env is not None:
                 options_kwargs["env"] = env
+            # Crash-recovery resume arm (inert until a caller passes these):
+            # pin the session id so a later run can resume the same Claude
+            # conversation. ``ClaudeAgentOptions`` (SDK 0.1.63) exposes both
+            # ``session_id`` and ``resume`` fields; the SDK forwards
+            # ``resume`` as ``claude --resume <id>``.
+            if session_id is not None:
+                options_kwargs["session_id"] = session_id
+            if resume:
+                options_kwargs["resume"] = session_id
             options = ClaudeAgentOptions(**options_kwargs)
 
             # foreman#266: the per-call ``PartialResult`` accumulates
