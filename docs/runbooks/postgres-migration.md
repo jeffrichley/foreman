@@ -16,17 +16,16 @@ the daemon, CLI, and role runners are unchanged.
 
 ---
 
-## CRITICAL: Config template gap
+## Status: cutover complete, SQLite removed
 
-`docker/foreman/config.toml.template` does **not** currently contain a
-`[storage]` section. The `FOREMAN_PG_DSN` env var is passed into the daemon
-container (see `docker-compose.yml`), but `envsubst` only substitutes
-placeholders that exist in the template. Until a `[storage]` block is added to
-the template, the daemon loads with `engine = "sqlite"` (the default) and
-ignores `FOREMAN_PG_DSN` entirely.
+This cutover is **done**. SQLite has been fully removed from foreman — there
+is no longer a `sqlite` engine option, no default-to-SQLite behavior, and no
+silent fallback. The storage selector is **Postgres-only and loud-fails** if it
+is not configured (e.g. `FOREMAN_STORAGE_ENGINE` unset or not `postgres`); it
+will not boot against a missing or non-Postgres config.
 
-**Add the following block to `docker/foreman/config.toml.template`** (after the
-`[backup]` section, before `[apps]`):
+`docker/foreman/config.toml.template` now **ships a `[storage]` Postgres
+block**, and `FOREMAN_PG_DSN` is substituted into it at container start:
 
 ```toml
 [storage]
@@ -43,9 +42,9 @@ in `docker-compose.yml`:
 FOREMAN_PG_DSN: postgresql://foreman:${FOREMAN_PG_PASSWORD}@postgres:5432/foreman
 ```
 
-This is a **required step before v5 is operational**. Without it, the daemon
-silently falls back to SQLite and the bugs above are not fixed. Consider this a
-follow-up task before the v5 deploy.
+The remainder of this runbook records how the one-time cutover was performed and
+how to operate the Postgres stack. It is no longer a set of pending follow-up
+steps.
 
 ---
 
@@ -93,11 +92,16 @@ FOREMAN_PG_DSN: postgresql://foreman:${FOREMAN_PG_PASSWORD}@postgres:5432/forema
 
 ---
 
-## Migration paths
+## Migration history (how the one-time cutover was performed)
 
-### Cold-start (recommended)
+> These steps are **historical** — they record how the v4→v5 cutover was run
+> once. SQLite is now fully removed; there is no `sqlite` engine to migrate from
+> and no migrate tool to re-run. New deployments start directly on Postgres
+> (see "Bring-up sequence" below).
 
-Use this when in-flight tickets can drain before the switch or are few enough to
+### Cold-start (the path that was used)
+
+Used when in-flight tickets could drain before the switch or were few enough to
 re-enqueue manually.
 
 1. **Drain the queue.** Run `foreman ps` and confirm no tickets are in an
@@ -107,23 +111,19 @@ re-enqueue manually.
    foreman hold <ticket-id>
    ```
 
-2. **Stop the v4 daemon.**
+2. **Stop the daemon.**
    ```
    docker compose stop daemon
    ```
 
-3. **Add `[storage]` to the config template** (see the critical section above).
-   Rebuild the image so the updated template is baked in:
-   ```
-   docker compose build daemon
-   ```
-
-4. **Set `FOREMAN_PG_PASSWORD` in `.env`.**
+3. **Set `FOREMAN_PG_PASSWORD` in `.env`.**
    ```
    FOREMAN_PG_PASSWORD=<choose-a-strong-password>
    ```
+   (The `[storage]` Postgres block now ships in the config template, so no
+   hand-edit of the template is required.)
 
-5. **Bring up Postgres and wait for it to be healthy.**
+4. **Bring up Postgres and wait for it to be healthy.**
    ```
    docker compose up -d postgres
    docker compose ps        # wait until postgres shows "healthy"
@@ -132,36 +132,24 @@ re-enqueue manually.
    (50 seconds total). The daemon's `depends_on: condition: service_healthy`
    ensures it will not start until Postgres passes.
 
-6. **Bring up the daemon.**
+5. **Bring up the daemon.**
    ```
    docker compose up -d daemon
    ```
 
-7. **Verify** (see Verification section below).
+6. **Verify** (see Verification section below).
 
-### Hot-port (opt-in, lossy on event history)
+### Hot-port of existing state (historical — tool removed)
 
-Use this when the deployment has long-tenured tickets whose state history must
-be preserved in the new store. The migration command is idempotent on
-`(project, issue_number)`, so it is safe to run multiple times.
+For deployments with long-tenured tickets, a one-time `foreman migrate-v4-to-v5`
+tool ported tickets + state instances (current state, sequence, timing,
+outcomes, dependencies) from the old SQLite file into Postgres. The events
+archive was intentionally not ported, and state-instance integer IDs were
+reassigned as fresh BIGSERIAL IDs (sequence ordering within a ticket was
+preserved, which is what the state machine relies on).
 
-```
-foreman migrate-v4-to-v5 \
-    --sqlite-path /path/to/foreman.sqlite \
-    --postgres-url "postgresql://foreman:<password>@<host>:5432/foreman"
-```
-
-**What is ported:** tickets + state instances (current state, sequence, timing,
-outcomes, dependencies).
-
-**What is NOT ported:** the events archive. The `events` table holds the full
-history of `EventBus` emissions; it is large, low value for day-to-day
-operation, and not ported by design. State-instance integer IDs are not
-preserved — Postgres assigns fresh BIGSERIAL IDs; sequence ordering within a
-ticket is preserved, which is what the state machine relies on.
-
-After the port succeeds, update the `[storage]` section in the config template
-and bring up the v5 stack as in the cold-start path above (steps 3–7).
+**That migrate tool has been removed along with SQLite** — there is no longer a
+SQLite file to port from, so this path no longer exists.
 
 ---
 
@@ -210,28 +198,19 @@ To confirm the bugs are gone:
 
 ## Rollback
 
-1. Stop the daemon:
-   ```
-   docker compose stop daemon
-   ```
+There is **no rollback to SQLite.** SQLite has been removed from foreman
+entirely — there is no `sqlite` engine to set, no `db_path` config field, and
+no SQLite file left on the `foreman-state` volume. The storage selector is
+Postgres-only and loud-fails if Postgres is not configured, so reverting the
+`[storage]` block does not fall back to SQLite; it fails to boot.
 
-2. Remove the `[storage]` block from `docker/foreman/config.toml.template` (or
-   set `engine = "sqlite"`). Rebuild:
-   ```
-   docker compose build daemon
-   ```
-
-3. Restart the daemon:
-   ```
-   docker compose up -d daemon
-   ```
-
-The SQLite file at `[daemon].db_path` (`/foreman/state/foreman.sqlite` inside
-the container, on the `foreman-state` named volume) is untouched by the
-Postgres path. The v4 ticket history is fully intact.
-
-Postgres data survives on the `foreman-pg-data` named volume. Only
-`docker compose down -v` destroys it.
+The only recovery path now is forward: fix the Postgres configuration /
+connectivity and bring the daemon back up against the sidecar. Postgres data
+survives on the `foreman-pg-data` named volume across `docker compose stop` and
+`docker compose down`; only `docker compose down -v` destroys it. (Postgres DR
+backups are tracked separately as
+[foreman#434](https://github.com/jeffrichley/foreman/issues/434) and not yet
+built.)
 
 ---
 
