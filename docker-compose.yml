@@ -118,12 +118,13 @@ services:
       - foreman-repos:/foreman/repos
       - foreman-state:/foreman/state
       - foreman-logs:/foreman/logs
-      # foreman#360: backups land on a host BIND MOUNT (not a named
-      # volume) so they survive `docker compose down -v`. The whole
-      # point of this directory is to protect against the failure
-      # mode that `down -v` causes; putting backups on the same
-      # named volume they're protecting defeats the purpose.
-      - ${HOME}/.foreman/backups:/foreman/backups
+      # Crash-recovery resume arm: persist the Claude session dir
+      # (CLAUDE_CONFIG_DIR=/root/.claude-container) so role session
+      # transcripts survive a container recreate (Watchtower redeploy).
+      # Without this they live on the ephemeral writable layer and resume
+      # silently breaks on every redeploy. cmd_daemon_start warns loudly at
+      # boot if this mount is missing.
+      - foreman-claude-sessions:/root/.claude-container
       # v5: bind-mount ~/.foreman so the daemon can read v5/config.toml
       # (V5Config) from the host, and so operator key files remain
       # accessible at the same paths the secrets block references.
@@ -187,6 +188,10 @@ volumes:
   # v5: postgres data volume. Persists across container restarts and `down`.
   # Only destroyed by `docker compose down -v` (explicit operator intent).
   foreman-pg-data:
+  # Crash-recovery resume arm: Claude session transcripts (CLAUDE_CONFIG_DIR).
+  # Persists across container recreate so a redeploy mid-work can resume the
+  # interrupted role's session instead of re-running it from scratch.
+  foreman-claude-sessions:
 
 # Secrets sourced from the host's protected user directory.
 secrets:
