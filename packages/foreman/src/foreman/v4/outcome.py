@@ -104,6 +104,56 @@ class OutcomeInvalidError(Exception):
         self.pydantic_errors = pydantic_errors
 
 
+def is_runaway_exempt(failure_phase: str | None, outcome_kind: OutcomeKind | None) -> bool:
+    """Return True if a state-instance row should be skipped by the runaway-cap counter.
+
+    Codifies the four exempt conditions for ``count_consecutive_same_state``:
+
+    - ``failure_phase == "can_run"``: the ticket was held and the state never
+      actually executed; not runaway-defense signal (Phase 8d.15 Bug F4).
+    - ``failure_phase == "crash_recovery"``: a daemon restart closed this row as
+      an orphan; not runaway-defense signal (C1 crash-recovery reconciliation).
+    - ``outcome_kind == OutcomeKind.BLOCKED``: a legitimate async-polling
+      self-loop; not runaway-defense signal (Phase 8d.18).
+    - ``outcome_kind == OutcomeKind.TRANSIENT_PROVIDER_ERROR``: an Anthropic-side
+      transient blip handled by the backoff scheduler; not runaway-defense
+      signal (foreman#361).
+
+    Single source of truth for issue #455 — both InMemoryTicketRepository and
+    PostgresTicketRepository delegate to this predicate.
+    """
+    if failure_phase == "can_run":
+        return True
+    if failure_phase == "crash_recovery":
+        return True
+    if outcome_kind == OutcomeKind.BLOCKED:
+        return True
+    if outcome_kind == OutcomeKind.TRANSIENT_PROVIDER_ERROR:
+        return True
+    return False
+
+
+def is_transient_error_exempt(failure_phase: str | None, outcome_kind: OutcomeKind | None) -> bool:
+    """Return True if a state-instance row should be skipped by the transient-provider-error counter.
+
+    Codifies the two exempt conditions for ``count_consecutive_transient_provider_errors``:
+
+    - ``failure_phase == "can_run"``: same precedent as ``is_runaway_exempt`` —
+      can_run failures don't count and don't break the run.
+    - ``outcome_kind is None``: the in-flight row (``mark_execute_completed``
+      has not yet been called) — skipped so the counter returns prior completed
+      transient attempts, not "current row, NULL outcome, break → 0" (foreman#361).
+
+    Single source of truth for issue #455 — both InMemoryTicketRepository and
+    PostgresTicketRepository delegate to this predicate.
+    """
+    if failure_phase == "can_run":
+        return True
+    if outcome_kind is None:
+        return True
+    return False
+
+
 def parse_outcome_from_stdout(stdout: str) -> Outcome:
     """Scan stdout in reverse for the FOREMAN_OUTCOME: marker; parse + validate.
 
