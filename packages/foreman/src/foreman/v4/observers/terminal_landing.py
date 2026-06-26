@@ -264,9 +264,8 @@ class TerminalLandingObserver:
         )
         what_would_unblock = (
             "Review the linked role log for the underlying failure "
-            "signature. When ready, apply the `foreman:retry` label "
-            "on the issue to re-dispatch the ticket from the prior "
-            "state."
+            "signature. When ready, run `foreman retry <ticket_id>` "
+            "to re-dispatch (find the id via `foreman ps`)."
         )
         payload = EscalationComment(
             why=why,

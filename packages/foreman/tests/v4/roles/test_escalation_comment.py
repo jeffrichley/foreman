@@ -110,8 +110,7 @@ def test_body_contains_no_github_closing_keywords() -> None:
     """Regression guard mirror for foreman#63: the rendered template
     must contain no standalone auto-close keyword + ``#N`` tokens.
 
-    The body intentionally mentions the literal label
-    ``foreman:retry`` and the word ``role`` — neither is a closing
+    The word ``role`` is present in the body but is not a closing
     keyword. We assert on the explicit nine keywords followed by a
     ``#N`` reference.
     """
@@ -131,6 +130,29 @@ def test_body_contains_no_github_closing_keywords() -> None:
         r"(?i)\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\b\s*:?\s+#\d+"
     )
     assert pattern.search(body) is None
+
+
+def test_body_footer_names_cli_command_not_dead_label() -> None:
+    """The shared footer must name the CLI command, not the dead label.
+
+    After foreman#413, the footer line reads
+    ``run `foreman retry <ticket_id>` ...`` instead of
+    ``apply the `foreman:retry` label``.  This test asserts both the
+    positive (CLI string present) and negative (dead label absent)
+    invariants on the rendered body.
+    """
+    body = build_escalation_comment_body(
+        role="worker",
+        outcome_label="incomplete",
+        summary="worker could not finish",
+        at=dt.datetime(2026, 6, 20, tzinfo=dt.UTC),
+        payload=_payload(),
+        ticket_ref="x/y#413",
+        source="role:worker",
+        key="k413",
+    )
+    assert "foreman retry" in body
+    assert "foreman:retry" not in body
 
 
 # ---------------------------------------------------------------------------

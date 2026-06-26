@@ -543,12 +543,19 @@ constant in `foreman.v4.observers.sustained_blocked`
 (`SUSTAINED_BLOCKED_THRESHOLD`); tests override it via the
 observer's constructor.
 
-### Re-dispatch via `foreman:retry`
+### Re-dispatch via `foreman retry`
 
-The standard re-dispatch verb is the `foreman:retry` label. Every
-escalation comment's footer names it explicitly. Applying the label
-clears the suspension (`next_action_at`) and re-enqueues the ticket
-through the v4 Poller.
+The standard re-dispatch verb is the `foreman retry <ticket_id>` CLI
+command. Every escalation comment's footer names it explicitly. To find
+the internal ticket id, run `foreman ps` and note the numeric id in the
+first column. Then run:
+
+```bash
+foreman retry <ticket_id>
+```
+
+This re-enqueues the ticket from its current state (including
+`NeedsHelp`) without any manual `foreman set-state` step.
 
 ---
 
