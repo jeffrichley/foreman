@@ -36,7 +36,18 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-PID_PATH = Path.home() / ".foreman" / "v4" / "daemon.pid"
+# The PID file MUST live on an ephemeral, per-container-lifetime path — NOT a
+# persistent volume/bind-mount. Across a container recreate (Watchtower redeploy)
+# or a restart, PID *numbers* reset (fresh PID namespace), so a PID written by a
+# prior daemon generation can collide with an unrelated live PID in the new
+# container. That makes the single-instance start guard false-positive ("daemon
+# already running (pid N)") and crash-loop the daemon — observed live 2026-06-26
+# when a mid-run redeploy left a stale ``pid 7`` on the bind-mounted path.
+# ``FOREMAN_PID_DIR`` points the container at a tmpfs (see docker-compose.yml)
+# that is wiped on every container start; non-container dev runs fall back to the
+# home dir so behavior there is unchanged.
+_PID_DIR = Path(os.environ.get("FOREMAN_PID_DIR") or (Path.home() / ".foreman" / "v4"))
+PID_PATH = _PID_DIR / "daemon.pid"
 
 # Matches docker-compose's CLAUDE_CONFIG_DIR for the daemon container. The
 # Claude Agent SDK + claude CLI store session transcripts under
