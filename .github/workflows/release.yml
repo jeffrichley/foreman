@@ -64,10 +64,12 @@ jobs:
   # Trusted Publisher (OIDC) — no PYPI_TOKEN secret needed. PyPI verifies
   # this workflow's identity via GitHub OIDC against the Pending Publisher
   # binding configured at:
-  #   https://pypi.org/manage/project/foreman/settings/publishing/
+  #   https://pypi.org/manage/project/agent-core-foreman/settings/publishing/
   # Binding shape: owner=jeffrichley, repo=foreman, workflow=release.yml,
   # environment=pypi. The `pypi` environment is configured in the repo
   # settings → Environments → pypi → restricted to branch=main + tag=v*.
+  # NOTE: PyPI distribution name is `agent-core-foreman` (the bare `foreman`
+  # is taken by Puppet); import name + CLI stay `foreman`. See pyproject.
   #
   # If you don't want to publish to PyPI yet, leave this job in place but
   # skip configuring the pypi environment in repo settings — the job will
