@@ -151,6 +151,98 @@ async def test_run_agent_returns_validated_pydantic_instance(
 
 
 # ----------------------------------------------------------------------
+# Crash-recovery resume arm: session_id + resume forwarding
+# ----------------------------------------------------------------------
+#
+# The provider forwards ``session_id`` to ``ClaudeAgentOptions.session_id``
+# (pin the session) and, when ``resume`` is True, ``ClaudeAgentOptions.resume``
+# = session_id (the SDK forwards this as ``claude --resume <id>``). Both
+# fields exist on ClaudeAgentOptions (claude_agent_sdk 0.1.63). Behavior is
+# unchanged when both are left at their defaults — covered by every other
+# test in this file, which never passes them and asserts session_id/resume
+# stay None.
+
+
+@pytest.mark.asyncio
+async def test_run_agent_forwards_session_id_and_resume_to_options(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When ``session_id`` + ``resume=True`` are passed, both land in the
+    ``ClaudeAgentOptions`` handed to the SDK: ``session_id`` pins the
+    session and ``resume`` carries the same id."""
+    calls = _patch_query(
+        monkeypatch,
+        [_make_result(subtype="success", structured_output={"name": "ok", "count": 1})],
+    )
+
+    provider = AnthropicSDKProvider()
+    await provider.run_agent(
+        system_prompt="sys",
+        user_prompt="usr",
+        allowed_tools=["Read"],
+        output_model=_DemoOutput,
+        cwd=tmp_path,
+        session_id="s1",
+        resume=True,
+    )
+
+    options = calls[0]["options"]
+    assert options.session_id == "s1"
+    assert options.resume == "s1"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_session_id_without_resume_pins_but_does_not_resume(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``session_id`` alone pins the session id but leaves ``resume``
+    unset (None) — the SDK starts a fresh session under that id."""
+    calls = _patch_query(
+        monkeypatch,
+        [_make_result(subtype="success", structured_output={"name": "ok", "count": 1})],
+    )
+
+    provider = AnthropicSDKProvider()
+    await provider.run_agent(
+        system_prompt="sys",
+        user_prompt="usr",
+        allowed_tools=["Read"],
+        output_model=_DemoOutput,
+        cwd=tmp_path,
+        session_id="s1",
+    )
+
+    options = calls[0]["options"]
+    assert options.session_id == "s1"
+    assert options.resume is None
+
+
+@pytest.mark.asyncio
+async def test_run_agent_defaults_leave_session_id_and_resume_unset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The inert default: no ``session_id`` / ``resume`` passed → the
+    SDK options carry None for both (SDK generates a fresh session)."""
+    calls = _patch_query(
+        monkeypatch,
+        [_make_result(subtype="success", structured_output={"name": "ok", "count": 1})],
+    )
+
+    provider = AnthropicSDKProvider()
+    await provider.run_agent(
+        system_prompt="sys",
+        user_prompt="usr",
+        allowed_tools=["Read"],
+        output_model=_DemoOutput,
+        cwd=tmp_path,
+    )
+
+    options = calls[0]["options"]
+    assert options.session_id is None
+    assert options.resume is None
+
+
+# ----------------------------------------------------------------------
 # Subtype error handling
 # ----------------------------------------------------------------------
 

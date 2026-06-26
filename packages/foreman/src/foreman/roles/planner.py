@@ -356,12 +356,21 @@ async def _run_planner_core(
             labels=set(issue.labels),
         )
 
+        # Crash-recovery resume arm (inert here): the dispatcher exports
+        # FOREMAN_SESSION_ID + FOREMAN_RESUME_SESSION_ID when a state wants
+        # to resume an interrupted Claude session. Both unset under normal
+        # operation, so ``session_id`` is None and ``resume`` is False.
+        _session_id = os.environ.get("FOREMAN_SESSION_ID")
+        _resume_id = os.environ.get("FOREMAN_RESUME_SESSION_ID")
+        _resume = bool(_resume_id) and _resume_id == _session_id
         llm_output, run_usage = await provider.run_agent(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             allowed_tools=PLANNER_ALLOWED_TOOLS,
             output_model=PlannerOutput,
             cwd=wt_path,
+            session_id=_session_id,
+            resume=_resume,
         )
         # foreman#235: hoist ``usage`` to the outer scope IMMEDIATELY
         # so a failure in any later step (commit/push/open_pull_request)

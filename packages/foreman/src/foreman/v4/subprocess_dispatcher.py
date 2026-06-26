@@ -221,6 +221,8 @@ class SubprocessRoleDispatcher:
     def dispatch(
         self, *, role: str, project: str, issue_number: int, ticket_id: int,
         state_instance_id: int | None = None,
+        session_id: str | None = None,
+        resume: bool = False,
     ) -> str:
         try:
             inv = _ROLE_TO_INVOCATION[role]
@@ -246,6 +248,18 @@ class SubprocessRoleDispatcher:
         # uses the literal ``"unknown"`` for its dedup key.
         if state_instance_id is not None:
             env["FOREMAN_STATE_INSTANCE_ID"] = str(state_instance_id)
+        # Crash-recovery resume arm: thread the Claude session id +
+        # resume flag into the role subprocess. The role-core reads
+        # FOREMAN_SESSION_ID (to pin) and FOREMAN_RESUME_SESSION_ID (to
+        # resume that same session). Both omitted under normal operation,
+        # so the role-core's reads return None and behavior is unchanged.
+        if session_id is not None:
+            env["FOREMAN_SESSION_ID"] = session_id
+            # ``resume`` forwards the same session id; it is meaningless
+            # (and there is no value to export) without one. Guarding on
+            # ``session_id is not None`` also keeps the env value a str.
+            if resume:
+                env["FOREMAN_RESUME_SESSION_ID"] = session_id
 
         started_at = dt.datetime.now(dt.UTC)
         role_base = _base_role(role)

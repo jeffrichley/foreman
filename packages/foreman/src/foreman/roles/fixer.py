@@ -656,12 +656,21 @@ async def _run_fixer_core(
         # ``Signed-off-by:`` trailers — regardless of which target
         # (spec_pr / impl_pr) is in flight.
         operator = resolve_operator(project, config)
+        # Crash-recovery resume arm (inert here): the dispatcher exports
+        # FOREMAN_SESSION_ID + FOREMAN_RESUME_SESSION_ID when a state wants
+        # to resume an interrupted Claude session. Both unset under normal
+        # operation, so ``session_id`` is None and ``resume`` is False.
+        _session_id = os.environ.get("FOREMAN_SESSION_ID")
+        _resume_id = os.environ.get("FOREMAN_RESUME_SESSION_ID")
+        _resume = bool(_resume_id) and _resume_id == _session_id
         llm_output, run_usage = await provider.run_agent(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             allowed_tools=FIXER_ALLOWED_TOOLS,
             output_model=FixerOutput,
             cwd=wt_path,
+            session_id=_session_id,
+            resume=_resume,
             env={
                 **os.environ,
                 "GH_TOKEN": fixer_token,

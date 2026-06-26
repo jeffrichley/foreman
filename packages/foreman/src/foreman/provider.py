@@ -134,6 +134,8 @@ class ProviderFacade(ABC):
         cwd: Path,
         max_turns: int = 1000,
         env: dict[str, str] | None = None,
+        session_id: str | None = None,
+        resume: bool = False,
     ) -> tuple[T, UsageInfo]:
         """Run an agent and return ``(validated_output, usage_info)``.
 
@@ -158,6 +160,14 @@ class ProviderFacade(ABC):
                 they want preserved (e.g., ``{**os.environ, "GH_TOKEN": ...}``).
                 Used by role dispatchers to inject per-role bot tokens so the
                 agent's ``gh`` calls act as the bot identity, not the parent.
+            session_id: Optional Claude session id to pin for this run. When
+                provided, it is forwarded to the SDK's ``ClaudeAgentOptions``
+                so a later resume can target the same session. Default
+                ``None`` — the SDK generates a fresh session id.
+            resume: When True, the SDK resumes the conversation history from
+                ``session_id`` (forwarded as ``claude --resume <id>``).
+                Inert without a ``session_id``. Default ``False`` — start a
+                new session.
 
         Returns:
             A tuple ``(output, usage)``. ``output`` is an instance of
