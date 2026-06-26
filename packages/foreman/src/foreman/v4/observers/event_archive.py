@@ -74,7 +74,7 @@ class EventArchiveObserver:
         )
         event_type = _EVENT_TYPE_NAMES.get(type(event), "unknown")
         # foreman#314: write through the repo seam so event archival is
-        # storage-agnostic (SQLite today, Postgres next). The repo owns
+        # storage-agnostic (Postgres). The repo owns
         # JSON serialization of ``payload`` — pass the dict directly.
         self._repo.append_event(
             ticket_id=event.ticket_id,
