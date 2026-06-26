@@ -46,7 +46,7 @@ These are parallel only in the `can_run` skip; they diverge after that. Forcing 
 3. Update `InMemoryTicketRepository.count_consecutive_transient_provider_errors` in `repository.py` to import and call `is_transient_error_exempt`; remove the two inline skip branches.
 4. Update `PostgresTicketRepository.count_consecutive_same_state` in `postgres_repository.py` to import and call `is_runaway_exempt`; remove the four inline skip branches.
 5. Update `PostgresTicketRepository.count_consecutive_transient_provider_errors` in `postgres_repository.py` to import and call `is_transient_error_exempt`; remove the two inline skip branches.
-6. Add unit tests for `is_runaway_exempt` and `is_transient_error_exempt` in a new `packages/foreman/tests/v4/test_outcome.py` (the file does not currently exist).
+6. Append unit tests for `is_runaway_exempt` and `is_transient_error_exempt` to the existing `packages/foreman/tests/v4/test_outcome.py`.
 
 ## File-level changes
 
@@ -55,7 +55,7 @@ These are parallel only in the `can_run` skip; they diverge after that. Forcing 
 | `packages/foreman/src/foreman/v4/outcome.py` | Add `is_runaway_exempt` and `is_transient_error_exempt` pure functions |
 | `packages/foreman/src/foreman/v4/repository.py` | Import the two predicates; replace inline skip branches in both counter methods |
 | `packages/foreman/src/foreman/v4/postgres_repository.py` | Import the two predicates; replace inline skip branches in both counter methods |
-| `packages/foreman/tests/v4/test_outcome.py` | New file: unit tests for `is_runaway_exempt` and `is_transient_error_exempt` |
+| `packages/foreman/tests/v4/test_outcome.py` | Existing file: append unit tests for `is_runaway_exempt` and `is_transient_error_exempt` |
 
 ## Alternatives considered
 
