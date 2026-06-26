@@ -97,7 +97,7 @@ class Poller:
             # non-transient outcome (defense in depth) and via
             # ``cmd_retry`` for operator overrides — we deliberately
             # do NOT clear here so a daemon restart mid-suspension
-            # picks up the same suspension window from SQLite.
+            # picks up the same suspension window from the repository.
             if ticket.next_action_at is not None and ticket.next_action_at > now:
                 continue
             self._qm.enqueue(WorkItem(

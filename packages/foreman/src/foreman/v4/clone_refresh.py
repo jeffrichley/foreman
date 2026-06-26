@@ -9,8 +9,7 @@ the local ``refs/remotes/origin/<default>`` ref went stale between polls.
 Consequence: a role could be dispatched against an out-of-date base until
 the next worktree creation re-fetched.
 
-This module re-introduces the refresh as a daemon-loop component shaped
-exactly like :class:`foreman.v4.state_backup.BackupScheduler`: it is
+This module re-introduces the refresh as a daemon-loop component: it is
 injected into the :class:`~foreman.v4.daemon.Daemon`, ``tick()``-ed once
 per ``tick_once()`` call, and reuses the surviving
 :func:`foreman.worktree.fetch_origin_default_branch` helper rather than
@@ -155,5 +154,5 @@ class CloneRefresher:
 # Type alias for "the daemon's clone-refresher attribute" — either a real
 # :class:`CloneRefresher` or the no-op :class:`_DisabledCloneRefresher`
 # sentinel. Structural typing (not a formal Protocol); both share
-# ``tick() -> None``. Mirrors ``state_backup.BackupSchedulerLike``.
+# ``tick() -> None``.
 CloneRefresherLike = CloneRefresher | _DisabledCloneRefresher

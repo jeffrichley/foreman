@@ -4,14 +4,13 @@ from __future__ import annotations
 import datetime as dt
 import threading
 import time
-from pathlib import Path
 from unittest.mock import MagicMock
 
 from foreman.v4.daemon import Daemon, DaemonConfig
 from foreman.v4.git_provider import FakeGitProvider
 from foreman.v4.poller import Poller
+from foreman.v4.repository import InMemoryTicketRepository
 from foreman.v4.role_dispatcher import FakeRoleDispatcher
-from foreman.v4.sqlite_repository import SqliteTicketRepository
 
 
 def _canned(kind: str, *, pr_number: int | None = None) -> str:
@@ -20,7 +19,7 @@ def _canned(kind: str, *, pr_number: int | None = None) -> str:
 
 
 def test_daemon_one_tick_processes_one_ticket():
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     git = FakeGitProvider()
     git.set_open_issues_with_label(
         project="p", label="foreman:plan", issue_numbers={1},
@@ -51,7 +50,7 @@ def test_daemon_one_tick_processes_one_ticket():
 
 
 def test_daemon_run_until_stopped_responds_to_stop_event():
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     poller = Poller(
         repo=repo, qm=None, git=FakeGitProvider(),
         project="p", trigger_label="foreman:plan",
@@ -78,7 +77,7 @@ def test_daemon_shutdown_waits_for_in_flight_work():
     submit a transition that parks on an Event, kick shutdown from a side
     thread, and assert it doesn't return early.
     """
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     git = FakeGitProvider()
     git.set_open_issues_with_label(
         project="p", label="foreman:plan", issue_numbers={1},
@@ -158,7 +157,7 @@ def test_daemon_shutdown_is_idempotent():
     (delegates to a ThreadPoolExecutor whose shutdown is documented
     safe to call repeatedly).
     """
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     poller = Poller(
         repo=repo, qm=None, git=FakeGitProvider(),
         project="p", trigger_label="foreman:plan",
@@ -176,53 +175,6 @@ def test_daemon_shutdown_is_idempotent():
     assert daemon.qm.in_flight_count() == 0
 
 
-# --- Issue #360: backup scheduler wiring on tick_once -------------------
-
-
-def test_tick_once_calls_backup_scheduler():
-    """tick_once must invoke the injected scheduler exactly once."""
-    repo = SqliteTicketRepository.in_memory()
-    stub_scheduler = MagicMock()
-    stub_scheduler.tick.return_value = None
-    poller = Poller(
-        repo=repo, qm=None, git=FakeGitProvider(),
-        project="p", trigger_label="foreman:plan",
-        clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
-    )
-    daemon = Daemon(
-        repo=repo, git=FakeGitProvider(),
-        dispatcher=FakeRoleDispatcher(responses={}),
-        pollers=[poller],
-        config=DaemonConfig(tick_seconds=0, max_in_flight=4),
-        clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
-        backup_scheduler=stub_scheduler,
-    )
-    daemon.tick_once()
-    assert stub_scheduler.tick.call_count == 1
-
-
-def test_tick_once_runs_with_disabled_scheduler_default(tmp_path: Path):
-    """No explicit ``backup_scheduler=`` kwarg → sentinel default.
-    ``tick_once`` must not raise AND must not write any files to
-    ``tmp_path`` (the sentinel writes nowhere)."""
-    repo = SqliteTicketRepository.in_memory()
-    poller = Poller(
-        repo=repo, qm=None, git=FakeGitProvider(),
-        project="p", trigger_label="foreman:plan",
-        clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
-    )
-    daemon = Daemon(
-        repo=repo, git=FakeGitProvider(),
-        dispatcher=FakeRoleDispatcher(responses={}),
-        pollers=[poller],
-        config=DaemonConfig(tick_seconds=0, max_in_flight=4),
-        clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
-    )
-    daemon.tick_once()
-    # Sentinel writes no files — tmp_path stays empty.
-    assert list(tmp_path.iterdir()) == []
-
-
 # --- Issue #407: clone refresher wiring on tick_once -------------------
 
 
@@ -230,7 +182,7 @@ def test_tick_once_calls_clone_refresher():
     """foreman#407: tick_once must invoke the injected clone refresher
     exactly once per tick — proving the per-poll clone refresh runs in
     the daemon loop, NOT only inside worktree.create()."""
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     stub_refresher = MagicMock()
     stub_refresher.tick.return_value = None
     poller = Poller(
@@ -253,7 +205,7 @@ def test_tick_once_calls_clone_refresher():
 def test_tick_once_runs_with_disabled_clone_refresher_default():
     """No explicit ``clone_refresher=`` kwarg → no-op sentinel default;
     ``tick_once`` must not raise."""
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     poller = Poller(
         repo=repo, qm=None, git=FakeGitProvider(),
         project="p", trigger_label="foreman:plan",

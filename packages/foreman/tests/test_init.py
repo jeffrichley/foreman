@@ -439,8 +439,10 @@ def _v4_skeleton_config() -> str:
     actually runs against an apps shape."""
     return (
         "[daemon]\n"
-        'db_path = "/tmp/v4.db"\n'
         'log_dir = "/tmp/logs"\n\n'
+        "[storage]\n"
+        'engine = "postgres"\n'
+        'dsn = "postgresql://test/test"\n\n'
         "[apps.planner]\n"
         "app_id = 12345\n"
         'private_key_path = "/keys/planner.pem"\n\n'

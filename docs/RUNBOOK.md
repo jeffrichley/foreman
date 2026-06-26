@@ -51,6 +51,12 @@ worktrees won't be touched again post-cutover.
 
 ## v3 → v4 substrate cutover (one-shot, 2026-06-19)
 
+> **Historical.** This documents a one-time past cutover. The SQLite
+> stores it references (`reconciler.sqlite`, `foreman.sqlite`) are no
+> longer the live store — v4/v5 has since moved to a Postgres sidecar
+> (`foreman-postgres`); SQLite was removed entirely. Read this section
+> only for the migration history, not for current state layout.
+
 The Phase 9 PR replaces the v3 reconciler-rules state engine with the
 v4 state-machine + EventBus + observers substrate. There is no in-place
 migration of in-flight tickets — the v3 and v4 SQLite schemas are
@@ -360,85 +366,27 @@ The 120s default is the trade-off the foreman#363 spec settled on.
 
 ## Backups and restoration
 
-Issue #360 added a daemon-internal scheduler that takes online SQLite
-snapshots of `/foreman/state/foreman.sqlite` and writes them gzip-
-compressed to a host bind mount at `~/.foreman/backups/`. The bind
-mount is load-bearing: `docker compose down -v` deletes named volumes
-(the whole failure mode the backups protect against) but leaves
-host-bind directories alone.
+The daemon-internal SQLite snapshot scheduler (issue #360) and the
+`foreman restore` command were **removed** with the SQLite kill. They
+snapshotted `/foreman/state/foreman.sqlite`, which is no longer the
+authoritative store, so they no longer apply.
 
-### What exists
+Production state now lives in the `foreman-postgres` sidecar
+(`postgres:16-alpine`), with its data on the `foreman-pg-data` named
+volume.
 
-- Path: `~/.foreman/backups/foreman-<YYYYMMDDTHHMMSSZ>.sqlite.gz`
-- Schedule: hourly by default (`config.toml.template` `[backup]`
-  `interval_seconds = 3600`).
-- Retention: 24 hourly + 7 daily + 4 weekly survivors ≈ 35 files
-  at any time. Each file is a few MB after gzip; total footprint
-  is in the low tens of MB.
+### Current DR gap (read this)
 
-### Verify a backup is non-corrupt
+There is **no Postgres snapshot mechanism yet**. The `foreman-pg-data`
+volume survives `docker compose stop` and `docker compose down`, but is
+**wiped by `docker compose down -v`**. With no backup in place, a
+`down -v` against this volume is irrecoverable — treat it as a
+destructive, point-of-no-return command.
 
-Before restoring, sanity-check the snapshot with `PRAGMA
-integrity_check`:
-
-```bash
-gunzip -c ~/.foreman/backups/foreman-<ts>.sqlite.gz > /tmp/check.sqlite
-sqlite3 /tmp/check.sqlite "PRAGMA integrity_check;"
-# should print: ok
-```
-
-If the result is anything other than `ok`, pick the next-older
-snapshot and re-verify.
-
-### Restore procedure
-
-**MANDATORY: stop the daemon FIRST.** The `foreman restore` PID-file
-check is best-effort inside Docker — the one-off `docker compose run`
-container cannot see the daemon container's PID file (it lives in
-the daemon's writable layer, not on a shared volume), so the check
-will say "safe to proceed" even if the daemon is actively writing
-the DB. Running restore against a live DB will corrupt either the
-live DB or the restored one.
-
-```bash
-# MANDATORY first step — stop writers before the swap.
-docker compose stop daemon
-
-# One-off container mounts the same volumes/binds as `up`, so
-# `db_path` (inside `foreman-state`) and the bind-mounted backup
-# file are both resolvable inside the one-off container.
-docker compose run --rm daemon \
-    foreman restore /foreman/backups/foreman-<ts>.sqlite.gz
-
-# Bring the daemon back online.
-docker compose up -d daemon
-```
-
-The restore command writes a "pre-restore" snapshot of the live DB
-next to it as `foreman.pre-restore-<ts>.sqlite.gz` BEFORE swapping
-in the requested snapshot. Use it as a one-step undo if you
-restored the wrong file: another `foreman restore` invocation
-against the pre-restore path swaps it back into place.
-
-### Tuning
-
-Edit `[backup]` in `docker/foreman/config.toml.template` (or your
-own deployed `config.toml`) to change the cadence or retention:
-
-```toml
-[backup]
-enabled = true              # set to false to turn snapshots off
-dir = "/foreman/backups"
-interval_seconds = 3600     # ge=60 floor; 0 is rejected at load
-retention_hourly = 24
-retention_daily = 7
-retention_weekly = 4
-```
-
-Operators with a small WSL2 disk who don't want backups at all can
-set `enabled = false`; the scheduler returns a no-op sentinel and
-writes no files. Operators with a bigger disk who want longer
-horizons can grow the three `retention_*` knobs.
+The replacement Postgres DR backup is tracked as
+[foreman#434](https://github.com/jeffrichley/foreman/issues/434) and is
+not yet built. Until it lands, the only protection is operator
+discipline around `down -v`.
 
 ---
 
@@ -809,5 +757,5 @@ Decision 7 § How to add a rule.
 
 The image is reproducible from any commit-SHA via `scripts/build-docker.sh`.
 Volume contents are NOT reproducible (they hold cloned project state +
-SQLite + logs from real runs). Treat `down -v` as the destructive
+Postgres data + logs from real runs). Treat `down -v` as the destructive
 command it is.

@@ -11,7 +11,7 @@ from foreman.v4.observers.label_observability import LabelObservabilityObserver
 from foreman.v4.observers.metrics import MetricsObserver
 from foreman.v4.observers.structured_log import StructuredLogObserver
 from foreman.v4.outcome import Outcome, OutcomeConfidence, OutcomeKind
-from foreman.v4.sqlite_repository import SqliteTicketRepository
+from foreman.v4.repository import InMemoryTicketRepository
 from foreman.v4.state import StateContext, TicketState
 
 
@@ -60,7 +60,7 @@ class _RecordingWriter:
 
 def test_one_transition_reaches_all_four_observers(caplog):
     caplog.set_level(logging.INFO, logger="foreman.v4.transitions")
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
     instance = repo.open_state_instance(
         ticket_id=ticket.id, state_name="Demo", sequence=1,
@@ -110,9 +110,7 @@ def test_one_transition_reaches_all_four_observers(caplog):
     #    by _enter_terminal — it precedes the Demo state_exited because
     #    _enter_terminal runs inside transition()'s try-block, before
     #    the finally that emits state_exited.
-    rows = repo._conn.execute(
-        "SELECT event_type FROM events ORDER BY id"
-    ).fetchall()
+    rows = repo.list_events_for_ticket(ticket.id)
     types = [r["event_type"] for r in rows]
     assert types == [
         "state_entered",

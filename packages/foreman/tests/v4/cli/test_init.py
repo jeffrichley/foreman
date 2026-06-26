@@ -23,6 +23,7 @@ from foreman.v4.config import (
     OperatorIdentity,
     OrchestratorConfig,
     ProjectConfig,
+    StorageConfig,
     V4Config,
 )
 
@@ -52,7 +53,6 @@ def _v4_config_toml(tmp_path: Path, projects: list[ProjectConfig]) -> Path:
     The minimum required shape — daemon + apps + orchestrator + a list
     of projects. Used by tests that need a real V4Config on disk.
     """
-    db_path = tmp_path / "v4.db"
     log_dir = tmp_path / "logs"
     project_blocks = "\n".join(
         f'[[projects]]\nname = "{p.name}"\nrepo = "{p.repo}"\n'
@@ -61,8 +61,11 @@ def _v4_config_toml(tmp_path: Path, projects: list[ProjectConfig]) -> Path:
     )
     toml = f"""\
 [daemon]
-db_path = "{db_path.as_posix()}"
 log_dir = "{log_dir.as_posix()}"
+
+[storage]
+engine = "postgres"
+dsn = "postgresql://test/test"
 
 [apps.planner]
 app_id = 12345
@@ -302,7 +305,7 @@ def test_init_uses_v4_config_apps_and_orchestrator():
     surface depends on it.
     """
     config = V4Config(
-        db_path="/tmp/v4.db",
+        storage=StorageConfig(engine="postgres", dsn="postgresql://test/test"),
         log_dir="/tmp/logs",
         apps=_apps_config(),
         orchestrator=_orchestrator_config(),

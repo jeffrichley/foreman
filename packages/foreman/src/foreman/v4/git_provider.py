@@ -154,7 +154,7 @@ class GitProvider(Protocol):
 
         Returns the PR number, or None if no open PR matches. Used by
         ``foreman reset`` to discover spec/impl PRs without depending
-        on the SQLite ticket row (which may have already been deleted
+        on the ticket row (which may have already been deleted
         manually). PRs that are closed or merged are NOT returned —
         the discovery phase only cares about live debris that needs
         closing.

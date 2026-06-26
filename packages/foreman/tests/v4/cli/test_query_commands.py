@@ -11,12 +11,12 @@ from foreman.v4.cli import app
 from foreman.v4.cli.context import build_cli_context
 from foreman.v4.outcome import OutcomeKind
 from foreman.v4.queue_manager import QueueManager
-from foreman.v4.sqlite_repository import SqliteTicketRepository
+from foreman.v4.repository import InMemoryTicketRepository
 from foreman.v4.work import WorkItem
 
 
-def _setup_repo_with_two_tickets() -> SqliteTicketRepository:
-    repo = SqliteTicketRepository.in_memory()
+def _setup_repo_with_two_tickets() -> InMemoryTicketRepository:
+    repo = InMemoryTicketRepository()
     now = dt.datetime(2026, 6, 13, 12, 0, 0)
     a = repo.create_ticket(project="p", issue_number=1, now=now)
     b = repo.create_ticket(project="p", issue_number=2, now=now)
@@ -56,7 +56,7 @@ def test_ps_format_json_emits_parseable_json():
 
 
 def test_show_renders_state_history_tree():
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     now = dt.datetime(2026, 6, 13, 12, 0, 0)
     ticket = repo.create_ticket(project="p", issue_number=1, now=now)
     inst1 = repo.open_state_instance(
@@ -77,7 +77,7 @@ def test_show_renders_state_history_tree():
 
 
 def test_show_unknown_ticket_returns_nonzero():
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     runner = CliRunner()
     result = runner.invoke(
         app, ["show", "999"], obj=build_cli_context(repo=repo),

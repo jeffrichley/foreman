@@ -11,6 +11,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from foreman.v4.bootstrap import bootstrap_cli_context
 from foreman.v4.config import (
     AppCredentials,
@@ -32,8 +34,37 @@ from foreman.v4.observers.terminal_landing import TerminalLandingObserver
 from foreman.v4.postgres_repository import PostgresTicketRepository
 from foreman.v4.repository import InMemoryTicketRepository
 from foreman.v4.routing_git_provider import RoutingGitProvider
-from foreman.v4.sqlite_repository import SqliteTicketRepository
-from foreman.v4.state_backup import _DisabledBackupScheduler
+
+_TEST_DSN = "postgresql://u:p@localhost:5432/foreman"
+
+
+def _storage_config() -> StorageConfig:
+    """Postgres-only storage block for bootstrap wiring tests.
+
+    StorageConfig is Postgres-only (kill-sqlite): every V4Config used in
+    these tests must carry a valid postgres storage block with a dsn, or
+    the ``StorageConfig`` validator refuses at construction. The
+    ``_stub_postgres`` autouse fixture stubs ``from_dsn`` so no live DB is
+    required — bootstrap gets a real (in-memory) repo object back."""
+    return StorageConfig(engine="postgres", dsn=_TEST_DSN)
+
+
+@pytest.fixture(autouse=True)
+def _stub_postgres(monkeypatch):
+    """Stub ``PostgresTicketRepository.from_dsn`` so bootstrap wiring
+    tests build a real repo object without a live Postgres. Returns an
+    :class:`InMemoryTicketRepository` — a real repo that satisfies every
+    construction-time need (bootstrap never queries the repo while
+    wiring)."""
+
+    def fake_from_dsn(dsn, *, pool_min, pool_max):
+        return InMemoryTicketRepository()
+
+    monkeypatch.setattr(
+        PostgresTicketRepository,
+        "from_dsn",
+        staticmethod(fake_from_dsn),
+    )
 
 
 def _stub_identity():
@@ -75,11 +106,11 @@ def _operator_config() -> OperatorConfig:
 
 def test_bootstrap_returns_clicontext_with_all_fields(tmp_path: Path):
     config = V4Config(
-        db_path=str(tmp_path / "foreman.db"),
         log_dir=str(tmp_path / "logs"),
         apps=_apps_config(),
         orchestrator=_orchestrator_config(),
         operator=_operator_config(),
+        storage=_storage_config(),
         projects=[
             ProjectConfig(
                 name="voice",
@@ -99,39 +130,13 @@ def test_bootstrap_returns_clicontext_with_all_fields(tmp_path: Path):
     assert ctx.dispatcher is not None
 
 
-def test_db_file_created_at_configured_path(tmp_path: Path):
-    db_path = tmp_path / "v4.db"
-    config = V4Config(
-        db_path=str(db_path),
-        log_dir=str(tmp_path / "logs"),
-        apps=_apps_config(),
-        orchestrator=_orchestrator_config(),
-        operator=_operator_config(),
-        projects=[
-            ProjectConfig(
-                name="voice",
-                repo="owner/voice",
-                local_clone_path=str(tmp_path / "voice"),
-            ),
-        ],
-    )
-    bootstrap_cli_context(
-        config=config,
-        identity=_stub_identity(),
-        git_provider_factory=lambda repo: _stub_git_factory(),
-    )
-    # SQLite creates the file lazily on first write; the bootstrap
-    # should have applied the schema, which IS a write.
-    assert db_path.exists()
-
-
 def test_bootstrap_builds_one_poller_per_project(tmp_path: Path):
     config = V4Config(
-        db_path=str(tmp_path / "v4.db"),
         log_dir=str(tmp_path / "logs"),
         apps=_apps_config(),
         orchestrator=_orchestrator_config(),
         operator=_operator_config(),
+        storage=_storage_config(),
         projects=[
             ProjectConfig(name="a", repo="o/a", local_clone_path=str(tmp_path / "a")),
             ProjectConfig(name="b", repo="o/b", local_clone_path=str(tmp_path / "b")),
@@ -156,11 +161,11 @@ def test_bootstrap_wires_event_bus_with_standard_observers(tmp_path: Path):
       - one of each of the standard observer types is present.
     """
     config = V4Config(
-        db_path=str(tmp_path / "v4.db"),
         log_dir=str(tmp_path / "logs"),
         apps=_apps_config(),
         orchestrator=_orchestrator_config(),
         operator=_operator_config(),
+        storage=_storage_config(),
         projects=[
             ProjectConfig(
                 name="voice",
@@ -216,11 +221,11 @@ def test_bootstrap_wires_routing_git_provider_for_multi_project(tmp_path: Path):
     by_repo = {"owner/voice": voice_provider, "owner/foreman": foreman_provider}
 
     config = V4Config(
-        db_path=str(tmp_path / "v4.db"),
         log_dir=str(tmp_path / "logs"),
         apps=_apps_config(),
         orchestrator=_orchestrator_config(),
         operator=_operator_config(),
+        storage=_storage_config(),
         projects=[
             ProjectConfig(
                 name="voice",
@@ -271,11 +276,11 @@ def test_bootstrap_skips_label_observer_when_no_projects(tmp_path: Path):
     LabelObservabilityObserver from. The other three observers still
     land on the bus so the surface remains observable."""
     config = V4Config(
-        db_path=str(tmp_path / "v4.db"),
         log_dir=str(tmp_path / "logs"),
         apps=_apps_config(),
         orchestrator=_orchestrator_config(),
         operator=_operator_config(),
+        storage=_storage_config(),
         projects=[],
     )
     ctx = bootstrap_cli_context(
@@ -291,32 +296,6 @@ def test_bootstrap_skips_label_observer_when_no_projects(tmp_path: Path):
     assert StructuredLogObserver in observer_types
     assert EventArchiveObserver in observer_types
     assert MetricsObserver in observer_types
-
-
-def test_bootstrap_uses_sqlite_when_engine_sqlite(tmp_path: Path):
-    """Task 11: with ``storage.engine == "sqlite"`` (the default),
-    bootstrap builds a :class:`SqliteTicketRepository`."""
-    config = V4Config(
-        db_path=str(tmp_path / "v4.db"),
-        log_dir=str(tmp_path / "logs"),
-        apps=_apps_config(),
-        orchestrator=_orchestrator_config(),
-        operator=_operator_config(),
-        storage=StorageConfig(engine="sqlite"),
-        projects=[
-            ProjectConfig(
-                name="voice",
-                repo="owner/voice",
-                local_clone_path=str(tmp_path / "voice"),
-            ),
-        ],
-    )
-    ctx = bootstrap_cli_context(
-        config=config,
-        identity=_stub_identity(),
-        git_provider_factory=lambda repo: FakeGitProvider(),
-    )
-    assert isinstance(ctx.repo, SqliteTicketRepository)
 
 
 def test_bootstrap_uses_postgres_when_engine_postgres(monkeypatch, tmp_path: Path):
@@ -344,7 +323,6 @@ def test_bootstrap_uses_postgres_when_engine_postgres(monkeypatch, tmp_path: Pat
     )
 
     config = V4Config(
-        db_path=str(tmp_path / "v4.db"),
         log_dir=str(tmp_path / "logs"),
         apps=_apps_config(),
         orchestrator=_orchestrator_config(),
@@ -375,8 +353,7 @@ def test_bootstrap_uses_postgres_when_engine_postgres(monkeypatch, tmp_path: Pat
     assert captured["pool_max"] == 7
     assert isinstance(ctx.repo, InMemoryTicketRepository)
 
-    # File-snapshot backups are SQLite-specific; under postgres the daemon
-    # must hold the disabled-backup sentinel, not a real BackupScheduler.
+    # The daemon no longer carries any backup scheduler — file-snapshot
+    # backups were SQLite-specific and removed with the SQLite subsystem.
     assert ctx.daemon is not None
-    backup_scheduler = ctx.daemon._backup_scheduler  # type: ignore[attr-defined]
-    assert isinstance(backup_scheduler, _DisabledBackupScheduler)
+    assert not hasattr(ctx.daemon, "_backup_scheduler")

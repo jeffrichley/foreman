@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from foreman.auth import InstallationToken
+from foreman.v4.repository import InMemoryTicketRepository
 
 
 def test_main_help_exits_cleanly(
@@ -49,18 +50,29 @@ def test_main_help_exits_cleanly(
         "foreman.v4.pygithub_git_provider.PyGithubGitProvider",
         lambda **_kwargs: MagicMock(),
     )
+    # v5 (kill-sqlite): bootstrap now builds a PostgresTicketRepository,
+    # whose ``from_dsn`` opens a real connection pool eagerly. The test
+    # uses a dummy DSN, so stub the constructor to return an in-memory
+    # repo — no Postgres connect happens. The boundary under test is the
+    # config-load + bootstrap wiring, not real persistence.
+    monkeypatch.setattr(
+        "foreman.v4.postgres_repository.PostgresTicketRepository.from_dsn",
+        classmethod(lambda cls, dsn, **_kwargs: InMemoryTicketRepository()),
+    )
 
     # Build a minimal valid config + dummy PEM files (never read at --help).
     log_dir = tmp_path / "logs"
-    db_path = tmp_path / "v4.db"
     for role in ("planner", "reviewer", "fixer", "worker", "orchestrator"):
         (tmp_path / f"{role}.pem").write_text("dummy")
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         f"""
 [daemon]
-db_path = "{db_path.as_posix()}"
 log_dir = "{log_dir.as_posix()}"
+
+[storage]
+engine = "postgres"
+dsn = "postgresql://test/test"
 
 [apps.planner]
 app_id = 12345

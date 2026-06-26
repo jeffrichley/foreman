@@ -1,4 +1,4 @@
-"""STATE_REGISTRY — name → factory mapping for state revival from SQLite.
+"""STATE_REGISTRY — name → factory mapping for state revival from the repository.
 
 The Poller and CLI both need to instantiate the right concrete state class
 from a stored ``current_state`` string. This is the only place that mapping

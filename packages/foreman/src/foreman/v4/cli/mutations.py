@@ -42,9 +42,9 @@ _RETRYABLE_TERMINALS = frozenset({"NeedsHelp", "Failed"})
 class ResetPlan:
     """What ``foreman reset`` will do, decided in the discovery phase.
 
-    Built read-only from current GitHub + SQLite + filesystem state by
+    Built read-only from current GitHub + Postgres + filesystem state by
     :func:`_discover`. Walked destructively by :func:`_execute`. Steps
-    that are off — no PR matched, no row in SQLite, ``--keep-pr`` set —
+    that are off — no PR matched, no row in Postgres, ``--keep-pr`` set —
     are encoded as ``None`` / empty / False so the renderer + executor
     can skip them uniformly.
     """
@@ -137,7 +137,7 @@ def _plan_steps(plan: ResetPlan) -> list[tuple[str, str]]:
         ))
     if plan.delete_ticket_id is not None:
         steps.append((
-            f"Delete ticket row id={plan.delete_ticket_id} from state.db",
+            f"Delete ticket row id={plan.delete_ticket_id} from the database",
             "delete_ticket",
         ))
     if plan.apply_plan_label:
@@ -456,14 +456,14 @@ def cmd_enqueue(
         ..., "--issue-number", min=1, help="GitHub issue number",
     ),
 ) -> None:
-    """Insert a ticket directly into SQLite at state ``Queued``.
+    """Insert a ticket directly into Postgres at state ``Queued``.
 
     Bypasses the Poller's GitHub label scan. Useful for dogfood +
     recovery scenarios where round-tripping through ``gh issue edit``
     + waiting for the next Poller tick is friction. The next worker
     poll picks the row up like any other Queued ticket.
 
-    No GitHub API calls are made; this is a pure SQLite mutation.
+    No GitHub API calls are made; this is a pure Postgres mutation.
     """
     repo = ctx.obj.repo
     config = ctx.obj.config

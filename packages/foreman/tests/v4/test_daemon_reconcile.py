@@ -13,8 +13,8 @@ from foreman.v4.daemon import Daemon, DaemonConfig
 from foreman.v4.git_provider import FakeGitProvider
 from foreman.v4.poller import Poller
 from foreman.v4.reconcile import reconcile_on_startup
+from foreman.v4.repository import InMemoryTicketRepository
 from foreman.v4.role_dispatcher import FakeRoleDispatcher
-from foreman.v4.sqlite_repository import SqliteTicketRepository
 
 
 def test_run_forever_reconciles_before_ticking():
@@ -29,7 +29,7 @@ def test_run_forever_reconciles_before_ticking():
     def clock() -> dt.datetime:
         return now
 
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(project="p", issue_number=1, now=now)
     repo.open_state_instance(
         ticket_id=ticket.id, state_name="Implementing", sequence=1, now=now,
@@ -63,7 +63,7 @@ def test_repeated_restarts_do_not_escalate_healthy_ticket():
     ``crash_recovery`` and exempted from the runaway-cap counter.
     """
     now = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     t = repo.create_ticket(project="p", issue_number=1, now=now)
     for seq in (1, 2, 3):
         repo.open_state_instance(

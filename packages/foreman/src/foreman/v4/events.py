@@ -1,13 +1,11 @@
 """Lifecycle events — the notification stream observers consume.
 
-These events are emitted by TicketState.transition() at each hook boundary
-AND (issue #360) by the daemon-level :class:`BackupScheduler` for backup
-take / failure outcomes. They are pure data — observers decide what (if
-anything) to do with them. Events MUST NOT carry references to live
-objects (repos, sockets); only serializable values. This keeps audit /
-replay implementations honest.
+These events are emitted by TicketState.transition() at each hook boundary.
+They are pure data — observers decide what (if anything) to do with them.
+Events MUST NOT carry references to live objects (repos, sockets); only
+serializable values. This keeps audit / replay implementations honest.
 
-Type hierarchy (issue #360):
+Type hierarchy:
 
     Event                 - common base; carries only ``at``
       |-- TicketEvent     - ticket-scoped fields (id / instance /
@@ -19,10 +17,8 @@ Type hierarchy (issue #360):
       |     |-- StateExitedEvent
       |     `-- StateFailedEvent
       `-- DaemonEvent     - daemon-level fields (just ``at`` today;
-            |               no ticket scope); parent of every event
-            |               emitted by the daemon itself
-            |-- BackupTakenEvent
-            `-- BackupFailedEvent
+                            no ticket scope); parent of any event
+                            emitted by the daemon itself
 
 Observers that need to read ticket-scoped fields ``isinstance``-guard
 on :class:`TicketEvent` (`StructuredLogObserver`, `MetricsObserver`,
@@ -37,7 +33,6 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass
-from typing import Literal
 
 from foreman.v4.outcome import Outcome
 
@@ -111,35 +106,6 @@ class StateFailedEvent(TicketEvent):
     """A lifecycle hook raised. ``failure_phase`` matches the failed hook."""
     failure_phase: str
     failure_reason: str
-
-
-@dataclass(frozen=True, slots=True)
-class BackupTakenEvent(DaemonEvent):
-    """The :class:`BackupScheduler` took a snapshot successfully.
-
-    ``path`` is the on-disk snapshot path as a string (NOT a
-    ``Path`` object) so the event payload stays serializable / portable
-    across observer write paths. ``pruned_count`` is the number of
-    old snapshot files the post-snapshot pruner deleted on this tick.
-    """
-
-    path: str
-    size_bytes: int
-    pruned_count: int
-
-
-@dataclass(frozen=True, slots=True)
-class BackupFailedEvent(DaemonEvent):
-    """The :class:`BackupScheduler` failed to take or prune a snapshot.
-
-    ``phase`` is ``"snapshot"`` when the failure surfaced from
-    :func:`take_snapshot` and ``"prune"`` when from
-    :func:`prune_snapshots`. ``reason`` is ``str(exc)`` truncated to
-    500 chars to keep the structured-log line tractable.
-    """
-
-    phase: Literal["snapshot", "prune"]
-    reason: str
 
 
 @dataclass(frozen=True, slots=True)

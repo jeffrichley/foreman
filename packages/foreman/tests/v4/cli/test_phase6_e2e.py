@@ -8,11 +8,11 @@ from typer.testing import CliRunner
 from foreman.v4.cli import app
 from foreman.v4.cli.context import build_cli_context
 from foreman.v4.queue_manager import QueueManager
-from foreman.v4.sqlite_repository import SqliteTicketRepository
+from foreman.v4.repository import InMemoryTicketRepository
 
 
 def test_hold_ps_resume_retry_queue_workflow():
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     t = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
     repo.set_ticket_state(t.id, "Planning", now=dt.datetime(2026, 6, 13))
     qm = QueueManager(repo=repo, max_in_flight=4)

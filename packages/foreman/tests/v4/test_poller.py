@@ -6,7 +6,7 @@ import datetime as dt
 from foreman.v4.git_provider import FakeGitProvider
 from foreman.v4.poller import Poller
 from foreman.v4.queue_manager import QueueManager
-from foreman.v4.sqlite_repository import SqliteTicketRepository
+from foreman.v4.repository import InMemoryTicketRepository
 from foreman.v4.work import WorkItem
 
 _T0 = dt.datetime(2026, 6, 13, 12, 0, 0)
@@ -23,7 +23,7 @@ def _make_poller(repo, git):
 
 
 def test_new_labeled_issue_creates_ticket_and_enqueues():
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     git = FakeGitProvider()
     git.set_open_issues_with_label(
         project="p", label="foreman:plan", issue_numbers={42},
@@ -38,7 +38,7 @@ def test_new_labeled_issue_creates_ticket_and_enqueues():
 
 
 def test_existing_ticket_not_duplicated():
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     repo.create_ticket(project="p", issue_number=42, now=_T0)
     git = FakeGitProvider()
     git.set_open_issues_with_label(
@@ -54,7 +54,7 @@ def test_existing_ticket_not_duplicated():
 
 
 def test_in_flight_non_blocked_state_re_enqueued_for_advance():
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     t = repo.create_ticket(project="p", issue_number=1, now=_T0)
     repo.set_ticket_state(t.id, "Planning", now=_T0)
     git = FakeGitProvider()
@@ -64,7 +64,7 @@ def test_in_flight_non_blocked_state_re_enqueued_for_advance():
 
 
 def test_terminal_states_not_enqueued():
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     for issue, state in (
         (101, "Done"), (102, "Failed"), (103, "NeedsHelp"),
     ):
@@ -78,7 +78,7 @@ def test_terminal_states_not_enqueued():
 
 def test_dedup_across_repeated_ticks():
     """Three identical ticks should leave the QM with at most one WorkItem per ticket."""
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     t = repo.create_ticket(project="p", issue_number=1, now=_T0)
     repo.set_ticket_state(t.id, "Planning", now=_T0)
     git = FakeGitProvider()
@@ -95,7 +95,7 @@ def test_poller_skips_suspended_ticket():
     MUST NOT be enqueued. Once the clock advances past
     ``next_action_at``, the next tick enqueues normally.
     """
-    repo = SqliteTicketRepository.in_memory()
+    repo = InMemoryTicketRepository()
     t = repo.create_ticket(project="p", issue_number=1, now=_T0)
     repo.set_ticket_state(t.id, "Planning", now=_T0)
     suspend_until = _T0 + dt.timedelta(minutes=5)
