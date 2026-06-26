@@ -20,6 +20,7 @@ that was used at daemon start; it does NOT re-read config from disk
 
 from __future__ import annotations
 
+import logging
 import os
 import signal
 from collections.abc import Callable
@@ -33,7 +34,16 @@ from foreman.v4.logging_config import configure_logging, reset_logging
 if TYPE_CHECKING:
     from foreman.v4.config import V4Config
 
+logger = logging.getLogger(__name__)
+
 PID_PATH = Path.home() / ".foreman" / "v4" / "daemon.pid"
+
+# Matches docker-compose's CLAUDE_CONFIG_DIR for the daemon container. The
+# Claude Agent SDK + claude CLI store session transcripts under
+# ``<CLAUDE_CONFIG_DIR>/projects/<munged-cwd>/<session-id>.jsonl`` — the
+# substrate crash-recovery resume arm continues an interrupted role's
+# session from there instead of re-running it from scratch.
+_DEFAULT_CLAUDE_CONFIG_DIR = "/root/.claude-container"
 
 # SIGHUP doesn't exist on Windows (signal module omits it). getattr
 # (instead of `try: signal.SIGHUP`) keeps mypy happy on Windows hosts —
@@ -63,6 +73,43 @@ def is_pid_alive(pid: int) -> bool:
         return True
     except ProcessLookupError:
         return False
+
+
+def warn_if_session_dir_ephemeral() -> bool:
+    """Loudly warn (NOT fatal) if the Claude session dir isn't on a mount.
+
+    Returns True when the session dir is persistent (on a mounted volume)
+    OR when ``CLAUDE_CONFIG_DIR`` is unset (a non-container dev run, where
+    resume persistence doesn't apply); False when the dir resolves onto the
+    container's ephemeral writable layer.
+
+    Crash-recovery's resume arm can only continue an interrupted role's
+    Claude session if the transcript survives a container recreate (the
+    Watchtower-redeploy case). Transcripts live under ``CLAUDE_CONFIG_DIR``;
+    if that path is on the ephemeral writable layer rather than a mounted
+    volume, every recreate silently wipes them and resume degrades to a
+    fresh re-run. That degradation is SAFE — it is exactly the pre-resume
+    Stage-1 behavior — so this is a loud warning, never a fatal error: we
+    do not block daemon boot over an efficiency-only property. The fix is
+    the ``foreman-claude-sessions`` volume in docker-compose.yml.
+    """
+    raw = os.environ.get("CLAUDE_CONFIG_DIR")
+    if raw is None:
+        # Not container-deployed (no override) → resume persistence is not
+        # applicable; nothing to warn about.
+        return True
+    config_dir = Path(raw)
+    if os.path.ismount(config_dir):
+        return True
+    logger.warning(
+        "claude session dir %s is NOT a mounted volume — role session "
+        "transcripts will be WIPED on container recreate (e.g. Watchtower "
+        "redeploy), silently disabling crash-recovery resume. Mount a "
+        "persistent volume there (docker-compose.yml: foreman-claude-"
+        "sessions). Safe to run — degrades to fresh re-runs until fixed.",
+        config_dir,
+    )
+    return False
 
 
 def _build_sighup_handler(config: V4Config) -> Callable[..., None]:
@@ -117,6 +164,10 @@ def cmd_daemon_start(ctx: typer.Context) -> None:
             raise typer.Exit(code=1)
     PID_PATH.parent.mkdir(parents=True, exist_ok=True)
     PID_PATH.write_text(str(os.getpid()))
+    # Startup diagnostic for the crash-recovery resume arm: warn loudly (but
+    # never fatally) if the Claude session dir isn't on a persistent mount,
+    # so resumability can't be silently lost on a redeploy.
+    warn_if_session_dir_ephemeral()
     try:
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda *_args: daemon.stop())

@@ -10,7 +10,10 @@ from typer.testing import CliRunner
 
 from foreman.v4.cli import app
 from foreman.v4.cli.context import build_cli_context
-from foreman.v4.cli.daemon import _build_sighup_handler
+from foreman.v4.cli.daemon import (
+    _build_sighup_handler,
+    warn_if_session_dir_ephemeral,
+)
 from foreman.v4.config import (
     AppCredentials,
     AppsConfig,
@@ -147,6 +150,40 @@ def test_start_overwrites_stale_pid_and_proceeds(tmp_path: Path, monkeypatch):
     assert result.exit_code == 0
     mock_daemon.run_forever.assert_called_once()
     assert captured["pid"] == str(os.getpid())  # stale 99999 overwritten
+
+
+# --- Claude session-dir persistence check (crash-recovery resume arm) --
+
+def test_session_dir_warns_when_not_mounted(monkeypatch, caplog):
+    """An ephemeral CLAUDE_CONFIG_DIR (not on a mount) → loud warning +
+    returns False, so a redeploy can't silently disable resume. NOT fatal."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/tmp/not-a-mount-xyz")
+    with (
+        patch("os.path.ismount", return_value=False),
+        caplog.at_level(logging.WARNING, logger="foreman.v4.cli.daemon"),
+    ):
+        result = warn_if_session_dir_ephemeral()
+    assert result is False
+    assert any("NOT a mounted volume" in r.message for r in caplog.records)
+
+
+def test_session_dir_ok_when_mounted(monkeypatch, caplog):
+    """A mounted CLAUDE_CONFIG_DIR → returns True, no warning."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/root/.claude-container")
+    with (
+        patch("os.path.ismount", return_value=True),
+        caplog.at_level(logging.WARNING, logger="foreman.v4.cli.daemon"),
+    ):
+        result = warn_if_session_dir_ephemeral()
+    assert result is True
+    assert not any("NOT a mounted volume" in r.message for r in caplog.records)
+
+
+def test_session_dir_skipped_when_unset(monkeypatch):
+    """Unset CLAUDE_CONFIG_DIR (non-container dev run) → no-op True; the
+    resume-persistence property doesn't apply off the container."""
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    assert warn_if_session_dir_ephemeral() is True
 
 
 # --- Task 8.5: SIGHUP handler reset+reconfigure logging ----------------
