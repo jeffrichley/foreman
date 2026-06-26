@@ -76,8 +76,11 @@ def is_pid_alive(pid: int) -> bool:
     Windows-native dev caveat: ``os.kill(pid, 0)`` is not a real Win32
     API — every PID raises ``OSError`` with ``winerror == 87``
     (``ERROR_INVALID_PARAMETER``), alive or dead. Production runs in
-    Docker (POSIX), so this helper is correct where it matters; the
-    Windows behavior is documented in the daemon RUNBOOK.
+    Docker (POSIX), so this helper is correct where it matters. On a
+    Windows host ``foreman daemon status``/``stop`` may therefore
+    misreport a stale PID file — accepted as a non-issue because the
+    daemon only ever runs as a POSIX process inside the container; it is
+    never started as a Windows host process.
     """
     try:
         os.kill(pid, 0)
