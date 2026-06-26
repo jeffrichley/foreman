@@ -23,9 +23,10 @@ from foreman.v4.repository import (
 )
 
 # Single source of truth for which states are terminal (machine-done).
-# Imported rather than duplicated so a new terminal (e.g. ImplApproved)
-# stays in sync here — duplicating the set is exactly how past drift bugs
-# crept in.
+# Imported rather than duplicated so changes to the terminal set stay in
+# sync here automatically — duplicating the set is how past drift bugs
+# crept in. foreman#443: ImplApproved was removed from _TERMINAL_STATE_NAMES
+# (it now polls for the human merge rather than parking as a dead-end).
 from foreman.v4.state import _TERMINAL_STATE_NAMES
 from foreman.v4.states.registry import STATE_REGISTRY
 from foreman.v4.work import WorkItem
@@ -33,8 +34,9 @@ from foreman.worktree import WorktreeManager
 
 # foreman#414: terminal states an operator can recover via ``retry`` — the
 # command re-dispatches the role that escalated. ``Done`` is a happy
-# terminal (nothing to retry); ``ImplApproved`` is parked awaiting a human
-# merge, not a role re-run, so neither is retryable.
+# terminal (nothing to retry). foreman#443: ``ImplApproved`` is no longer
+# terminal; a ticket polling at ImplApproved is simply re-enqueued by the
+# Poller each tick without any special retry handling.
 _RETRYABLE_TERMINALS = frozenset({"NeedsHelp", "Failed"})
 
 

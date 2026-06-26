@@ -233,6 +233,12 @@ class PyGithubGitProvider:
             # merge-healer registry can dispatch on "behind" / future
             # corner cases. ci_passing above stays derived from it.
             mergeable_state=pr.mergeable_state or "",
+            # foreman#443: GitHub sets pr.state == "closed" for both
+            # merged PRs and PRs closed-without-merge. ImplApprovedState
+            # uses this to distinguish "closed without merge" (NeedsHelp)
+            # from "still open" (BLOCKED self-loop). A merged PR has both
+            # merged=True and closed=True; callers must check merged first.
+            closed=(pr.state == "closed"),
         )
 
     def merge_pr(self, *, project: str, pr_number: int) -> None:
