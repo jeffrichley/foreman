@@ -25,9 +25,9 @@ from foreman.v4.event_bus import EventBus
 from foreman.v4.git_provider import FakeGitProvider
 from foreman.v4.observers.label_observability import LabelObservabilityObserver
 from foreman.v4.poller import Poller
+from foreman.v4.repository import InMemoryTicketRepository
 from foreman.v4.role_dispatcher import FakeRoleDispatcher
 from foreman.v4.routing_git_provider import RoutingGitProvider
-from foreman.v4.repository import InMemoryTicketRepository
 
 
 def _canned(kind: str) -> str:

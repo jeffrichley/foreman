@@ -13,8 +13,8 @@ from foreman.v4.event_bus import EventBus
 from foreman.v4.git_provider import FakeGitProvider, PRState
 from foreman.v4.observers.event_archive import EventArchiveObserver
 from foreman.v4.observers.structured_log import StructuredLogObserver
-from foreman.v4.role_dispatcher import FakeRoleDispatcher
 from foreman.v4.repository import InMemoryTicketRepository
+from foreman.v4.role_dispatcher import FakeRoleDispatcher
 from foreman.v4.state import StateContext
 from foreman.v4.states.merging import MergingState
 from foreman.v4.states.registry import build_state

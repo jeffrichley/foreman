@@ -82,7 +82,6 @@ def test_daemon_defaults(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
@@ -97,7 +96,6 @@ def test_projects_round_trip(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
@@ -117,7 +115,6 @@ def test_missing_project_name_raises(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
@@ -142,7 +139,6 @@ def test_role_timeout_seconds_default_600(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
@@ -156,7 +152,6 @@ def test_role_timeout_seconds_override(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n'
         "role_timeout_seconds = 1200\n" + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
@@ -174,7 +169,6 @@ def test_max_state_attempts_default_3(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
@@ -188,7 +182,6 @@ def test_max_state_attempts_override(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n'
         "max_state_attempts = 5\n" + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
@@ -205,7 +198,6 @@ def test_max_state_attempts_zero_raises(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n'
         "max_state_attempts = 0\n" + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
@@ -229,7 +221,6 @@ def test_missing_apps_block_raises(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n' + _STORAGE_TOML
         + "[[projects]]\n"
         'name = "voice"\n'
@@ -249,7 +240,6 @@ def test_missing_role_app_raises(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n'
         "[apps.planner]\n"
         "app_id = 12345\n"
@@ -280,7 +270,6 @@ def test_apps_orchestrator_round_trip(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n'
         "[apps.planner]\n"
         "app_id = 12345\n"
@@ -332,7 +321,6 @@ def test_project_minimal_still_parses(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
@@ -355,7 +343,6 @@ def test_project_check_command_override(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
@@ -375,7 +362,6 @@ def test_project_dev_base_branch_override(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
@@ -407,7 +393,6 @@ def test_project_auto_merge_impl_round_trip(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
@@ -426,7 +411,6 @@ def test_project_max_fix_attempts_override(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
@@ -448,7 +432,6 @@ def test_project_max_impl_attempts_override(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
@@ -480,7 +463,6 @@ def test_project_attempt_caps_reject_zero(tmp_path: Path):
         config_path = tmp_path / "config.toml"
         config_path.write_text(
             "[daemon]\n"
-            'db_path = "/tmp/foreman.db"\n'
             'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
             'name = "voice"\n'
             'repo = "jeffrichley/voice"\n'
@@ -500,7 +482,6 @@ def test_missing_orchestrator_raises(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n'
         "[apps.planner]\n"
         "app_id = 12345\n"
@@ -545,7 +526,6 @@ def _config_text(operator_block: str | None, project_extra: str = "") -> str:
     base_apps_only = _APPS_TOML[: -(len(_OPERATOR_TOML) + len(_STORAGE_TOML))]
     body = (
         "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n' + base_apps_only
     )
     if operator_block is not None:
@@ -745,7 +725,6 @@ def _build_config_with_override(
         operator=override,
     )
     config = V4Config(
-        db_path="/tmp/foreman.db",
         log_dir="/tmp/foreman-logs",
         apps=AppsConfig(
             planner=AppCredentials(app_id=1, private_key_path="/dev/null"),
@@ -807,68 +786,8 @@ def test_resolve_operator_both_overridden():
 # ---------------------------------------------------------------------------
 
 
-def test_backup_block_defaulted_when_absent(tmp_path: Path):
-    """Issue #360: ``[backup]`` is optional. A config without one MUST
-    still load, and ``config.backup`` MUST take the documented defaults
-    (enabled=True, hourly schedule, 24/7/4 retention)."""
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
-        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
-        'name = "voice"\n'
-        'repo = "jeffrichley/voice"\n'
-        'local_clone_path = "/tmp/voice"\n'
-    )
-    config = load_config(config_path)
-    assert config.backup.enabled is True
-    assert config.backup.dir == "/foreman/backups"
-    assert config.backup.interval_seconds == 3600
-    assert config.backup.retention_hourly == 24
-    assert config.backup.retention_daily == 7
-    assert config.backup.retention_weekly == 4
-
-
-def test_backup_block_validated_when_present(tmp_path: Path):
-    """Issue #360: ``interval_seconds = 30`` MUST raise — the ge=60
-    floor is runaway defense against a misconfigured ``0`` snapshot
-    interval that would fill disk in minutes."""
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
-        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[backup]\n"
-        "interval_seconds = 30\n"
-        "[[projects]]\n"
-        'name = "voice"\n'
-        'repo = "jeffrichley/voice"\n'
-        'local_clone_path = "/tmp/voice"\n'
-    )
-    with pytest.raises(ValidationError):
-        load_config(config_path)
-
-
-def test_backup_block_extras_forbidden(tmp_path: Path):
-    """Issue #360: ``extra='forbid'`` mirrors the other config blocks.
-    An unknown field MUST raise rather than silently drop on the
-    floor."""
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
-        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[backup]\n"
-        'mystery_field = "boom"\n'
-        "[[projects]]\n"
-        'name = "voice"\n'
-        'repo = "jeffrichley/voice"\n'
-        'local_clone_path = "/tmp/voice"\n'
-    )
-    with pytest.raises(ValidationError):
-        load_config(config_path)
-
-
 # ---------------------------------------------------------------------------
-# Task 2 (v5): [storage] block — PostgreSQL opt-in with sqlite default.
+# Task 2 (v5): [storage] block — Postgres-only with loud-fail validation.
 # ---------------------------------------------------------------------------
 
 
@@ -892,7 +811,6 @@ def test_storage_defaults_to_postgres_loud_fail_when_section_absent(
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML_NO_STORAGE
         + "[[projects]]\n"
         'name = "voice"\n'
@@ -910,7 +828,6 @@ def test_storage_postgres_requires_dsn(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML_NO_STORAGE
         + "[[projects]]\n"
         'name = "voice"\n'
@@ -929,7 +846,6 @@ def test_storage_postgres_accepts_dsn_and_pool_sizes(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'db_path = "/tmp/foreman.db"\n'
         'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML_NO_STORAGE
         + "[[projects]]\n"
         'name = "voice"\n'

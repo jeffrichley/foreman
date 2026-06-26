@@ -8,8 +8,8 @@ from foreman.v4.config import ProjectConfig
 from foreman.v4.git_provider import FakeGitProvider, PRState
 from foreman.v4.poller import Poller
 from foreman.v4.queue_manager import QueueManager
-from foreman.v4.role_dispatcher import FakeRoleDispatcher
 from foreman.v4.repository import InMemoryTicketRepository
+from foreman.v4.role_dispatcher import FakeRoleDispatcher
 from foreman.v4.worker_pool import WorkerPool
 
 

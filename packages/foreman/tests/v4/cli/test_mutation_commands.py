@@ -9,8 +9,7 @@ from typer.testing import CliRunner
 from foreman.v4.cli import app
 from foreman.v4.cli.context import build_cli_context
 from foreman.v4.queue_manager import QueueManager
-from foreman.v4.repository import TicketNotFoundError
-from foreman.v4.repository import InMemoryTicketRepository
+from foreman.v4.repository import InMemoryTicketRepository, TicketNotFoundError
 from foreman.v4.work import WorkItem
 
 
@@ -307,6 +306,7 @@ def _full_reset_ctx(tmp_path):
         OperatorIdentity,
         OrchestratorConfig,
         ProjectConfig,
+        StorageConfig,
         V4Config,
     )
     from foreman.v4.git_provider import FakeGitProvider, PRState
@@ -341,7 +341,7 @@ def _full_reset_ctx(tmp_path):
     clone_path.mkdir()
     fake_creds = AppCredentials(app_id=1, private_key_path="/tmp/fake.pem")
     v4_config = V4Config(
-        db_path=str(tmp_path / "v4.db"),
+        storage=StorageConfig(engine="postgres", dsn="postgresql://test/test"),
         log_dir=str(tmp_path / "logs"),
         apps=AppsConfig(
             planner=fake_creds,

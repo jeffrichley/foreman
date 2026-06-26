@@ -1,6 +1,6 @@
 """Shared TicketRepository contract suite.
 
-Both InMemoryTicketRepository and SqliteTicketRepository must satisfy
+Both InMemoryTicketRepository and PostgresTicketRepository must satisfy
 every assertion here. Test files subclass ``RepositoryContract`` and bind
 ``factory`` to their concrete repo constructor; pytest collects the
 contract tests against that binding.

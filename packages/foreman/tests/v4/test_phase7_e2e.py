@@ -7,11 +7,13 @@ and verifies that:
 
   - the journal advances a ticket all the way to Done,
   - StructuredLogObserver's JSON lines land in ``<log_dir>/transitions.jsonl``,
-  - EventArchiveObserver's rows land in the SQLite ``events`` table.
+  - EventArchiveObserver's rows land in the Postgres ``events`` table.
 
 The SubprocessRoleDispatcher is monkey-patched at the bootstrap import
 site so no real subprocess fork happens; everything else is the production
-wiring.
+wiring. Persistence is Postgres-only (v5 kill-sqlite), so the test runs
+against the session-scoped Postgres testcontainer (``clean_postgres_dsn``)
+and skips gracefully when Docker is unavailable.
 """
 from __future__ import annotations
 
@@ -25,6 +27,11 @@ from foreman.v4.git_provider import FakeGitProvider, PRState
 from foreman.v4.logging_config import reset_logging
 from foreman.v4.role_dispatcher import FakeRoleDispatcher
 
+from .postgres_fixture import (  # noqa: F401  (fixture imports)
+    clean_postgres_dsn,
+    postgres_dsn,
+)
+
 
 def _canned(kind: str, *, pr_number: int | None = None) -> str:
     art = f',"artifacts":{{"pr_number":{pr_number}}}' if pr_number else ""
@@ -34,17 +41,18 @@ def _canned(kind: str, *, pr_number: int | None = None) -> str:
     )
 
 
-def test_full_boot_from_toml_to_done(tmp_path: Path, monkeypatch):
+def test_full_boot_from_toml_to_done(tmp_path: Path, monkeypatch, clean_postgres_dsn):  # noqa: F811
     reset_logging()
-    db_path = tmp_path / "v4.db"
     log_dir = tmp_path / "logs"
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         f"[daemon]\n"
-        f'db_path = "{db_path.as_posix()}"\n'
         f'log_dir = "{log_dir.as_posix()}"\n'
         f"tick_seconds = 0\n"
         f"max_in_flight = 1\n"
+        f"[storage]\n"
+        f'engine = "postgres"\n'
+        f'dsn = "{clean_postgres_dsn}"\n'
         # Task 8.3: [apps.*] is now required. Real PEM read happens in
         # main() at IdentityRegistry construction; the loader only
         # validates the string shape, so fake on-disk paths are fine
@@ -108,7 +116,7 @@ def test_full_boot_from_toml_to_done(tmp_path: Path, monkeypatch):
     })
     # Bootstrap unconditionally constructs a SubprocessRoleDispatcher;
     # for the e2e smoke we replace that constructor with one that yields
-    # our FakeRoleDispatcher. Everything else (SqliteTicketRepository,
+    # our FakeRoleDispatcher. Everything else (the repository,
     # Daemon, Poller, WorkerPool, QueueManager) is the real production
     # wiring — only the network seams (git + role dispatch) are faked.
     monkeypatch.setattr(
@@ -162,11 +170,10 @@ def test_full_boot_from_toml_to_done(tmp_path: Path, monkeypatch):
         ), "no state_entered event landed in the JSON-lines log"
 
         # Events archive populated — proves EventArchiveObserver ran on
-        # the same bus the Daemon used.
-        rows = ctx.repo._conn.execute(  # type: ignore[attr-defined]
-            "SELECT COUNT(*) AS n FROM events"
-        ).fetchone()
-        assert rows["n"] > 0, "events table empty — archive observer never fired"
+        # the same bus the Daemon used. Query through the Postgres pool.
+        with ctx.repo._pool.connection() as conn:  # type: ignore[attr-defined]
+            row = conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()
+        assert row["n"] > 0, "events table empty — archive observer never fired"
     finally:
         # Logging handlers are process-global; tear them down so later
         # tests don't see this run's JsonLinesHandler still attached.

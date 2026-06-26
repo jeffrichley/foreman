@@ -364,6 +364,7 @@ def test_commit_files_to_worktree_planner_trailer_pattern_end_to_end(
         OperatorIdentity,
         OrchestratorConfig,
         ProjectConfig,
+        StorageConfig,
         V4Config,
         resolve_operator,
     )
@@ -372,7 +373,7 @@ def test_commit_files_to_worktree_planner_trailer_pattern_end_to_end(
     provider = GitHubProvider(identity=_identity(), client=MagicMock())
 
     config = V4Config(
-        db_path="/tmp/v4.db",
+        storage=StorageConfig(engine="postgres", dsn="postgresql://test/test"),
         log_dir="/tmp/logs",
         apps=AppsConfig(
             planner=AppCredentials(app_id=1, private_key_path="/dev/null"),

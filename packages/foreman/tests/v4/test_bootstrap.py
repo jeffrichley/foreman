@@ -34,7 +34,6 @@ from foreman.v4.observers.terminal_landing import TerminalLandingObserver
 from foreman.v4.postgres_repository import PostgresTicketRepository
 from foreman.v4.repository import InMemoryTicketRepository
 from foreman.v4.routing_git_provider import RoutingGitProvider
-from foreman.v4.state_backup import _DisabledBackupScheduler
 
 _TEST_DSN = "postgresql://u:p@localhost:5432/foreman"
 
@@ -107,7 +106,6 @@ def _operator_config() -> OperatorConfig:
 
 def test_bootstrap_returns_clicontext_with_all_fields(tmp_path: Path):
     config = V4Config(
-        db_path=str(tmp_path / "foreman.db"),
         log_dir=str(tmp_path / "logs"),
         apps=_apps_config(),
         orchestrator=_orchestrator_config(),
@@ -134,7 +132,6 @@ def test_bootstrap_returns_clicontext_with_all_fields(tmp_path: Path):
 
 def test_bootstrap_builds_one_poller_per_project(tmp_path: Path):
     config = V4Config(
-        db_path=str(tmp_path / "v4.db"),
         log_dir=str(tmp_path / "logs"),
         apps=_apps_config(),
         orchestrator=_orchestrator_config(),
@@ -164,7 +161,6 @@ def test_bootstrap_wires_event_bus_with_standard_observers(tmp_path: Path):
       - one of each of the standard observer types is present.
     """
     config = V4Config(
-        db_path=str(tmp_path / "v4.db"),
         log_dir=str(tmp_path / "logs"),
         apps=_apps_config(),
         orchestrator=_orchestrator_config(),
@@ -225,7 +221,6 @@ def test_bootstrap_wires_routing_git_provider_for_multi_project(tmp_path: Path):
     by_repo = {"owner/voice": voice_provider, "owner/foreman": foreman_provider}
 
     config = V4Config(
-        db_path=str(tmp_path / "v4.db"),
         log_dir=str(tmp_path / "logs"),
         apps=_apps_config(),
         orchestrator=_orchestrator_config(),
@@ -281,7 +276,6 @@ def test_bootstrap_skips_label_observer_when_no_projects(tmp_path: Path):
     LabelObservabilityObserver from. The other three observers still
     land on the bus so the surface remains observable."""
     config = V4Config(
-        db_path=str(tmp_path / "v4.db"),
         log_dir=str(tmp_path / "logs"),
         apps=_apps_config(),
         orchestrator=_orchestrator_config(),
@@ -329,7 +323,6 @@ def test_bootstrap_uses_postgres_when_engine_postgres(monkeypatch, tmp_path: Pat
     )
 
     config = V4Config(
-        db_path=str(tmp_path / "v4.db"),
         log_dir=str(tmp_path / "logs"),
         apps=_apps_config(),
         orchestrator=_orchestrator_config(),
@@ -360,8 +353,7 @@ def test_bootstrap_uses_postgres_when_engine_postgres(monkeypatch, tmp_path: Pat
     assert captured["pool_max"] == 7
     assert isinstance(ctx.repo, InMemoryTicketRepository)
 
-    # File-snapshot backups are SQLite-specific; under postgres the daemon
-    # must hold the disabled-backup sentinel, not a real BackupScheduler.
+    # The daemon no longer carries any backup scheduler — file-snapshot
+    # backups were SQLite-specific and removed with the SQLite subsystem.
     assert ctx.daemon is not None
-    backup_scheduler = ctx.daemon._backup_scheduler  # type: ignore[attr-defined]
-    assert isinstance(backup_scheduler, _DisabledBackupScheduler)
+    assert not hasattr(ctx.daemon, "_backup_scheduler")

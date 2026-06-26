@@ -20,6 +20,7 @@ from foreman.v4.config import (
     OperatorIdentity,
     OrchestratorConfig,
     ProjectConfig,
+    StorageConfig,
     V4Config,
 )
 from foreman.v4.git_provider import FakeGitProvider
@@ -33,7 +34,7 @@ def _make_config(tmp_path: Path, project_names: tuple[str, ...] = ("algokit",)) 
     """
     fake_creds = AppCredentials(app_id=1, private_key_path="/tmp/fake.pem")
     return V4Config(
-        db_path=str(tmp_path / "v4.db"),
+        storage=StorageConfig(engine="postgres", dsn="postgresql://test/test"),
         log_dir=str(tmp_path / "logs"),
         apps=AppsConfig(
             planner=fake_creds,

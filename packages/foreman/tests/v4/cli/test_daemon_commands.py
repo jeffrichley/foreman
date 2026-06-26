@@ -18,6 +18,7 @@ from foreman.v4.config import (
     OperatorIdentity,
     OrchestratorConfig,
     ProjectConfig,
+    StorageConfig,
     V4Config,
 )
 from foreman.v4.json_lines_handler import JsonLinesHandler
@@ -158,7 +159,7 @@ def _minimal_v4_config(tmp_path: Path) -> V4Config:
     """
     fake_creds = AppCredentials(app_id=1, private_key_path="/tmp/fake.pem")
     return V4Config(
-        db_path=str(tmp_path / "v4.db"),
+        storage=StorageConfig(engine="postgres", dsn="postgresql://test/test"),
         log_dir=str(tmp_path / "logs"),
         log_level="INFO",
         apps=AppsConfig(

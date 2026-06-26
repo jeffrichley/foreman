@@ -3,8 +3,8 @@
 foreman#407: the v4 Poller dropped the per-poll ``origin/<default>``
 auto-fetch that #291 shipped for v3 (the v3 ``OnPollFetch`` reconciler
 was not ported in the #333 v4 cutover). This re-introduces it as a
-daemon-loop component shaped like :class:`BackupScheduler`: injected,
-interval-throttled, swallows per-project failures.
+daemon-loop component: injected, interval-throttled, swallows
+per-project failures.
 """
 from __future__ import annotations
 

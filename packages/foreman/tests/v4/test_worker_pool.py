@@ -6,8 +6,8 @@ import threading
 import time
 
 from foreman.v4.queue_manager import QueueManager
-from foreman.v4.role_dispatcher import FakeRoleDispatcher
 from foreman.v4.repository import InMemoryTicketRepository
+from foreman.v4.role_dispatcher import FakeRoleDispatcher
 from foreman.v4.work import WorkItem
 from foreman.v4.worker_pool import WorkerPool
 

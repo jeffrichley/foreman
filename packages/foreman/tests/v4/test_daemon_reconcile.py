@@ -13,8 +13,8 @@ from foreman.v4.daemon import Daemon, DaemonConfig
 from foreman.v4.git_provider import FakeGitProvider
 from foreman.v4.poller import Poller
 from foreman.v4.reconcile import reconcile_on_startup
-from foreman.v4.role_dispatcher import FakeRoleDispatcher
 from foreman.v4.repository import InMemoryTicketRepository
+from foreman.v4.role_dispatcher import FakeRoleDispatcher
 
 
 def test_run_forever_reconciles_before_ticking():

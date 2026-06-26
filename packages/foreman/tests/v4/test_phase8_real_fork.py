@@ -38,6 +38,11 @@ import pytest
 
 from foreman.v4.outcome import OutcomeKind, parse_outcome_from_stdout
 
+from .postgres_fixture import (  # noqa: F401  (fixture imports)
+    clean_postgres_dsn,
+    postgres_dsn,
+)
+
 # Subprocess startup on Windows / cold-import of the typer app costs
 # more than a few hundred ms; cap each invocation generously so a true
 # hang fails fast rather than hanging CI.
@@ -156,20 +161,27 @@ def _build_v4_only_env(*, v4_cfg_path: Path) -> dict[str, str]:
     return env
 
 
-def _write_v4_config_toml(*, cfg_path: Path, project_name: str, repo: str) -> None:
+def _write_v4_config_toml(
+    *, cfg_path: Path, project_name: str, repo: str, storage_dsn: str
+) -> None:
     """Write a minimum-valid V4Config TOML at ``cfg_path``.
 
     Uses fake App credentials — the test deliberately expects the
     downstream PyGithub token-mint to fail, because the test exists to
     prove the v4-config-load seam works *before* the token-mint runs.
+    The ``storage_dsn`` points at the Postgres testcontainer so bootstrap
+    (which now builds a real PostgresTicketRepository before identity
+    bootstrap) connects cleanly and the crash lands on the fake PEM path.
     """
-    db_path = cfg_path.parent / "v4.db"
     log_dir = cfg_path.parent / "logs"
     cfg_path.write_text(
         f"""\
 [daemon]
-db_path = "{db_path.as_posix()}"
 log_dir = "{log_dir.as_posix()}"
+
+[storage]
+engine = "postgres"
+dsn = "{storage_dsn}"
 
 [apps.planner]
 app_id = 12345
@@ -210,6 +222,7 @@ local_clone_path = "/tmp/does-not-exist-clone"
 
 def test_planner_real_fork_loads_v4_config_without_v3_config_present(
     tmp_path: Path,
+    clean_postgres_dsn: str,  # noqa: F811
 ) -> None:
     """Planner subprocess parses V4Config without a v3 ``~/.foreman/config.toml``.
 
@@ -239,6 +252,7 @@ def test_planner_real_fork_loads_v4_config_without_v3_config_present(
     cfg_path = tmp_path / "v4-config.toml"
     _write_v4_config_toml(
         cfg_path=cfg_path, project_name="algokit", repo="jeffrichley/algokit",
+        storage_dsn=clean_postgres_dsn,
     )
 
     cmd = [

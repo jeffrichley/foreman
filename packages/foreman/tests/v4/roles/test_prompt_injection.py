@@ -54,6 +54,7 @@ from foreman.v4.config import (
     OperatorIdentity,
     OrchestratorConfig,
     ProjectConfig,
+    StorageConfig,
     V4Config,
 )
 from foreman.worktree import ImplWorktreeResult
@@ -76,7 +77,7 @@ def _build_v4_config(*, project_repo: str, local_clone_path: str) -> V4Config:
     """
     placeholder_app = AppCredentials(app_id=1, private_key_path="/dev/null")
     return V4Config(
-        db_path="/tmp/foreman-test.db",
+        storage=StorageConfig(engine="postgres", dsn="postgresql://test/test"),
         log_dir="/tmp/foreman-test-logs",
         apps=AppsConfig(
             planner=placeholder_app,
