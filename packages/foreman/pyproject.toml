@@ -1,5 +1,11 @@
 [project]
-name = "foreman"
+# Distribution name (PyPI). Intentionally differs from the import name +
+# CLI command, which both stay `foreman` — the bare `foreman` name is taken
+# on PyPI (Puppet's Foreman). `agent-core-<tool>` is the family namespace
+# for substrate-coupled tools (see foreman#443 release-policy discussion).
+# `pip install agent-core-foreman` still gives you `import foreman` + the
+# `foreman` CLI.
+name = "agent-core-foreman"
 dynamic = ["version"]
 description = "Multi-identity GitHub-issue-to-PR orchestrator on agent-core substrate."
 license = "MIT"
