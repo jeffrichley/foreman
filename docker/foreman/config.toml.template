@@ -15,12 +15,6 @@
 # repo); the daemon at runtime authenticates as the role Apps directly.
 
 [daemon]
-# NOTE: db_path is a vestigial REQUIRED field on V4Config pending the
-# later kill-sqlite task that removes it (it is still read by the
-# `foreman restore` SQLite backup/restore CLI). The daemon's persistence
-# engine is Postgres-only — see the [storage] block below — so this path
-# is unused by the running daemon. Leave it set until db_path is dropped.
-db_path = "/foreman/state/foreman.sqlite"
 log_dir = "/foreman/logs"
 log_level = "INFO"
 tick_seconds = 30.0
@@ -28,32 +22,16 @@ max_in_flight = 1
 role_timeout_seconds = 1800
 max_state_attempts = 3
 
-# Issue #360: periodic SQLite snapshot scheduler.
-# - `dir` MUST match the container side of the docker-compose bind
-#   mount (`${HOME}/.foreman/backups:/foreman/backups`); changing it
-#   here without changing the mount strands snapshots in a non-
-#   persistent layer.
-# - `interval_seconds = 3600` → hourly. Floor is 60 (runaway defense).
-# - Retention: 24 hourly + 7 daily + 4 weekly ≈ 35 files at any time.
-#   Each gzipped snapshot is a few MB; total disk footprint is in the
-#   low tens of MB.
-# v5 (kill-sqlite): persistence is Postgres-only. ``engine`` is fixed to
-# "postgres"; StorageConfig will refuse to load (loud fail) if ``dsn`` is
+# Persistence is Postgres-only (kill-sqlite). ``engine`` is fixed to
+# "postgres"; StorageConfig refuses to load (loud fail) if ``dsn`` is
 # empty, so ${FOREMAN_PG_DSN} MUST be set in .env (docker-compose already
-# passes it to the daemon). There is no SQLite fallback.
+# passes it to the daemon). There is no SQLite fallback, and no SQLite
+# snapshot scheduler — Postgres DR is tracked in jeffrichley/foreman#434.
 [storage]
 engine = "postgres"
 dsn = "${FOREMAN_PG_DSN}"
 pool_min = 2
 pool_max = 10
-
-[backup]
-enabled = true
-dir = "/foreman/backups"
-interval_seconds = 3600
-retention_hourly = 24
-retention_daily = 7
-retention_weekly = 4
 
 [apps]
 planner = { app_id = ${FOREMAN_PLANNER_APP_ID}, private_key_path = "/run/secrets/planner_pem" }
