@@ -186,6 +186,45 @@ def test_session_dir_skipped_when_unset(monkeypatch):
     assert warn_if_session_dir_ephemeral() is True
 
 
+# --- PID file location: ephemeral via FOREMAN_PID_DIR ------------------
+
+def test_pid_dir_env_override_relocates_pid_path(monkeypatch):
+    """``FOREMAN_PID_DIR`` relocates PID_PATH onto the ephemeral (tmpfs) dir.
+
+    The PID file must NOT live on a persistent volume: across a container
+    recreate/restart, PID numbers reset, so a stale PID on a bind-mount can
+    collide with an unrelated live PID and false-trip the single-instance
+    start guard (crash loop). The container points FOREMAN_PID_DIR at a tmpfs;
+    this asserts the override is honored. PID_PATH is computed at import, so we
+    reload the module with the env set.
+    """
+    import importlib
+
+    from foreman.v4.cli import daemon as daemon_mod
+
+    monkeypatch.setenv("FOREMAN_PID_DIR", "/run/foreman")
+    try:
+        reloaded = importlib.reload(daemon_mod)
+        assert reloaded.PID_PATH == Path("/run/foreman/daemon.pid")
+    finally:
+        # Restore the module to its unset-env default so later tests that
+        # import daemon see the home-dir default, not the tmpfs path.
+        monkeypatch.delenv("FOREMAN_PID_DIR", raising=False)
+        importlib.reload(daemon_mod)
+
+
+def test_pid_dir_defaults_to_home_when_env_unset(monkeypatch):
+    """With FOREMAN_PID_DIR unset (non-container dev), PID_PATH falls back to
+    the home ``~/.foreman/v4/daemon.pid`` — behavior there is unchanged."""
+    import importlib
+
+    from foreman.v4.cli import daemon as daemon_mod
+
+    monkeypatch.delenv("FOREMAN_PID_DIR", raising=False)
+    reloaded = importlib.reload(daemon_mod)
+    assert reloaded.PID_PATH == Path.home() / ".foreman" / "v4" / "daemon.pid"
+
+
 # --- Task 8.5: SIGHUP handler reset+reconfigure logging ----------------
 
 def _minimal_v4_config(tmp_path: Path) -> V4Config:

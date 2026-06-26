@@ -111,6 +111,13 @@ services:
       # postgres service above. See docs/runbooks/postgres-migration.md.
       FOREMAN_STORAGE_ENGINE: postgres
       FOREMAN_PG_DSN: postgresql://foreman:${FOREMAN_PG_PASSWORD}@postgres:5432/foreman
+      # Single-instance PID file lives on the tmpfs mount below (NOT a
+      # persistent volume). A PID file on a bind-mount/volume survives a
+      # container recreate; PID numbers reset per container, so a stale PID can
+      # collide with an unrelated live PID and make the start guard
+      # false-positive ("daemon already running") → crash loop. tmpfs is wiped
+      # on every container start, so the daemon always boots clean.
+      FOREMAN_PID_DIR: /run/foreman
 
     # Persistent state volumes. NOT visible from the Windows host — inspect
     # via `docker exec foreman-daemon ls /foreman/...` or `docker cp`.
@@ -135,6 +142,13 @@ services:
       #   volumes:
       #     - C:/Users/<you>/.foreman:/root/.foreman
       - ${HOME}/.foreman:/root/.foreman
+
+    # Ephemeral, per-container-lifetime PID dir (FOREMAN_PID_DIR above). tmpfs is
+    # RAM-backed and re-created empty on every container start (both Watchtower
+    # recreate AND docker restart), so a stale daemon PID can never survive into
+    # a new daemon generation and false-trip the single-instance start guard.
+    tmpfs:
+      - /run/foreman
 
     # Docker json-file driver: rotation at 10MB × 5 files (≈50MB ceiling).
     # Without this it grows forever inside the WSL2 VM.
