@@ -30,9 +30,8 @@ import psycopg
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
-from foreman.v4.outcome import OutcomeKind
+from foreman.v4.outcome import OutcomeKind, is_runaway_exempt, is_transient_error_exempt
 from foreman.v4.records import (
-    FAILURE_PHASE_CRASH_RECOVERY,
     StateInstanceRecord,
     TicketRecord,
 )
@@ -467,22 +466,13 @@ class PostgresTicketRepository:
 
     def count_consecutive_same_state(self, *, ticket_id: int, state: str) -> int:
         # Mirror InMemoryTicketRepository.count_consecutive_same_state exactly:
-        # walk newest-first, skip can_run-failed / BLOCKED /
-        # TRANSIENT_PROVIDER_ERROR rows (neither count nor break), count
+        # walk newest-first, delegate skip decision to is_runaway_exempt, count
         # matching state_name rows, break on first non-matching.
         instances = self.list_state_instances_for_ticket(ticket_id)
         instances.reverse()  # sequence DESC
         count = 0
         for inst in instances:
-            if inst.failure_phase == "can_run":
-                continue
-            # A daemon restart closed this orphan as crash_recovery; it is
-            # not runaway-defense signal. Skip (neither count nor break).
-            if inst.failure_phase == FAILURE_PHASE_CRASH_RECOVERY:
-                continue
-            if inst.outcome_kind == OutcomeKind.BLOCKED:
-                continue
-            if inst.outcome_kind == OutcomeKind.TRANSIENT_PROVIDER_ERROR:
+            if is_runaway_exempt(inst.failure_phase, inst.outcome_kind):
                 continue
             if inst.state_name == state:
                 count += 1
@@ -491,16 +481,14 @@ class PostgresTicketRepository:
         return count
 
     def count_consecutive_transient_provider_errors(self, ticket_id: int) -> int:
-        # Mirror InMemoryTicketRepository exactly: skip can_run-failed rows
-        # and the in-flight (outcome_kind IS NULL) row; count consecutive
-        # TRANSIENT_PROVIDER_ERROR; break on any other completed outcome.
+        # Mirror InMemoryTicketRepository exactly: delegate skip decision to
+        # is_transient_error_exempt; count consecutive TRANSIENT_PROVIDER_ERROR;
+        # break on any other completed outcome.
         instances = self.list_state_instances_for_ticket(ticket_id)
         instances.reverse()
         count = 0
         for inst in instances:
-            if inst.failure_phase == "can_run":
-                continue
-            if inst.outcome_kind is None:
+            if is_transient_error_exempt(inst.failure_phase, inst.outcome_kind):
                 continue
             if inst.outcome_kind == OutcomeKind.TRANSIENT_PROVIDER_ERROR:
                 count += 1

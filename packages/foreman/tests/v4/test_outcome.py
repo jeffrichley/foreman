@@ -134,3 +134,55 @@ def test_outcome_details_field_serializes_round_trip():
     assert reloaded == original
     assert reloaded.details["did_check_pass"] is False
     assert "no `check` recipe" in reloaded.details["work_comment"]
+
+
+# --- is_runaway_exempt ---
+
+
+from foreman.v4.outcome import is_runaway_exempt, is_transient_error_exempt  # noqa: E402
+
+
+class TestIsRunawayExempt:
+    """Unit tests for the runaway-cap exemption predicate (issue #455)."""
+
+    def test_exempt_when_failure_phase_is_can_run(self):
+        assert is_runaway_exempt("can_run", None) is True
+
+    def test_exempt_when_failure_phase_is_crash_recovery(self):
+        assert is_runaway_exempt("crash_recovery", None) is True
+
+    def test_exempt_when_outcome_kind_is_blocked(self):
+        assert is_runaway_exempt(None, OutcomeKind.BLOCKED) is True
+
+    def test_exempt_when_outcome_kind_is_transient_provider_error(self):
+        assert is_runaway_exempt(None, OutcomeKind.TRANSIENT_PROVIDER_ERROR) is True
+
+    def test_not_exempt_for_clean_outcome(self):
+        assert is_runaway_exempt(None, OutcomeKind.CLEAN) is False
+
+    def test_not_exempt_for_none_phase_and_none_kind(self):
+        assert is_runaway_exempt(None, None) is False
+
+    def test_not_exempt_for_arbitrary_failure_phase(self):
+        assert is_runaway_exempt("execute", None) is False
+
+
+class TestIsTransientErrorExempt:
+    """Unit tests for the transient-provider-error counter exemption predicate (issue #455)."""
+
+    def test_exempt_when_failure_phase_is_can_run(self):
+        assert is_transient_error_exempt("can_run", None) is True
+
+    def test_exempt_when_outcome_kind_is_none(self):
+        # In-flight row (outcome_kind not yet written).
+        assert is_transient_error_exempt(None, None) is True
+
+    def test_not_exempt_for_transient_provider_error_outcome(self):
+        # TRANSIENT_PROVIDER_ERROR is counted, not skipped.
+        assert is_transient_error_exempt(None, OutcomeKind.TRANSIENT_PROVIDER_ERROR) is False
+
+    def test_not_exempt_for_clean_outcome(self):
+        assert is_transient_error_exempt(None, OutcomeKind.CLEAN) is False
+
+    def test_not_exempt_for_arbitrary_failure_phase(self):
+        assert is_transient_error_exempt("execute", OutcomeKind.CLEAN) is False

@@ -12,9 +12,8 @@ import dataclasses
 import datetime as dt
 from typing import Any, Protocol
 
-from foreman.v4.outcome import OutcomeKind
+from foreman.v4.outcome import OutcomeKind, is_runaway_exempt, is_transient_error_exempt
 from foreman.v4.records import (
-    FAILURE_PHASE_CRASH_RECOVERY,
     StateInstanceRecord,
     TicketRecord,
 )
@@ -437,33 +436,7 @@ class InMemoryTicketRepository:
         matches.sort(key=lambda i: i.sequence, reverse=True)
         count = 0
         for inst in matches:
-            # Phase 8d.15 (F4): can_run-failed rows record "the ticket
-            # was held and the state never executed" — they are not
-            # runaway-defense signal. Skip them entirely (neither count
-            # nor break the run) so a held-then-resumed ticket doesn't
-            # immediately escalate to NeedsHelp.
-            if inst.failure_phase == "can_run":
-                continue
-            # A daemon restart closed this orphan as crash_recovery; it is
-            # not runaway-defense signal. Skip (neither count nor break).
-            if inst.failure_phase == FAILURE_PHASE_CRASH_RECOVERY:
-                continue
-            # Phase 8d.18: BLOCKED-outcome rows record a legitimate
-            # async-polling self-loop (MergingState polling a pending
-            # merge verdict; ImplementingState polling impl-PR CI). The
-            # state ran, emitted "still waiting", and asked to be re-
-            # tried via next_state() → self. They are not runaway-
-            # defense signal. Skip them entirely so a few polling cycles
-            # don't trip the cap and escalate the ticket to NeedsHelp.
-            if inst.outcome_kind == OutcomeKind.BLOCKED:
-                continue
-            # foreman#361: TRANSIENT_PROVIDER_ERROR rows record an
-            # Anthropic-side blip that the RoleDispatchState handles
-            # via the backoff scheduler — transient-provider self-loops
-            # are not runaway-defense signal. Skip them entirely so a
-            # short Anthropic outage doesn't trip the cap and escalate
-            # the ticket to NeedsHelp by the wrong path.
-            if inst.outcome_kind == OutcomeKind.TRANSIENT_PROVIDER_ERROR:
+            if is_runaway_exempt(inst.failure_phase, inst.outcome_kind):
                 continue
             if inst.state_name == state:
                 count += 1
@@ -476,20 +449,7 @@ class InMemoryTicketRepository:
         matches.sort(key=lambda i: i.sequence, reverse=True)
         count = 0
         for inst in matches:
-            # foreman#361: same precedent as
-            # count_consecutive_same_state — can_run failures don't
-            # count and don't break.
-            if inst.failure_phase == "can_run":
-                continue
-            # foreman#361 CRITICAL: skip the in-flight row.
-            # ``RoleDispatchState.next_state`` is called BEFORE
-            # ``mark_execute_completed`` writes the outcome_kind, so
-            # the most-recent row has outcome_kind=None when we walk
-            # from inside the Template Method. Without this skip,
-            # every call would see "current row, NULL outcome, break"
-            # and return 0 — the backoff would never advance past
-            # 30s.
-            if inst.outcome_kind is None:
+            if is_transient_error_exempt(inst.failure_phase, inst.outcome_kind):
                 continue
             if inst.outcome_kind == OutcomeKind.TRANSIENT_PROVIDER_ERROR:
                 count += 1
