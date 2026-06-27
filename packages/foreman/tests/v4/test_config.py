@@ -92,6 +92,55 @@ def test_daemon_defaults(tmp_path: Path):
     assert config.max_in_flight > 0
 
 
+def test_max_in_flight_above_one_rejected(tmp_path: Path):
+    """foreman#316 guard (arch-review independent-I4): ``max_in_flight > 1``
+    is unsafe until the PR auto-rebase-on-BEHIND work lands, so the loader
+    rejects it loudly at boot rather than silently running an unsafe
+    concurrency level. The implicit ``=1`` correctness dependency was
+    comment-only (``states/merging.py``); this makes it enforced."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[daemon]\n"
+        'log_dir = "/tmp/foreman-logs"\n'
+        "max_in_flight = 2\n" + _APPS_TOML + "[[projects]]\n"
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+    )
+    with pytest.raises(ValidationError, match="316"):
+        load_config(config_path)
+
+
+def test_max_in_flight_zero_rejected(tmp_path: Path):
+    """0 would size the ThreadPoolExecutor at zero workers — no ticket ever
+    runs. The same one-value guard rejects it."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[daemon]\n"
+        'log_dir = "/tmp/foreman-logs"\n'
+        "max_in_flight = 0\n" + _APPS_TOML + "[[projects]]\n"
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+    )
+    with pytest.raises(ValidationError):
+        load_config(config_path)
+
+
+def test_max_in_flight_one_ok(tmp_path: Path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[daemon]\n"
+        'log_dir = "/tmp/foreman-logs"\n'
+        "max_in_flight = 1\n" + _APPS_TOML + "[[projects]]\n"
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+    )
+    config = load_config(config_path)
+    assert config.max_in_flight == 1
+
+
 def test_projects_round_trip(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
