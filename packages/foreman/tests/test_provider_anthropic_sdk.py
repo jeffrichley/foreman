@@ -246,6 +246,60 @@ async def test_run_agent_defaults_leave_session_id_and_resume_unset(
     assert options.resume is None
 
 
+@pytest.mark.asyncio
+async def test_run_agent_resume_missing_session_falls_back_to_fresh(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """foreman#461: a resume into a session that was never flushed to disk
+    (daemon killed before the role's transcript landed) makes the claude CLI
+    print 'No conversation found with session ID: <id>' to stderr; the SDK
+    surfaces it as ProcessError. The provider must retry ONCE fresh (drop
+    --resume, keep the same session id) rather than surfacing
+    ProviderUnknownError → NeedsHelp. A fresh session is always safe."""
+    from claude_agent_sdk._errors import ProcessError
+
+    seen_options: list[Any] = []
+
+    def fake_query(*, prompt: str, options: Any) -> AsyncIterator[Any]:
+        seen_options.append(options)
+
+        async def gen() -> AsyncIterator[Any]:
+            if options.resume is not None:
+                # First attempt: resume into the missing session → hard-fail.
+                raise ProcessError(
+                    "Command failed",
+                    exit_code=1,
+                    stderr="No conversation found with session ID: s1",
+                )
+            # Retry: fresh session succeeds.
+            yield _make_result(
+                subtype="success", structured_output={"name": "ok", "count": 1}
+            )
+
+        return gen()
+
+    monkeypatch.setattr(anthropic_sdk_module, "query", fake_query)
+
+    provider = AnthropicSDKProvider()
+    result, _usage = await provider.run_agent(
+        system_prompt="sys",
+        user_prompt="usr",
+        allowed_tools=["Read"],
+        output_model=_DemoOutput,
+        cwd=tmp_path,
+        session_id="s1",
+        resume=True,
+    )
+
+    assert isinstance(result, _DemoOutput)
+    assert result.name == "ok"
+    # Exactly two SDK calls: the failed resume, then the fresh retry.
+    assert len(seen_options) == 2
+    assert seen_options[0].resume == "s1"  # first attempt resumes
+    assert seen_options[1].resume is None  # retry is fresh…
+    assert seen_options[1].session_id == "s1"  # …but reuses the session id
+
+
 # ----------------------------------------------------------------------
 # Subtype error handling
 # ----------------------------------------------------------------------

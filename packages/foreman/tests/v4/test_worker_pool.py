@@ -5,6 +5,8 @@ import datetime as dt
 import threading
 import time
 
+from foreman.v4.event_bus import EventBus
+from foreman.v4.events import Event, StateEnteredEvent
 from foreman.v4.queue_manager import QueueManager
 from foreman.v4.repository import InMemoryTicketRepository
 from foreman.v4.role_dispatcher import FakeRoleDispatcher
@@ -43,6 +45,87 @@ def test_tick_processes_one_workitem():
         assert submitted == 1
         _wait_until_idle(qm)
         assert repo.get_ticket(ticket.id).current_state == "SpecReview"
+    finally:
+        pool.shutdown(wait=True)
+
+
+class _CrashOnCompleteRepo:
+    """Delegates to an inner repo but raises in ``mark_execute_completed``.
+
+    Simulates a worker-thread crash *inside* transition() that escapes its
+    per-phase handlers: the state_instance row is already open and the
+    StateContext is built, transition()'s ``finally`` runs (closing the row),
+    then the exception re-raises into the WorkerPool future. ``record_failure``
+    / ``execute`` failures are caught by transition() and return None — they
+    do NOT reproduce #454. A raise from ``mark_execute_completed`` does.
+    """
+
+    def __init__(self, inner: InMemoryTicketRepository) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+    def mark_execute_completed(self, *args: object, **kwargs: object) -> None:
+        raise RuntimeError("simulated worker-thread crash")
+
+
+def test_worker_crash_parks_ticket_on_needs_help():
+    """#454: a worker-future exception must not leave the ticket in a
+    non-terminal state with next_action_at NULL — the Poller would re-enqueue
+    it every tick forever (silent infinite loop, evidence only in logs). The
+    crash handler parks it on NeedsHelp and surfaces the landing event."""
+    inner = InMemoryTicketRepository()
+    ticket = inner.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
+    inner.set_ticket_state(ticket.id, "Planning", now=dt.datetime(2026, 6, 13))
+    repo = _CrashOnCompleteRepo(inner)
+
+    events: list[Event] = []
+    bus = EventBus()
+    bus.subscribe(events.append)
+
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    dispatcher = FakeRoleDispatcher(responses={("planner", "p", 1): _canned("clean")})
+    pool = WorkerPool(
+        repo=repo, qm=qm, dispatcher=dispatcher,
+        git=None, bus=bus,
+        clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
+    )
+    try:
+        qm.enqueue(WorkItem(ticket_id=ticket.id, state_name="Planning"))
+        pool.tick()
+        _wait_until_idle(qm)
+        # Parked terminally → Poller stops re-enqueueing.
+        assert inner.get_ticket(ticket.id).current_state == "NeedsHelp"
+        # Surfaced → LabelObservabilityObserver applies foreman:state-needshelp.
+        assert any(
+            isinstance(e, StateEnteredEvent) and e.state_name == "NeedsHelp"
+            for e in events
+        )
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_worker_crash_before_context_built_still_parks_ticket():
+    """Floor case (#454): the crash happens before the StateContext exists —
+    here ``build_state`` raises on an unknown state_name. There's no instance
+    to land a terminal event on, but the ticket must still be parked so the
+    Poller stops re-enqueueing it."""
+    repo = InMemoryTicketRepository()
+    ticket = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
+    repo.set_ticket_state(ticket.id, "Planning", now=dt.datetime(2026, 6, 13))
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    pool = WorkerPool(
+        repo=repo, qm=qm,
+        dispatcher=FakeRoleDispatcher(responses={}),
+        git=None, bus=None,
+        clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
+    )
+    try:
+        qm.enqueue(WorkItem(ticket_id=ticket.id, state_name="NotARealState"))
+        pool.tick()
+        _wait_until_idle(qm)
+        assert repo.get_ticket(ticket.id).current_state == "NeedsHelp"
     finally:
         pool.shutdown(wait=True)
 

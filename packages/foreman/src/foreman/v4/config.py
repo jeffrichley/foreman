@@ -347,6 +347,30 @@ class V4Config(BaseModel):
     ``dsn`` — a config without a valid ``[storage]`` block raises a
     ``ValidationError`` at load time (loud-fail; no SQLite fallback)."""
 
+    @field_validator("max_in_flight")
+    @classmethod
+    def _max_in_flight_pinned_to_one(cls, v: int) -> int:
+        """Enforce the implicit ``max_in_flight == 1`` correctness dependency.
+
+        Arch-review (independent-I4): the merge states assume no PR goes
+        BEHIND mid-flight — at cap-1 that race is sidestepped, not handled,
+        and the dependency lived only as a comment in ``states/merging.py``.
+        Until foreman#316 (auto-rebase a PR left BEHIND by a concurrent merge)
+        lands, running >1 in-flight is unsafe, so we fail loud at boot rather
+        than silently run an unsafe concurrency level. 0 is rejected here too
+        (it would size the WorkerPool's ThreadPoolExecutor at zero workers, so
+        no ticket ever runs) — the same one-value guard catches both.
+        """
+        if v != 1:
+            raise ValueError(
+                f"max_in_flight must be 1 (got {v}). Concurrency > 1 is unsafe "
+                "until foreman#316 (auto-rebase a PR left BEHIND by a "
+                "concurrent merge) lands: the merge states assume cap-1 "
+                "serialization and sidestep the rebase race rather than "
+                "handling it. Pinned to 1 deliberately; lifts when #316 ships."
+            )
+        return v
+
 
 def load_config(path: Path) -> V4Config:
     """Parse the TOML at ``path`` and validate as V4Config.

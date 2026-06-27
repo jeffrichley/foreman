@@ -145,6 +145,55 @@ def _enter_terminal(ctx: StateContext, terminal: TicketState) -> None:
     ctx.repo.close_state_instance(terminal_instance.id, now=now)
 
 
+def escalate_to_needs_help(
+    ctx: StateContext, *, failure_phase: str, failure_reason: str,
+) -> TicketState:
+    """Park ``ctx``'s ticket on NeedsHelp without running any further hooks.
+
+    The single escalation path shared by:
+
+    * the **runaway-defense cap** in ``transition()`` (a state that failed
+      ``max_state_attempts`` consecutive times), and
+    * the **WorkerPool crash-handler** (foreman#454) — a worker-thread future
+      that raises *outside* transition()'s per-phase handlers (e.g. a repo
+      error in ``next_state`` / ``mark_execute_completed``, or ``build_state``
+      raising). Left unhandled, the ticket keeps its non-terminal
+      ``current_state`` with ``next_action_at`` NULL, so the Poller re-enqueues
+      it every tick forever — a silent infinite loop visible only in logs.
+
+    Sequence (mirrors what the runaway-cap branch did inline):
+      1. record the failure on the in-flight ``state_instance`` (audit);
+      2. emit ``StateFailedEvent`` (observability);
+      3. set the ticket to NeedsHelp;
+      4. close the failed instance + emit ``StateExitedEvent`` so the observer
+         REMOVES the old ``foreman:state-<X>`` label;
+      5. synthesize the terminal landing (``_enter_terminal``) so the observer
+         ADDS ``foreman:state-needshelp`` and the Poller stops re-enqueueing.
+
+    Steps 4–5 are idempotent against transition()'s own ``finally`` (which may
+    have already closed the row + emitted StateExited before re-raising): the
+    repo close is a no-op flip and the observer's label removal swallows a 404.
+    Returns the :class:`NeedsHelpState`.
+    """
+    from foreman.v4.states.terminal import NeedsHelpState
+
+    now = ctx.clock()
+    ctx.repo.record_failure(
+        ctx.instance.id, now=now,
+        failure_phase=failure_phase, failure_reason=failure_reason,
+    )
+    _publish(
+        ctx, StateFailedEvent,
+        failure_phase=failure_phase, failure_reason=failure_reason,
+    )
+    needs_help = NeedsHelpState()
+    ctx.repo.set_ticket_state(ctx.ticket.id, needs_help.state_name, now=now)
+    ctx.repo.close_state_instance(ctx.instance.id, now=now)
+    _publish(ctx, StateExitedEvent, outcome=None)
+    _enter_terminal(ctx, needs_help)
+    return needs_help
+
+
 class TicketState(ABC):
     """One phase in the ticket's lifecycle.
 
@@ -258,30 +307,14 @@ class TicketState(ABC):
                 f"state {self.state_name!r} failed {consecutive} consecutive "
                 f"times (cap={ctx.max_state_attempts}); escalating to NeedsHelp"
             )
-            ctx.repo.record_failure(
-                ctx.instance.id, now=ctx.clock(),
-                failure_phase="retry_cap", failure_reason=reason,
+            # Single shared escalation path (also used by the WorkerPool
+            # crash-handler, foreman#454): record_failure → StateFailed → set
+            # NeedsHelp → close + StateExited (drops the old foreman:state-<X>
+            # label) → synthesize the terminal landing (adds
+            # foreman:state-needshelp; WorkerPool won't re-enqueue once parked).
+            return escalate_to_needs_help(
+                ctx, failure_phase="retry_cap", failure_reason=reason,
             )
-            _publish(
-                ctx, StateFailedEvent,
-                failure_phase="retry_cap", failure_reason=reason,
-            )
-            from foreman.v4.states.terminal import NeedsHelpState
-            needs_help = NeedsHelpState()
-            ctx.repo.set_ticket_state(
-                ctx.ticket.id, needs_help.state_name, now=ctx.clock(),
-            )
-            # Phase 8d.15 (F2): close the failed state's instance row AND
-            # emit StateExitedEvent — the prior code only closed the row,
-            # so LabelObservabilityObserver never saw the failed state
-            # exit and left foreman:state-<failed> stuck on the issue
-            # alongside the new foreman:state-needshelp.
-            self._close_failed_state(ctx)
-            # Synthesize the terminal landing event so observers see it
-            # — WorkerPool will not re-enqueue once the ticket is parked
-            # in NeedsHelp. See ``_enter_terminal`` for the full rationale.
-            _enter_terminal(ctx, needs_help)
-            return needs_help
 
         try:
             self.enter(ctx)
