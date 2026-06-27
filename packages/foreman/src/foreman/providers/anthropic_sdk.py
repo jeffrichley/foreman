@@ -175,6 +175,30 @@ _TRANSIENT_PATTERNS: tuple[str, ...] = (
 )
 
 
+# foreman#461: substrings that signal a resume into a session that isn't on
+# disk. The claude CLI prints "No conversation found with session ID: <id>"
+# to stderr; ProcessError surfaces it in str(exc) (message + "\nError output:
+# <stderr>"). One module-level tuple so the signature has a single edit point,
+# mirroring _TRANSIENT_PATTERNS. Patterns are matched against a lowercased
+# haystack, so keep them lowercase.
+_MISSING_SESSION_PATTERNS: tuple[str, ...] = (
+    "no conversation found",
+)
+
+
+def _is_missing_session_sdk_error(exc: BaseException) -> bool:
+    """Classify ``exc`` as a resume-into-a-session-that-isn't-on-disk failure.
+
+    foreman#461: a daemon hard-killed before the role's Claude transcript
+    flushed to the mounted ``CLAUDE_CONFIG_DIR`` leaves the named session
+    unwritten, so a later ``--resume <id>`` hard-fails. The safe response is to
+    retry FRESH (Stage-1 idempotency makes the redo harmless). Only meaningful
+    on a ``resume=True`` dispatch — a fresh run can never raise this.
+    """
+    haystack = str(exc).lower()
+    return any(p in haystack for p in _MISSING_SESSION_PATTERNS)
+
+
 def _is_transient_sdk_error(exc: BaseException) -> bool:
     """Classify ``exc`` as an Anthropic-side transient transport failure.
 
@@ -416,6 +440,46 @@ class AnthropicSDKProvider(ProviderFacade):
                 recovered = self._recovery.try_recover(e, partial)
                 if recovered is not None:
                     return recovered
+                # foreman#461: a resume into a session that was never flushed
+                # to disk (daemon killed before the role's transcript landed)
+                # hard-fails with "No conversation found". Retry ONCE FRESH —
+                # drop --resume, keep the same session id so a later crash can
+                # still resume THIS run — instead of surfacing
+                # ProviderUnknownError → NeedsHelp. A fresh session is always
+                # safe (Stage-1 idempotency). Gated on ``resume`` so a fresh
+                # run can never trip it. Placed before the transient/auth
+                # checks because a missing-session error is neither.
+                if resume and _is_missing_session_sdk_error(e):
+                    log.warning(
+                        "resume session %r not on disk (killed-before-flush?); "
+                        "retrying fresh (foreman#461)",
+                        session_id,
+                    )
+                    fresh_kwargs = {
+                        k: v for k, v in options_kwargs.items() if k != "resume"
+                    }
+                    if session_id is not None:
+                        fresh_kwargs["session_id"] = session_id
+                    fresh_options = ClaudeAgentOptions(**fresh_kwargs)
+                    partial = PartialResult(
+                        result_message=None, output_model=output_model
+                    )
+                    try:
+                        return await self._iterate_query(
+                            user_prompt=user_prompt,
+                            options=fresh_options,
+                            output_model=output_model,
+                            partial=partial,
+                        )
+                    except ProviderError:
+                        raise
+                    except Exception as fresh_exc:
+                        recovered = self._recovery.try_recover(fresh_exc, partial)
+                        if recovered is not None:
+                            return recovered
+                        if _is_transient_sdk_error(fresh_exc):
+                            raise ProviderTransientError(str(fresh_exc)) from fresh_exc
+                        raise _translate_sdk_exception(fresh_exc) from fresh_exc
                 # foreman#361: classify transient transport failures BEFORE
                 # the auth-retry decision. A Claude-Code-wrapped 5xx/429
                 # also starts with _SDK_AUTH_ERROR_PREFIX, so without this
