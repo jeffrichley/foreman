@@ -30,7 +30,7 @@ from foreman.v4.git_provider import GitProvider
 from foreman.v4.queue_manager import QueueManager
 from foreman.v4.repository import TicketRepository
 from foreman.v4.role_dispatcher import RoleDispatcher
-from foreman.v4.state import StateContext
+from foreman.v4.state import StateContext, escalate_to_needs_help
 from foreman.v4.states.registry import build_state
 from foreman.v4.work import WorkItem
 
@@ -120,27 +120,76 @@ class WorkerPool:
             )
 
     def _run_transition(self, item: WorkItem) -> None:
-        ticket = self._repo.get_ticket(item.ticket_id)
-        sequence = self._repo.count_state_instances_for_ticket(item.ticket_id) + 1
-        instance = self._repo.open_state_instance(
-            ticket_id=item.ticket_id,
-            state_name=item.state_name,
-            sequence=sequence,
-            now=self._clock(),
-        )
-        state = build_state(item.state_name)
-        ctx = StateContext(
-            ticket=ticket,
-            instance=instance,
-            repo=self._repo,
-            clock=self._clock,
-            bus=self._bus,
-            role_dispatcher=self._dispatcher,
-            git=self._git,
-            max_state_attempts=self._max_state_attempts,
-            project_configs=self._project_configs,
-        )
-        state.transition(ctx)
+        ctx: StateContext | None = None
+        try:
+            ticket = self._repo.get_ticket(item.ticket_id)
+            sequence = self._repo.count_state_instances_for_ticket(item.ticket_id) + 1
+            instance = self._repo.open_state_instance(
+                ticket_id=item.ticket_id,
+                state_name=item.state_name,
+                sequence=sequence,
+                now=self._clock(),
+            )
+            state = build_state(item.state_name)
+            ctx = StateContext(
+                ticket=ticket,
+                instance=instance,
+                repo=self._repo,
+                clock=self._clock,
+                bus=self._bus,
+                role_dispatcher=self._dispatcher,
+                git=self._git,
+                max_state_attempts=self._max_state_attempts,
+                project_configs=self._project_configs,
+            )
+            state.transition(ctx)
+        except Exception:
+            # foreman#454: a transition that raises OUTSIDE transition()'s own
+            # per-phase handlers (a repo error in next_state /
+            # mark_execute_completed, build_state on an unknown state_name, …)
+            # would otherwise leave the ticket in a non-terminal current_state
+            # with next_action_at NULL — the Poller re-enqueues it every tick
+            # forever, a silent infinite loop with evidence only in logs (the
+            # _on_done_log callback). Park it on NeedsHelp so the loop stops and
+            # the label observer surfaces it. Re-raise so the done-callback
+            # still logs the original stack trace.
+            self._escalate_crashed_transition(item, ctx)
+            raise
+
+    def _escalate_crashed_transition(
+        self, item: WorkItem, ctx: StateContext | None,
+    ) -> None:
+        """Best-effort park-to-NeedsHelp after a worker-thread crash (#454).
+
+        Never masks the original exception: if the repo/bus is itself the
+        failure this also raises, which we swallow + log here so the caller's
+        ``raise`` still surfaces the real cause via the done-callback.
+        """
+        try:
+            if ctx is not None:
+                # The StateContext exists, so we can land the full terminal
+                # sequence (close the failed instance + drop its label, add
+                # foreman:state-needshelp). Idempotent against transition()'s
+                # own finally if it already closed the row.
+                escalate_to_needs_help(
+                    ctx, failure_phase="worker_crash",
+                    failure_reason="worker-thread transition raised",
+                )
+            else:
+                # Crash before the StateContext was built (get_ticket /
+                # open_state_instance / build_state raised): no open instance to
+                # land a terminal event on. Floor: park the ticket so the Poller
+                # stops re-enqueueing. If the repo is itself broken this raises
+                # and is logged below — nothing more we can safely do.
+                from foreman.v4.states.terminal import NeedsHelpState
+                self._repo.set_ticket_state(
+                    item.ticket_id, NeedsHelpState().state_name, now=self._clock(),
+                )
+        except Exception:
+            _LOG.exception(
+                "WorkerPool crash-escalation failed for ticket %d state=%s",
+                item.ticket_id, item.state_name,
+            )
 
     def shutdown(self, *, wait: bool = True) -> None:
         self._executor.shutdown(wait=wait)
