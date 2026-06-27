@@ -57,6 +57,7 @@ services:
     # operator happens to have on the same host. See foreman#363.
     labels:
       com.centurylinklabs.watchtower.scope: foreman
+      com.centurylinklabs.watchtower.lifecycle.pre-update: "foreman gate-update"
 
     # PID 1: tini handles zombie reaping + signal forwarding for Python.
     # See Docker design spec, Architecture section, "PID 1 / signal forwarding."
@@ -184,6 +185,7 @@ services:
       # on the host (any voice/agent_core dev containers the
       # operator happens to be running).
       WATCHTOWER_SCOPE: "foreman"
+      WATCHTOWER_LIFECYCLE_HOOKS: "true"
       # JSON-lines log output matches the daemon's structured log
       # convention; tail via `docker compose logs -f watchtower`.
       WATCHTOWER_LOG_FORMAT: "Json"

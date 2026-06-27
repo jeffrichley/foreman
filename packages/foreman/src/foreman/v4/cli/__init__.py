@@ -29,6 +29,7 @@ from foreman.v4.cli.daemon import (
     cmd_daemon_stop,
 )
 from foreman.v4.cli.doctor import cmd_doctor
+from foreman.v4.cli.gate_update import cmd_gate_update
 from foreman.v4.cli.init import cmd_init
 from foreman.v4.cli.log import cmd_log
 from foreman.v4.cli.mutations import (
@@ -75,6 +76,7 @@ app.command("init")(cmd_init)
 
 # Query + log + mutation commands wired. Daemon lifecycle commands land in
 # the daemon_app sub-typer below.
+app.command("gate-update")(cmd_gate_update)
 app.command("ps")(cmd_ps)
 app.command("show")(cmd_show)
 app.command("queue")(cmd_queue)
