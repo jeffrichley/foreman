@@ -301,6 +301,34 @@ class OrchestratorConfig(BaseModel):
     private_key_path: str
 
 
+class BackupConfig(BaseModel):
+    """Postgres pg_dump snapshot scheduler config (foreman#434).
+
+    ``enabled`` turns the scheduler on/off. ``dir`` is the
+    container-internal path where ``.sql.gz`` dumps are written
+    (bind-mounted to ``~/.foreman/backups/`` on the host so
+    ``docker compose down -v`` cannot wipe them). ``interval_seconds``
+    controls how often the daemon fires a snapshot; ``ge=60`` guards
+    against runaway snapshot spam if misconfigured to 0.
+
+    Retention tiers:
+      - ``retention_hourly`` — keep the N most-recent files in the
+        last 24 h window (default 24).
+      - ``retention_daily``  — keep the N most-recent calendar-day
+        survivors from the ``[now-7d, now-24h)`` window (default 7).
+      - ``retention_weekly`` — keep the N most-recent ISO-week
+        survivors from the ``[now-28d, now-7d)`` window (default 4).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True
+    dir: str = "/foreman/backups"
+    interval_seconds: int = Field(default=3600, ge=60)
+    retention_hourly: int = Field(default=24, ge=0)
+    retention_daily: int = Field(default=7, ge=0)
+    retention_weekly: int = Field(default=4, ge=0)
+
+
 class V4Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
     log_dir: str
@@ -343,6 +371,10 @@ class V4Config(BaseModel):
     on :func:`resolve_operator` returning both identities."""
     projects: list[ProjectConfig] = Field(default_factory=list)
     storage: StorageConfig = Field(default_factory=StorageConfig)
+    backup: BackupConfig = Field(default_factory=BackupConfig)
+    """foreman#434: pg_dump snapshot scheduler. Optional with default
+    — existing operator configs without a ``[backup]`` block continue
+    to load and default to ``enabled=True`` with hourly snapshots."""
     """v5: persistence engine selection. Postgres-only with a required
     ``dsn`` — a config without a valid ``[storage]`` block raises a
     ``ValidationError`` at load time (loud-fail; no SQLite fallback)."""
@@ -400,6 +432,8 @@ def load_config(path: Path) -> V4Config:
         payload["operator"] = raw["operator"]
     if "storage" in raw:
         payload["storage"] = raw["storage"]
+    if "backup" in raw:
+        payload["backup"] = raw["backup"]
     return V4Config.model_validate(payload)
 
 

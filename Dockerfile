@@ -44,6 +44,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ${FOREMAN_*_APP_ID} placeholders in /etc/foreman/config.toml.template
 # into the runtime V4Config file at $FOREMAN_V4_CONFIG.
 
+# foreman#434: install postgresql-client-16 via the PGDG apt repo.
+# python:3.12-slim (Debian Bookworm) ships postgresql-client v15 from the
+# default apt repo; pg_dump 15 cannot dump from a PostgreSQL 16 server.
+# The PGDG repo provides postgresql-client-16, matching the postgres:16-alpine
+# sidecar exactly. This puts pg_dump and psql on PATH at the correct major
+# version for the daemon's backup/restore CLI.
+RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+        | gpg --dearmor -o /usr/share/keyrings/postgresql-archive-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/postgresql-archive-keyring.gpg] \
+        https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+        > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client-16 \
+    && rm -rf /var/lib/apt/lists/*
+
 # --- uv -----------------------------------------------------------------
 RUN pip install --no-cache-dir uv
 

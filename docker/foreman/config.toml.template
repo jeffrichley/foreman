@@ -33,6 +33,17 @@ dsn = "${FOREMAN_PG_DSN}"
 pool_min = 2
 pool_max = 10
 
+# foreman#434: pg_dump snapshot scheduler. Backups write to /foreman/backups
+# (bind-mounted to ${HOME}/.foreman/backups on the host — survives down -v).
+# Set enabled = false to disable; tune interval_seconds and retention_* to taste.
+[backup]
+enabled = true
+dir = "/foreman/backups"
+interval_seconds = 3600
+retention_hourly = 24
+retention_daily = 7
+retention_weekly = 4
+
 [apps]
 planner = { app_id = ${FOREMAN_PLANNER_APP_ID}, private_key_path = "/run/secrets/planner_pem" }
 reviewer = { app_id = ${FOREMAN_REVIEWER_APP_ID}, private_key_path = "/run/secrets/reviewer_pem" }

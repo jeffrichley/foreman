@@ -427,27 +427,90 @@ docker inspect foreman-daemon \
 
 ## Backups and restoration
 
-The daemon-internal SQLite snapshot scheduler (issue #360) and the
-`foreman restore` command were **removed** with the SQLite kill. They
-snapshotted `/foreman/state/foreman.sqlite`, which is no longer the
-authoritative store, so they no longer apply.
-
-Production state now lives in the `foreman-postgres` sidecar
+Production state lives in the `foreman-postgres` sidecar
 (`postgres:16-alpine`), with its data on the `foreman-pg-data` named
+volume. Foreman ships a `pg_dump`-based backup scheduler (foreman#434)
+that writes gzip-compressed logical dump files to `~/.foreman/backups/`
+on the host — a bind-mounted directory that **survives `docker compose
+down -v`** because it lives on the host filesystem, not in a Docker
 volume.
 
-### Current DR gap (read this)
+### What backups exist and where
 
-There is **no Postgres snapshot mechanism yet**. The `foreman-pg-data`
-volume survives `docker compose stop` and `docker compose down`, but is
-**wiped by `docker compose down -v`**. With no backup in place, a
-`down -v` against this volume is irrecoverable — treat it as a
-destructive, point-of-no-return command.
+- **Location:** `~/.foreman/backups/foreman-<ts>.sql.gz` on the host
+  (inside the container: `/foreman/backups/foreman-<ts>.sql.gz`).
+- **Schedule:** hourly by default (`interval_seconds = 3600`).
+- **Retention:** 24/7/4 by default — 24 hourly + 7 daily + 4 weekly
+  survivors ≈ 35 files total at steady state.
+- **Format:** gzip-compressed plain-SQL `pg_dump` output, restoreable
+  with a single `psql` pipe.
 
-The replacement Postgres DR backup is tracked as
-[foreman#434](https://github.com/jeffrichley/foreman/issues/434) and is
-not yet built. Until it lands, the only protection is operator
-discipline around `down -v`.
+### Verify a backup is readable
+
+```bash
+gunzip -c ~/.foreman/backups/foreman-<ts>.sql.gz | head -5
+# Expected: PostgreSQL header comments, e.g.:
+# -- PostgreSQL database dump
+# -- Dumped from database version 16.x
+# -- Dumped by pg_dump version 16.x
+```
+
+### Restore procedure
+
+> **WARNING: read this before running any commands.**
+>
+> `docker compose stop daemon` is **MANDATORY** before restoring. The
+> postgres sidecar **must remain running** — `foreman restore` needs it
+> to take a pre-restore backup and to run `psql` against it.
+>
+> The `foreman restore` PID-file check is best-effort inside Docker: a
+> one-off `docker compose run` container cannot see the daemon's PID file
+> (it lives in the daemon's writable layer, not on a shared volume).
+> Running restore against a live daemon can corrupt either the live DB or
+> the restored state.
+
+```bash
+# MANDATORY: stop the daemon FIRST. The postgres sidecar must stay running.
+docker compose stop daemon
+
+# One-off container mounts the same volumes/binds as the daemon:
+docker compose run --rm daemon \
+    foreman restore /foreman/backups/foreman-<ts>.sql.gz
+docker compose up -d daemon
+```
+
+`foreman restore` prints the path to both the restored file and the
+pre-restore snapshot. Exit code 0 means `psql` returned cleanly.
+
+### One-step undo (reverse a restore)
+
+The pre-restore dump is saved automatically as
+`~/.foreman/backups/pre-restore-<ts>.sql.gz` alongside the regular
+backups. To reverse a restore, run `foreman restore` against it:
+
+```bash
+docker compose stop daemon
+docker compose run --rm daemon \
+    foreman restore /foreman/backups/pre-restore-<ts>.sql.gz
+docker compose up -d daemon
+```
+
+### Tuning backup settings
+
+All backup settings live in the `[backup]` block of your
+`config.toml` (template: `docker/foreman/config.toml.template`):
+
+```toml
+[backup]
+enabled = true          # set to false to disable entirely
+dir = "/foreman/backups"
+interval_seconds = 3600   # snapshot cadence (minimum 60)
+retention_hourly = 24     # keep N most-recent files in the last 24h
+retention_daily = 7       # keep N calendar-day survivors in [now-7d, now-24h)
+retention_weekly = 4      # keep N ISO-week survivors in [now-28d, now-7d)
+```
+
+Changes take effect on the next daemon restart.
 
 ---
 
@@ -816,14 +879,19 @@ Decision 7 § How to add a rule.
 
 ## What survives what
 
-| Action                         | Container | foreman-repos | foreman-state | foreman-logs | image |
-| ------------------------------ | --------- | ------------- | ------------- | ------------ | ----- |
-| `docker compose stop daemon`   | killed    | survives      | survives      | survives     | survives |
-| `docker compose down`          | removed   | survives      | survives      | survives     | survives |
-| `docker compose down -v`       | removed   | **WIPED**     | **WIPED**     | **WIPED**    | survives |
-| `docker rmi foreman:dev`       | (none)    | survives      | survives      | survives     | removed  |
+| Action                         | Container | foreman-repos | foreman-state | foreman-logs | foreman-pg-data | ~/.foreman/backups | image |
+| ------------------------------ | --------- | ------------- | ------------- | ------------ | --------------- | ------------------ | ----- |
+| `docker compose stop daemon`   | killed    | survives      | survives      | survives     | survives        | survives           | survives |
+| `docker compose down`          | removed   | survives      | survives      | survives     | survives        | survives           | survives |
+| `docker compose down -v`       | removed   | **WIPED**     | **WIPED**     | **WIPED**    | **WIPED**       | **survives**       | survives |
+| `docker rmi foreman:dev`       | (none)    | survives      | survives      | survives     | survives        | survives           | removed  |
+
+`~/.foreman/backups` survives all `docker compose` operations because it
+lives on the host filesystem (a bind mount), not in a Docker named volume.
+`docker compose down -v` wipes named volumes but leaves host-side bind-mounted
+directories untouched — this is the key DR property that makes the backup
+story meaningful.
 
 The image is reproducible from any commit-SHA via `scripts/build-docker.sh`.
-Volume contents are NOT reproducible (they hold cloned project state +
-Postgres data + logs from real runs). Treat `down -v` as the destructive
-command it is.
+Volume contents (other than `~/.foreman/backups`) are NOT reproducible.
+Treat `down -v` as the destructive command it is.

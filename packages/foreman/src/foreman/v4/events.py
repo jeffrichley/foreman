@@ -17,8 +17,10 @@ Type hierarchy:
       |     |-- StateExitedEvent
       |     `-- StateFailedEvent
       `-- DaemonEvent     - daemon-level fields (just ``at`` today;
-                            no ticket scope); parent of any event
-                            emitted by the daemon itself
+            |               no ticket scope); parent of any event
+            |               emitted by the daemon itself
+            |-- BackupTakenEvent  - pg_dump snapshot completed (issue #434)
+            `-- BackupFailedEvent - pg_dump snapshot/prune failed (issue #434)
 
 Observers that need to read ticket-scoped fields ``isinstance``-guard
 on :class:`TicketEvent` (`StructuredLogObserver`, `MetricsObserver`,
@@ -33,6 +35,7 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass
+from typing import Literal
 
 from foreman.v4.outcome import Outcome
 
@@ -76,6 +79,37 @@ class DaemonEvent(Event):
     consumers that need those fields ``isinstance``-guard on
     :class:`TicketEvent`.
     """
+
+
+@dataclass(frozen=True, slots=True)
+class BackupTakenEvent(DaemonEvent):
+    """pg_dump snapshot completed successfully (foreman#434).
+
+    ``path`` is the absolute path to the gzip-compressed dump file.
+    ``size_bytes`` is the uncompressed dump size (the gzip output
+    size, i.e. ``stat().st_size`` on the ``.sql.gz`` file).
+    ``pruned_count`` is the number of old snapshot files deleted by
+    the retention-tier algorithm during this same tick.
+    """
+
+    path: str
+    size_bytes: int
+    pruned_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class BackupFailedEvent(DaemonEvent):
+    """pg_dump snapshot or prune step failed (foreman#434).
+
+    ``phase`` is ``"snapshot"`` when ``pg_dump`` itself failed (e.g.
+    postgres unreachable, disk full on the pg side) or ``"prune"``
+    when the retention cleanup failed after a successful snapshot.
+    ``reason`` is the first 500 characters of ``str(exc)`` from the
+    caught exception.
+    """
+
+    phase: Literal["snapshot", "prune"]
+    reason: str
 
 
 @dataclass(frozen=True, slots=True)

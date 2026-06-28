@@ -26,6 +26,7 @@ from foreman.v4.observers.metrics import MetricsObserver
 from foreman.v4.observers.structured_log import StructuredLogObserver
 from foreman.v4.observers.sustained_blocked import SustainedBlockedObserver
 from foreman.v4.observers.terminal_landing import TerminalLandingObserver
+from foreman.v4.pg_backup import BackupScheduler
 from foreman.v4.poller import Poller
 from foreman.v4.repository import TicketRepository
 from foreman.v4.routing_git_provider import RoutingGitProvider
@@ -167,6 +168,15 @@ def bootstrap_cli_context(
         clock=dt.datetime.now,
     )
 
+    # foreman#434: pg_dump snapshot scheduler. The assert above guarantees
+    # config.storage.dsn is non-None; pass it directly to from_config.
+    backup_scheduler = BackupScheduler.from_config(
+        config.backup,
+        dsn=config.storage.dsn,
+        bus=bus,
+        clock=lambda: dt.datetime.now(dt.UTC),
+    )
+
     daemon = Daemon(
         repo=repo,
         git=git_for_cross_project,  # type: ignore[arg-type]
@@ -181,6 +191,7 @@ def bootstrap_cli_context(
         bus=bus,
         project_configs=project_configs,
         clone_refresher=clone_refresher,
+        backup_scheduler=backup_scheduler,
     )
 
     return build_cli_context(
