@@ -12,7 +12,7 @@ Add a partial unique index on `state_instances (ticket_id) WHERE exited_at IS NU
 - `PostgresTicketRepository.open_state_instance` catches `psycopg.errors.UniqueViolation` from the INSERT and re-raises as `StateInstanceAlreadyOpenError(str(ticket_id))` — raw psycopg exceptions do not leak.
 - `InMemoryTicketRepository.open_state_instance` enforces the same invariant with an explicit pre-insert check, raising `StateInstanceAlreadyOpenError` on violation.
 - The shared `RepositoryContract` test suite gains `test_open_state_instance_raises_when_already_open`, which proves both implementations raise `StateInstanceAlreadyOpenError` on a second open call for the same ticket.
-- Three existing contract tests (`test_count_consecutive_same_state_counts_run_correctly`, `test_count_consecutive_same_state_full_history_match`, `test_delete_ticket_cascades_state_instances`) are updated to close each state instance before opening the next — they currently open multiple instances for the same ticket without closing, which violates the new invariant.
+- Five existing tests are updated to close each state instance before opening the next — they currently open multiple instances for the same ticket without closing, which violates the new invariant: three in `_repository_contract.py` (`test_count_consecutive_same_state_counts_run_correctly`, `test_count_consecutive_same_state_full_history_match`, `test_delete_ticket_cascades_state_instances`), one in `test_role_dispatch.py` (`test_interrupted_prior_with_matching_id_resumes`), and one in `test_transition_events.py` (`test_execute_completed_event_payload_includes_details`).
 - `test_daemon_reconcile.py` gains `test_reconcile_second_run_is_noop`, which calls `reconcile_on_startup` twice and confirms the second call returns 0 (idempotent: no orphans remain after the first pass).
 - `just check` exits zero.
 
@@ -36,12 +36,24 @@ Note: this wraps only the INSERT; the existing `TicketNotFoundError` check that 
 
 **InMemory parity.** `InMemoryTicketRepository.create_ticket` enforces the `TicketAlreadyExistsError` invariant with an explicit dict-lookup check before inserting. The same approach applies here: check `self._instances.values()` for an open row (`ticket_id == ticket_id and exited_at is None`) before creating the new record. This keeps the two impls contract-equivalent, which is what the shared `RepositoryContract` suite validates.
 
-**Existing-test breakage.** Three contract tests open two instances for the same ticket sequentially without closing the first:
+**Existing-test breakage.** Five tests across three files open two instances for the same ticket sequentially without closing the first. All must be updated.
+
+*In `_repository_contract.py` (three tests):*
 - `test_count_consecutive_same_state_counts_run_correctly` — loop calls `open_state_instance` 6 times without closing
 - `test_count_consecutive_same_state_full_history_match` — loop calls `open_state_instance` 3 times without closing
 - `test_delete_ticket_cascades_state_instances` — opens instance at sequence=1 then sequence=2 without closing sequence=1
 
 Each must be updated to call `repo.close_state_instance(inst.id, now=_now())` after each open. The `count_consecutive_same_state` method counts all rows regardless of `exited_at`, so closing them does not change the count, and the test assertions remain valid.
+
+*In `test_role_dispatch.py` (one test):*
+- `test_interrupted_prior_with_matching_id_resumes` — opens `prior` at seq=1, calls `mark_execute_started` and `set_session_id` on it, then opens `current` at seq=2 while `prior` is still open.
+
+Fix: call `repo.close_state_instance(prior.id, now=dt.datetime(2026, 6, 13))` after `repo.set_session_id(prior.id, run_id)` and before opening `current`. The `resume=True` semantic is preserved: `list_state_instances_for_ticket` returns all rows regardless of `exited_at`, `close_state_instance` sets only `exited_at` (not `execute_completed_at`), so `resolve_dispatch` still sees `prior` as an interrupted prior with the matching session id and routes to `resume=True`.
+
+*In `test_transition_events.py` (one test):*
+- `test_execute_completed_event_payload_includes_details` — the `setup` fixture opens `instance` at sequence=1; the test then opens `new_instance` at sequence=2 for state `"DiagnosticDetail"` without closing sequence=1 first.
+
+Fix: call `repo.close_state_instance(instance.id, now=dt.datetime(2026, 6, 13))` before the `repo.open_state_instance(...)` call for `new_instance`. The test's `transition()` call and outcome assertions are unaffected — they operate entirely on `new_instance` and `ctx.bus`.
 
 ## Sub-requests (topologically sorted)
 
@@ -70,7 +82,21 @@ Each must be updated to call `repo.close_state_instance(inst.id, now=_now())` af
 
 4. **Update `PostgresTicketRepository.open_state_instance` in `packages/foreman/src/foreman/v4/postgres_repository.py`** — import `StateInstanceAlreadyOpenError` from `foreman.v4.repository` and wrap the INSERT in a try/except. The existing ticket-existence check is unchanged. See the exact pattern in the Approach section above.
 
-5. **Fix three existing contract tests in `packages/foreman/tests/v4/_repository_contract.py`** — for each of the three tests named in the Acceptance Criteria, change the setup loops to capture the returned instance and call `repo.close_state_instance(inst.id, now=_now())` immediately after each `open_state_instance` call. The assertions in these tests are unchanged.
+5. **Fix five existing tests across three files that violate the new invariant:**
+
+   **`packages/foreman/tests/v4/_repository_contract.py` (three tests):** For each of `test_count_consecutive_same_state_counts_run_correctly`, `test_count_consecutive_same_state_full_history_match`, and `test_delete_ticket_cascades_state_instances`, change the setup loops to capture the returned instance and call `repo.close_state_instance(inst.id, now=_now())` immediately after each `open_state_instance` call. The assertions in these tests are unchanged.
+
+   **`packages/foreman/tests/v4/states/test_role_dispatch.py` — `test_interrupted_prior_with_matching_id_resumes`:** After the `repo.set_session_id(prior.id, run_id)` call and before the `repo.open_state_instance(ticket_id=ticket.id, state_name="Demo", sequence=2, ...)` call, insert:
+   ```python
+   repo.close_state_instance(prior.id, now=dt.datetime(2026, 6, 13))
+   ```
+   The `resume=True` assertion at the end of the test remains valid. `list_state_instances_for_ticket` returns all rows regardless of `exited_at` (no filter on that column), so `resolve_dispatch` still sees `prior` in the run. `close_state_instance` sets only `exited_at`, not `execute_completed_at`, so `prior` still reads as an interrupted attempt. The stored session id on `prior` still matches the derived id, so `resolve_dispatch` returns `resume=True` exactly as before.
+
+   **`packages/foreman/tests/v4/test_transition_events.py` — `test_execute_completed_event_payload_includes_details`:** Before the `repo.open_state_instance(ticket_id=ticket.id, state_name="DiagnosticDetail", sequence=2, ...)` call inside the test body, insert:
+   ```python
+   repo.close_state_instance(instance.id, now=dt.datetime(2026, 6, 13))
+   ```
+   where `instance` is the seq=1 row opened by the `setup` fixture. The `_DiagnosticDetailState().transition(ctx_diag)` call and the outcome-detail assertions are unaffected — they operate entirely on `new_instance` and `ctx.bus`.
 
 6. **Add `StateInstanceAlreadyOpenError` to the imports at the top of `packages/foreman/tests/v4/_repository_contract.py`** — add it to the existing `from foreman.v4.repository import (...)` block.
 
@@ -116,6 +142,8 @@ Each must be updated to call `repo.close_state_instance(inst.id, now=_now())` af
 | `packages/foreman/src/foreman/v4/postgres_repository.py` | Import `StateInstanceAlreadyOpenError`; wrap INSERT in `open_state_instance` with `try/except psycopg.errors.UniqueViolation` |
 | `packages/foreman/tests/v4/_repository_contract.py` | Import `StateInstanceAlreadyOpenError`; fix 3 existing tests (close instances before re-opening); add `test_open_state_instance_raises_when_already_open` |
 | `packages/foreman/tests/v4/test_daemon_reconcile.py` | Add `test_reconcile_second_run_is_noop` |
+| `packages/foreman/tests/v4/states/test_role_dispatch.py` | In `test_interrupted_prior_with_matching_id_resumes`: close `prior` (seq=1) before opening `current` (seq=2) to satisfy the new invariant; `resume=True` semantic is preserved |
+| `packages/foreman/tests/v4/test_transition_events.py` | In `test_execute_completed_event_payload_includes_details`: close `instance` (seq=1, from `setup` fixture) before opening `new_instance` (seq=2, `"DiagnosticDetail"`) |
 
 ## Alternatives considered
 
