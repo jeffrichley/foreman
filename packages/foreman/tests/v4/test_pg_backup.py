@@ -109,47 +109,71 @@ def _make_snapshot(dst_dir: Path, ts: dt.datetime) -> Path:
 
 
 def test_prune_keeps_hourly_then_daily_then_weekly(tmp_path: Path) -> None:
-    """Seed with 60 hourly + 30 daily files; assert 35 survivors after pruning.
+    """Seed with 60 hourly + 30 daily files; assert exactly 35 survivors.
 
-    Survivors:
-      - hourly window (now - 24h): keep 24 most-recent
-      - daily window (now - 7d to now - 24h): 6 calendar days exist
-        in [now-7d, now-24h); keep most-recent per day (= 6), then
-        keep at most 7 day-survivors → 6 kept
-      - weekly window (now - 28d to now - 7d): files spaced 1 day apart
-        over last 30 days, so 23 files fall in [now-28d, now-7d);
-        those span ~3 ISO weeks; keep most-recent per week then keep
-        at most 4 → ≤4 kept
+    With now = 2026-06-27 12:00:00 UTC and RetentionPolicy(24, 7, 4):
+    - Hourly window [now-24h, now]: 25 unique files; keep 24 most-recent.
+    - Daily window [now-7d, now-24h): 7 distinct calendar days (Jun 20–26);
+      keep most-recent per day → 7 survivors.
+    - Weekly window [now-28d, now-7d): 21 daily-spaced files spanning ISO
+      weeks 22–25 (2026); keep most-recent per week → 4 survivors.
+    Total: 24 + 7 + 4 = 35.
     """
     now = dt.datetime(2026, 6, 27, 12, 0, 0, tzinfo=dt.UTC)
 
-    # 60 files spaced 1 hour apart ending at now
-    hourly_files = []
+    # Seed 1: 60 hourly files (now-59h through now).
     for i in range(60):
         ts = now - dt.timedelta(hours=60 - i - 1)
-        hourly_files.append(_make_snapshot(tmp_path, ts))
+        _make_snapshot(tmp_path, ts)
+
+    # Seed 2: 30 daily files (now-30d through now-1d).
+    # Files at now-30d and now-29d fall before all retention windows and
+    # are pruned unconditionally. Files at now-1d and now-2d share
+    # timestamps with hourly files (no-op collision: same filename, same bytes).
+    daily_ts: list[dt.datetime] = []
+    for i in range(30):
+        ts = now - dt.timedelta(days=30 - i)
+        _make_snapshot(tmp_path, ts)
+        daily_ts.append(ts)
 
     retention = RetentionPolicy(hourly=24, daily=7, weekly=4)
     pruned = prune_snapshots(dst_dir=tmp_path, now=now, retention=retention)
-    survivors = [p for p in tmp_path.glob("foreman-*.sql.gz")]
+    survivors = list(tmp_path.glob("foreman-*.sql.gz"))
 
-    # Verify none of the pruned files remain.
+    # No pruned file may remain on disk.
     for p in pruned:
         assert not p.exists(), f"Pruned file still exists: {p}"
 
-    # Hourly window: 60 files, only 24 newest kept, 36 pruned.
-    # But some of those 60 overlap with the daily window (files older than 24h).
-    # Files 0..35 (oldest) are in the [now-60h, now-24h) zone;
-    # files 36..59 (newest 24) are in the [now-24h, now] zone → hourly.
-    # In the [now-60h, now-24h) zone there are 36 files; they span
-    # calendar days. With daily-7 retention they contribute additional
-    # survivors. Let's just assert the count is within expected range.
-    # Rather than computing the exact number, assert it's <= 35
-    # (24 hourly + 7 daily + 4 weekly) and > 0.
-    assert 1 <= len(survivors) <= 35
-    # And all survivors are real files.
+    # Exact total must be 24 (hourly) + 7 (daily) + 4 (weekly) = 35.
+    assert len(survivors) == 35
+
     for p in survivors:
         assert p.exists()
+
+    # Verify weekly-tier: the most-recent file per ISO week must survive.
+    # Daily files i=2..22 (now-28d..now-8d) fall in the weekly window,
+    # spanning 4 ISO weeks (22–25 of 2026). The most-recent per week is:
+    #   week 22 → now-27d (2026-05-31), week 23 → now-20d (2026-06-07),
+    #   week 24 → now-13d (2026-06-14), week 25 → now-8d  (2026-06-19).
+    horizon_weekly = now - dt.timedelta(days=28)
+    horizon_daily = now - dt.timedelta(days=7)
+
+    week_best: dict[tuple[int, int], dt.datetime] = {}
+    for ts in daily_ts:
+        if horizon_weekly <= ts < horizon_daily:
+            wk = (ts.isocalendar()[0], ts.isocalendar()[1])
+            if wk not in week_best or ts > week_best[wk]:
+                week_best[wk] = ts
+
+    assert len(week_best) == 4, (
+        f"Expected 4 ISO weeks in weekly window, got {len(week_best)}"
+    )
+    survivor_names = {p.name for p in survivors}
+    for wk, best_ts in week_best.items():
+        name = f"foreman-{best_ts.strftime('%Y%m%dT%H%M%SZ')}.sql.gz"
+        assert name in survivor_names, (
+            f"Most-recent file for ISO week {wk} ({name}) was pruned"
+        )
 
 
 def test_prune_leaves_unparseable_filenames_alone(tmp_path: Path) -> None:
