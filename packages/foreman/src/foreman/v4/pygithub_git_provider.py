@@ -3,60 +3,23 @@
 Tests use FakeGitProvider (Task 3.2); production uses this. The seam
 matches the Protocol from foreman.v4.git_provider.
 
-Token-refresh seam
-------------------
-GitHub App installation tokens expire after 1 hour. v4's
-:class:`~foreman.v4.identity.V4IdentityRegistry` mints + caches them
-with a pre-expiry refresh window, but that refresh is only useful if
-the consumer ASKS for a fresh token. ``PyGithub.Github(token)`` stores
-the token at construction and never reaches back for a new one — so a
-long-running daemon that constructs the client once at bootstrap dies
-at minute ~60 with ``BadCredentialsException: 401``.
-
-The fix is a factory seam: ``PyGithubGitProvider`` takes a callable
-that mints a fresh ``Github`` client (which internally calls
-``identity.get_role_token(...)``), and rebuilds the cached client when
-it's older than ``refresh_after_seconds`` (default 50 min = 3000s — well
-inside the 1-hour TTL with safety margin). The :class:`Repository`
-handle lives INSIDE each ``Github`` instance, so rebuilding the client
-invalidates it too.
-
-Cooperation with V4IdentityRegistry's pre-expiry safety window
---------------------------------------------------------------
-A subtle gotcha bit dogfood at minute 60 on 2026-06-15: rebuilding the
-``Github`` client only helps if the factory closure pulls a FRESH
-installation token from the identity registry. The registry's
-``get_role_token`` will reuse its cached token until the token enters
-its pre-expiry safety window. So the rebuild interval here and the
-identity registry's safety window must cooperate:
-
-    safety_window > (token_lifetime - refresh_after_seconds)
-
-With token_lifetime = 3600s and refresh_after_seconds = 3000s, the
-registry's ``_REFRESH_SAFETY_SECONDS`` must be > 600s. It is currently
-900s — so when we rebuild here at t=3000s, the cached token (minted at
-t=0, expiring at t=3600) has 600s left, which is INSIDE the 900s safety
-window, so the registry mints a fresh one. Every PyGithub rebuild
-reliably gets a brand-new installation token.
-
-Do NOT raise ``_DEFAULT_REFRESH_AFTER_SECONDS`` above ~3300s without
-raising ``V4IdentityRegistry._REFRESH_SAFETY_SECONDS`` in lockstep, or
-the cooperation breaks and the daemon will 401 at minute ~60.
+PyGithubGitProvider rebuilds its cached Github client iff
+identity.get_role_token(role) returns a different string than the last
+cached token. V4IdentityRegistry is the sole arbiter of when a new
+installation token is minted.
 """
 
 from __future__ import annotations
 
-import time
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from github import GithubException
+from github import Github, GithubException
 
 from foreman.git_host import CommentRef
 from foreman.v4.git_provider import PRNotFoundError, PRState
+from foreman.v4.identity import V4IdentityRegistry
 
 if TYPE_CHECKING:
-    from github import Github
     from github.Repository import Repository
 
 
@@ -116,75 +79,56 @@ def _resolve_merge_method(
 #: check failed, which is still a green-light for our purposes.
 CI_PASSING_MERGEABLE_STATES = frozenset({"clean", "unstable"})
 
-# Default refresh window: 50 minutes (3000 seconds). Load-bearing — the
-# GitHub App installation token TTL is 1 hour (3600s); rebuilding the
-# client at 50 min keeps us comfortably inside that window even if the
-# next API call happens a few minutes later. See the module-level
-# "Cooperation with V4IdentityRegistry's pre-expiry safety window"
-# docstring for why this constant and V4IdentityRegistry's
-# _REFRESH_SAFETY_SECONDS (currently 900s) must change in lockstep.
-_DEFAULT_REFRESH_AFTER_SECONDS = 3000.0
-
 
 class PyGithubGitProvider:
     def __init__(
         self,
         *,
-        github_factory: Callable[[], Github],
+        identity: V4IdentityRegistry,
+        role: str,
         repo_full_name: str,
-        clock: Callable[[], float] = time.time,
-        refresh_after_seconds: float = _DEFAULT_REFRESH_AFTER_SECONDS,
     ) -> None:
         """Construct the provider.
 
         Parameters
         ----------
-        github_factory:
-            Zero-arg callable that returns a fresh ``Github`` client.
-            Called lazily on first ``_gh`` access AND on each refresh
-            past ``refresh_after_seconds``. Production wires this to
-            ``lambda: Github(identity.get_role_token("orchestrator"))``
-            so every rebuild pulls a fresh installation token from the
-            identity registry.
+        identity:
+            :class:`~foreman.v4.identity.V4IdentityRegistry` that owns
+            token freshness. ``_gh`` delegates to
+            ``identity.get_role_token(role)`` on every access; the
+            registry decides when to mint a fresh installation token.
+        role:
+            Role name whose token is used for GitHub API calls, e.g.
+            ``"orchestrator"``.
         repo_full_name:
             ``owner/name`` slug, e.g. ``"jeffrichley/algokit"``.
-        clock:
-            Injectable seconds-since-epoch source. Defaults to
-            :func:`time.time`. Tests monkey-patch this to simulate
-            clock advance without sleeping.
-        refresh_after_seconds:
-            How long a cached ``Github`` client can live before the
-            next ``_gh`` access rebuilds it. Default 50 min = 3000s; see the
-            module-level docstring for why this is load-bearing.
         """
-        self._github_factory = github_factory
+        self._identity = identity
+        self._role = role
         self._repo_full_name = repo_full_name
-        self._clock = clock
-        self._refresh_after = refresh_after_seconds
+        self._cached_token: str | None = None
         self._cached_github: Github | None = None
-        self._cached_at: float | None = None
         self._cached_repo: Repository | None = None
 
     @property
     def _gh(self) -> Github:
-        """Return a ``Github`` client with a non-expired token.
+        """Return a ``Github`` client backed by the current installation token.
 
-        Rebuilds the cached client (and invalidates the cached
-        :class:`Repository` handle) when the cached client is older
-        than ``refresh_after_seconds``. Lazy: the factory is NOT
-        invoked at construction time — only on first access.
+        Delegates token-freshness to the identity registry: calls
+        ``self._identity.get_role_token(self._role)`` on every access
+        and rebuilds the ``Github`` client iff the returned token string
+        differs from the last cached token. Lazy: the registry is NOT
+        queried at construction time — only on first ``_gh`` access.
 
         Callers MUST go through ``self._gh`` for every API access; do
         not cache a ``Github`` reference outside this property — a
-        stashed reference clings to the old client across refresh and
-        silently 401s once its token expires.
+        stashed reference clings to the old token and silently 401s
+        once it expires.
         """
-        now = self._clock()
-        # _cached_github and _cached_at are set together; check _cached_at
-        # alone — its None state proves the cache is uninitialized.
-        if self._cached_at is None or (now - self._cached_at) > self._refresh_after:
-            self._cached_github = self._github_factory()
-            self._cached_at = now
+        current_token = self._identity.get_role_token(self._role)
+        if self._cached_token != current_token:
+            self._cached_github = Github(current_token)
+            self._cached_token = current_token
             # Repository handle is scoped to the OLD Github client's
             # requester; invalidate so the next ``_repo`` access
             # re-fetches via the freshly-built client.
@@ -200,17 +144,15 @@ class PyGithubGitProvider:
     def _repo(self) -> Repository:
         """Return a :class:`Repository` handle for the configured repo.
 
-        Cached alongside ``_gh`` — when ``_gh`` refreshes, the
-        ``_cached_repo`` is dropped and the next access re-fetches via
-        the new client. Cheap call (one extra GET) per refresh window.
+        Cached alongside ``_gh`` — when ``_gh`` detects a new token and
+        rebuilds the client, ``_cached_repo`` is invalidated and the
+        next access re-fetches via the new client.
 
-        Always invoke ``self._gh`` first so its time-based rebuild check
+        Always invokes ``self._gh`` first so its token-equality check
         fires on every ``_repo`` access. Otherwise the Poller's hot path
         (``self._repo.get_issues(...)`` every tick) would short-circuit
         on the cached Repository handle and the rebuild path inside
-        ``_gh`` would never trigger — which is the bug that killed the
-        v4 daemon at minute 60 on 2026-06-15 dogfood, despite 8c.3's
-        rebuild logic being correct in isolation.
+        ``_gh`` would never trigger.
         """
         gh = self._gh
         if self._cached_repo is None:
@@ -427,9 +369,9 @@ class PyGithubGitProvider:
         """Fetch the issue's comments in chronological order (oldest first).
 
         Goes through ``self._repo`` → ``self._gh``, which triggers the
-        time-based token-refresh check. This is the seam that fixes the
-        original 401 bug: the legacy ``GitHostProvider`` took a static
-        client; this method always uses the current refreshed client.
+        token-equality check. This is the seam that fixes the original
+        401 bug: the legacy ``GitHostProvider`` took a static client;
+        this method always uses the current token-delegated client.
 
         ``project`` is accepted for Protocol-shape symmetry but unused —
         the provider is locked to one repo at construction.
