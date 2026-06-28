@@ -184,8 +184,6 @@ def main() -> None:
 
     # Local imports keep the typer app importable for tests without
     # requiring PyGithub or any App credentials to be configured.
-    from github import Github
-
     from foreman.v4.bootstrap import bootstrap_cli_context
     from foreman.v4.config import load_config
     from foreman.v4.identity import V4IdentityRegistry
@@ -214,18 +212,15 @@ def main() -> None:
     )
 
     def _git_factory(repo: str) -> PyGithubGitProvider:
-        # Pass a callable rather than a static Github client so the
-        # provider can rebuild the client when the App installation
-        # token nears expiry. V4IdentityRegistry handles the token
-        # cache + 5-min-pre-expiry refresh; this factory seam ensures
-        # the PyGithub client SEES the refresh instead of clinging to a
-        # token that 401s at minute ~60. Role-specific tokens still
-        # flow through SubprocessRoleDispatcher; this seam is for the
-        # daemon's orchestrator read-path only.
+        # PyGithubGitProvider delegates token-freshness to the registry —
+        # it calls identity.get_role_token('orchestrator') on every _gh
+        # access and rebuilds the Github client only when the token string
+        # changes. Role-specific tokens still flow through
+        # SubprocessRoleDispatcher; this factory is for the daemon's
+        # orchestrator read-path only.
         return PyGithubGitProvider(
-            github_factory=lambda: Github(
-                identity.get_role_token("orchestrator"),
-            ),
+            identity=identity,
+            role="orchestrator",
             repo_full_name=repo,
         )
 
