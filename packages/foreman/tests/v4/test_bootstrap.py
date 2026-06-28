@@ -353,7 +353,10 @@ def test_bootstrap_uses_postgres_when_engine_postgres(monkeypatch, tmp_path: Pat
     assert captured["pool_max"] == 7
     assert isinstance(ctx.repo, InMemoryTicketRepository)
 
-    # The daemon no longer carries any backup scheduler — file-snapshot
-    # backups were SQLite-specific and removed with the SQLite subsystem.
+    # foreman#434: bootstrap wires a real BackupScheduler (enabled=True by
+    # default) into the daemon when the Postgres DSN is available. The
+    # SQLite file-snapshot scheduler was removed; this Postgres-aware
+    # scheduler is the replacement.
     assert ctx.daemon is not None
-    assert not hasattr(ctx.daemon, "_backup_scheduler")
+    from foreman.v4.pg_backup import BackupScheduler
+    assert isinstance(ctx.daemon._backup_scheduler, BackupScheduler)

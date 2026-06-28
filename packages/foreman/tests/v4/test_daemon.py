@@ -219,3 +219,48 @@ def test_tick_once_runs_with_disabled_clone_refresher_default():
         clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
     )
     daemon.tick_once()  # must not raise
+
+
+# --- Issue #434: backup scheduler wiring on tick_once -------------------
+
+
+def test_tick_once_calls_backup_scheduler():
+    """foreman#434: tick_once must invoke the injected backup scheduler
+    exactly once per tick."""
+    repo = InMemoryTicketRepository()
+    stub_scheduler = MagicMock()
+    stub_scheduler.tick.return_value = None
+    poller = Poller(
+        repo=repo, qm=None, git=FakeGitProvider(),
+        project="p", trigger_label="foreman:plan",
+        clock=lambda: dt.datetime(2026, 6, 27, 12, 0, 0),
+    )
+    daemon = Daemon(
+        repo=repo, git=FakeGitProvider(),
+        dispatcher=FakeRoleDispatcher(responses={}),
+        pollers=[poller],
+        config=DaemonConfig(tick_seconds=0, max_in_flight=4),
+        clock=lambda: dt.datetime(2026, 6, 27, 12, 0, 0),
+        backup_scheduler=stub_scheduler,
+    )
+    daemon.tick_once()
+    assert stub_scheduler.tick.call_count == 1
+
+
+def test_tick_once_uses_disabled_scheduler_by_default():
+    """No explicit ``backup_scheduler=`` kwarg → no-op sentinel default;
+    ``tick_once`` must not raise."""
+    repo = InMemoryTicketRepository()
+    poller = Poller(
+        repo=repo, qm=None, git=FakeGitProvider(),
+        project="p", trigger_label="foreman:plan",
+        clock=lambda: dt.datetime(2026, 6, 27, 12, 0, 0),
+    )
+    daemon = Daemon(
+        repo=repo, git=FakeGitProvider(),
+        dispatcher=FakeRoleDispatcher(responses={}),
+        pollers=[poller],
+        config=DaemonConfig(tick_seconds=0, max_in_flight=4),
+        clock=lambda: dt.datetime(2026, 6, 27, 12, 0, 0),
+    )
+    daemon.tick_once()  # must not raise

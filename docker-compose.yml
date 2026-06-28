@@ -143,6 +143,11 @@ services:
       #   volumes:
       #     - C:/Users/<you>/.foreman:/root/.foreman
       - ${HOME}/.foreman:/root/.foreman
+      # foreman#434: pg_dump snapshot target — bind mount survives `down -v`.
+      # Named volumes are wiped by `down -v`; host bind-mounted directories
+      # are not — Docker owns only the mount, not the host directory.
+      # Container path /foreman/backups matches [backup] dir in config.toml.
+      - ${HOME}/.foreman/backups:/foreman/backups
 
     # Ephemeral, per-container-lifetime PID dir (FOREMAN_PID_DIR above). tmpfs is
     # RAM-backed and re-created empty on every container start (both Watchtower

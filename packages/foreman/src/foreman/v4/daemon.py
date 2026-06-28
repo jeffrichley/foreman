@@ -25,6 +25,10 @@ from foreman.v4.clone_refresh import (
 )
 from foreman.v4.event_bus import EventBus
 from foreman.v4.git_provider import GitProvider
+from foreman.v4.pg_backup import (
+    BackupSchedulerLike,
+    _DisabledBackupScheduler,
+)
 from foreman.v4.poller import Poller
 from foreman.v4.queue_manager import QueueManager
 from foreman.v4.reconcile import reconcile_on_startup
@@ -32,10 +36,17 @@ from foreman.v4.repository import TicketRepository
 from foreman.v4.role_dispatcher import RoleDispatcher
 from foreman.v4.worker_pool import WorkerPool
 
-# Module-level singleton for the daemon's ``clone_refresher`` default kwarg
-# — same rationale as ``_DISABLED_BACKUP_SCHEDULER`` above (avoids ruff B008
-# function-call-in-default; the sentinel is stateless so sharing one
-# instance across every ``Daemon(...)`` construction is safe). foreman#407.
+# Module-level singletons for the daemon's default kwarg sentinels —
+# avoids ruff B008 (function-call-in-default); the sentinels are stateless
+# so sharing one instance across every ``Daemon(...)`` construction is safe.
+
+# foreman#434: disabled backup scheduler sentinel. Used as the default
+# ``backup_scheduler`` kwarg on ``Daemon.__init__`` so test-only ``Daemon(...)``
+# constructions that don't pass ``backup_scheduler=`` stay no-ops.
+_DISABLED_BACKUP_SCHEDULER: BackupSchedulerLike = _DisabledBackupScheduler()
+
+# foreman#407: disabled clone refresher sentinel. Used as the default
+# ``clone_refresher`` kwarg on ``Daemon.__init__``.
 _DISABLED_CLONE_REFRESHER: CloneRefresherLike = _DisabledCloneRefresher()
 
 if TYPE_CHECKING:
@@ -80,6 +91,7 @@ class Daemon:
         bus: EventBus | None = None,
         project_configs: dict[str, ProjectConfig] | None = None,
         clone_refresher: CloneRefresherLike = _DISABLED_CLONE_REFRESHER,
+        backup_scheduler: BackupSchedulerLike = _DISABLED_BACKUP_SCHEDULER,
     ) -> None:
         self._repo = repo
         self._git = git
@@ -106,6 +118,10 @@ class Daemon:
         # constructions (and zero-project configs) stay no-ops; production
         # wires the real refresher in ``bootstrap_cli_context``.
         self._clone_refresher = clone_refresher
+        # foreman#434: pg_dump snapshot scheduler. Default is the no-op
+        # ``_DisabledBackupScheduler`` sentinel so test-only ``Daemon(...)``
+        # constructions stay no-ops without specifying ``backup_scheduler=``.
+        self._backup_scheduler = backup_scheduler
         self._stop = threading.Event()
 
     @property
@@ -143,6 +159,11 @@ class Daemon:
         for poller in self._pollers:
             poller.tick()
         self._pool.tick()
+        # foreman#434: take a pg_dump snapshot if the interval has elapsed.
+        # Placed after pool submission and before bounded-drain — symmetric
+        # with the ordering of other side-effectful daemon work. The
+        # scheduler swallows errors internally and is no-op when disabled.
+        self._backup_scheduler.tick()
         # Bounded drain — see docstring.
         budget = 5.0
         while self._qm.in_flight_count() > 0 and budget > 0:

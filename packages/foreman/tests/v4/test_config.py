@@ -911,3 +911,57 @@ def test_storage_postgres_accepts_dsn_and_pool_sizes(tmp_path: Path):
     assert cfg.storage.dsn == "postgresql://foreman:pw@postgres:5432/foreman"
     assert cfg.storage.pool_min == 2
     assert cfg.storage.pool_max == 10
+
+
+# --- Issue #434: BackupConfig tests ------------------------------------
+
+
+def test_backup_block_defaulted_when_absent(tmp_path: Path):
+    """A TOML without a [backup] block defaults to enabled=True, 3600s interval."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[daemon]\n"
+        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+    )
+    config = load_config(config_path)
+    assert config.backup.enabled is True
+    assert config.backup.interval_seconds == 3600
+    assert config.backup.dir == "/foreman/backups"
+    assert config.backup.retention_hourly == 24
+    assert config.backup.retention_daily == 7
+    assert config.backup.retention_weekly == 4
+
+
+def test_backup_block_interval_too_small(tmp_path: Path):
+    """[backup] with interval_seconds = 30 (< ge=60) raises ValidationError."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[daemon]\n"
+        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+        "\n[backup]\n"
+        "interval_seconds = 30\n"
+    )
+    with pytest.raises(ValidationError, match="interval_seconds"):
+        load_config(config_path)
+
+
+def test_backup_block_extras_forbidden(tmp_path: Path):
+    """[backup] with an unknown key raises ValidationError (extra='forbid')."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[daemon]\n"
+        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+        "\n[backup]\n"
+        "unknown_key = true\n"
+    )
+    with pytest.raises(ValidationError):
+        load_config(config_path)
