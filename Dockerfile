@@ -45,15 +45,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # into the runtime V4Config file at $FOREMAN_V4_CONFIG.
 
 # foreman#434: install postgresql-client-16 via the PGDG apt repo.
-# python:3.12-slim (Debian Bookworm) ships postgresql-client v15 from the
-# default apt repo; pg_dump 15 cannot dump from a PostgreSQL 16 server.
-# The PGDG repo provides postgresql-client-16, matching the postgres:16-alpine
-# sidecar exactly. This puts pg_dump and psql on PATH at the correct major
-# version for the daemon's backup/restore CLI.
+# Debian's own postgresql-client trails the version we need (and varies by
+# suite), and pg_dump must be >= the server it dumps; the PGDG repo provides
+# postgresql-client-16 to match the postgres:16-alpine sidecar exactly. This
+# puts pg_dump and psql on PATH at the correct major version for the daemon's
+# backup/restore CLI.
+#
+# The PGDG suite MUST match the base image's Debian codename. Do NOT hardcode
+# it: Docker silently re-points the `python:3.12-slim` tag across Debian
+# releases (it moved bookworm -> trixie, which broke a hardcoded `bookworm-pgdg`
+# line with apt exit 100 — unmet deps against the newer base). Derive the
+# codename from /etc/os-release so the repo always tracks the live base.
 RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
         | gpg --dearmor -o /usr/share/keyrings/postgresql-archive-keyring.gpg \
+    && . /etc/os-release \
     && echo "deb [signed-by=/usr/share/keyrings/postgresql-archive-keyring.gpg] \
-        https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+        https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
         > /etc/apt/sources.list.d/pgdg.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends postgresql-client-16 \
