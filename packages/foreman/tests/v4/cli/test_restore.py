@@ -75,9 +75,14 @@ def test_restore_calls_psql_with_correct_args(tmp_path: Path) -> None:
     assert len(psql_calls) == 1
     psql_cmd = psql_calls[0]
     assert psql_cmd[0] == "psql"
-    assert psql_cmd[1] == dsn
+    # Password must be stripped from the argv DSN (passed via PGPASSWORD env instead).
+    assert psql_cmd[1] == "postgresql://foreman@localhost:5432/foreman"
     assert "--file" in psql_cmd
     assert "--quiet" in psql_cmd
+    # Atomicity flags must be present (M1 fix).
+    assert "--single-transaction" in psql_cmd
+    assert "-v" in psql_cmd
+    assert "ON_ERROR_STOP=1" in psql_cmd
 
 
 # ---------------------------------------------------------------------------
@@ -138,3 +143,87 @@ def test_restore_refuses_missing_snapshot(tmp_path: Path) -> None:
 
     assert result.exit_code == 1
     mock_run.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# test_restore_gz_decompresses_and_cleans_tempfile  (M2 fix)
+# ---------------------------------------------------------------------------
+
+
+def test_restore_gz_decompresses_and_cleans_tempfile(tmp_path: Path) -> None:
+    """Drive the .sql.gz decompress branch end-to-end.
+
+    Verifies:
+    - A .sql.gz snapshot is decompressed before being fed to psql.
+    - The pre-restore-*.sql.gz safety file is created in the backup dir
+      BEFORE psql is called (so that if psql fails the safety dump is
+      already on disk).
+    - The decompressed tempfile is cleaned up after restore completes.
+    """
+    dsn = "postgresql://foreman:pw@localhost:5432/foreman"
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+
+    # A real .sql.gz snapshot with known SQL content.
+    sql_content = b"-- PostgreSQL database dump\nCREATE TABLE test ();\n"
+    snapshot = tmp_path / "foreman-20260627T120000Z.sql.gz"
+    snapshot.write_bytes(gzip.compress(sql_content))
+
+    config = _make_config(tmp_path, dsn=dsn)
+    config.backup.dir = str(backup_dir)
+    ctx = _make_ctx(config)
+
+    # Track ordering: capture the tempfile path when psql is called and
+    # whether the pre-restore safety dump already existed at that moment.
+    pre_restore_present_at_psql_call: list[bool] = []
+    tempfile_path_at_psql_call: list[Path] = []
+
+    def fake_take_snapshot(*, dsn: str, dst_dir: Path, now: object) -> Path:
+        ts = now.strftime("%Y%m%dT%H%M%SZ") if hasattr(now, "strftime") else "20260627T120000Z"
+        pre_restore_file = dst_dir / f"foreman-{ts}.sql.gz"
+        pre_restore_file.parent.mkdir(parents=True, exist_ok=True)
+        pre_restore_file.write_bytes(gzip.compress(b"-- pre-restore dump"))
+        return pre_restore_file
+
+    def fake_psql_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        # Verify the pre-restore file was renamed before psql ran.
+        pre_restore_files = list(backup_dir.glob("pre-restore-*.sql.gz"))
+        pre_restore_present_at_psql_call.append(len(pre_restore_files) > 0)
+        # Capture the tempfile path to verify cleanup afterward.
+        if "--file" in args:
+            idx = args.index("--file")
+            tempfile_path_at_psql_call.append(Path(args[idx + 1]))
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=b"", stderr=b"")
+
+    runner = CliRunner()
+    with patch("foreman.v4.cli.restore.take_snapshot", side_effect=fake_take_snapshot):
+        with patch("foreman.v4.cli.restore.subprocess.run", side_effect=fake_psql_run):
+            with patch("foreman.v4.cli.restore.PID_PATH", tmp_path / "daemon.pid"):
+                result = runner.invoke(
+                    app,
+                    ["restore", str(snapshot)],
+                    obj=ctx,
+                    catch_exceptions=False,
+                )
+
+    assert result.exit_code == 0, (
+        f"Expected exit 0; got {result.exit_code}\n{result.output}"
+    )
+
+    # psql was called exactly once.
+    assert len(tempfile_path_at_psql_call) == 1
+
+    # Pre-restore safety dump existed on disk before psql ran.
+    assert pre_restore_present_at_psql_call == [True], (
+        "pre-restore-*.sql.gz must be saved to backup_dir before psql is invoked"
+    )
+
+    # The safety dump file persists after restore (it's the undo point).
+    pre_restore_files = list(backup_dir.glob("pre-restore-*.sql.gz"))
+    assert len(pre_restore_files) == 1, "pre-restore-*.sql.gz must be retained in backup_dir"
+
+    # Decompressed tempfile is cleaned up by the finally block.
+    tmp_p = tempfile_path_at_psql_call[0]
+    assert not tmp_p.exists(), (
+        f"Decompressed tempfile {tmp_p} must be deleted after restore"
+    )

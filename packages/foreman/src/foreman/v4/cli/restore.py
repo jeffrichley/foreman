@@ -30,7 +30,7 @@ from typing import Annotated
 import typer
 
 from foreman.v4.cli.daemon import PID_PATH, is_pid_alive
-from foreman.v4.pg_backup import take_snapshot
+from foreman.v4.pg_backup import _dsn_without_password, _subprocess_pg_env, take_snapshot
 
 
 def cmd_restore(
@@ -113,10 +113,24 @@ def cmd_restore(
             shutil.copy2(snapshot_file, tmp_path)
 
         # 7. Run psql.
+        # Password is passed via PGPASSWORD env (not argv) to avoid ps exposure.
+        # --single-transaction + -v ON_ERROR_STOP=1 make the restore atomic:
+        # a truncated/malformed snapshot rolls back instead of leaving the DB
+        # half-dropped (foreman Reviewer finding M1).
+        safe_dsn = _dsn_without_password(dsn)
+        pg_env = _subprocess_pg_env(dsn)
         try:
             subprocess.run(
-                ["psql", dsn, "--file", str(tmp_path), "--quiet"],
+                [
+                    "psql",
+                    safe_dsn,
+                    "--file", str(tmp_path),
+                    "--quiet",
+                    "--single-transaction",
+                    "-v", "ON_ERROR_STOP=1",
+                ],
                 check=True,
+                env=pg_env,
             )
         except subprocess.CalledProcessError as exc:
             typer.echo(f"psql restore failed: {exc}", err=True)

@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import datetime as dt
 import gzip
+import os
 import re
 import subprocess
+import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +36,48 @@ if TYPE_CHECKING:
 _SNAPSHOT_FILENAME_RE = re.compile(
     r"^foreman-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z\.sql\.gz$"
 )
+
+# Subprocess timeout (seconds) for pg_dump — prevents a hung sidecar from
+# blocking the daemon main loop indefinitely (foreman#309 lesson).
+_PG_DUMP_TIMEOUT = 300
+
+
+def _dsn_without_password(dsn: str) -> str:
+    """Return the DSN with the password stripped, safe for argv exposure.
+
+    Avoids leaking credentials via ``ps``/``/proc/<pid>/cmdline`` for the
+    lifetime of a ``pg_dump`` or ``psql`` process.  If the DSN carries no
+    password the original string is returned unchanged.
+    """
+    parsed = urllib.parse.urlparse(dsn)
+    if not parsed.password:
+        return dsn
+    userinfo = parsed.username or ""
+    host = parsed.hostname or ""
+    port_suffix = f":{parsed.port}" if parsed.port else ""
+    netloc = f"{userinfo}@{host}{port_suffix}" if userinfo else f"{host}{port_suffix}"
+    return urllib.parse.urlunparse((
+        parsed.scheme,
+        netloc,
+        parsed.path,
+        parsed.params,
+        parsed.query,
+        parsed.fragment,
+    ))
+
+
+def _subprocess_pg_env(dsn: str) -> dict[str, str]:
+    """Return ``os.environ`` copy with ``PGPASSWORD`` set from the DSN.
+
+    Used alongside :func:`_dsn_without_password` so the password never
+    appears on the command line while still being available to
+    ``pg_dump``/``psql`` via the libpq environment variable.
+    """
+    parsed = urllib.parse.urlparse(dsn)
+    env = os.environ.copy()
+    if parsed.password:
+        env["PGPASSWORD"] = parsed.password
+    return env
 
 
 @dataclass(frozen=True)
@@ -58,11 +102,20 @@ def take_snapshot(dsn: str, dst_dir: Path, *, now: dt.datetime) -> Path:
     Creates ``dst_dir`` (with parents) if it doesn't already exist.
     Returns the path of the written ``.sql.gz`` file.
 
+    The DSN password is passed via ``PGPASSWORD`` (never on argv).
+    A hard timeout of :data:`_PG_DUMP_TIMEOUT` seconds guards the daemon
+    main loop — ``subprocess.TimeoutExpired`` (a ``SubprocessError``)
+    propagates to the caller and is caught by ``BackupScheduler.tick``.
+
     Raises ``subprocess.CalledProcessError`` on non-zero pg_dump exit.
+    Raises ``subprocess.TimeoutExpired`` when pg_dump hangs.
     Raises ``OSError`` on I/O failures. Does NOT swallow — callers
     (``BackupScheduler.tick``) handle exceptions at the call site.
     """
     dst_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_dsn = _dsn_without_password(dsn)
+    env = _subprocess_pg_env(dsn)
 
     result = subprocess.run(
         [
@@ -72,10 +125,12 @@ def take_snapshot(dsn: str, dst_dir: Path, *, now: dt.datetime) -> Path:
             "--if-exists",
             "--no-owner",
             "--no-acl",
-            dsn,
+            safe_dsn,
         ],
         capture_output=True,
         check=True,
+        timeout=_PG_DUMP_TIMEOUT,
+        env=env,
     )
 
     filename = f"foreman-{now.strftime('%Y%m%dT%H%M%SZ')}.sql.gz"
