@@ -31,6 +31,10 @@ class TicketAlreadyExistsError(ValueError):
     """A ticket with this (project, issue_number) is already tracked."""
 
 
+class StateInstanceAlreadyOpenError(ValueError):
+    """A state instance for this ticket is already open (exited_at IS NULL)."""
+
+
 class MissingPRNumberError(LookupError):
     """No state outcome on this ticket recorded a pr_number."""
 
@@ -309,6 +313,12 @@ class InMemoryTicketRepository:
         self, *, ticket_id: int, state_name: str, sequence: int, now: dt.datetime
     ) -> StateInstanceRecord:
         self.get_ticket(ticket_id)  # raise if missing
+        open_rows = [
+            i for i in self._instances.values()
+            if i.ticket_id == ticket_id and i.exited_at is None
+        ]
+        if open_rows:
+            raise StateInstanceAlreadyOpenError(str(ticket_id))
         instance = StateInstanceRecord(
             id=self._next_instance_id,
             ticket_id=ticket_id,

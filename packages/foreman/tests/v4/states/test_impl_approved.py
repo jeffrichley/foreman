@@ -240,6 +240,11 @@ def test_impl_approved_blocked_does_not_count_toward_runaway_cap() -> None:
     pr_open = PRState(merged=False, closed=False, mergeable=False, ci_passing=False)
     ctx0, _repo, git = _ctx(pr_open, repo=repo)
     ticket_id = ctx0.ticket.id
+    # Close the initial _ctx instance (seq=2) before the loop so the new
+    # one-open-per-ticket invariant is satisfied when the loop opens each
+    # polling instance. The _ctx helper leaves it open but this test
+    # exercises the runaway-cap logic, not the initial dispatch path.
+    repo.close_state_instance(ctx0.instance.id, now=dt.datetime(2026, 6, 13))
 
     # Run 5 transition() calls — more than max_state_attempts=3.
     for poll_n in range(1, 6):

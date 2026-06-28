@@ -87,37 +87,36 @@ def test_one_transition_reaches_all_four_observers(caplog):
     assert {"state_entered", "execute_started", "execute_completed", "state_exited"} <= events_logged
 
     # 2. Label observer fired on every lifecycle boundary. The Demo
-    #    transition advances to Done — a terminal — so Phase 8d.12's
-    #    terminal-landing synthesis fires an additional
-    #    StateEnteredEvent for Done before transition()'s finally block
-    #    emits StateExited for Demo. Order:
+    #    transition advances to Done — a terminal. With the
+    #    one-open-per-ticket invariant, transition() closes and emits
+    #    StateExited for Demo BEFORE calling _enter_terminal (which opens
+    #    the Done row). Order:
     #      - add Demo on StateEntered(Demo) at entry
+    #      - remove Demo on StateExited(Demo) emitted before _enter_terminal
     #      - add Done on StateEntered(Done) synthesized by _enter_terminal
-    #      - remove Demo on StateExited(Demo) from the finally block
     #    No remove for Done — terminal-landing is intentionally one-sided
     #    so the issue keeps the terminal label visible for operators.
     assert writer.calls == [
         ("add", {"project": "p", "issue_number": 1,
                  "labels": {"foreman:state-demo"}}),
-        ("add", {"project": "p", "issue_number": 1,
-                 "labels": {"foreman:state-done"}}),
         ("remove", {"project": "p", "issue_number": 1,
                     "labels": {"foreman:state-demo"}}),
+        ("add", {"project": "p", "issue_number": 1,
+                 "labels": {"foreman:state-done"}}),
     ]
 
     # 3. Event-archive observer wrote rows into events table. The
-    #    state_entered for Done is the terminal landing synthesized
-    #    by _enter_terminal — it precedes the Demo state_exited because
-    #    _enter_terminal runs inside transition()'s try-block, before
-    #    the finally that emits state_exited.
+    #    state_exited for Demo now precedes state_entered for Done because
+    #    the close+emit happen before _enter_terminal to satisfy the
+    #    one-open-per-ticket invariant.
     rows = repo.list_events_for_ticket(ticket.id)
     types = [r["event_type"] for r in rows]
     assert types == [
         "state_entered",
         "execute_started",
         "execute_completed",
-        "state_entered",
         "state_exited",
+        "state_entered",
     ]
 
     # 4. (Metrics observer is no-op-backed; we just verify it didn't raise.

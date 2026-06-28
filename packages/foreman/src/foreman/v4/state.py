@@ -329,6 +329,7 @@ class TicketState(ABC):
         _publish(ctx, StateEnteredEvent)
 
         outcome: Outcome | None = None
+        _terminal_exit_done = False
         try:
             ctx.repo.mark_execute_started(ctx.instance.id, now=ctx.clock())
             _publish(ctx, ExecuteStartedEvent)
@@ -372,6 +373,9 @@ class TicketState(ABC):
                     # WorkerPool won't re-enqueue once parked here, so
                     # the terminal landing event has to be synthesized
                     # inline. See ``_enter_terminal`` for the rationale.
+                    ctx.repo.close_state_instance(ctx.instance.id, now=ctx.clock())
+                    _publish(ctx, StateExitedEvent, outcome=outcome)
+                    _terminal_exit_done = True
                     _enter_terminal(ctx, next_)
             return next_
         finally:
@@ -384,4 +388,5 @@ class TicketState(ABC):
                 )
                 _publish(ctx, StateFailedEvent, failure_phase="exit", failure_reason=repr(exc))
             ctx.repo.close_state_instance(ctx.instance.id, now=ctx.clock())
-            _publish(ctx, StateExitedEvent, outcome=outcome)
+            if not _terminal_exit_done:
+                _publish(ctx, StateExitedEvent, outcome=outcome)

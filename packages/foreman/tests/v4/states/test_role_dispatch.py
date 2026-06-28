@@ -131,6 +131,7 @@ def test_interrupted_prior_with_matching_id_resumes():
     run_id = derive_session_id(ticket.id, "planner", None, "1")
     repo.mark_execute_started(prior.id, now=dt.datetime(2026, 6, 13))
     repo.set_session_id(prior.id, run_id)
+    repo.close_state_instance(prior.id, now=dt.datetime(2026, 6, 13))
 
     # Current in-flight instance (seq 2): same state → same run as the prior.
     current = repo.open_state_instance(

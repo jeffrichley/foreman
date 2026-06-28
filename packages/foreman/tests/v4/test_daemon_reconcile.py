@@ -77,3 +77,18 @@ def test_repeated_restarts_do_not_escalate_healthy_ticket():
         )
         == 0
     )
+
+
+def test_reconcile_second_run_is_noop():
+    """Closing orphans then re-running reconcile finds none (idempotent)."""
+    now = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+    repo = InMemoryTicketRepository()
+    t = repo.create_ticket(project="p", issue_number=1, now=now)
+    repo.open_state_instance(
+        ticket_id=t.id, state_name="Planning", sequence=1, now=now
+    )
+    first_run = reconcile_on_startup(repo, clock=lambda: now)
+    assert first_run == 1
+    second_run = reconcile_on_startup(repo, clock=lambda: now)
+    assert second_run == 0
+    assert repo.list_in_flight_state_instances() == []

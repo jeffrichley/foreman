@@ -123,6 +123,7 @@ def test_execute_completed_event_payload_includes_details(setup):
     repo, ticket, instance, received, ctx = setup
     # Swap to a state-instance row for DiagnosticDetail to match what
     # transition() expects (state_name on the row matches the state).
+    repo.close_state_instance(instance.id, now=dt.datetime(2026, 6, 13))
     new_instance = repo.open_state_instance(
         ticket_id=ticket.id, state_name="DiagnosticDetail", sequence=2,
         now=dt.datetime(2026, 6, 13),

@@ -15,6 +15,7 @@ import pytest
 
 from foreman.v4.outcome import OutcomeKind
 from foreman.v4.repository import (
+    StateInstanceAlreadyOpenError,
     StateInstanceNotFoundError,
     TicketAlreadyExistsError,
     TicketNotFoundError,
@@ -101,6 +102,19 @@ class RepositoryContract:
         assert instance.id > 0
         assert instance.is_in_flight
         assert instance.entered_at == _now()
+
+    def test_open_state_instance_raises_when_already_open(self, repo: TicketRepository) -> None:
+        """A second open_state_instance call for a ticket that already has an open
+        row must raise StateInstanceAlreadyOpenError (one-in-flight-per-ticket
+        invariant: DB partial unique index / InMemory explicit check)."""
+        t = repo.create_ticket(project="p", issue_number=1, now=_now())
+        repo.open_state_instance(
+            ticket_id=t.id, state_name="Planning", sequence=1, now=_now()
+        )
+        with pytest.raises(StateInstanceAlreadyOpenError):
+            repo.open_state_instance(
+                ticket_id=t.id, state_name="Planning", sequence=2, now=_now()
+            )
 
     def test_state_instance_lifecycle_timestamps(self, repo: TicketRepository) -> None:
         t = repo.create_ticket(project="p", issue_number=1, now=_now())
@@ -259,9 +273,10 @@ class RepositoryContract:
              "SpecReview", "SpecReview"],
             start=1,
         ):
-            repo.open_state_instance(
+            inst = repo.open_state_instance(
                 ticket_id=t.id, state_name=name, sequence=seq, now=_now(),
             )
+            repo.close_state_instance(inst.id, now=_now())
         assert repo.count_consecutive_same_state(
             ticket_id=t.id, state="SpecReview"
         ) == 2
@@ -276,10 +291,11 @@ class RepositoryContract:
         """Every row matches → count equals total instances."""
         t = repo.create_ticket(project="p", issue_number=1, now=_now())
         for seq in range(1, 4):
-            repo.open_state_instance(
+            inst = repo.open_state_instance(
                 ticket_id=t.id, state_name="SpecReview", sequence=seq,
                 now=_now(),
             )
+            repo.close_state_instance(inst.id, now=_now())
         assert repo.count_consecutive_same_state(
             ticket_id=t.id, state="SpecReview"
         ) == 3
@@ -536,9 +552,10 @@ class RepositoryContract:
         self, repo: TicketRepository,
     ) -> None:
         t = repo.create_ticket(project="p", issue_number=1, now=_now())
-        repo.open_state_instance(
+        inst1 = repo.open_state_instance(
             ticket_id=t.id, state_name="Planning", sequence=1, now=_now(),
         )
+        repo.close_state_instance(inst1.id, now=_now())
         repo.open_state_instance(
             ticket_id=t.id, state_name="SpecReview", sequence=2, now=_now(),
         )

@@ -36,6 +36,7 @@ from foreman.v4.records import (
     TicketRecord,
 )
 from foreman.v4.repository import (
+    StateInstanceAlreadyOpenError,
     StateInstanceNotFoundError,
     TicketAlreadyExistsError,
     TicketNotFoundError,
@@ -290,15 +291,19 @@ class PostgresTicketRepository:
             if exists is None:
                 conn.rollback()
                 raise TicketNotFoundError(str(ticket_id))
-            row = conn.execute(
-                """
-                INSERT INTO state_instances
-                    (ticket_id, state_name, sequence, entered_at)
-                VALUES (%s, %s, %s, %s)
-                RETURNING *
-                """,
-                (ticket_id, state_name, sequence, _to_db(now)),
-            ).fetchone()
+            try:
+                row = conn.execute(
+                    """
+                    INSERT INTO state_instances
+                        (ticket_id, state_name, sequence, entered_at)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING *
+                    """,
+                    (ticket_id, state_name, sequence, _to_db(now)),
+                ).fetchone()
+            except psycopg.errors.UniqueViolation as exc:
+                conn.rollback()
+                raise StateInstanceAlreadyOpenError(str(ticket_id)) from exc
             conn.commit()
             assert row is not None
             return _instance_from_row(row)

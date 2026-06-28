@@ -31,10 +31,11 @@ def _make_with_history(*states: str) -> tuple[InMemoryTicketRepository, int]:
     repo = InMemoryTicketRepository()
     t = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
     for seq, name in enumerate(states):
-        repo.open_state_instance(
+        inst = repo.open_state_instance(
             ticket_id=t.id, state_name=name, sequence=seq,
             now=dt.datetime(2026, 6, 13),
         )
+        repo.close_state_instance(inst.id, now=dt.datetime(2026, 6, 13))
     repo.set_ticket_state(t.id, states[-1], now=dt.datetime(2026, 6, 13))
     return repo, t.id
 

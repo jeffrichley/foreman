@@ -48,6 +48,10 @@ CREATE INDEX IF NOT EXISTS idx_state_instances_inflight
     ON state_instances (ticket_id)
     WHERE exited_at IS NULL;
 
+CREATE UNIQUE INDEX IF NOT EXISTS uq_state_instances_one_inflight
+    ON state_instances (ticket_id)
+    WHERE exited_at IS NULL;
+
 CREATE INDEX IF NOT EXISTS idx_tickets_held
     ON tickets (held_by)
     WHERE held_by IS NOT NULL;
