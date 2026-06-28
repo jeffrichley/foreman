@@ -13,6 +13,7 @@ Add a partial unique index on `state_instances (ticket_id) WHERE exited_at IS NU
 - `InMemoryTicketRepository.open_state_instance` enforces the same invariant with an explicit pre-insert check, raising `StateInstanceAlreadyOpenError` on violation.
 - The shared `RepositoryContract` test suite gains `test_open_state_instance_raises_when_already_open`, which proves both implementations raise `StateInstanceAlreadyOpenError` on a second open call for the same ticket.
 - Five existing tests are updated to close each state instance before opening the next — they currently open multiple instances for the same ticket without closing, which violates the new invariant: three in `_repository_contract.py` (`test_count_consecutive_same_state_counts_run_correctly`, `test_count_consecutive_same_state_full_history_match`, `test_delete_ticket_cascades_state_instances`), one in `test_role_dispatch.py` (`test_interrupted_prior_with_matching_id_resumes`), and one in `test_transition_events.py` (`test_execute_completed_event_payload_includes_details`).
+- `transition()` in `packages/foreman/src/foreman/v4/state.py` is updated: in the terminal-advancement branch (lines 371–375), `ctx.instance` is closed and `StateExitedEvent` is emitted **before** calling `_enter_terminal`, mirroring the ordering already established in `escalate_to_needs_help` (lines 191–193); a local `_terminal_exit_done` guard prevents the `finally` block from double-firing `StateExitedEvent` on that path. This fix also resolves five terminal-landing tests that would otherwise raise `StateInstanceAlreadyOpenError` without any manual edits to those test files: `test_transition_to_terminal_state_emits_state_entered_event`, `test_transition_to_done_emits_state_entered_event`, `test_terminal_landing_emits_no_state_exited_event`, `test_terminal_landing_state_instance_row_is_closed`, `test_terminal_landing_no_bus_does_not_crash`.
 - `test_daemon_reconcile.py` gains `test_reconcile_second_run_is_noop`, which calls `reconcile_on_startup` twice and confirms the second call returns 0 (idempotent: no orphans remain after the first pass).
 - `just check` exits zero.
 
@@ -35,6 +36,22 @@ except psycopg.errors.UniqueViolation as exc:
 Note: this wraps only the INSERT; the existing `TicketNotFoundError` check that precedes it is unchanged.
 
 **InMemory parity.** `InMemoryTicketRepository.create_ticket` enforces the `TicketAlreadyExistsError` invariant with an explicit dict-lookup check before inserting. The same approach applies here: check `self._instances.values()` for an open row (`ticket_id == ticket_id and exited_at is None`) before creating the new record. This keeps the two impls contract-equivalent, which is what the shared `RepositoryContract` suite validates.
+
+**Terminal-advancement ordering fix in `state.py`.** The `transition()` method (lines 371–375) currently calls `_enter_terminal(ctx, next_)` while `ctx.instance` is still open (`exited_at IS NULL`). With the new partial unique index and InMemory pre-insert check both enforcing one open row per ticket, every happy-path advancement to a terminal state raises `StateInstanceAlreadyOpenError` (InMemory) or `UniqueViolation` (Postgres). Five tests exercise this path: `test_transition_to_terminal_state_emits_state_entered_event`, `test_transition_to_done_emits_state_entered_event`, `test_terminal_landing_emits_no_state_exited_event`, `test_terminal_landing_state_instance_row_is_closed`, `test_terminal_landing_no_bus_does_not_crash`.
+
+The fix mirrors `escalate_to_needs_help` (lines 191–193), which already performs close-then-emit-then-enter-terminal in the correct order. In the terminal-advancement branch, replace the bare `_enter_terminal(ctx, next_)` call with:
+```python
+ctx.repo.close_state_instance(ctx.instance.id, now=ctx.clock())
+_publish(ctx, StateExitedEvent, outcome=outcome)
+_terminal_exit_done = True
+_enter_terminal(ctx, next_)
+```
+where `_terminal_exit_done` is a local boolean declared `False` before the inner `try` block (at `outcome: Outcome | None = None`). In the `finally` block, guard the `StateExitedEvent` publish to prevent double-firing:
+```python
+if not _terminal_exit_done:
+    _publish(ctx, StateExitedEvent, outcome=outcome)
+```
+The `close_state_instance` call in `finally` needs no guard — Postgres `UPDATE ... WHERE exited_at IS NULL` and InMemory `_replace` are both idempotent on an already-closed row.
 
 **Existing-test breakage.** Five tests across three files open two instances for the same ticket sequentially without closing the first. All must be updated.
 
@@ -82,7 +99,27 @@ Fix: call `repo.close_state_instance(instance.id, now=dt.datetime(2026, 6, 13))`
 
 4. **Update `PostgresTicketRepository.open_state_instance` in `packages/foreman/src/foreman/v4/postgres_repository.py`** — import `StateInstanceAlreadyOpenError` from `foreman.v4.repository` and wrap the INSERT in a try/except. The existing ticket-existence check is unchanged. See the exact pattern in the Approach section above.
 
-5. **Fix five existing tests across three files that violate the new invariant:**
+5. **Update `transition()` in `packages/foreman/src/foreman/v4/state.py`** — fix the terminal-advancement branch to close `ctx.instance` and emit `StateExitedEvent` before calling `_enter_terminal`, and add a `_terminal_exit_done` guard to the `finally` block. Full pattern is in the Approach section above.
+
+   a. Declare `_terminal_exit_done = False` immediately before the inner `try` block (on the same line as `outcome: Outcome | None = None`, or immediately before it).
+   b. In the terminal-advancement branch (currently `if next_.state_name in _TERMINAL_STATE_NAMES: _enter_terminal(ctx, next_)`), insert three lines before `_enter_terminal`:
+   ```python
+   if next_.state_name in _TERMINAL_STATE_NAMES:
+       ctx.repo.close_state_instance(ctx.instance.id, now=ctx.clock())
+       _publish(ctx, StateExitedEvent, outcome=outcome)
+       _terminal_exit_done = True
+       _enter_terminal(ctx, next_)
+   ```
+   c. In the `finally` block, wrap the trailing `_publish(ctx, StateExitedEvent, outcome=outcome)` call:
+   ```python
+   if not _terminal_exit_done:
+       _publish(ctx, StateExitedEvent, outcome=outcome)
+   ```
+   Leave the `ctx.repo.close_state_instance(ctx.instance.id, now=ctx.clock())` call in `finally` ungarded — it is already idempotent.
+
+   This fix resolves five terminal-landing tests without manual edits to those test files: `test_transition_to_terminal_state_emits_state_entered_event`, `test_transition_to_done_emits_state_entered_event`, `test_terminal_landing_emits_no_state_exited_event`, `test_terminal_landing_state_instance_row_is_closed`, `test_terminal_landing_no_bus_does_not_crash`.
+
+6. **Fix five existing tests across three files that violate the new invariant:**
 
    **`packages/foreman/tests/v4/_repository_contract.py` (three tests):** For each of `test_count_consecutive_same_state_counts_run_correctly`, `test_count_consecutive_same_state_full_history_match`, and `test_delete_ticket_cascades_state_instances`, change the setup loops to capture the returned instance and call `repo.close_state_instance(inst.id, now=_now())` immediately after each `open_state_instance` call. The assertions in these tests are unchanged.
 
@@ -98,9 +135,9 @@ Fix: call `repo.close_state_instance(instance.id, now=dt.datetime(2026, 6, 13))`
    ```
    where `instance` is the seq=1 row opened by the `setup` fixture. The `_DiagnosticDetailState().transition(ctx_diag)` call and the outcome-detail assertions are unaffected — they operate entirely on `new_instance` and `ctx.bus`.
 
-6. **Add `StateInstanceAlreadyOpenError` to the imports at the top of `packages/foreman/tests/v4/_repository_contract.py`** — add it to the existing `from foreman.v4.repository import (...)` block.
+7. **Add `StateInstanceAlreadyOpenError` to the imports at the top of `packages/foreman/tests/v4/_repository_contract.py`** — add it to the existing `from foreman.v4.repository import (...)` block.
 
-7. **Add `test_open_state_instance_raises_when_already_open` to `packages/foreman/tests/v4/_repository_contract.py`**:
+8. **Add `test_open_state_instance_raises_when_already_open` to `packages/foreman/tests/v4/_repository_contract.py`**:
    ```python
    def test_open_state_instance_raises_when_already_open(self, repo: TicketRepository) -> None:
        """A second open_state_instance call for a ticket that already has an open
@@ -116,7 +153,7 @@ Fix: call `repo.close_state_instance(instance.id, now=dt.datetime(2026, 6, 13))`
            )
    ```
 
-8. **Add `test_reconcile_second_run_is_noop` to `packages/foreman/tests/v4/test_daemon_reconcile.py`**:
+9. **Add `test_reconcile_second_run_is_noop` to `packages/foreman/tests/v4/test_daemon_reconcile.py`**:
    ```python
    def test_reconcile_second_run_is_noop():
        """Closing orphans then re-running reconcile finds none (idempotent)."""
@@ -140,6 +177,7 @@ Fix: call `repo.close_state_instance(instance.id, now=dt.datetime(2026, 6, 13))`
 | `packages/foreman/src/foreman/v4/postgres_schema.sql` | Add `CREATE UNIQUE INDEX IF NOT EXISTS uq_state_instances_one_inflight ON state_instances (ticket_id) WHERE exited_at IS NULL;` after the existing `idx_state_instances_inflight` block |
 | `packages/foreman/src/foreman/v4/repository.py` | Add `StateInstanceAlreadyOpenError(ValueError)` after `TicketAlreadyExistsError`; add invariant check in `InMemoryTicketRepository.open_state_instance` |
 | `packages/foreman/src/foreman/v4/postgres_repository.py` | Import `StateInstanceAlreadyOpenError`; wrap INSERT in `open_state_instance` with `try/except psycopg.errors.UniqueViolation` |
+| `packages/foreman/src/foreman/v4/state.py` | In `transition()`, close `ctx.instance` and emit `StateExitedEvent` before `_enter_terminal` in the terminal-advancement branch; add `_terminal_exit_done` flag to prevent double-firing `StateExitedEvent` in the `finally` block |
 | `packages/foreman/tests/v4/_repository_contract.py` | Import `StateInstanceAlreadyOpenError`; fix 3 existing tests (close instances before re-opening); add `test_open_state_instance_raises_when_already_open` |
 | `packages/foreman/tests/v4/test_daemon_reconcile.py` | Add `test_reconcile_second_run_is_noop` |
 | `packages/foreman/tests/v4/states/test_role_dispatch.py` | In `test_interrupted_prior_with_matching_id_resumes`: close `prior` (seq=1) before opening `current` (seq=2) to satisfy the new invariant; `resume=True` semantic is preserved |
