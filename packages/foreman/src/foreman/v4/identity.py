@@ -45,6 +45,16 @@ org-wide App installed at ``orgA/*`` *and* a separately-installed App
 at ``orgB/*``), the registry would need a project → repo mapping at
 ``get_role_token`` time. That's not in scope for v4 v1; document the
 constraint here so the next refactor finds it.
+
+Single source of truth for token freshness
+------------------------------------------
+After foreman#312, this registry is the sole arbiter of when a new
+installation token is minted. ``_REFRESH_SAFETY_SECONDS`` is the only
+tunable controlling how aggressively tokens are refreshed. Callers
+(including ``PyGithubGitProvider``) do not maintain their own time-based
+rebuild intervals — they call ``get_role_token`` on every access and
+receive a fresh token whenever the registry decides one is needed. There
+is no cross-file arithmetic invariant to maintain.
 """
 
 from __future__ import annotations
@@ -58,19 +68,11 @@ from foreman.v4.config import AppCredentials, AppsConfig, OrchestratorConfig
 # Pre-expiry safety window: refresh the cached token when fewer than this
 # many seconds remain until expiry.
 #
-# Load-bearing dependency on PyGithubGitProvider's rebuild interval:
-# PyGithubGitProvider rebuilds its cached ``Github`` client every
-# ``_DEFAULT_REFRESH_AFTER_SECONDS`` (3000s = 50min) by calling back into
-# ``get_role_token`` via the factory closure. For that rebuild to actually
-# pick up a FRESH installation token (not the same cached one heading
-# toward expiry), this safety window MUST be strictly greater than
-# ``(token_lifetime - PyGithubGitProvider._DEFAULT_REFRESH_AFTER_SECONDS)``.
-# Currently: token_lifetime=3600s, refresh_after=3000s, so safety must be
-# > 600s. 900s = 600s mandatory minimum + 300s margin.
-#
-# If you raise PyGithubGitProvider's refresh interval, you MUST raise this
-# in lockstep, or long-running daemons will 401 at minute ~60 — empirically
-# confirmed by the 2026-06-15 dogfood crash that motivated this constant.
+# After foreman#312, this is the ONLY tunable controlling how aggressively
+# tokens are refreshed. PyGithubGitProvider no longer has its own time-based
+# rebuild interval — it delegates token-freshness to this registry on every
+# _gh access. Raising or lowering this value is the single knob an operator
+# needs; no matching change in PyGithubGitProvider is required.
 _REFRESH_SAFETY_SECONDS = 900
 
 _KNOWN_ROLES = ("planner", "reviewer", "fixer", "worker", "orchestrator")
@@ -110,9 +112,9 @@ class V4IdentityRegistry:
     Satisfies :class:`~foreman.v4.bootstrap.IdentityProvider` (one
     method: ``get_role_token(role: str) -> str``). Caches one
     installation token per (role, repo_slug) pair; refreshes when
-    within 15 minutes of expiry (see ``_REFRESH_SAFETY_SECONDS`` —
-    the window cooperates with PyGithubGitProvider's 50-min rebuild
-    cadence so client-rebuilds always pick up a fresh token).
+    within ``_REFRESH_SAFETY_SECONDS`` of expiry. This registry is
+    the sole arbiter of token freshness (foreman#312); callers receive
+    a fresh token on every call that falls within the safety window.
 
     All five roles (``planner``, ``reviewer``, ``fixer``, ``worker``,
     ``orchestrator``) resolve their installation-id lookup against
