@@ -965,3 +965,26 @@ def test_backup_block_extras_forbidden(tmp_path: Path):
     )
     with pytest.raises(ValidationError):
         load_config(config_path)
+
+
+# ---------------------------------------------------------------------------
+# issue #472: ProjectConfig gains per-project max_in_flight cap
+# ---------------------------------------------------------------------------
+
+
+def test_project_config_max_in_flight_defaults_to_none():
+    """No per-project cap set → max_in_flight defaults to None (unbounded)."""
+    p = ProjectConfig(name="p", repo="o/r", local_clone_path="/tmp/r")
+    assert p.max_in_flight is None
+
+
+def test_project_config_max_in_flight_zero_rejected():
+    """A cap of 0 would block all tickets — reject at validation time."""
+    with pytest.raises(ValidationError):
+        ProjectConfig(name="p", repo="o/r", local_clone_path="/tmp/r", max_in_flight=0)
+
+
+def test_project_config_max_in_flight_positive_accepted():
+    """A positive cap is valid and stored as-is."""
+    p = ProjectConfig(name="p", repo="o/r", local_clone_path="/tmp/r", max_in_flight=2)
+    assert p.max_in_flight == 2

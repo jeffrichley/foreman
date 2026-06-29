@@ -104,7 +104,17 @@ class Daemon:
         # None → empty dict keeps test-only ``Daemon(...)`` constructions
         # working without the kwarg.
         self._project_configs: dict[str, ProjectConfig] = project_configs or {}
-        self._qm = QueueManager(repo=repo, max_in_flight=config.max_in_flight)
+        # issue #472: extract per-project caps and pass to QueueManager so it
+        # can enforce per-project concurrency limits in its dequeue filter.
+        project_caps = {
+            name: pc.max_in_flight
+            for name, pc in self._project_configs.items()
+        }
+        self._qm = QueueManager(
+            repo=repo,
+            max_in_flight=config.max_in_flight,
+            project_caps=project_caps,
+        )
         # Wire the shared QM into every Poller that was constructed without one.
         self._pollers = [self._with_qm(p) for p in pollers]
         self._pool = WorkerPool(

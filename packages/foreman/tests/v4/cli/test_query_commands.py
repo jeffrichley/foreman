@@ -88,9 +88,9 @@ def test_show_unknown_ticket_returns_nonzero():
 def test_queue_reports_depth_and_in_flight():
     repo = _setup_repo_with_two_tickets()
     qm = QueueManager(repo=repo, max_in_flight=4)
-    qm.enqueue(WorkItem(ticket_id=1, state_name="Planning"))
+    qm.enqueue(WorkItem(ticket_id=1, state_name="Planning", project="p"))
     qm.dequeue()  # 1 in flight, 0 queued
-    qm.enqueue(WorkItem(ticket_id=2, state_name="Done"))  # +1 queued
+    qm.enqueue(WorkItem(ticket_id=2, state_name="Done", project="p"))  # +1 queued
     runner = CliRunner()
     result = runner.invoke(
         app, ["queue"], obj=build_cli_context(repo=repo, qm=qm),

@@ -83,7 +83,7 @@ class Poller:
                 )
             except TicketAlreadyExistsError:
                 continue
-            self._qm.enqueue(WorkItem(ticket_id=ticket.id, state_name="Queued"))
+            self._qm.enqueue(WorkItem(ticket_id=ticket.id, state_name="Queued", project=ticket.project))
 
     def _enqueue_open_tickets(self) -> None:
         assert self._qm is not None  # narrowed by tick()
@@ -104,4 +104,5 @@ class Poller:
                 continue
             self._qm.enqueue(WorkItem(
                 ticket_id=ticket.id, state_name=ticket.current_state,
+                project=ticket.project,
             ))

@@ -40,7 +40,7 @@ def test_tick_processes_one_workitem():
     )
     try:
         repo.set_ticket_state(ticket.id, "Planning", now=dt.datetime(2026, 6, 13))
-        qm.enqueue(WorkItem(ticket_id=ticket.id, state_name="Planning"))
+        qm.enqueue(WorkItem(ticket_id=ticket.id, state_name="Planning", project="p"))
         submitted = pool.tick()
         assert submitted == 1
         _wait_until_idle(qm)
@@ -92,7 +92,7 @@ def test_worker_crash_parks_ticket_on_needs_help():
         clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
     )
     try:
-        qm.enqueue(WorkItem(ticket_id=ticket.id, state_name="Planning"))
+        qm.enqueue(WorkItem(ticket_id=ticket.id, state_name="Planning", project="p"))
         pool.tick()
         _wait_until_idle(qm)
         # Parked terminally → Poller stops re-enqueueing.
@@ -122,7 +122,7 @@ def test_worker_crash_before_context_built_still_parks_ticket():
         clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
     )
     try:
-        qm.enqueue(WorkItem(ticket_id=ticket.id, state_name="NotARealState"))
+        qm.enqueue(WorkItem(ticket_id=ticket.id, state_name="NotARealState", project="p"))
         pool.tick()
         _wait_until_idle(qm)
         assert repo.get_ticket(ticket.id).current_state == "NeedsHelp"
@@ -167,7 +167,7 @@ def test_three_tickets_dispatch_concurrently():
     )
     try:
         for tid in tids:
-            qm.enqueue(WorkItem(ticket_id=tid, state_name="Planning"))
+            qm.enqueue(WorkItem(ticket_id=tid, state_name="Planning", project="p"))
         submitted = pool.tick()
         assert submitted == 3
         _wait_until_idle(qm)
@@ -214,8 +214,8 @@ def test_same_ticket_serialized_across_concurrent_submissions():
     try:
         # Enqueue Planning AND SpecReview for the same ticket. QM should only
         # dispatch one at a time; the SpecReview WorkItem waits.
-        qm.enqueue(WorkItem(ticket_id=t.id, state_name="Planning"))
-        qm.enqueue(WorkItem(ticket_id=t.id, state_name="SpecReview"))
+        qm.enqueue(WorkItem(ticket_id=t.id, state_name="Planning", project="p"))
+        qm.enqueue(WorkItem(ticket_id=t.id, state_name="SpecReview", project="p"))
         submitted = pool.tick()
         # Only ONE in flight per ticket — second waits behind the per-ticket
         # FIFO filter inside QM.dequeue().

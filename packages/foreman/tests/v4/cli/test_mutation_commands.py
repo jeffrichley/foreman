@@ -69,7 +69,7 @@ def test_retry_enqueues_workitem_for_current_state():
         obj=build_cli_context(repo=repo, qm=qm),
     )
     assert result.exit_code == 0
-    assert qm.dequeue() == WorkItem(ticket_id=tid, state_name="Planning")
+    assert qm.dequeue() == WorkItem(ticket_id=tid, state_name="Planning", project="p")
 
 
 def test_retry_clears_next_action_at():
@@ -91,7 +91,7 @@ def test_retry_clears_next_action_at():
     )
     assert result.exit_code == 0
     assert repo.get_ticket(tid).next_action_at is None
-    assert qm.dequeue() == WorkItem(ticket_id=tid, state_name="Planning")
+    assert qm.dequeue() == WorkItem(ticket_id=tid, state_name="Planning", project="p")
 
 
 def test_retry_needshelp_resumes_escalated_role_state():
@@ -112,7 +112,7 @@ def test_retry_needshelp_resumes_escalated_role_state():
     # Ticket moved off the terminal state back to the escalated role-state.
     assert repo.get_ticket(tid).current_state == "Implementing"
     # And a WorkItem for that role-state was enqueued (daemon re-runs Worker).
-    assert qm.dequeue() == WorkItem(ticket_id=tid, state_name="Implementing")
+    assert qm.dequeue() == WorkItem(ticket_id=tid, state_name="Implementing", project="p")
 
 
 def test_retry_needshelp_message_names_resumed_state():
@@ -141,7 +141,7 @@ def test_retry_failed_also_resumes_role_state():
     )
     assert result.exit_code == 0, result.output
     assert repo.get_ticket(tid).current_state == "SpecReview"
-    assert qm.dequeue() == WorkItem(ticket_id=tid, state_name="SpecReview")
+    assert qm.dequeue() == WorkItem(ticket_id=tid, state_name="SpecReview", project="p")
 
 
 def test_retry_done_refuses():
