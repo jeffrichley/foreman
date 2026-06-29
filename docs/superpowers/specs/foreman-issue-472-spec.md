@@ -8,7 +8,7 @@ Layer a per-project concurrency cap on top of the existing global `max_in_flight
 
 - `ProjectConfig` in `config.py` gains `max_in_flight: int | None = None`; `None` means no per-project limit beyond the global cap. A value < 1 is rejected by Pydantic (`ge=1`). Validated by a new `test_config.py` test.
 - `WorkItem` in `work.py` gains a required `project: str` field; its frozen-dataclass equality and hash automatically include the new field.
-- `QueueManager.__init__` accepts an optional `project_caps: dict[str, int | None]` kwarg (default `{}`). When a candidate's project has a cap `c` and `_in_flight_by_project[project] >= c`, the candidate is **skipped** (not `None` returned) — a different project may still be eligible.
+- `QueueManager.__init__` accepts an optional `project_caps: dict[str, int | None] | None = None` kwarg; coerced in the body with `self._project_caps: dict[str, int | None] = project_caps or {}`. When a candidate's project has a cap `c` and `_in_flight_by_project[project] >= c`, the candidate is **skipped** (not `None` returned) — a different project may still be eligible.
 - On a successful `dequeue`, `_in_flight_by_project[project]` is incremented; `mark_done` decrements it. Both structures (`_in_flight_tickets` and `_in_flight_by_project`) stay in sync under the existing `threading.RLock`.
 - Unit test: a project with `max_in_flight=1` yields at most one dequeued ticket at a time even when the global cap is higher and multiple tickets from that project are ready.
 - Unit test: two projects each capped at 1 with a global cap of 2 — one ticket from each project runs concurrently (cross-project cap does not block each other).
@@ -71,7 +71,7 @@ self._qm = QueueManager(
 
 3. **Source callsites — add `project=`**: Update the two `WorkItem(...)` calls in `poller.py` (`_adopt_new_tickets`, `_enqueue_open_tickets`) to add `project=ticket.project`. Update the one `WorkItem(...)` call in `cli/mutations.py:cmd_retry` to add `project=ticket.project`.
 
-4. **`queue_manager.py` — per-project counter**: Add `project_caps: dict[str, int | None] = {}` kwarg to `__init__`; store as `self._project_caps`. Add `self._in_flight_by_project: dict[str, int] = {}`. Insert the per-project cap filter in `dequeue()` after the `list_unmet_dependencies` check. Increment on dequeue success. Decrement in `mark_done`.
+4. **`queue_manager.py` — per-project counter**: Add `project_caps: dict[str, int | None] | None = None` kwarg to `__init__`; coerce in the body with `self._project_caps: dict[str, int | None] = project_caps or {}`. Add `self._in_flight_by_project: dict[str, int] = {}`. Insert the per-project cap filter in `dequeue()` after the `list_unmet_dependencies` check. Increment on dequeue success. Decrement in `mark_done`.
 
 5. **`daemon.py` — wire `project_caps`**: Extract `project_caps` from `self._project_configs` before constructing `self._qm`, pass as `project_caps=project_caps`.
 
