@@ -4,11 +4,12 @@ Producer/consumer Mediator between Poller and WorkerPool. The queue is a
 priority heap keyed by (state's distance to Done, enqueue sequence) so
 late-stage work drains before early-stage work fills the pipeline.
 
-Three filters apply at dequeue time, in order:
+Four filters apply at dequeue time, in order:
 
   1. ticket already in flight (per-ticket FIFO serialization)
   2. ticket held by an operator
   3. ticket has unmet dependencies
+  4. project per-concurrency cap exceeded (issue #472)
 
 A filtered WorkItem stays in the heap; it's not requeued, not reordered.
 The next dequeue() re-evaluates everyone naturally.
@@ -48,17 +49,30 @@ def _priority_for(state_name: str) -> int:
 
 
 class QueueManager:
-    def __init__(self, *, repo: TicketRepository, max_in_flight: int) -> None:
+    def __init__(
+        self,
+        *,
+        repo: TicketRepository,
+        max_in_flight: int,
+        project_caps: dict[str, int | None] | None = None,
+    ) -> None:
         self._repo = repo
         # Public: WorkerPool reads this to size its ThreadPoolExecutor.
         # The contract is "the single concurrency knob"; treat as read-only
         # after construction.
         self.max_in_flight = max_in_flight
+        # issue #472: per-project concurrency cap. None means unbounded (only
+        # the global max_in_flight applies). Coerce None to empty dict so
+        # every lookup is a simple dict.get() without a None-guard.
+        self._project_caps: dict[str, int | None] = project_caps or {}
         self._heap: list[tuple[int, int, WorkItem]] = []
         self._counter = itertools.count()  # tie-breaker = enqueue order
         self._queued: set[WorkItem] = set()
         self._in_flight: set[WorkItem] = set()
         self._in_flight_tickets: set[int] = set()
+        # issue #472: per-project in-flight counter. Guarded by the same
+        # RLock as _in_flight_tickets so both stay in sync.
+        self._in_flight_by_project: dict[str, int] = {}
         self._lock = threading.RLock()  # RLock so future observers can reenter QM safely
 
     def enqueue(self, item: WorkItem) -> None:
@@ -91,10 +105,20 @@ class QueueManager:
                         continue
                     if self._repo.list_unmet_dependencies(candidate.ticket_id):
                         continue
+                    # issue #472: per-project cap filter. A candidate whose
+                    # project is at its cap is skipped (not None-returned) so
+                    # a ticket from a different project may still be eligible.
+                    cap = self._project_caps.get(ticket.project)
+                    if cap is not None and self._in_flight_by_project.get(ticket.project, 0) >= cap:
+                        continue
                     skipped.pop()  # un-claim on success — entry won't be re-pushed
                     self._queued.discard(candidate)
                     self._in_flight.add(candidate)
                     self._in_flight_tickets.add(candidate.ticket_id)
+                    # issue #472: increment per-project counter on dequeue.
+                    self._in_flight_by_project[ticket.project] = (
+                        self._in_flight_by_project.get(ticket.project, 0) + 1
+                    )
                     return candidate
                 return None
             finally:
@@ -106,6 +130,12 @@ class QueueManager:
         with self._lock:
             self._in_flight.discard(item)
             self._in_flight_tickets.discard(item.ticket_id)
+            # issue #472: decrement per-project counter. Guard against going
+            # negative (defensive — mark_done is declared idempotent so a
+            # double-call must not corrupt the counter).
+            count = self._in_flight_by_project.get(item.project, 0)
+            if count > 0:
+                self._in_flight_by_project[item.project] = count - 1
 
     def in_flight_count(self) -> int:
         with self._lock:

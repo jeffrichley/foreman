@@ -34,7 +34,7 @@ def test_new_labeled_issue_creates_ticket_and_enqueues():
     ticket = repo.get_ticket_by_issue(project="p", issue_number=42)
     assert ticket.current_state == "Queued"
     # Work enqueued:
-    assert qm.dequeue() == WorkItem(ticket_id=ticket.id, state_name="Queued")
+    assert qm.dequeue() == WorkItem(ticket_id=ticket.id, state_name="Queued", project="p")
 
 
 def test_existing_ticket_not_duplicated():
@@ -60,7 +60,7 @@ def test_in_flight_non_blocked_state_re_enqueued_for_advance():
     git = FakeGitProvider()
     poller, qm = _make_poller(repo, git)
     poller.tick()
-    assert qm.dequeue() == WorkItem(ticket_id=t.id, state_name="Planning")
+    assert qm.dequeue() == WorkItem(ticket_id=t.id, state_name="Planning", project="p")
 
 
 def test_terminal_states_not_enqueued():
@@ -86,7 +86,7 @@ def test_dedup_across_repeated_ticks():
     poller.tick()
     poller.tick()
     poller.tick()
-    assert qm.dequeue() == WorkItem(ticket_id=t.id, state_name="Planning")
+    assert qm.dequeue() == WorkItem(ticket_id=t.id, state_name="Planning", project="p")
     assert qm.dequeue() is None
 
 
@@ -120,4 +120,4 @@ def test_poller_skips_suspended_ticket():
         clock=lambda: suspend_until + dt.timedelta(seconds=1),
     )
     later_poller.tick()
-    assert later_qm.dequeue() == WorkItem(ticket_id=t.id, state_name="Planning")
+    assert later_qm.dequeue() == WorkItem(ticket_id=t.id, state_name="Planning", project="p")
