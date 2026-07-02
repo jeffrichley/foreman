@@ -74,6 +74,11 @@ Schema:
     dev_base_branch   - alternate base branch for spec worktrees (None → origin/default)
     max_fix_attempts  - max fix cycles before NeedsHelp escalation (default 3)
     max_impl_attempts - max impl cycles before NeedsHelp escalation (default 3)
+    max_in_flight     - per-project concurrency cap (None → unbounded, bounded
+                        only by the global Config.max_in_flight). A value ≥ 1
+                        limits how many of this project's tickets the
+                        QueueManager dequeues simultaneously. Can never raise
+                        effective concurrency above the global cap. Issue #472.
     auto_merge_impl   - when False (default), an approved impl PR parks at
                         ImplApproved for human merge; when True, foreman
                         auto-merges the impl PR (the historic behavior)
@@ -209,6 +214,15 @@ class ProjectConfig(BaseModel):
     ``operator.supervisor`` / ``operator.signer`` may be set; unset
     fields inherit from the top-level identity via
     :func:`resolve_operator`. Issue #347."""
+
+    max_in_flight: int | None = Field(default=None, ge=1)
+    """Per-project concurrency cap (issue #472).
+
+    ``None`` (the default) means no per-project limit beyond the global
+    ``Config.max_in_flight``. A value ≥ 1 limits how many of this
+    project's tickets the QueueManager dequeues simultaneously. Can
+    never raise effective concurrency above the global cap — it is a
+    ceiling-under-the-global-ceiling, not an override upward."""
 
     auto_merge_impl: bool = False
     """foreman#418: the impl-merge gate.

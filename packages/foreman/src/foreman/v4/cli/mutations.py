@@ -403,7 +403,7 @@ def cmd_retry(
     cleared_suspension = ticket.next_action_at is not None
     if cleared_suspension:
         repo.clear_next_action_at(ticket_id)
-    qm.enqueue(WorkItem(ticket_id=ticket_id, state_name=resume_state))
+    qm.enqueue(WorkItem(ticket_id=ticket_id, state_name=resume_state, project=ticket.project))
     suspension_note = " (cleared next_action_at)" if cleared_suspension else ""
     if resumed_from is not None:
         typer.echo(
