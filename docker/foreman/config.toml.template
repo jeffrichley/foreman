@@ -69,9 +69,9 @@ name = "${FOREMAN_OPERATOR_SIGNER_NAME}"
 email = "${FOREMAN_OPERATOR_SIGNER_EMAIL}"
 
 [[projects]]
-name = "voice"
-repo = "jeffrichley/voice"
-local_clone_path = "/foreman/repos/voice"
+name = "madrigal"
+repo = "jeffrichley/madrigal"
+local_clone_path = "/foreman/repos/madrigal"
 
 [[projects]]
 name = "foreman"
