@@ -28,12 +28,18 @@ class _TerminalState(TicketState):
 
 
 class DoneState(_TerminalState):
+    """Happy-path terminal: the impl PR merged and the ticket is complete."""
+
     state_name = "Done"
 
 
 class FailedState(_TerminalState):
+    """Terminal failure with no human-actionable recovery path."""
+
     state_name = "Failed"
 
 
 class NeedsHelpState(_TerminalState):
+    """Terminal-pending-human holding pen; resumed via ``foreman resume``."""
+
     state_name = "NeedsHelp"

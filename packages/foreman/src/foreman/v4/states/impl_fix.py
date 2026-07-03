@@ -7,10 +7,13 @@ from foreman.v4.states.role_dispatch import RoleDispatchState
 
 
 class ImplFixState(RoleDispatchState):
+    """Dispatch fixer-impl on an impl-review NEEDS_FIX outcome."""
+
     state_name = "ImplFix"
     role = "fixer-impl"
 
     def next_state_for(self, outcome: Outcome) -> TicketState | None:
+        """Route CLEAN back to ImplReview for re-review; else NeedsHelp/Failed."""
         from foreman.v4.states.impl_review import ImplReviewState
         from foreman.v4.states.terminal import FailedState, NeedsHelpState
 

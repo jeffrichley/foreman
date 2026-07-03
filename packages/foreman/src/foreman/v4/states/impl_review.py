@@ -22,6 +22,8 @@ from foreman.v4.states.role_dispatch import RoleDispatchState
 
 
 class ImplReviewState(RoleDispatchState):
+    """Dispatch reviewer-impl; the CLEAN outcome is gated in ``next_state``."""
+
     state_name = "ImplReview"
     role = "reviewer-impl"
 
@@ -56,6 +58,11 @@ class ImplReviewState(RoleDispatchState):
         return super().next_state(ctx, outcome)
 
     def next_state_for(self, outcome: Outcome) -> TicketState | None:
+        """Route NEEDS_FIX/NEEDS_HELP/else — CLEAN never reaches this method.
+
+        See the ``next_state`` docstring above for why CLEAN is intercepted
+        before delegation ever gets here.
+        """
         # CLEAN is intentionally NOT handled here: the impl-merge gate
         # (foreman#418) intercepts CLEAN in ``next_state`` above — which
         # also performs the suspension-clear — and never delegates a CLEAN

@@ -55,6 +55,11 @@ class ImplApprovedState(TicketState):
         return pr
 
     def execute(self, ctx: StateContext) -> Outcome:
+        """Poll the impl PR's merge state and return CLEAN/BLOCKED/NEEDS_HELP.
+
+        Checks ``merged`` before ``closed`` since GitHub sets both flags on
+        a merged PR — see the module docstring for the full outcome table.
+        """
         if ctx.git is None:
             raise RuntimeError("ImplApprovedState requires git in StateContext")
         pr_number = self._pr_number_for(ctx)
@@ -97,6 +102,7 @@ class ImplApprovedState(TicketState):
         )
 
     def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:
+        """Route the polling outcome to Done, a self-loop, or NeedsHelp."""
         from foreman.v4.states.terminal import DoneState, NeedsHelpState
 
         if outcome.kind == OutcomeKind.CLEAN:

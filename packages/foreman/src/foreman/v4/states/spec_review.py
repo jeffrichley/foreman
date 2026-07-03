@@ -24,6 +24,8 @@ from foreman.v4.states.role_dispatch import RoleDispatchState
 
 
 class SpecReviewState(RoleDispatchState):
+    """Dispatch reviewer-spec; a CLEAN spec advances to SpecMerging."""
+
     state_name = "SpecReview"
     role = "reviewer-spec"
 
@@ -46,6 +48,7 @@ class SpecReviewState(RoleDispatchState):
             )
 
     def next_state_for(self, outcome: Outcome) -> TicketState | None:
+        """Route CLEAN to SpecMerging, NEEDS_FIX to SpecFix, else NeedsHelp/Failed."""
         from foreman.v4.states.spec_fix import SpecFixState
         from foreman.v4.states.spec_merging import SpecMerging
         from foreman.v4.states.terminal import FailedState, NeedsHelpState
