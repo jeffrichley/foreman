@@ -23,7 +23,7 @@ import concurrent.futures
 import datetime as dt
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from foreman.v4.event_bus import EventBus
 from foreman.v4.git_provider import GitProvider
@@ -95,12 +95,12 @@ class WorkerPool:
             #      silently captured by the future and never reach an
             #      operator, turning a stuck pipeline into guess-and-check.
             def _on_done_mark(
-                _f: concurrent.futures.Future, _item: WorkItem = item,
+                _f: concurrent.futures.Future[Any], _item: WorkItem = item,
             ) -> None:
                 self._qm.mark_done(_item)
 
             def _on_done_log(
-                _f: concurrent.futures.Future, _item: WorkItem = item,
+                _f: concurrent.futures.Future[Any], _item: WorkItem = item,
             ) -> None:
                 self._log_exception(_f, _item)
 
@@ -109,7 +109,7 @@ class WorkerPool:
             submitted += 1
 
     def _log_exception(
-        self, future: concurrent.futures.Future, item: WorkItem,
+        self, future: concurrent.futures.Future[Any], item: WorkItem,
     ) -> None:
         exc = future.exception()
         if exc is not None:

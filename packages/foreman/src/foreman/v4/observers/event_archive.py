@@ -9,6 +9,8 @@ isolates the exception; the journal stays correct.
 
 from __future__ import annotations
 
+from typing import Any
+
 from foreman.v4.events import (
     DaemonEvent,
     Event,
@@ -30,7 +32,7 @@ _EVENT_TYPE_NAMES = {
 }
 
 
-def _payload_for(event: TicketEvent) -> dict:
+def _payload_for(event: TicketEvent) -> dict[str, Any]:
     if isinstance(event, ExecuteCompletedEvent):
         return {
             "outcome_kind": event.outcome.kind.value,

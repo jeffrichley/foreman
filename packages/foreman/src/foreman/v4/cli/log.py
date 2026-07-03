@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -38,10 +39,10 @@ def cmd_log(
 
 def _read_last(
     path: Path, limit: int, *, ticket: int | None, state: str | None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     if not path.exists():
         return []
-    matched: list[dict] = []
+    matched: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as f:
         for raw in f:
             try:
