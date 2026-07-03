@@ -82,8 +82,7 @@ def parse_issue_url(url: str) -> tuple[str, str, int]:
 
 
 def _load_planner_prompt() -> str:
-    """Load the Planner system prompt: vendored ``writing-plans`` followed
-    by the Foreman-specific Planner contract.
+    """Load the Planner system prompt: vendored ``writing-plans`` followed by the Foreman-specific Planner contract.
 
     The discipline that makes superpowers' interactive Claude Code write
     rigorous, bite-sized plans is inlined here so the SDK-driven Planner
@@ -208,8 +207,7 @@ async def _run_planner_core(
     host: GitHostProvider | None = None
 
     def _on_failure(exc: BaseException) -> None:
-        """Shared cleanup body for both ``except ProviderError`` and
-        ``except Exception`` arms (foreman#266 — type-narrowing split).
+        """Shared cleanup body for both ``except ProviderError`` and ``except Exception`` arms (foreman#266 — type-narrowing split).
 
         Closes over ``start_time`` / ``usage`` / ``pr_number`` /
         ``actual_repo_slug`` / ``issue_number`` / ``host`` /

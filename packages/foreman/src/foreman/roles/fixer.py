@@ -408,6 +408,11 @@ async def _run_fixer_core(
             ``get_role_token(role)`` shape — see
             :func:`foreman.roles.build_role_resources` for the test
             seam.
+        target: ``"spec_pr"`` (default) or ``"impl_pr"``. Selects which
+            PR shape to fix — drives the Fixer prompt composition
+            (:func:`_load_fixer_prompt`), which branch to locate
+            (:func:`_find_role_pr`), and the error wording used when
+            no matching open PR is found.
 
     Returns:
         A :class:`~foreman.schemas.fixer.FixerRunResult` bundling the
@@ -495,8 +500,9 @@ async def _run_fixer_core(
     pr_number: int | None = None
 
     def _on_failure(exc: BaseException) -> None:
-        """Shared cleanup body for ``ProviderError`` + ``Exception``
-        arms (foreman#266 — type-narrowing split). Closes over
+        """Shared cleanup body for ``ProviderError`` + ``Exception`` arms (foreman#266 — type-narrowing split).
+
+        Closes over
         ``start_time`` / ``usage`` / ``pr_number`` /
         ``actual_repo_slug`` / ``issue_number`` / ``attempt`` /
         ``project_name`` / ``issue``. The bare ``raise`` that
