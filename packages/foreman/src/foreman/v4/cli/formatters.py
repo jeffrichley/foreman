@@ -17,21 +17,34 @@ from rich.table import Table
 
 
 class OutputFormatter(Protocol):
-    def format(self, rows: list[dict[str, Any]]) -> str: ...
+    """Structural type for a CLI output strategy: rows in, rendered text out."""
+
+    def format(self, rows: list[dict[str, Any]]) -> str:
+        """Render ``rows`` (already-shaped record dicts) as a display string."""
+        ...
 
 
 class JsonFormatter:
+    """Renders rows as indented JSON, coercing non-serializable values with ``str``."""
+
     def format(self, rows: list[dict[str, Any]]) -> str:
+        """Serialize ``rows`` to a pretty-printed JSON array."""
         return json.dumps(rows, default=str, indent=2)
 
 
 class YamlFormatter:
+    """Renders rows as a YAML document, preserving column order."""
+
     def format(self, rows: list[dict[str, Any]]) -> str:
+        """Dump ``rows`` as YAML with keys kept in their original order."""
         return yaml.safe_dump(rows, sort_keys=False, default_flow_style=False)
 
 
 class TableFormatter:
+    """Renders rows as a Rich-drawn ASCII table for terminal display."""
+
     def format(self, rows: list[dict[str, Any]]) -> str:
+        """Render ``rows`` as a bordered table, using the first row's keys as columns."""
         if not rows:
             return "(no rows)\n"
         buffer = io.StringIO()
@@ -53,6 +66,13 @@ _FORMATTERS: dict[str, type[OutputFormatter]] = {
 
 
 def get_formatter(name: str) -> OutputFormatter:
+    """Look up the output-formatter strategy registered under ``name``.
+
+    Raises:
+        ValueError: if ``name`` isn't one of the registered ``--format``
+            choices (table/json/yaml), so the CLI can surface a clean
+            error instead of a raw ``KeyError``.
+    """
     try:
         return _FORMATTERS[name]()
     except KeyError as exc:

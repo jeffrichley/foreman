@@ -323,6 +323,12 @@ def cmd_hold(
     reason: str = typer.Option(..., "--reason"),
     by: str | None = typer.Option(None, "--by", help="Operator name (defaults to $USER)"),
 ) -> None:
+    """Mark a ticket held, recording who held it and why.
+
+    Held tickets are excluded from the daemon's normal processing until
+    an operator runs ``resume``; ``--reason`` is stored on the ticket
+    row for later audit.
+    """
     repo, _ = _resolve(ctx, ticket_id)
     repo.hold_ticket(
         ticket_id,
@@ -337,6 +343,11 @@ def cmd_resume(
     ctx: typer.Context,
     ticket_id: int = typer.Argument(...),
 ) -> None:
+    """Clear a ticket's held status so the daemon resumes normal processing.
+
+    Undoes ``hold``; does not otherwise change the ticket's state or
+    re-enqueue any work.
+    """
     repo, _ = _resolve(ctx, ticket_id)
     repo.resume_ticket(ticket_id, now=dt.datetime.now(dt.UTC))
     typer.echo(f"ticket {ticket_id} resumed")
@@ -364,6 +375,17 @@ def cmd_retry(
     ctx: typer.Context,
     ticket_id: int = typer.Argument(...),
 ) -> None:
+    """Re-enqueue a stuck ticket, resolving it out of a terminal state first.
+
+    If the ticket sits in a retryable terminal (``NeedsHelp``/``Failed``),
+    walks its state-instance history to find the role-state that
+    escalated and moves it back there before enqueuing — retrying a
+    terminal in place would be a no-op since terminals don't dispatch a
+    role. Also clears any active ``next_action_at`` provider-error
+    suspension so the retry isn't silently deferred. Refuses (exit 1)
+    for a happy terminal (``Done``) or a terminal with no prior
+    role-dispatch state to resume into.
+    """
     repo, ticket = _resolve(ctx, ticket_id)
     qm = ctx.obj.qm
     if qm is None:
@@ -422,6 +444,13 @@ def cmd_set_state(
     ticket_id: int = typer.Argument(...),
     state: str = typer.Argument(...),
 ) -> None:
+    """Force a ticket directly to an arbitrary registered state.
+
+    An operator escape hatch for correcting a ticket that's stuck or
+    was moved incorrectly — bypasses the normal state-machine
+    transition rules entirely. Refuses (exit 1) if ``state`` isn't in
+    :data:`~foreman.v4.states.registry.STATE_REGISTRY`.
+    """
     repo, ticket = _resolve(ctx, ticket_id)
     if state not in STATE_REGISTRY:
         typer.echo(f"unknown state: {state}", err=True)
@@ -434,6 +463,12 @@ def cmd_drop(
     ctx: typer.Context,
     ticket_id: int = typer.Argument(...),
 ) -> None:
+    """Force a ticket straight to the ``Failed`` terminal state.
+
+    An operator giving up on a ticket rather than letting it keep
+    retrying/escalating; ``Failed`` is one of the terminals ``retry``
+    can later resume out of, so this isn't destructive.
+    """
     repo, _ = _resolve(ctx, ticket_id)
     repo.set_ticket_state(ticket_id, "Failed", now=dt.datetime.now(dt.UTC))
     typer.echo(f"ticket {ticket_id} dropped (-> Failed)")
@@ -444,6 +479,13 @@ def cmd_skip(
     ticket_id: int = typer.Argument(...),
     next_state: str = typer.Argument(...),
 ) -> None:
+    """Jump a ticket directly to ``next_state``, bypassing intermediate transitions.
+
+    Unlike ``set-state`` this is framed as forward progress (skipping
+    steps an operator has already handled out-of-band) rather than an
+    arbitrary correction, but the mechanics are identical: refuses
+    (exit 1) if ``next_state`` isn't registered.
+    """
     repo, _ = _resolve(ctx, ticket_id)
     if next_state not in STATE_REGISTRY:
         typer.echo(f"unknown state: {next_state}", err=True)

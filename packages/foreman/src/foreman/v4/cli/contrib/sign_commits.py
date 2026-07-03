@@ -165,7 +165,7 @@ def _list_unsigned_commits(
     base: str,
     signoff_email: str,
 ) -> list[tuple[str, str]]:
-    """Return ``[(short_sha, subject), ...]`` for unsigned commits.
+    r"""Return ``[(short_sha, subject), ...]`` for unsigned commits.
 
     A commit counts as signed when at least one ``Signed-off-by:``
     trailer's email part matches ``signoff_email`` (case-insensitive).
