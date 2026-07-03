@@ -277,8 +277,8 @@ class TicketState(ABC):
     def transition(self, ctx: StateContext) -> TicketState | None:
         """Orchestrate the five-hook lifecycle. The base class controls the
         flow; subclasses control the steps. See the docstring of each hook
-        for what its handler does on failure."""
-
+        for what its handler does on failure.
+        """
         if not self.can_run(ctx):
             ctx.repo.record_failure(
                 ctx.instance.id, now=ctx.clock(),

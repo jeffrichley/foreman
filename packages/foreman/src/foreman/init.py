@@ -683,7 +683,8 @@ def _write_project_block_to_config(
 
 def _project_block_exists(config_path: Path, name: str) -> bool:
     """Return True iff a ``[[projects]]`` block with ``name = "<name>"``
-    is already in the config."""
+    is already in the config.
+    """
     if not config_path.exists():
         return False
     existing = config_path.read_text(encoding="utf-8")

@@ -202,7 +202,8 @@ class Daemon:
 
     def stop(self) -> None:
         """Signal the loop to exit. Safe to call from a signal handler
-        — threading.Event.set() is async-signal-safe."""
+        — threading.Event.set() is async-signal-safe.
+        """
         self._stop.set()
 
     def shutdown(self, *, wait: bool = True) -> None:

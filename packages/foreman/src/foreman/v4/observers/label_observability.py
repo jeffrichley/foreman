@@ -43,7 +43,8 @@ from foreman.v4.repository import TicketRepository
 class LabelWriter(Protocol):
     """Decouples observer from PyGithub. Implementations add or remove
     the given labels on the named issue. Reads are out of scope — this
-    observer never inspects existing labels."""
+    observer never inspects existing labels.
+    """
 
     def add_labels(
         self, *, project: str, issue_number: int, labels: set[str]

@@ -44,7 +44,7 @@ def _resolve_merge_method(
         preferred value is returned; otherwise the function falls back to
         the first allowed method in the preference order.
 
-    Raises
+    Raises:
     ------
     ValueError
         If none of the three repo flags are ``True`` — which should not

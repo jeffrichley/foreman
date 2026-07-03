@@ -67,7 +67,8 @@ class IdentityProvider(Protocol):
 class RoleSubprocessError(RuntimeError):
     """Subprocess exited non-zero AND did not emit a FOREMAN_OUTCOME: line,
     OR the subprocess exceeded its timeout. Both failure modes carry the
-    role + exit context + log path in the message."""
+    role + exit context + log path in the message.
+    """
 
 
 @dataclass(frozen=True)

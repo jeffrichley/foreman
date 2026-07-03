@@ -126,7 +126,8 @@ _COMMON_ENVELOPE_FIELDS: tuple[str, ...] = tuple(CommonEnvelope.model_fields.key
 
 def _default_stats_root() -> Path:
     """Return ``~/.foreman/stats`` (env-overridable for tests via
-    ``FOREMAN_STATS_ROOT``)."""
+    ``FOREMAN_STATS_ROOT``).
+    """
     override = os.environ.get("FOREMAN_STATS_ROOT")
     if override:
         return Path(override)
