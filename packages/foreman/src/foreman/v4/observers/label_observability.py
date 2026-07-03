@@ -41,18 +41,23 @@ from foreman.v4.repository import TicketRepository
 
 
 class LabelWriter(Protocol):
-    """Decouples observer from PyGithub. Implementations add or remove
-    the given labels on the named issue. Reads are out of scope — this
-    observer never inspects existing labels.
+    """Decouples the observer from PyGithub for testability.
+
+    Implementations add or remove the given labels on the named issue.
+    Reads are out of scope — this observer never inspects existing labels.
     """
 
     def add_labels(
         self, *, project: str, issue_number: int, labels: set[str]
-    ) -> None: ...
+    ) -> None:
+        """Add ``labels`` to the issue, leaving any other labels untouched."""
+        ...
 
     def remove_labels(
         self, *, project: str, issue_number: int, labels: set[str]
-    ) -> None: ...
+    ) -> None:
+        """Remove ``labels`` from the issue, leaving any other labels untouched."""
+        ...
 
 
 def _state_label(state_name: str) -> str:
@@ -89,6 +94,11 @@ class LabelObservabilityObserver:
         self._repo = repo
 
     def __call__(self, event: Event) -> None:
+        """Route state-entered/exited events to their label-mutation handler.
+
+        Any other event type is ignored — this observer only reacts to
+        the two events that bracket a state transition.
+        """
         if isinstance(event, StateEnteredEvent):
             self._on_state_entered(event)
             return
@@ -97,8 +107,7 @@ class LabelObservabilityObserver:
             return
 
     def _on_state_entered(self, event: StateEnteredEvent) -> None:
-        """Add the new state's label, and on first-state entry drop the
-        trigger label.
+        """Add the new state's label, and on first-state entry drop the trigger label.
 
         Phase 8d.8 moved the ``foreman:plan`` removal here after 8d.3
         stripped the Planner's manual removal. Roles don't touch labels;
