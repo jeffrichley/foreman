@@ -34,6 +34,7 @@ dev = [
     "import-linter>=2.0",
     # foreman#336 step 1/7 — pytest-cov for coverage measurement.
     "pytest-cov>=5.0",
+    "diff-cover>=9.0",
     # foreman#336 step 2/7 — pytest-clarity for better assertion-failure diffs.
     "pytest-clarity>=1.0",
     # foreman#336 step 3/7 — pytest-timeout enforces a 60s wallclock cap
@@ -96,12 +97,10 @@ docstring-code-format = true
 
 [tool.mypy]
 python_version = "3.12"
+strict = true
 files = [
     "packages/foreman/src",
 ]
-warn_unused_ignores = true
-no_implicit_optional = true
-check_untyped_defs = true
 
 # Optional-dep override pattern (madrigal-style). Uncomment + edit if your
 # package lazy-imports heavy/optional deps so the rest of the module stays
@@ -242,7 +241,7 @@ asyncio_mode = "auto"
 # ``signal`` (the default) does not.
 timeout = 60
 timeout_method = "thread"
-addopts = "--import-mode=importlib --cov=packages/foreman/src --cov-branch --cov-report=term-missing --cov-report=xml:coverage.xml --cov-fail-under=78 -n auto --dist=loadscope"
+addopts = "--import-mode=importlib --cov=packages/foreman/src --cov-branch --cov-report=term-missing --cov-report=xml:coverage.xml --cov-fail-under=85 -n auto --dist=loadscope"
 
 # Custom marker pattern (madrigal-style). Uncomment + edit when you have
 # tests that require expensive external resources (GPU, real cloud API,

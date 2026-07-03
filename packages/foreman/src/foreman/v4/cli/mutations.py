@@ -16,6 +16,7 @@ from pathlib import Path
 import typer
 
 from foreman.v4.git_provider import GitProvider
+from foreman.v4.records import TicketRecord
 from foreman.v4.repository import (
     TicketAlreadyExistsError,
     TicketNotFoundError,
@@ -306,7 +307,7 @@ def cmd_reset(
     )
 
 
-def _resolve(ctx: typer.Context, ticket_id: int):
+def _resolve(ctx: typer.Context, ticket_id: int) -> tuple[TicketRepository, TicketRecord]:
     repo = ctx.obj.repo
     try:
         ticket = repo.get_ticket(ticket_id)
