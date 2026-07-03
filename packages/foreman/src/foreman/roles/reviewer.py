@@ -415,8 +415,9 @@ async def _run_reviewer_core(
     issue: Issue | None = None
 
     def _on_failure(exc: BaseException) -> None:
-        """Shared cleanup body for the ``ProviderError`` + ``Exception``
-        catch arms (foreman#266 — type-narrowing split). Closes over
+        """Shared cleanup body for the ``ProviderError`` + ``Exception`` catch arms (foreman#266 — type-narrowing split).
+
+        Closes over
         ``start_time`` / ``usage`` / ``pr_number`` /
         ``actual_repo_slug`` / ``issue_number`` / ``target`` /
         ``issue`` / ``project_name``. The bare ``raise`` that re-propagates
@@ -769,8 +770,7 @@ class _V4ReviewerResult:
 def _run_reviewer_for_v4(
     *, project: str, issue_number: int, target: str
 ) -> _V4ReviewerResult:
-    """Run the reviewer the same way the legacy ``review`` command does,
-    but without label-writing on top.
+    """Run the reviewer the same way the legacy ``review`` command does, but without label-writing on top.
 
     Calls :func:`_run_reviewer_core` (worktree → diff → LLM → review-post,
     formerly ``run_reviewer``) and unpacks the flat-shape result the v4

@@ -202,6 +202,12 @@ def cmd_daemon_start(ctx: typer.Context) -> None:
 
 
 def cmd_daemon_stop(ctx: typer.Context) -> None:
+    """Send SIGTERM to the daemon recorded in the PID file.
+
+    Triggers the same graceful-shutdown path ``run_forever`` installs a
+    handler for. If the PID file is stale (process already dead), clean
+    it up instead of signaling and report that to the operator.
+    """
     if not PID_PATH.exists():
         typer.echo("no daemon PID file", err=True)
         raise typer.Exit(code=1)
@@ -222,6 +228,14 @@ def cmd_daemon_stop(ctx: typer.Context) -> None:
 
 
 def cmd_daemon_status(ctx: typer.Context) -> None:
+    """Report whether the daemon PID file points at a live process.
+
+    Reads the PID file (if present) and probes liveness with
+    :func:`is_pid_alive`, distinguishing "not running" (no PID file),
+    "running", and "stale PID file" (file present, process dead) so an
+    operator knows whether a ``start`` would be refused or would clean
+    up first.
+    """
     if not PID_PATH.exists():
         typer.echo("daemon: not running")
         return
@@ -233,6 +247,12 @@ def cmd_daemon_status(ctx: typer.Context) -> None:
 
 
 def cmd_daemon_reload(ctx: typer.Context) -> None:
+    """Send SIGHUP to the running daemon to reset + reconfigure logging.
+
+    Exits 1 without signaling if the host has no SIGHUP (Windows) or if
+    no PID file is present — reload only makes sense for a daemon that
+    is actually tracked as running.
+    """
     if _SIGHUP is None:
         typer.echo("reload not supported on this platform", err=True)
         raise typer.Exit(code=1)

@@ -29,6 +29,12 @@ class RoleDispatchState(TicketState):
     role: str = ""  # subclasses MUST override
 
     def execute(self, ctx: StateContext) -> Outcome:
+        """Resolve fresh-vs-resume dispatch, invoke the role, and parse its outcome.
+
+        Persists the chosen session id on this state instance (via
+        ``resolve_dispatch``) before dispatching, so a future crash re-run
+        can find and verify it.
+        """
         if ctx.role_dispatcher is None:
             raise RuntimeError(
                 f"{self.state_name}.execute requires a role_dispatcher in StateContext"

@@ -169,8 +169,10 @@ _DEFAULT_CONFIG = Path.home() / ".foreman" / "v4" / "config.toml"
 
 
 def main() -> None:
-    """Console-script entry point. Loads config, bootstraps the object
-    graph, then invokes the typer app with the prepared context.
+    """Console-script entry point.
+
+    Loads config, bootstraps the object graph, then invokes the typer
+    app with the prepared context.
     """
     if os.environ.get("FOREMAN_DRY_RUN") == "1":
         # Real-fork integration-test path (Task 8.6). Skip bootstrap

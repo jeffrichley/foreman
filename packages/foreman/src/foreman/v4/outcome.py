@@ -18,6 +18,15 @@ from pydantic import BaseModel, Field
 
 
 class OutcomeKind(StrEnum):
+    """The terminal verdict a role CLI reports back to the state machine.
+
+    Drives ``next_state()`` branching in every role-dispatch state — e.g.
+    NEEDS_FIX routes Implementing back to ImplFix, BLOCKED keeps a ticket
+    polling in place, and TRANSIENT_PROVIDER_ERROR routes to the backoff
+    scheduler instead of counting toward the runaway-defense cap (see
+    ``is_runaway_exempt``).
+    """
+
     CLEAN = "clean"
     NEEDS_FIX = "needs_fix"
     BLOCKED = "blocked"
@@ -37,18 +46,24 @@ class OutcomeKind(StrEnum):
 
 
 class OutcomeConfidence(StrEnum):
+    """How confident the reporting role is in its own ``OutcomeKind`` verdict."""
+
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
 
 
 class Finding(BaseModel):
+    """A single issue a review-style role (Reviewer/Fixer) surfaces about the work under evaluation."""
+
     severity: Literal["critical", "important", "minor"]
     location: str = Field(..., description="file:line or 'general'")
     description: str
 
 
 class OutcomeArtifacts(BaseModel):
+    """Optional pointers to the work products a role produced (PR, commit, spec doc)."""
+
     pr_url: str | None = None
     pr_number: int | None = None
     commit_sha: str | None = None
@@ -57,6 +72,13 @@ class OutcomeArtifacts(BaseModel):
 
 
 class Outcome(BaseModel):
+    """The ``FOREMAN_OUTCOME:`` JSON payload every role CLI emits on stdout.
+
+    Parsed by ``parse_outcome_from_stdout`` and passed to each state's
+    ``verify``/``next_state`` hooks, which branch on ``kind`` to decide
+    where the ticket goes next.
+    """
+
     schema_version: Literal[1] = 1
     kind: OutcomeKind
     confidence: OutcomeConfidence

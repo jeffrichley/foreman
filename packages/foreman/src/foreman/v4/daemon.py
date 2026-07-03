@@ -55,10 +55,11 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class DaemonConfig:
-    """The handful of global knobs. Per-project fields would belong to a
-    ProjectConfig, not here — keeping DaemonConfig small means the
-    multi-project surface lives in the Pollers list, not in nested
-    config.
+    """The handful of global knobs shared by every project the daemon polls.
+
+    Per-project fields would belong to a ProjectConfig, not here —
+    keeping DaemonConfig small means the multi-project surface lives in
+    the Pollers list, not in nested config.
 
     ``max_state_attempts`` defaults to 3 to match V4Config's default
     and to keep the existing test fixtures that construct DaemonConfig
@@ -73,10 +74,12 @@ class DaemonConfig:
 
 
 class Daemon:
-    """Multi-project daemon. Holds a list of Pollers (one per project)
-    sharing one QueueManager + one WorkerPool. Per-project Pollers can
-    be constructed without a QM; the Daemon injects its shared QM into
-    any Poller that arrived without one.
+    """Multi-project daemon owning the tick loop shared by every project's Poller.
+
+    Holds a list of Pollers (one per project) sharing one QueueManager +
+    one WorkerPool. Per-project Pollers can be constructed without a QM;
+    the Daemon injects its shared QM into any Poller that arrived
+    without one.
     """
 
     def __init__(
@@ -201,8 +204,11 @@ class Daemon:
             self.shutdown(wait=True)
 
     def stop(self) -> None:
-        """Signal the loop to exit. Safe to call from a signal handler
-        — threading.Event.set() is async-signal-safe."""
+        """Signal the loop to exit at the next tick boundary.
+
+        Safe to call from a signal handler — threading.Event.set() is
+        async-signal-safe.
+        """
         self._stop.set()
 
     def shutdown(self, *, wait: bool = True) -> None:

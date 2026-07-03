@@ -149,8 +149,7 @@ def already_posted_for_key(
 def any_recent_marker_with_source_prefix(
     comments: list[CommentRef], *, source_prefix: str, since: dt.datetime,
 ) -> bool:
-    """Return True iff any comment carries a begin marker whose ``source=``
-    starts with ``source_prefix`` AND whose ``posted_at >= since``.
+    """Return True iff any comment carries a begin marker whose ``source=`` starts with ``source_prefix`` AND whose ``posted_at >= since``.
 
     Used by :class:`TerminalLandingObserver` for the 5-minute
     "recent role-comment suppress" check. The substring scan is a

@@ -252,11 +252,11 @@ class TicketState(ABC):
     # --- Template Method ---
 
     def _close_failed_state(self, ctx: StateContext) -> None:
-        """Close the state_instance row and emit StateExitedEvent for a
-        state that failed (or was held) and is exiting WITHOUT going
-        through the normal verify/exit phases.
+        """Close the state_instance row and emit StateExitedEvent for an early-exit failure.
 
-        Centralizes the lifecycle invariants both early-return branches
+        Used when a state failed (or was held) and is exiting WITHOUT
+        going through the normal verify/exit phases. Centralizes the
+        lifecycle invariants both early-return branches
         in transition() must satisfy (can_run-false / retry-cap-trip).
         Without this:
 
@@ -275,10 +275,14 @@ class TicketState(ABC):
         _publish(ctx, StateExitedEvent, outcome=None)
 
     def transition(self, ctx: StateContext) -> TicketState | None:
-        """Orchestrate the five-hook lifecycle. The base class controls the
-        flow; subclasses control the steps. See the docstring of each hook
-        for what its handler does on failure."""
+        """Orchestrate the five-hook lifecycle for one state transition attempt.
 
+        The base class controls the flow (can_run gate, runaway-cap
+        check, enter/execute/verify/next_state/exit in order, each phase
+        wrapped with failure recording and event publication); subclasses
+        control the steps. See the docstring of each hook for what its
+        handler does on failure.
+        """
         if not self.can_run(ctx):
             ctx.repo.record_failure(
                 ctx.instance.id, now=ctx.clock(),

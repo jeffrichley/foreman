@@ -39,6 +39,12 @@ class StructuredLogObserver:
         self._log = logging.getLogger(logger_name)
 
     def __call__(self, event: Event) -> None:
+        """Emit one JSON log line describing the event, at a severity keyed by event type.
+
+        Unrecognized event types still log (at INFO, name ``"unknown"``)
+        rather than raising, since EventBus dispatch must not be
+        interrupted by a logging observer.
+        """
         try:
             name, level = _EVENT_NAMES[type(event)]
         except KeyError:

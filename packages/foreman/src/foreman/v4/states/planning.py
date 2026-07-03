@@ -8,10 +8,13 @@ from foreman.v4.states.role_dispatch import RoleDispatchState
 
 
 class PlanningState(RoleDispatchState):
+    """Dispatch the Planner role to produce the ticket's spec."""
+
     state_name = "Planning"
     role = "planner"
 
     def next_state_for(self, outcome: Outcome) -> TicketState | None:
+        """Route CLEAN to SpecReview, NEEDS_HELP to NeedsHelp, else Failed."""
         from foreman.v4.states.spec_review import SpecReviewState
         from foreman.v4.states.terminal import FailedState, NeedsHelpState
         if outcome.kind == OutcomeKind.CLEAN:

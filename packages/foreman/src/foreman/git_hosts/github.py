@@ -67,6 +67,13 @@ class GitHubProvider(GitHostProvider):
     # Issue + repo queries
     # ------------------------------------------------------------------
     def get_issue(self, repo_slug: str, issue_number: int) -> IssueRef:
+        """Fetch an issue via PyGithub and normalize it into an :class:`IssueRef`.
+
+        ``title``/``body`` are coerced from PyGithub's ``None`` (which it
+        returns for empty fields) to ``""`` so callers never have to
+        null-check, and labels are flattened from ``Label`` objects to
+        their plain names.
+        """
         repo = self._client.get_repo(repo_slug)
         issue = repo.get_issue(issue_number)
         return IssueRef(
@@ -78,6 +85,7 @@ class GitHubProvider(GitHostProvider):
         )
 
     def get_default_branch(self, repo_slug: str) -> str:
+        """Look up the repository via PyGithub and return its default branch name."""
         repo = self._client.get_repo(repo_slug)
         return repo.default_branch
 
@@ -107,8 +115,7 @@ class GitHubProvider(GitHostProvider):
     # Worktree git operations
     # ------------------------------------------------------------------
     def _identity_env(self) -> dict[str, str]:
-        """Build the env-var dict that scopes commit attribution to this
-        provider's bot identity for a single ``git commit`` subprocess.
+        """Build env vars that scope commit attribution to this provider's bot identity.
 
         foreman#53: ``git config user.name`` writes ``.git/config`` which
         a worktree shares with its parent repo, so the bot identity leaks
@@ -133,6 +140,18 @@ class GitHubProvider(GitHostProvider):
         *,
         provenance_trailers: list[str] | None = None,
     ) -> str:
+        """Write ``files`` into the worktree, stage them, and commit under the bot identity.
+
+        Handles the foreman#117 retry case: if a prior run already
+        committed these exact contents (killed after commit but before
+        push), staging is a no-op and a fresh ``git commit`` would fail
+        with "nothing to commit" — this detects that empty-diff state via
+        ``git diff --cached --quiet`` and returns the existing HEAD instead
+        of erroring, so the caller can retry the push idempotently.
+        ``provenance_trailers`` (issue #347), when given, are appended as
+        ``--trailer`` flags in order (e.g. ``Supervised-by:`` then
+        ``Signed-off-by:``).
+        """
         for relpath, content in files.items():
             target = worktree_path / relpath
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -177,10 +196,14 @@ class GitHubProvider(GitHostProvider):
         return result.stdout.strip()
 
     def push_branch(self, worktree_path: Path, branch: str) -> None:
-        # Determine owner/repo from the existing remote, then rewrite the
-        # remote URL to embed the installation token. Using -c http.extraheader
-        # would leak the token into ~/.git config; the URL approach scopes the
-        # secret to one subprocess call.
+        """Push ``branch`` to origin, authenticating via an installation-token URL.
+
+        Reads the existing ``remote.origin.url`` to recover the owner/repo
+        slug, then constructs an ``https://x-access-token:<token>@...``
+        push URL rather than using ``-c http.extraheader`` — the latter
+        would leak the token into persistent git config, whereas the URL
+        form scopes it to this one subprocess call.
+        """
         remote_url = self._git(worktree_path, "config", "--get", "remote.origin.url").stdout.strip()
         repo_slug = _extract_repo_slug(remote_url)
         push_url = f"https://x-access-token:{self._identity.token}@github.com/{repo_slug}.git"
@@ -197,6 +220,7 @@ class GitHubProvider(GitHostProvider):
         base: str,
         head: str,
     ) -> PRRef:
+        """Create the pull request via PyGithub and wrap the response in a :class:`PRRef`."""
         repo = self._client.get_repo(repo_slug)
         pr = repo.create_pull(title=title, body=body, base=base, head=head)
         return PRRef(
@@ -216,6 +240,11 @@ class GitHubProvider(GitHostProvider):
         add: list[str],
         remove: list[str],
     ) -> None:
+        """Remove ``remove`` labels then apply ``add`` labels to the issue, via PyGithub.
+
+        Removals run before additions so a label present in both lists
+        ends up applied (remove-then-add, not add-then-remove).
+        """
         repo = self._client.get_repo(repo_slug)
         issue = repo.get_issue(issue_number)
         for label in remove:
@@ -229,6 +258,7 @@ class GitHubProvider(GitHostProvider):
         issue_number: int,
         body: str,
     ) -> None:
+        """Post ``body`` as a new comment on the issue via PyGithub."""
         repo = self._client.get_repo(repo_slug)
         issue = repo.get_issue(issue_number)
         issue.create_comment(body)

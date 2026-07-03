@@ -7,9 +7,12 @@ from foreman.v4.state import StateContext, TicketState
 
 
 class QueuedState(TicketState):
+    """Entry state for newly created tickets; advances directly to Planning."""
+
     state_name = "Queued"
 
     def execute(self, ctx: StateContext) -> Outcome:
+        """Return a CLEAN outcome unconditionally — Queued has no work to do."""
         return Outcome(
             kind=OutcomeKind.CLEAN,
             confidence=OutcomeConfidence.HIGH,
@@ -17,6 +20,7 @@ class QueuedState(TicketState):
         )
 
     def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:
+        """Advance every Queued ticket straight to Planning."""
         # Late import to keep the states package import-cycle-free.
         from foreman.v4.states.planning import PlanningState
         return PlanningState()

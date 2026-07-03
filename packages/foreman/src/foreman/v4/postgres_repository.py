@@ -126,6 +126,16 @@ _TERMINAL_STATES = ("Done", "Failed")
 
 
 class PostgresTicketRepository:
+    """Production `TicketRepository` backed by a PostgreSQL database.
+
+    Each method borrows a connection from the injected `ConnectionPool`,
+    runs a single statement or short transaction, and commits (or rolls
+    back on a caught error) before returning — there is no long-lived
+    transaction spanning multiple public calls. Postgres MVCC handles
+    concurrent access from the daemon's worker threads, so no
+    application-level locking is needed.
+    """
+
     def __init__(self, pool: ConnectionPool[psycopg.Connection[DictRow]]) -> None:
         self._pool = pool
         with self._pool.connection() as conn:
@@ -136,6 +146,13 @@ class PostgresTicketRepository:
     def from_dsn(
         cls, dsn: str, *, pool_min: int = 2, pool_max: int = 10
     ) -> PostgresTicketRepository:
+        """Build a repository from a DSN, opening its own connection pool.
+
+        The pool is created with ``dict_row`` so query results come back
+        as ``dict[str, Any]`` rows (what `_ticket_from_row` /
+        `_instance_from_row` expect) and ``autocommit=False`` so each
+        method controls its own commit/rollback boundary.
+        """
         pool: ConnectionPool[psycopg.Connection[DictRow]] = ConnectionPool(
             dsn,
             min_size=pool_min,
@@ -147,11 +164,20 @@ class PostgresTicketRepository:
         return cls(pool)
 
     def close(self) -> None:
+        """Close the underlying connection pool, releasing all connections."""
         self._pool.close()
 
     # --- Ticket CRUD ---
 
     def create_ticket(self, *, project: str, issue_number: int, now: dt.datetime) -> TicketRecord:
+        """Insert a new Queued ticket row, translating a duplicate-key error.
+
+        The ``(project, issue_number)`` uniqueness rule is enforced by a
+        database constraint rather than a pre-check query, so a
+        `psycopg.errors.UniqueViolation` on insert is caught, the
+        transaction rolled back, and re-raised as
+        `TicketAlreadyExistsError` to match the in-memory implementation.
+        """
         ts = _to_db(now)
         with self._pool.connection() as conn:
             try:
@@ -173,6 +199,7 @@ class PostgresTicketRepository:
             return _ticket_from_row(row)
 
     def get_ticket(self, ticket_id: int) -> TicketRecord:
+        """Select the ticket row by primary key, translating a miss to a domain error."""
         with self._pool.connection() as conn:
             row = conn.execute("SELECT * FROM tickets WHERE id = %s", (ticket_id,)).fetchone()
         if row is None:
@@ -180,6 +207,7 @@ class PostgresTicketRepository:
         return _ticket_from_row(row)
 
     def get_ticket_by_issue(self, *, project: str, issue_number: int) -> TicketRecord:
+        """Select the ticket row by its ``(project, issue_number)`` unique index."""
         with self._pool.connection() as conn:
             row = conn.execute(
                 "SELECT * FROM tickets WHERE project = %s AND issue_number = %s",
@@ -190,6 +218,13 @@ class PostgresTicketRepository:
         return _ticket_from_row(row)
 
     def list_open_tickets(self) -> list[TicketRecord]:
+        """Select every ticket whose state isn't in the terminal-states array.
+
+        Uses Postgres's ``<> ALL(%s)`` array-comparison form rather than
+        ``NOT IN``: psycopg adapts a Python list to a native array, and
+        ``NOT IN %s`` with a tuple binds to a single placeholder that
+        Postgres rejects as a syntax error.
+        """
         with self._pool.connection() as conn:
             # psycopg v3 adapts a Python list to a Postgres array; ``<>
             # ALL(%s)`` is the array-aware spelling of ``NOT IN (...)``.
@@ -203,11 +238,19 @@ class PostgresTicketRepository:
         return [_ticket_from_row(r) for r in rows]
 
     def list_all_tickets(self) -> list[TicketRecord]:
+        """Select every ticket row, ordered by id."""
         with self._pool.connection() as conn:
             rows = conn.execute("SELECT * FROM tickets ORDER BY id").fetchall()
         return [_ticket_from_row(r) for r in rows]
 
     def set_ticket_state(self, ticket_id: int, new_state: str, *, now: dt.datetime) -> None:
+        """Update the ticket's state and ``updated_at``, rolling back if the id is unknown.
+
+        Existence is inferred from the ``UPDATE``'s own affected-row
+        count rather than a separate ``SELECT``, saving a round trip; a
+        zero rowcount rolls back the (no-op) transaction and raises
+        `TicketNotFoundError`.
+        """
         with self._pool.connection() as conn:
             cur = conn.execute(
                 "UPDATE tickets SET current_state = %s, updated_at = %s WHERE id = %s",
@@ -219,6 +262,7 @@ class PostgresTicketRepository:
             conn.commit()
 
     def hold_ticket(self, ticket_id: int, *, held_by: str, reason: str, now: dt.datetime) -> None:
+        """Update the ticket's held_by/held_at/held_reason columns, or raise if unknown."""
         with self._pool.connection() as conn:
             cur = conn.execute(
                 """
@@ -235,6 +279,7 @@ class PostgresTicketRepository:
             conn.commit()
 
     def resume_ticket(self, ticket_id: int, *, now: dt.datetime) -> None:
+        """Null out the ticket's held_by/held_at/held_reason columns, or raise if unknown."""
         with self._pool.connection() as conn:
             cur = conn.execute(
                 """
@@ -251,6 +296,13 @@ class PostgresTicketRepository:
             conn.commit()
 
     def delete_ticket(self, ticket_id: int) -> None:
+        """Delete the ticket row, relying on a DB-level cascade for its journal.
+
+        Unlike the in-memory implementation, which manually filters out
+        orphaned state-instance rows, here ``ON DELETE CASCADE`` on
+        ``state_instances.ticket_id`` drops the journal rows as part of
+        the same statement.
+        """
         # ON DELETE CASCADE on state_instances.ticket_id drops the journal
         # rows automatically (matches InMemory's manual cascade).
         with self._pool.connection() as conn:
@@ -261,6 +313,7 @@ class PostgresTicketRepository:
             conn.commit()
 
     def set_next_action_at(self, ticket_id: int, *, when: dt.datetime) -> None:
+        """Update ``next_action_at`` and ``updated_at`` to ``when``, or raise if unknown."""
         with self._pool.connection() as conn:
             cur = conn.execute(
                 "UPDATE tickets SET next_action_at = %s, updated_at = %s WHERE id = %s",
@@ -272,6 +325,14 @@ class PostgresTicketRepository:
             conn.commit()
 
     def clear_next_action_at(self, ticket_id: int) -> None:
+        """Null out ``next_action_at`` for the ticket.
+
+        Unlike its sibling mutators, this does not check the affected-row
+        count or raise `TicketNotFoundError` for an unknown id — an
+        unconditional no-op UPDATE matches the in-memory implementation's
+        own no-op-on-already-clear behavior and the Protocol declares no
+        error for this method.
+        """
         with self._pool.connection() as conn:
             conn.execute(
                 "UPDATE tickets SET next_action_at = NULL WHERE id = %s",
@@ -284,6 +345,13 @@ class PostgresTicketRepository:
     def open_state_instance(
         self, *, ticket_id: int, state_name: str, sequence: int, now: dt.datetime
     ) -> StateInstanceRecord:
+        """Insert a new journal row, checking ticket existence before the insert.
+
+        The ``ticket_id`` foreign key would itself reject an insert for
+        an unknown ticket, but that failure surfaces as a generic FK
+        violation; a preceding existence check lets this raise the clean
+        `TicketNotFoundError` the contract expects instead.
+        """
         with self._pool.connection() as conn:
             # FK enforces ticket existence; surface a clean error first.
             exists = conn.execute("SELECT 1 FROM tickets WHERE id = %s", (ticket_id,)).fetchone()
@@ -304,6 +372,7 @@ class PostgresTicketRepository:
             return _instance_from_row(row)
 
     def get_state_instance(self, instance_id: int) -> StateInstanceRecord:
+        """Select the state-instance row by primary key, translating a miss to a domain error."""
         with self._pool.connection() as conn:
             row = conn.execute(
                 "SELECT * FROM state_instances WHERE id = %s", (instance_id,)
@@ -313,6 +382,7 @@ class PostgresTicketRepository:
         return _instance_from_row(row)
 
     def mark_execute_started(self, instance_id: int, *, now: dt.datetime) -> None:
+        """Update ``execute_started_at`` on the instance row."""
         with self._pool.connection() as conn:
             conn.execute(
                 "UPDATE state_instances SET execute_started_at = %s WHERE id = %s",
@@ -329,6 +399,13 @@ class PostgresTicketRepository:
         outcome_payload: dict[str, Any],
         next_state: str,
     ) -> None:
+        """Update the instance with its execute() outcome, storing the payload as JSONB.
+
+        The outcome payload is wrapped in `psycopg.types.json.Jsonb` so
+        psycopg serializes the dict for the ``jsonb`` column, and the
+        `OutcomeKind` enum is stored by its string ``.value`` rather than
+        the enum member itself.
+        """
         from psycopg.types.json import Jsonb
 
         with self._pool.connection() as conn:
@@ -350,6 +427,7 @@ class PostgresTicketRepository:
             conn.commit()
 
     def close_state_instance(self, instance_id: int, *, now: dt.datetime) -> None:
+        """Update ``exited_at`` on the instance row, closing its lifecycle."""
         with self._pool.connection() as conn:
             conn.execute(
                 "UPDATE state_instances SET exited_at = %s WHERE id = %s",
@@ -365,6 +443,7 @@ class PostgresTicketRepository:
         failure_phase: str,
         failure_reason: str,
     ) -> None:
+        """Update ``failure_phase`` and ``failure_reason`` on the instance row."""
         with self._pool.connection() as conn:
             conn.execute(
                 """
@@ -377,6 +456,7 @@ class PostgresTicketRepository:
             conn.commit()
 
     def set_session_id(self, instance_id: int, session_id: str) -> None:
+        """Update the instance's ``session_id`` column."""
         with self._pool.connection() as conn:
             conn.execute(
                 "UPDATE state_instances SET session_id = %s WHERE id = %s",
@@ -385,6 +465,7 @@ class PostgresTicketRepository:
             conn.commit()
 
     def list_in_flight_state_instances(self) -> list[StateInstanceRecord]:
+        """Select every state-instance row across all tickets with a NULL ``exited_at``."""
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM state_instances WHERE exited_at IS NULL ORDER BY id"
@@ -392,6 +473,7 @@ class PostgresTicketRepository:
         return [_instance_from_row(r) for r in rows]
 
     def list_state_instances_for_ticket(self, ticket_id: int) -> list[StateInstanceRecord]:
+        """Select every state-instance row for the ticket, ordered by sequence."""
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM state_instances WHERE ticket_id = %s ORDER BY sequence",
@@ -410,6 +492,7 @@ class PostgresTicketRepository:
         at: dt.datetime,
         payload: dict[str, Any],
     ) -> None:
+        """Insert an audit-log row, storing ``payload`` as JSONB via `Jsonb`."""
         from psycopg.types.json import Jsonb
 
         with self._pool.connection() as conn:
@@ -430,6 +513,7 @@ class PostgresTicketRepository:
             conn.commit()
 
     def list_events_for_ticket(self, ticket_id: int) -> list[dict[str, Any]]:
+        """Select every event row for the ticket, ordered by timestamp."""
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM events WHERE ticket_id = %s ORDER BY at",
@@ -440,6 +524,14 @@ class PostgresTicketRepository:
     # --- Helpers used by states / WorkerPool / QueueManager ---
 
     def latest_pr_number_for_ticket(self, ticket_id: int) -> int | None:
+        """Return the most recent ``pr_number`` recorded for a ticket, or None.
+
+        Fetches every instance's ``outcome_payload`` newest-first and
+        scans them in Python for the first populated ``pr_number`` — the
+        lookup is nested inside a JSONB blob rather than its own column,
+        so there's no indexable SQL predicate to push this filter into
+        the query itself.
+        """
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT outcome_payload FROM state_instances "
@@ -456,6 +548,7 @@ class PostgresTicketRepository:
         return None
 
     def count_state_instances_for_ticket(self, ticket_id: int) -> int:
+        """Return ``COUNT(*)`` of state-instance rows for the ticket."""
         with self._pool.connection() as conn:
             row = conn.execute(
                 "SELECT COUNT(*) AS n FROM state_instances WHERE ticket_id = %s",
@@ -465,6 +558,15 @@ class PostgresTicketRepository:
         return int(row["n"])
 
     def count_consecutive_same_state(self, *, ticket_id: int, state: str) -> int:
+        """Count consecutive newest-first instances of the ticket still in ``state``.
+
+        Reuses `list_state_instances_for_ticket` and reverses it in
+        Python rather than issuing a ``DESC``-ordered query, then mirrors
+        `InMemoryTicketRepository.count_consecutive_same_state` exactly:
+        walk newest-first, delegate the skip decision to
+        :func:`~foreman.v4.outcome.is_runaway_exempt`, count matching
+        ``state_name`` rows, and break on the first non-matching one.
+        """
         # Mirror InMemoryTicketRepository.count_consecutive_same_state exactly:
         # walk newest-first, delegate skip decision to is_runaway_exempt, count
         # matching state_name rows, break on first non-matching.
@@ -481,6 +583,14 @@ class PostgresTicketRepository:
         return count
 
     def count_consecutive_transient_provider_errors(self, ticket_id: int) -> int:
+        """Count consecutive newest-first transient-provider-error outcomes.
+
+        Mirrors `InMemoryTicketRepository.count_consecutive_transient_provider_errors`
+        exactly: delegates the skip decision to
+        :func:`~foreman.v4.outcome.is_transient_error_exempt`, counts
+        consecutive ``TRANSIENT_PROVIDER_ERROR`` outcomes, and breaks on
+        any other completed outcome.
+        """
         # Mirror InMemoryTicketRepository exactly: delegate skip decision to
         # is_transient_error_exempt; count consecutive TRANSIENT_PROVIDER_ERROR;
         # break on any other completed outcome.
@@ -499,6 +609,7 @@ class PostgresTicketRepository:
     # --- Dependency tracking ---
 
     def set_ticket_dependencies(self, ticket_id: int, *, deps: list[int]) -> None:
+        """Replace the ticket's ``depends_on`` JSONB array with ``deps``."""
         from psycopg.types.json import Jsonb
 
         with self._pool.connection() as conn:
@@ -512,9 +623,20 @@ class PostgresTicketRepository:
             conn.commit()
 
     def get_ticket_dependencies(self, ticket_id: int) -> list[int]:
+        """Return the ticket's ``depends_on`` array by delegating to `get_ticket`."""
         return list(self.get_ticket(ticket_id).depends_on)
 
     def list_unmet_dependencies(self, ticket_id: int) -> list[int]:
+        """Return the subset of the ticket's dependencies not yet Done.
+
+        Issues one ``get_ticket`` round trip per dependency rather than a
+        single batched query — acceptable given tickets typically list a
+        handful of dependencies at most.
+
+        Raises:
+            TicketNotFoundError: any recorded dependency id is not a
+                tracked ticket.
+        """
         deps = self.get_ticket_dependencies(ticket_id)
         unmet: list[int] = []
         for dep in deps:

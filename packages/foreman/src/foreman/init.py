@@ -254,9 +254,10 @@ def _validate_repo_slug(repo: str) -> tuple[str, str]:
 
 
 def _validate_clone_path(clone_path: Path, expected_repo: str) -> None:
-    """Verify that ``clone_path`` exists, is a git repo, and its ``origin``
-    remote points at ``expected_repo``.
+    """Verify that ``clone_path`` is a usable git clone of ``expected_repo``.
 
+    Checks existence, that the path is a directory, that it is a git
+    repo, and that its ``origin`` remote points at ``expected_repo``.
     Raises ``ValueError`` with a specific message for each failure mode.
     The remote check accepts both HTTPS and SSH URL shapes so operators
     using SSH push aren't forced to reconfigure their remote for init.
@@ -327,12 +328,11 @@ def _remote_matches_repo(origin_url: str, expected_repo: str) -> bool:
 
 
 def detect_matching_clone(cwd: Path, expected_repo: str) -> Path | None:
-    """Return ``cwd`` if it is a git repo whose origin matches
-    ``expected_repo``, else ``None``.
+    """Return ``cwd`` if it's a git repo whose origin matches ``expected_repo``, else ``None``.
 
     Used by the CLI to default ``--clone-path`` when the operator runs
     ``foreman init owner/repo`` from inside that repo's clone. Never
-    raises — a non-matching cwd just returns None.
+    raises — a non-matching cwd just returns ``None``.
     """
     try:
         _validate_clone_path(cwd, expected_repo)
@@ -394,8 +394,7 @@ def _write_instructions_template(
 
 
 def _check_instructions_committed(clone_path: Path) -> str | None:
-    """Return a copy-pasteable warning when ``.foreman/INSTRUCTIONS.md``
-    is untracked or has uncommitted modifications in ``clone_path``.
+    """Return a warning if ``.foreman/INSTRUCTIONS.md`` isn't committed in ``clone_path``.
 
     Runs ``git status --porcelain -- .foreman/INSTRUCTIONS.md`` and
     inspects the output:
@@ -553,8 +552,7 @@ def _format_project_block(*, name: str, repo: str, clone_path: Path, check_comma
 
 
 def _project_block_re(name: str) -> re.Pattern[str]:
-    """Compile a regex matching the ``[[projects]]`` block whose
-    ``name`` field equals ``name``.
+    r"""Compile a regex matching the ``[[projects]]`` block for ``name``.
 
     The match runs from the ``[[projects]]`` header through the start
     of the next top-level block (``[`` at line start) or end of file.
@@ -562,9 +560,9 @@ def _project_block_re(name: str) -> re.Pattern[str]:
     that so the regex only matches blocks belonging to the named project.
 
     Each repeated content line is anchored to ``^`` in multiline mode
-    so we never let ``[^\\[].*`` accidentally cross a newline into a
+    so we never let ``[^\[].*`` accidentally cross a newline into a
     subsequent ``[…]`` block header. Blank lines DO match (their first
-    char is ``\\n``, not ``[``).
+    char is ``\n``, not ``[``).
     """
     escaped = re.escape(name)
     pattern = (
@@ -682,8 +680,11 @@ def _write_project_block_to_config(
 
 
 def _project_block_exists(config_path: Path, name: str) -> bool:
-    """Return True iff a ``[[projects]]`` block with ``name = "<name>"``
-    is already in the config."""
+    """Return True iff the config already has a project block for ``name``.
+
+    Checks against ``[[projects]]`` blocks with a matching
+    ``name = "<name>"`` line.
+    """
     if not config_path.exists():
         return False
     existing = config_path.read_text(encoding="utf-8")

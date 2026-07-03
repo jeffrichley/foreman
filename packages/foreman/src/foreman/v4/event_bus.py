@@ -28,13 +28,28 @@ def _listener_name(listener: EventListener) -> str:
 
 
 class EventBus:
+    """Synchronous pub/sub hub decoupling transition durability from side effects.
+
+    Observers subscribe once and are notified, in subscription order, of
+    every event published thereafter. ``publish`` never propagates an
+    observer's exception — see its docstring — so a misbehaving observer
+    can never block or crash a state transition.
+    """
+
     def __init__(self) -> None:
         self._subscribers: list[EventListener] = []
 
     def subscribe(self, listener: EventListener) -> None:
+        """Register ``listener`` to receive every event published from now on."""
         self._subscribers.append(listener)
 
     def unsubscribe(self, listener: EventListener) -> None:
+        """Remove ``listener`` from the subscriber list.
+
+        Idempotent: unsubscribing a listener that isn't currently
+        registered (never subscribed, or already removed) is a silent
+        no-op rather than a raised error.
+        """
         try:
             self._subscribers.remove(listener)
         except ValueError:
@@ -42,6 +57,15 @@ class EventBus:
             pass
 
     def publish(self, event: Event) -> None:
+        """Deliver ``event`` to every subscriber, isolating each from the others' failures.
+
+        Iterates a snapshot of the subscriber list so a listener that
+        subscribes or unsubscribes mid-dispatch cannot mutate the list
+        out from under the loop. An observer that raises is caught and
+        logged — with full ticket/instance context for ticket-scoped
+        events — rather than allowed to propagate and abort delivery to
+        the remaining observers.
+        """
         for listener in list(self._subscribers):
             try:
                 listener(event)

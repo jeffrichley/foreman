@@ -1,6 +1,7 @@
-"""Recovery for the upstream ``claude_agent_sdk`` ``Exception("success")``
-family of bugs after a valid ``ResultMessage(subtype="success")`` was
-already yielded.
+r"""Recovery for the upstream ``claude_agent_sdk`` ``Exception("success")`` bug.
+
+Handles the bug family where a valid ``ResultMessage(subtype="success")``
+was already yielded before the SDK raised.
 
 Upstream issue
 --------------
@@ -114,11 +115,23 @@ _RECOVERABLE_ARGS: frozenset[tuple[object, ...]] = frozenset(
 
 
 class SuccessAsErrorRecovery(RecoveryStrategy):
-    """Recover from the upstream ``Exception("success")`` family — bare
-    and wrapped variants both extracted from a pre-yielded ResultMessage.
+    """Recover from the upstream ``Exception("success")`` family.
+
+    Both the bare and wrapped variants (see module docstring) are
+    handled by re-validating the ``structured_output`` already
+    captured on a pre-yielded ResultMessage, so a spurious post-success
+    raise doesn't propagate as a failure.
     """
 
     def can_recover(self, exc: BaseException, partial: PartialResult[Any]) -> bool:
+        """Return True iff ``exc`` matches the known bug shape with a usable payload.
+
+        Requires all three of: ``exc`` is a bare ``Exception`` (not a
+        subclass), its ``args`` match one of the two known upstream
+        message shapes, and ``partial`` captured a ``ResultMessage``
+        with ``subtype="success"`` and a non-``None``
+        ``structured_output`` to recover from.
+        """
         # ``type(exc) is Exception`` — strict identity; subclasses must
         # NOT match (a classified SDK error should surface, not be
         # silently re-classified as a fake success).
@@ -144,6 +157,13 @@ class SuccessAsErrorRecovery(RecoveryStrategy):
         return True
 
     def recover(self, exc: BaseException, partial: PartialResult[Any]) -> tuple[Any, UsageInfo]:
+        """Re-validate the captured ResultMessage's structured output and rebuild usage.
+
+        Assumes ``can_recover`` already returned True for the same
+        ``(exc, partial)`` pair, so ``partial.result_message`` and
+        ``partial.output_model`` are guaranteed present; the asserts
+        below are defense-in-depth for direct callers.
+        """
         # ``can_recover`` returning True implies the partial state has
         # everything we need; the asserts below are defense-in-depth
         # for the case where a caller invokes ``recover`` directly

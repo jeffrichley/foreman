@@ -123,8 +123,7 @@ def parse_issue_url(url: str) -> tuple[str, str, int]:
 
 
 def _load_worker_prompt() -> str:
-    """Load the Worker system prompt: four vendored superpowers skills
-    followed by the Foreman-specific Worker contract.
+    """Load the Worker system prompt: four vendored superpowers skills followed by the Foreman-specific Worker contract.
 
     Order is deliberate. ``test-driven-development`` sets the red→green
     rhythm the Worker LLM should follow on every change.
@@ -342,7 +341,7 @@ def _sanitize_head_commit_auto_close(
     commits_made_count: int,
     role_token: str,
 ) -> bool:
-    """Strip auto-close keywords from the HEAD commit's message via amend.
+    r"""Strip auto-close keywords from the HEAD commit's message via amend.
 
     foreman#63 + Phase 8d.22 runtime defense. Mirrors the Planner's
     PR-body strip but operates on the Worker's local impl branch BEFORE
@@ -523,9 +522,7 @@ def _verify_impl_branch_remote_state(
     role_token: str,
     host: GitHostProvider,
 ) -> None:
-    """Belt-and-suspenders for foreman#175 — verify the impl branch is
-    on the remote with local HEAD before ``_create_pull_with_base_fallback``
-    runs.
+    """Belt-and-suspenders for foreman#175 — verify the impl branch is on the remote with local HEAD before ``_create_pull_with_base_fallback`` runs.
 
     Worker pushes the impl branch from Python via ``host.push_branch``
     (the authenticated tokenized-URL path) in :func:`_run_worker_core` after
@@ -622,8 +619,7 @@ def _create_pull_with_base_fallback(
     base: str,
     head: str,
 ) -> PullRequest:
-    """Open a PR; on a 422 "base invalid" error, retry against the
-    repo's default branch.
+    """Open a PR; on a 422 "base invalid" error, retry against the repo's default branch.
 
     foreman#122 belt-and-suspenders: the WorktreeManager fetch-and-prune
     fix in :func:`foreman.worktree._fetch_origin_branch` is the principled
@@ -867,8 +863,7 @@ async def _run_worker_core(
     usage: UsageInfo | None = None
 
     def _on_failure(exc: BaseException) -> None:
-        """Shared cleanup body for the outer ``ProviderError`` +
-        ``Exception`` catch arms (foreman#266 — type-narrowing split).
+        """Shared cleanup body for the outer ``ProviderError`` + ``Exception`` catch arms (foreman#266 — type-narrowing split).
 
         Closes over ``start_time`` / ``usage`` / ``actual_repo_slug``
         / ``issue_number`` / ``attempt`` / ``project_name`` / ``issue``.

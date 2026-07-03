@@ -119,11 +119,17 @@ class BehindBranchHealer:
     name = "behind-branch"
 
     def applies(self, pr: PRState) -> bool:
+        """True when the PR's ``mergeable_state`` is exactly ``"behind"``."""
         return pr.mergeable_state == "behind"
 
     def heal(
         self, ctx: _HealContext, *, project: str, pr_number: int, pr: PRState,
     ) -> HealResult:
+        """Issue GitHub's "Update branch" so the PR's base catches up.
+
+        Returns ``RETRY`` so the caller re-polls next tick, by which point
+        the update has landed and the PR is no longer behind.
+        """
         # attempt_merge guarantees ctx.git is non-None before reaching any
         # healer (it raises otherwise); narrow for the type checker.
         assert ctx.git is not None

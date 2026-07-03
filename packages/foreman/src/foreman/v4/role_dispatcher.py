@@ -16,6 +16,14 @@ class RoleNotConfiguredError(LookupError):
 
 
 class RoleDispatcher(Protocol):
+    """Structural seam between the state machine and role subprocess execution.
+
+    Concrete states never shell out or touch per-role identity directly;
+    they call ``dispatch(...)`` on whatever implementation is wired in —
+    ``SubprocessRoleDispatcher`` in production, ``FakeRoleDispatcher`` in
+    tests.
+    """
+
     def dispatch(
         self,
         *,
@@ -67,6 +75,16 @@ class FakeRoleDispatcher:
         session_id: str | None = None,
         resume: bool = False,
     ) -> str:
+        """Return the canned stdout registered for (role, project, issue_number).
+
+        Records the call args (and the resume-plumbing args separately)
+        before looking up the response, so tests can assert what the
+        state machine threaded down.
+
+        Raises:
+            RoleNotConfiguredError: if no canned response was registered
+                for this (role, project, issue_number) key.
+        """
         del state_instance_id  # not relevant to the in-memory fake
         self.calls.append((role, project, issue_number, ticket_id))
         self.resume_calls.append((session_id, resume))

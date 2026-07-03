@@ -45,6 +45,14 @@ class PRNotFoundError(LookupError):
 
 @dataclass(frozen=True, slots=True)
 class PRState:
+    """Snapshot of a PR's merge-relevant state as reported by GitHub.
+
+    Populated by :meth:`GitProvider.get_pr_state` and consumed by the
+    v4 state machine (``MergingState``, ``SpecReviewState``) and the
+    merge-healer registry to decide whether to merge, self-heal
+    (e.g. a behind branch), or escalate to a human.
+    """
+
     merged: bool
     mergeable: bool
     ci_passing: bool
@@ -81,11 +89,32 @@ class PRState:
 
 
 class GitProvider(Protocol):
+    """Read/write seam onto a project's GitHub repo for the v4 state machine.
+
+    One method per GitHub operation a state or observer needs — issue
+    label reads/writes, PR merge state + merge/update-branch, issue
+    close, branch delete, comment read/post. :class:`FakeGitProvider`
+    implements this in-memory for tests; ``PyGithubGitProvider``
+    implements it against the real GitHub API in production;
+    ``RoutingGitProvider`` fans a single call out to the right
+    per-project instance of this Protocol.
+    """
+
     def list_open_issues_with_label(
         self, *, project: str, label: str,
-    ) -> list[int]: ...
-    def get_pr_state(self, *, project: str, pr_number: int) -> PRState: ...
-    def merge_pr(self, *, project: str, pr_number: int) -> None: ...
+    ) -> list[int]:
+        """Return the numbers of open issues (excluding PRs) carrying ``label``."""
+        ...
+    def get_pr_state(self, *, project: str, pr_number: int) -> PRState:
+        """Fetch the PR's current merge-relevant state.
+
+        Raises :class:`PRNotFoundError` if no PR matches
+        ``(project, pr_number)``.
+        """
+        ...
+    def merge_pr(self, *, project: str, pr_number: int) -> None:
+        """Merge the PR using whichever merge method the target repo allows."""
+        ...
     def update_branch(self, *, project: str, pr_number: int) -> None:
         """Update the PR's branch from its base (GitHub "Update branch").
 
@@ -252,17 +281,21 @@ class FakeGitProvider:
     def set_open_issues_with_label(
         self, *, project: str, label: str, issue_numbers: set[int],
     ) -> None:
+        """Test helper: seed the open-issue-number set returned for (project, label)."""
         self._labeled_issues[(project, label)] = set(issue_numbers)
 
     def list_open_issues_with_label(
         self, *, project: str, label: str,
     ) -> list[int]:
+        """Return the sorted issue numbers seeded for (project, label)."""
         return sorted(self._labeled_issues.get((project, label), set()))
 
     def set_pr_state(self, *, project: str, pr_number: int, state: PRState) -> None:
+        """Test helper: seed the ``PRState`` returned by ``get_pr_state``."""
         self._prs[(project, pr_number)] = state
 
     def get_pr_state(self, *, project: str, pr_number: int) -> PRState:
+        """Return the seeded ``PRState``, raising ``PRNotFoundError`` if none was seeded."""
         try:
             return self._prs[(project, pr_number)]
         except KeyError as exc:
@@ -364,10 +397,9 @@ class FakeGitProvider:
             current.discard(branch_name)
 
     def close_pr(self, *, project: str, pr_number: int) -> None:
-        """Record the close on ``closed_prs`` and mark the stored ``PRState``
-        as ``closed=True``. Idempotent.
+        """Record the close and mark the stored ``PRState`` as ``closed=True``.
 
-        foreman#443: ``ImplApprovedState`` checks ``PRState.closed`` to
+        Idempotent. foreman#443: ``ImplApprovedState`` checks ``PRState.closed`` to
         distinguish "closed-without-merge" from "still open". When test code
         calls ``close_pr`` on the Fake (e.g. a ``foreman reset`` scenario
         that closes the impl PR), subsequent ``get_pr_state`` calls must

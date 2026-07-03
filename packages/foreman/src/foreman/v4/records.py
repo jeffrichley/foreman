@@ -23,6 +23,8 @@ FAILURE_PHASE_CRASH_RECOVERY = "crash_recovery"
 
 @dataclass(frozen=True, slots=True)
 class TicketRecord:
+    """Read-only snapshot of one ticket's row as returned by TicketRepository."""
+
     id: int
     project: str
     issue_number: int
@@ -44,11 +46,14 @@ class TicketRecord:
 
     @property
     def is_held(self) -> bool:
+        """Whether an operator hold is currently blocking this ticket from dispatch."""
         return self.held_by is not None
 
 
 @dataclass(frozen=True, slots=True)
 class StateInstanceRecord:
+    """Read-only snapshot of one state_instances row — one state's execution attempt."""
+
     id: int
     ticket_id: int
     state_name: str
@@ -66,4 +71,5 @@ class StateInstanceRecord:
 
     @property
     def is_in_flight(self) -> bool:
+        """Whether this state instance is still open (has not yet exited)."""
         return self.exited_at is None

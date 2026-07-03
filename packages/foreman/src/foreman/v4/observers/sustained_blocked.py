@@ -1,5 +1,4 @@
-"""SustainedBlockedObserver — posts a comment when a ticket has been
-BLOCKED for ≥15 minutes on the same async signal.
+"""SustainedBlockedObserver — posts a comment when a ticket has been BLOCKED for ≥15 minutes on the same async signal.
 
 Subscribes to :class:`ExecuteCompletedEvent`. On a ``BLOCKED`` outcome:
 
@@ -91,6 +90,11 @@ class SustainedBlockedObserver:
         self._clock = clock
 
     def __call__(self, event: Event) -> None:
+        """Handle the event, swallowing any exception so EventBus dispatch is never interrupted.
+
+        Delegates to :meth:`_handle`; a raised exception there is logged
+        and discarded rather than propagated.
+        """
         try:
             self._handle(event)
         except Exception:

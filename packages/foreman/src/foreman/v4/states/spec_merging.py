@@ -44,6 +44,8 @@ from foreman.v4.states.merge_helper import attempt_merge
 
 
 class SpecMerging(TicketState):
+    """Merge the approved spec PR, self-healing a BEHIND base via MERGE_HEALERS."""
+
     state_name = "SpecMerging"
 
     def _pr_number_for(self, ctx: StateContext) -> int:
@@ -65,6 +67,10 @@ class SpecMerging(TicketState):
         return pr
 
     def execute(self, ctx: StateContext) -> Outcome:
+        """Attempt the spec-PR merge; no base-ref guard or issue-close.
+
+        See the module docstring for why those differ from MergingState.
+        """
         if ctx.git is None:
             raise RuntimeError("SpecMerging requires git in StateContext")
         pr_number = self._pr_number_for(ctx)
@@ -76,6 +82,7 @@ class SpecMerging(TicketState):
         )
 
     def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:
+        """Route CLEAN to Implementing, BLOCKED to a self-loop, else NeedsHelp."""
         from foreman.v4.states.implementing import ImplementingState
         from foreman.v4.states.terminal import NeedsHelpState
 

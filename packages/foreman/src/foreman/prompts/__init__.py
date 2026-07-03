@@ -134,11 +134,11 @@ def load_role_prompt(role: str, *, target: Literal["spec_pr", "impl_pr"] | None 
 
 
 def _wrap_skill(name: str) -> str:
-    """Wrap one vendored SKILL.md with a short header that names it as a
-    superpowers skill and tells the LLM to treat downstream
-    "use superpowers:<name>" references as "apply what's in this block."
+    """Wrap one vendored SKILL.md with a header naming it as a superpowers skill.
 
-    This closes the dangling cross-references the upstream content
+    The header tells the LLM to treat downstream "use superpowers:<name>"
+    references as "apply what's in this block." This closes the dangling
+    cross-references the upstream content
     contains. The vendored ``writing-plans`` skill, for example, points
     callers at ``superpowers:executing-plans`` and
     ``superpowers:subagent-driven-development`` — the first IS vendored
@@ -170,7 +170,7 @@ def compose_role_prompt(
     superpowers: list[str],
     target: Literal["spec_pr", "impl_pr"] | None = None,
 ) -> str:
-    """Compose a role's full system prompt with three layers:
+    """Compose a role's full system prompt from three layers.
 
     1. **Adapter preamble** (:data:`_ADAPTER_PREAMBLE`) — read first,
        tells the LLM how to interpret cross-references and missing

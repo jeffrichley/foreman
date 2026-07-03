@@ -100,7 +100,7 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 class OperatorIdentity(BaseModel):
-    """One human operator identity (name + email) used in a commit trailer.
+    r"""One human operator identity (name + email) used in a commit trailer.
 
     Issue #347: the operator-identity primitive that backs both
     ``Supervised-by:`` (orchestration attribution) and ``Signed-off-by:``
@@ -174,6 +174,13 @@ class ProjectOperatorOverride(BaseModel):
 
 
 class ProjectConfig(BaseModel):
+    """One ``[[projects]]`` TOML entry: a single repo the daemon manages.
+
+    See the module docstring's ``[[projects]]`` schema section for the
+    full field-by-field description; several fields below also carry
+    their own attribute docstrings for the finer per-field rationale.
+    """
+
     model_config = ConfigDict(extra="forbid")
     name: str
     repo: str
@@ -344,6 +351,14 @@ class BackupConfig(BaseModel):
 
 
 class V4Config(BaseModel):
+    """Root of the daemon's TOML-loaded configuration.
+
+    See the module docstring for the complete schema of every section
+    (``[daemon]``, ``[apps.*]``, ``[orchestrator]``, ``[operator]``,
+    ``[[projects]]``, ``[storage]``, ``[backup]``). :func:`load_config`
+    parses TOML into a payload dict and validates it against this model.
+    """
+
     model_config = ConfigDict(extra="forbid")
     log_dir: str
     log_level: str = "INFO"

@@ -61,13 +61,21 @@ _READER_JOIN_TIMEOUT_SECONDS = 30.0
 
 
 class IdentityProvider(Protocol):
-    def get_role_token(self, role: str) -> str: ...
+    """Narrow seam for fetching a role's current GitHub installation token."""
+
+    def get_role_token(self, role: str) -> str:
+        """Return the current token to use for API calls made as ``role``."""
+        ...
 
 
 class RoleSubprocessError(RuntimeError):
-    """Subprocess exited non-zero AND did not emit a FOREMAN_OUTCOME: line,
-    OR the subprocess exceeded its timeout. Both failure modes carry the
-    role + exit context + log path in the message."""
+    """The role subprocess failed in a way ``dispatch()`` cannot recover from.
+
+    Covers both failure modes: the subprocess exited non-zero without
+    emitting a ``FOREMAN_OUTCOME:`` line, or it exceeded its timeout.
+    Both carry the role + exit context + log path in the message so an
+    operator can jump straight to the on-disk log.
+    """
 
 
 @dataclass(frozen=True)
@@ -87,9 +95,9 @@ _ROLE_TO_INVOCATION: dict[str, _Invocation] = {
 
 
 def _base_role(role: str) -> str:
-    """Strip the ``-spec`` / ``-impl`` target suffix so target-aware roles
-    land in their base-role log directory.
+    """Strip the ``-spec`` / ``-impl`` target suffix from a role name.
 
+    Target-aware roles land in their base-role log directory:
     ``reviewer-spec`` and ``reviewer-impl`` both → ``reviewer/`` so an
     operator looking for "what did Reviewer say about ticket 42?" doesn't
     have to know whether the role's last run was target=spec or
@@ -154,9 +162,9 @@ def _stream_to_log(
     prefix: str,
     capture: list[str] | None,
 ) -> None:
-    """Reader-thread body: drain ``stream`` line-by-line into ``log_file``,
-    flushing after every line so ``tail -f`` sees output mid-run.
+    """Reader-thread body: drain ``stream`` line-by-line into ``log_file``.
 
+    Flushes after every line so ``tail -f`` sees output mid-run.
     Two reader threads share one log file handle; the lock serializes
     writes so stdout + stderr lines don't interleave mid-line. Capture
     list (when provided) buffers stdout text for the state-machine
@@ -205,6 +213,15 @@ def _stream_to_log(
 
 
 class SubprocessRoleDispatcher:
+    """Production ``RoleDispatcher``: runs each role as a ``foreman`` CLI subprocess.
+
+    Maps a v4 role name to a ``foreman <subcmd>-v4 ...`` invocation via
+    ``_ROLE_TO_INVOCATION``, injects the role's current identity token
+    as ``GH_TOKEN``, streams stdout/stderr to a per-role log file on
+    disk as the subprocess runs, and returns the captured stdout for
+    the state machine's outcome-parsing verify hook.
+    """
+
     def __init__(
         self,
         *,
@@ -224,6 +241,18 @@ class SubprocessRoleDispatcher:
         session_id: str | None = None,
         resume: bool = False,
     ) -> str:
+        """Run ``role`` as a subprocess against ``project``/``issue_number`` and return its stdout.
+
+        Builds the CLI invocation from ``_ROLE_TO_INVOCATION``, injects
+        the role's current token as ``GH_TOKEN`` plus optional
+        state-instance / session-resume env vars, streams both stdout
+        and stderr to a per-role log file under ``log_dir`` as the
+        process runs, and enforces ``timeout_seconds``. Raises
+        :class:`RoleSubprocessError` on timeout, on a non-zero exit
+        that never emitted a ``FOREMAN_OUTCOME:`` line, or on a
+        mid-stream log-writer failure; raises ``ValueError`` for an
+        unknown role.
+        """
         try:
             inv = _ROLE_TO_INVOCATION[role]
         except KeyError as exc:
@@ -331,10 +360,10 @@ class SubprocessRoleDispatcher:
         writer_failed: threading.Event,
         stdout_chunks: list[str],
     ) -> str:
-        """Spawn the subprocess, drain stdout/stderr via two threads,
-        wait for exit (or timeout), and return the captured stdout.
+        """Spawn the subprocess and return its captured stdout once it exits.
 
-        Caller owns the log_file lifecycle and the log_lock. All cleanup
+        Drains stdout/stderr via two reader threads, waits for exit (or
+        timeout). Caller owns the log_file lifecycle and the log_lock. All cleanup
         — kill+reap of the subprocess, join of reader threads — happens
         in the finally block so EVERY exit path (success, timeout,
         unexpected exception, BaseException like KeyboardInterrupt)

@@ -28,6 +28,14 @@ def cmd_log(
     state: str | None = typer.Option(None, "--state"),
     tail: bool = typer.Option(False, "--tail", help="Follow the log (rich.Live)"),
 ) -> None:
+    """Print the transitions log as JSON lines, optionally filtered and/or followed.
+
+    Reads ``--limit`` most recent rows from the JSON-lines transition
+    log (default ``~/.foreman/v4/transitions.jsonl``), filtering by
+    ``--ticket`` / ``--state`` when given. With ``--tail``, hands off to
+    a polling ``rich.Live`` follower instead of printing once and
+    returning.
+    """
     resolved = Path(log_path) if log_path is not None else _default_log_path()
     if tail:
         _tail(resolved, ticket=ticket, state=state)

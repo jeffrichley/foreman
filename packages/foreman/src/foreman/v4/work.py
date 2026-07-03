@@ -16,6 +16,13 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class WorkItem:
+    """One unit of queueable work: advance a ticket from its current state.
+
+    Frozen + slotted so instances are hashable — the QueueManager dedups
+    pending work by WorkItem equality, so re-enqueuing the same
+    (ticket, state) pair on a later Poller tick is a no-op.
+    """
+
     ticket_id: int
     state_name: str
     project: str

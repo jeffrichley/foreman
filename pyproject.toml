@@ -84,10 +84,19 @@ select = [
     # accumulate without context and nobody knows whether they're
     # still relevant. If a thing is worth marking, it's worth a ticket.
     "TD003",
+    "D",
 ]
 ignore = [
     "E501",
+    "D105",
+    "D107",
 ]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"packages/foreman/tests/**" = ["D"]
 
 [tool.ruff.format]
 quote-style = "double"

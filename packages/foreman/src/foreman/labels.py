@@ -84,6 +84,13 @@ class Label(StrEnum):
     classification: LabelClass
 
     def __new__(cls, value: str, classification: LabelClass) -> Label:
+        """Build the enum member, pairing its string value with a classification.
+
+        Overriding ``__new__`` (rather than a plain ``StrEnum`` member)
+        is what makes ``classification`` mandatory — omitting it for any
+        member raises ``TypeError`` at class-creation time, before
+        module load completes.
+        """
         obj = str.__new__(cls, value)
         obj._value_ = value
         obj.classification = classification

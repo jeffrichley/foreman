@@ -60,10 +60,24 @@ def _payload_for(event: TicketEvent) -> dict[str, Any]:
 
 
 class EventArchiveObserver:
+    """Appends ticket-scoped events to the events table for forensics.
+
+    Runs alongside the state_instances journal, writing the same events
+    as a flat, append-only log that's cheap to grep, safe to replay, and
+    never under contention from the transition path's own writes.
+    """
+
     def __init__(self, *, repo: TicketRepository) -> None:
         self._repo = repo
 
     def __call__(self, event: Event) -> None:
+        """Persist a ticket-scoped event to the events table, skipping daemon-level events.
+
+        Daemon-level events (:class:`DaemonEvent` subclasses) have no
+        ``ticket_id`` and would violate the events table's non-null
+        constraint, so they're dropped here rather than archived; the
+        structured-log JSONL is their durable record instead.
+        """
         # The events table requires a non-null ``ticket_id``. Daemon-level
         # events (:class:`DaemonEvent` subclasses) have no ticket scope, so
         # writing them would violate the constraint. Skip them entirely —

@@ -1,5 +1,4 @@
-"""TerminalLandingObserver — posts a comment when a ticket lands on
-``NeedsHelp`` / ``Failed``.
+"""TerminalLandingObserver — posts a comment when a ticket lands on ``NeedsHelp`` / ``Failed``.
 
 Subscribes to :class:`StateEnteredEvent`. On entry to a state whose
 name is in ``{"NeedsHelp", "Failed"}``:
@@ -100,6 +99,11 @@ class TerminalLandingObserver:
         self._role_comment_window = role_comment_window
 
     def __call__(self, event: Event) -> None:
+        """Handle the event, swallowing any exception so EventBus dispatch is never interrupted.
+
+        Delegates to :meth:`_handle`; a raised exception there is logged
+        and discarded rather than propagated.
+        """
         try:
             self._handle(event)
         except Exception:

@@ -69,6 +69,8 @@ DEFAULT_DEV_BASE_BRANCH = "main"
 
 
 class MergingState(TicketState):
+    """Merge the impl PR directly once GitHub reports it mergeable and green."""
+
     state_name = "Merging"
 
     def _pr_number_for(self, ctx: StateContext) -> int:
@@ -141,6 +143,7 @@ class MergingState(TicketState):
         return guard
 
     def execute(self, ctx: StateContext) -> Outcome:
+        """Attempt the impl-PR merge, guarded by the foreman#357 base-ref check."""
         if ctx.git is None:
             raise RuntimeError("MergingState requires git in StateContext")
         pr_number = self._pr_number_for(ctx)
@@ -165,6 +168,7 @@ class MergingState(TicketState):
         )
 
     def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:
+        """Route CLEAN to Done, BLOCKED to a self-loop, else NeedsHelp."""
         from foreman.v4.states.terminal import DoneState, NeedsHelpState
         if outcome.kind == OutcomeKind.CLEAN:
             return DoneState()

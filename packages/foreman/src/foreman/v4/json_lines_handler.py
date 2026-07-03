@@ -43,11 +43,30 @@ _FORMATTER = logging.Formatter()
 
 
 class JsonLinesHandler(logging.Handler):
+    """Logging handler that appends one JSON object per record to a file.
+
+    Opens ``filename`` in append mode at construction and keeps the file
+    handle open for the handler's lifetime. Pairs with a human-readable
+    RichHandler on the same logger (see
+    :func:`foreman.v4.logging_config.configure_logging`) so one log
+    stream is simultaneously readable on a terminal and greppable/parsable
+    on disk.
+    """
+
     def __init__(self, *, filename: str, encoding: str = "utf-8") -> None:
         super().__init__()
         self._stream = open(filename, "a", encoding=encoding)
 
     def emit(self, record: logging.LogRecord) -> None:
+        """Serialize ``record`` to one JSON line and append it to the file.
+
+        Merges a JSON-encoded message (as produced by
+        StructuredLogObserver) into the top-level payload rather than
+        nesting it, folds in any non-standard extra record attributes,
+        and attaches exception/stack info when present. Never raises back
+        into the application: failures are routed through
+        ``self.handleError`` per the stdlib handler contract.
+        """
         try:
             payload: dict[str, Any] = {
                 "ts": dt.datetime.fromtimestamp(record.created, dt.UTC).isoformat(),
@@ -88,6 +107,7 @@ class JsonLinesHandler(logging.Handler):
             self.handleError(record)
 
     def close(self) -> None:
+        """Close the underlying file stream, then chain to the base handler."""
         try:
             self._stream.close()
         finally:

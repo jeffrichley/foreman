@@ -81,8 +81,7 @@ _CLAUDE_CREDS_LOCAL_DST = Path("/root/.claude/.credentials.json")
 
 
 def _maybe_refresh_container_creds() -> bool:
-    """Re-copy the container's local Claude credentials from the live
-    Compose-secret bind mount.
+    """Re-copy the container's local Claude credentials from the live secret mount.
 
     Returns True if a fresh copy was installed; False otherwise (paths
     don't exist outside the container, or the local copy is already at
@@ -112,9 +111,10 @@ _PROMPTS_DIR = Path.home() / ".foreman" / "prompts"
 
 @contextmanager
 def _system_prompt_file(prompt: str, *, hint: str) -> Iterator[Path]:
-    """Write ``prompt`` to a uniquely-named file under
-    ``~/.foreman/prompts`` and yield its path. The file is deleted when
-    the block exits, even on exception.
+    """Write ``prompt`` to a uniquely-named file under ``~/.foreman/prompts``.
+
+    Yields the file's path; the file is deleted when the block exits,
+    even on exception.
 
     ``hint`` becomes part of the filename so an operator inspecting
     ``~/.foreman/prompts/`` after a crash can tell who owned each file.
@@ -258,8 +258,7 @@ def _is_transient_sdk_error(exc: BaseException) -> bool:
 
 
 def _translate_sdk_exception(exc: BaseException) -> ProviderError:
-    """Translate an SDK-level exception into the corresponding domain
-    :class:`ProviderError` subclass.
+    """Translate an SDK-level exception into the corresponding domain error.
 
     foreman#266: the boundary between the SDK and the rest of foreman
     lives here. Role runners catch the ``ProviderError`` family; SDK
@@ -313,6 +312,13 @@ class AnthropicSDKProvider(ProviderFacade):
     """
 
     def __init__(self, recovery: RecoveryChain | None = None) -> None:
+        """Store ``recovery``, defaulting to an empty chain when omitted.
+
+        An empty chain means every SDK exception falls straight through
+        to the auth-retry branch and translator — this keeps direct
+        ``AnthropicSDKProvider()`` test fixtures working without a
+        recovery chain wired up.
+        """
         self._recovery = recovery if recovery is not None else RecoveryChain([])
 
     async def run_agent(
@@ -328,6 +334,31 @@ class AnthropicSDKProvider(ProviderFacade):
         session_id: str | None = None,
         resume: bool = False,
     ) -> tuple[T, UsageInfo]:
+        """Run one agent turn via the Anthropic Agent SDK and return the validated result.
+
+        Drives ``claude_agent_sdk.query()`` with a system-prompt file
+        (see :func:`_system_prompt_file`) and the JSON schema derived
+        from ``output_model``, then layers three defenses around the
+        raw SDK call before any exception reaches the caller as a typed
+        :class:`~foreman.providers.exceptions.ProviderError`:
+
+        1. The recovery chain (foreman#266) gets first look at any
+           exception, using the mid-stream :class:`PartialResult` to
+           recognize known SDK bug shapes and return the result the
+           happy path would have produced.
+        2. A missing-session retry (foreman#461) drops ``resume`` and
+           retries fresh if ``resume=True`` and the SDK reports the
+           named session isn't on disk.
+        3. A one-shot auth-retry (foreman#227) refreshes the
+           container's credentials and retries once when the SDK
+           raises its generic auth-failure shape — transient
+           transport errors (foreman#361) are classified out of this
+           path first so they don't get mis-treated as auth failures.
+
+        Any exception that survives all three is translated via
+        :func:`_translate_sdk_exception`. See the inline comments below
+        for the exact control-flow ordering, which is load-bearing.
+        """
         schema = output_model.model_json_schema()
         hint = cwd.name or "role"
         with _system_prompt_file(system_prompt, hint=hint) as sp_path:

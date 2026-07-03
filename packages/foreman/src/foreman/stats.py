@@ -125,8 +125,12 @@ _COMMON_ENVELOPE_FIELDS: tuple[str, ...] = tuple(CommonEnvelope.model_fields.key
 
 
 def _default_stats_root() -> Path:
-    """Return ``~/.foreman/stats`` (env-overridable for tests via
-    ``FOREMAN_STATS_ROOT``)."""
+    """Return the root directory stats JSONL files are written under.
+
+    Defaults to ``~/.foreman/stats``; overridable via
+    ``FOREMAN_STATS_ROOT`` for tests so they don't touch the real home
+    directory.
+    """
     override = os.environ.get("FOREMAN_STATS_ROOT")
     if override:
         return Path(override)
@@ -243,6 +247,16 @@ def log_fixer_run(
         duration_seconds: Wall-clock time the Fixer run took, end to
             end (orchestrator handle the timing — the LLM doesn't
             know how to time itself).
+        input_tokens: Provider-reported input token count.
+        output_tokens: Provider-reported output token count.
+        cache_creation_input_tokens: Provider-reported prompt-cache
+            creation tokens (foreman#244, billed at 25% of input rate).
+        cache_read_input_tokens: Provider-reported prompt-cache read
+            tokens (foreman#244, billed at 10% of input rate).
+        total_cost_usd: Provider-computed cost for the call.
+        model_usage: Per-model breakdown when the provider supplies one.
+        duration_ms: Provider-reported wall-clock duration.
+        num_turns: Number of agent-loop turns the provider executed.
         stats_root: Override for the stats root directory; defaults to
             ``$FOREMAN_STATS_ROOT`` or ``~/.foreman/stats``. Test-only
             knob.
@@ -361,6 +375,16 @@ def log_worker_run(
             returned MINUS the baseline. Positive → Worker introduced
             regressions; zero → Worker's net effect on the suite was
             non-negative.
+        input_tokens: Provider-reported input token count.
+        output_tokens: Provider-reported output token count.
+        cache_creation_input_tokens: Provider-reported prompt-cache
+            creation tokens (foreman#244, billed at 25% of input rate).
+        cache_read_input_tokens: Provider-reported prompt-cache read
+            tokens (foreman#244, billed at 10% of input rate).
+        total_cost_usd: Provider-computed cost for the call.
+        model_usage: Per-model breakdown when the provider supplies one.
+        duration_ms: Provider-reported wall-clock duration.
+        num_turns: Number of agent-loop turns the provider executed.
         stats_root: Override for the stats root directory; defaults to
             ``$FOREMAN_STATS_ROOT`` or ``~/.foreman/stats``. Test-only
             knob.
