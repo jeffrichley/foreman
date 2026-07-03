@@ -49,6 +49,15 @@ def _priority_for(state_name: str) -> int:
 
 
 class QueueManager:
+    """Priority-heap work queue shared by every Poller and drained by the WorkerPool.
+
+    Wraps a heap keyed by (state-priority, enqueue sequence) with the four
+    dequeue-time filters described in the module docstring (in-flight,
+    held, unmet dependencies, per-project cap). All public methods take
+    the internal lock, so Poller producers and the WorkerPool consumer
+    may call them concurrently.
+    """
+
     def __init__(
         self,
         *,
@@ -76,6 +85,11 @@ class QueueManager:
         self._lock = threading.RLock()  # RLock so future observers can reenter QM safely
 
     def enqueue(self, item: WorkItem) -> None:
+        """Push ``item`` onto the heap unless it's already queued or in flight.
+
+        A duplicate of a pending or currently-executing item is silently
+        dropped rather than re-queued or re-prioritized.
+        """
         with self._lock:
             if item in self._queued or item in self._in_flight:
                 return
@@ -86,6 +100,15 @@ class QueueManager:
             self._queued.add(item)
 
     def dequeue(self) -> WorkItem | None:
+        """Pop the highest-priority eligible WorkItem, or return None if none qualifies.
+
+        Applies the four filters (per-ticket FIFO serialization, operator
+        hold, unmet dependencies, per-project cap) in order. A filtered
+        candidate is popped off the heap and pushed back in the
+        ``finally`` clause rather than requeued or reordered, so the next
+        call re-evaluates it from scratch. Returns None immediately if
+        the global ``max_in_flight`` cap is already saturated.
+        """
         with self._lock:
             if len(self._in_flight_tickets) >= self.max_in_flight:
                 return None
@@ -138,9 +161,11 @@ class QueueManager:
                 self._in_flight_by_project[item.project] = count - 1
 
     def in_flight_count(self) -> int:
+        """Return how many WorkItems are currently dequeued and executing."""
         with self._lock:
             return len(self._in_flight_tickets)
 
     def queue_depth(self) -> int:
+        """Return how many WorkItems are waiting in the heap, not yet dequeued."""
         with self._lock:
             return len(self._heap)
