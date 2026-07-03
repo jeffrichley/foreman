@@ -81,6 +81,17 @@ CI_PASSING_MERGEABLE_STATES = frozenset({"clean", "unstable"})
 
 
 class PyGithubGitProvider:
+    """Production :class:`~foreman.v4.git_provider.GitProvider`, backed by PyGithub.
+
+    Locked to a single ``repo_full_name`` at construction — a multi-project
+    daemon holds one instance per project and reaches them all through
+    :class:`~foreman.v4.routing_git_provider.RoutingGitProvider`. Every
+    GitHub API access goes through the ``_gh`` property, which rebuilds
+    the cached ``Github`` client whenever the identity registry hands
+    back a new installation token, so a long-lived instance never
+    operates on an expired token.
+    """
+
     def __init__(
         self,
         *,
@@ -160,6 +171,12 @@ class PyGithubGitProvider:
         return self._cached_repo
 
     def get_pr_state(self, *, project: str, pr_number: int) -> PRState:
+        """Fetch the PR's current merge-relevant state from GitHub.
+
+        Raises :class:`PRNotFoundError` when GitHub returns a 404 for
+        this ``pr_number`` (unknown or wrong-repo PR); other
+        ``GithubException`` statuses propagate unchanged.
+        """
         try:
             pr = self._repo.get_pull(pr_number)
         except GithubException as exc:
@@ -220,6 +237,12 @@ class PyGithubGitProvider:
     def list_open_issues_with_label(
         self, *, project: str, label: str,
     ) -> list[int]:
+        """Return open issue numbers (excluding PRs) that carry ``label``.
+
+        GitHub's issues API returns PRs alongside issues (a PR is a
+        specialized issue under the hood); the ``issue.pull_request is
+        None`` filter excludes them so callers only see true issues.
+        """
         issues = self._repo.get_issues(state="open", labels=[label])
         return [issue.number for issue in issues if issue.pull_request is None]
 
