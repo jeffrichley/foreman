@@ -36,7 +36,16 @@ logger = logging.getLogger(__name__)
 
 
 class IdentityProvider(Protocol):
-    def get_role_token(self, role: str) -> str: ...
+    """Structural interface for minting a per-role GitHub token.
+
+    ``bootstrap_cli_context`` depends on this rather than a concrete
+    identity implementation, so production can pass the real
+    App-installation-token registry while tests pass a fake.
+    """
+
+    def get_role_token(self, role: str) -> str:
+        """Return a live GitHub token scoped to ``role``."""
+        ...
 
 
 def bootstrap_cli_context(

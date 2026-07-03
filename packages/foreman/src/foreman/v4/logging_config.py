@@ -25,6 +25,13 @@ _V4_LOGGER_NAMES = (
 
 
 def configure_logging(*, log_dir: Path, level: str = "INFO") -> None:
+    """Attach a RichHandler + JsonLinesHandler pair to each v4 logger.
+
+    Creates ``log_dir`` if it doesn't exist and points the JSON sink at
+    ``log_dir/transitions.jsonl``. Idempotent: checks each logger's
+    existing handler types before adding new ones, so repeated calls
+    (e.g. after a daemon SIGHUP reload) never stack duplicate handlers.
+    """
     log_dir.mkdir(parents=True, exist_ok=True)
     jsonl_path = log_dir / "transitions.jsonl"
 

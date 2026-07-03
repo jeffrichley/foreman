@@ -41,6 +41,16 @@ _LOG = logging.getLogger(__name__)
 
 
 class WorkerPool:
+    """Drains the QueueManager into a ThreadPoolExecutor running transitions.
+
+    Threads are the right primitive here: every ticket transition spends
+    most of its wall-clock blocked on subprocess (role dispatch) or
+    network (GitHub API) I/O, and both release the GIL, so N worker
+    threads run genuinely in parallel. Concurrency invariants (at most one
+    transition per ticket at a time, at most ``max_in_flight`` tickets
+    globally) are enforced by the QueueManager, not here.
+    """
+
     def __init__(
         self,
         *,
@@ -192,4 +202,9 @@ class WorkerPool:
             )
 
     def shutdown(self, *, wait: bool = True) -> None:
+        """Stop accepting new submissions.
+
+        When ``wait`` is True (the default), blocks until every in-flight
+        transition finishes before returning.
+        """
         self._executor.shutdown(wait=wait)

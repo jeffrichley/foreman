@@ -15,7 +15,7 @@ from foreman.v4.outcome import OUTCOME_MARKER, Outcome
 
 
 def emit_outcome(outcome: Outcome, *, stream: TextIO | None = None) -> None:
-    """Write one terminal line: ``FOREMAN_OUTCOME:<json>\\n``.
+    r"""Write one terminal line: ``FOREMAN_OUTCOME:<json>\n``.
 
     Default stream is sys.stdout. Tests pass StringIO. Roles call this
     once, as the very last thing before sys.exit().

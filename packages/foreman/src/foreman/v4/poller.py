@@ -35,6 +35,14 @@ _TERMINAL_STATES = frozenset({"Done", "Failed", "NeedsHelp"})
 
 
 class Poller:
+    """Sweeps GitHub + the ticket repository once per tick to enqueue work.
+
+    Owns exactly one project. A Daemon constructs one Poller per project
+    (see ``bootstrap_cli_context``) and injects its single shared
+    QueueManager into each of them via ``qm``, so per-project sweeps feed
+    one global work queue.
+    """
+
     def __init__(
         self,
         *,
@@ -57,6 +65,13 @@ class Poller:
         self._clock = clock
 
     def tick(self) -> None:
+        """Run one full sweep: adopt newly-labeled issues, then re-enqueue open tickets.
+
+        Raises:
+            RuntimeError: if no QueueManager has been wired in yet (via the
+                constructor or a Daemon), since there would be nothing to
+                enqueue into.
+        """
         if self._qm is None:
             # Constructed without a QM and never wired by a Daemon — tick()
             # would have no queue to enqueue into. Fail loud so this isn't
