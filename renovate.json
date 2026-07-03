@@ -1,0 +1,25 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits",
+    ":dependencyDashboard"
+  ],
+  "timezone": "America/New_York",
+  "schedule": ["before 6am"],
+  "labels": ["dependencies"],
+  "platformAutomerge": false,
+  "packageRules": [
+    {
+      "description": "Group all non-major updates into one PR and auto-merge once CI is green.",
+      "matchUpdateTypes": ["minor", "patch", "digest", "pin", "lockFileMaintenance"],
+      "groupName": "non-major dependencies",
+      "automerge": true
+    },
+    {
+      "description": "Majors get their own PR and require human review (they can break at runtime even when CI is green).",
+      "matchUpdateTypes": ["major"],
+      "automerge": false
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+name: Renovate
+
+# Self-hosted Renovate (free — no GitHub Pro needed).
+#
+# Why self-hosted instead of the Mend app / Dependabot: Renovate gates its
+# auto-merges on CI itself (see renovate.json `platformAutomerge: false`), so
+# safe auto-merge works on PRIVATE repos WITHOUT GitHub branch protection —
+# which on the free plan is Pro-gated. The RENOVATE_TOKEN secret is a PAT so
+# Renovate's PRs actually trigger CI (the default GITHUB_TOKEN would not).
+
+on:
+  schedule:
+    - cron: "0 10 * * *" # Daily ~06:00 America/New_York
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: renovate
+  cancel-in-progress: false
+
+jobs:
+  renovate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Renovate
+        uses: renovatebot/github-action@v46.1.17
+        with:
+          token: ${{ secrets.RENOVATE_TOKEN }}
+        env:
+          RENOVATE_REPOSITORIES: jeffrichley/foreman
+          LOG_LEVEL: info
