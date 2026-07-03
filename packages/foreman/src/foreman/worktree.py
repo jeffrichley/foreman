@@ -122,6 +122,12 @@ class WorktreeManager:
         *,
         role_token: str | None = None,
     ) -> None:
+        """Initialize the manager, storing the worktrees root and optional role token.
+
+        ``role_token`` (if given) is forwarded as ``GH_TOKEN`` on every
+        git/uv subprocess this manager spawns — see the class docstring
+        for why that matters.
+        """
         self.worktrees_root = worktrees_root
         self._role_token = role_token
 
@@ -135,8 +141,9 @@ class WorktreeManager:
         return filtered_subprocess_env(role_token=self._role_token)
 
     def _self_heal_orphaned_branch(self, *, clone_path: Path, branch_name: str) -> None:
-        """foreman#220: clear stranded local branch + stale worktree
-        metadata before a ``git worktree add -b <branch>`` call.
+        """Clear a stranded local branch + stale worktree metadata (foreman#220).
+
+        Runs before a ``git worktree add -b <branch>`` call.
 
         Failure mode the daemon hits after every ``docker compose
         restart``: the clone (``/foreman/repos/<project>``) lives on a
@@ -805,8 +812,7 @@ def _local_branch_exists(
 def _origin_branch_exists(
     clone_path: Path, branch: str, *, role_token: str | None = None
 ) -> bool:
-    """Return True if ``origin/<branch>`` resolves as a remote-tracking ref
-    in ``clone_path``.
+    """Return True if ``origin/<branch>`` resolves as a remote-tracking ref in ``clone_path``.
 
     Uses ``git rev-parse --verify --quiet`` against
     ``refs/remotes/origin/<branch>`` — silent, no network, rc 0 iff the

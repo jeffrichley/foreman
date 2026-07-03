@@ -177,9 +177,10 @@ class GitHostProvider(ABC):
         issue_number: int,
         body: str,
     ) -> None:
-        """Post a comment on an issue (foreman#229 — defensive exception
-        handler surface). Used by the Planner role runner when an
-        unhandled exception escapes the body wrap; the comment carries
-        the exception type + traceback so an operator can diagnose
-        without spelunking daemon logs.
+        """Post a comment on an issue.
+
+        Defensive exception-handler surface (foreman#229): used by the
+        Planner role runner when an unhandled exception escapes the body
+        wrap, so the comment carries the exception type + traceback and
+        an operator can diagnose without spelunking daemon logs.
         """
