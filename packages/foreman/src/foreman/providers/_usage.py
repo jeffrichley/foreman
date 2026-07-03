@@ -1,5 +1,4 @@
-"""Shared helper for reconstructing :class:`UsageInfo` from a SDK
-``ResultMessage``-shaped object.
+"""Shared helper for reconstructing :class:`UsageInfo` from a SDK message.
 
 Lives at the providers package level — separate from
 ``anthropic_sdk.py`` — so both the adapter and the recovery strategies
@@ -21,8 +20,7 @@ from foreman.provider import UsageInfo
 
 
 def build_usage_info(message: Any) -> UsageInfo:
-    """Construct a :class:`UsageInfo` from a ``ResultMessage``-shaped
-    object.
+    """Construct a :class:`UsageInfo` from a ``ResultMessage``-shaped object.
 
     foreman#227: ``ResultMessage.usage`` is a free-form
     ``dict[str, Any] | None`` carrying the Anthropic API's usage shape

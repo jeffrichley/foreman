@@ -45,9 +45,10 @@ class ProviderUnknownError(ProviderError):
 
 
 class ProviderTransientError(ProviderError):
-    """Anthropic-side transient transport failure — 5xx, 429, connection
-    refused, transport-level timeout. Re-raised at the provider
-    boundary; roles must surface it as
+    """Anthropic-side transient transport failure.
+
+    Covers 5xx, 429, connection refused, and transport-level timeout.
+    Re-raised at the provider boundary; roles must surface it as
     ``Outcome(kind=TRANSIENT_PROVIDER_ERROR)``, not ``ERROR``.
 
     foreman#361: distinguished from :class:`ProviderUnknownError` so

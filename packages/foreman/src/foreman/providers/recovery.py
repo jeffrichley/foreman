@@ -77,17 +77,21 @@ class RecoveryStrategy(ABC):
 
     @abstractmethod
     def can_recover(self, exc: BaseException, partial: PartialResult[Any]) -> bool:
-        """Return True iff this strategy can produce a valid result
+        """Return True iff this strategy can produce a valid result.
+
+        Inspects ``exc`` and the mid-stream ``partial`` state captured
+        so far to decide whether a valid result can be reconstructed
         for the captured exception + mid-stream state.
         """
 
     @abstractmethod
     def recover(self, exc: BaseException, partial: PartialResult[T]) -> tuple[T, UsageInfo]:
-        """Return the ``(validated_output, usage)`` tuple the caller
-        would have received on the happy path.
+        """Return the ``(validated_output, usage)`` tuple for the happy path.
 
-        Only invoked by :class:`RecoveryChain` after ``can_recover``
-        returned True for this strategy on the same inputs.
+        Reconstructs the value the caller would have received had the
+        SDK not raised. Only invoked by :class:`RecoveryChain` after
+        ``can_recover`` returned True for this strategy on the same
+        inputs.
         """
 
 
@@ -102,13 +106,18 @@ class RecoveryChain:
     """
 
     def __init__(self, strategies: list[RecoveryStrategy]) -> None:
+        """Store ``strategies`` in the order they will be tried by :meth:`try_recover`."""
         self._strategies = tuple(strategies)
 
     def try_recover(
         self, exc: BaseException, partial: PartialResult[T]
     ) -> tuple[T, UsageInfo] | None:
-        """Return the first strategy's recovery output, or ``None`` if
-        no strategy claims the exception.
+        """Return the first strategy's recovery output, or ``None``.
+
+        Walks the registered strategies in order and returns as soon
+        as one claims the exception (``None`` means no strategy
+        recognized this SDK bug shape, so the caller should propagate
+        the exception).
 
         When a strategy fires, emit one INFO-level log line naming
         the strategy class + exception type. Log analysis can graph
