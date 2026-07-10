@@ -198,16 +198,22 @@ class GitHubProvider(GitHostProvider):
     def push_branch(self, worktree_path: Path, branch: str) -> None:
         """Push ``branch`` to origin, authenticating via an installation-token URL.
 
-        Reads the existing ``remote.origin.url`` to recover the owner/repo
-        slug, then constructs an ``https://x-access-token:<token>@...``
-        push URL rather than using ``-c http.extraheader`` — the latter
-        would leak the token into persistent git config, whereas the URL
-        form scopes it to this one subprocess call.
+        Uses ``--force-with-lease`` so the push succeeds after a history-rewriting
+        rebase or amend (e.g. the Fixer rebasing its impl branch onto origin/main).
+        The flag is safe on bot-owned single-writer branches (``foreman/issue-*`` /
+        ``foreman/impl-*``) and refuses to overwrite if the remote moved unexpectedly
+        (unlike bare ``--force``).
+
+        Reads the existing ``remote.origin.url`` to recover the owner/repo slug,
+        then constructs an ``https://x-access-token:<token>@...`` push URL rather
+        than using ``-c http.extraheader`` — the latter would leak the token into
+        persistent git config, whereas the URL form scopes it to this one subprocess
+        call.
         """
         remote_url = self._git(worktree_path, "config", "--get", "remote.origin.url").stdout.strip()
         repo_slug = _extract_repo_slug(remote_url)
         push_url = f"https://x-access-token:{self._identity.token}@github.com/{repo_slug}.git"
-        self._git(worktree_path, "push", push_url, f"{branch}:{branch}")
+        self._git(worktree_path, "push", "--force-with-lease", push_url, f"{branch}:{branch}")
 
     # ------------------------------------------------------------------
     # PR + label API operations
