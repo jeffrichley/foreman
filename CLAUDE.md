@@ -57,6 +57,7 @@ gh release edit <tag> --draft=false
 - Conventional commits required (PR titles enforced by `.github/workflows/pr-title-lint.yml`)
 - Subject must NOT start with an uppercase letter
 - All allowed types: feat, fix, chore, docs, refactor, test, style, build, ci, perf, revert
+- Module-level collection constants must be immutable (`frozenset`/`tuple`/`MappingProxyType`)
 
 ## Design
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+from types import MappingProxyType
 from typing import Any, Protocol
 
 import yaml
@@ -58,11 +59,13 @@ class TableFormatter:
         return buffer.getvalue()
 
 
-_FORMATTERS: dict[str, type[OutputFormatter]] = {
-    "table": TableFormatter,
-    "json": JsonFormatter,
-    "yaml": YamlFormatter,
-}
+_FORMATTERS: MappingProxyType[str, type[OutputFormatter]] = MappingProxyType(
+    {
+        "table": TableFormatter,
+        "json": JsonFormatter,
+        "yaml": YamlFormatter,
+    }
+)
 
 
 def get_formatter(name: str) -> OutputFormatter:

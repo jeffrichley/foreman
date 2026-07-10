@@ -43,6 +43,7 @@ import subprocess
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import IO, Protocol, cast
 
 from foreman.v4.outcome import OUTCOME_MARKER
@@ -84,14 +85,16 @@ class _Invocation:
     target: str | None
 
 
-_ROLE_TO_INVOCATION: dict[str, _Invocation] = {
-    "planner":       _Invocation(subcommand="plan",      target=None),
-    "reviewer-spec": _Invocation(subcommand="review",    target="spec"),
-    "reviewer-impl": _Invocation(subcommand="review",    target="impl"),
-    "fixer-spec":    _Invocation(subcommand="fix",       target="spec"),
-    "fixer-impl":    _Invocation(subcommand="fix",       target="impl"),
-    "worker":        _Invocation(subcommand="implement", target=None),
-}
+_ROLE_TO_INVOCATION: MappingProxyType[str, _Invocation] = MappingProxyType(
+    {
+        "planner": _Invocation(subcommand="plan", target=None),
+        "reviewer-spec": _Invocation(subcommand="review", target="spec"),
+        "reviewer-impl": _Invocation(subcommand="review", target="impl"),
+        "fixer-spec": _Invocation(subcommand="fix", target="spec"),
+        "fixer-impl": _Invocation(subcommand="fix", target="impl"),
+        "worker": _Invocation(subcommand="implement", target=None),
+    }
+)
 
 
 def _base_role(role: str) -> str:
@@ -236,7 +239,12 @@ class SubprocessRoleDispatcher:
         self._timeout = timeout_seconds
 
     def dispatch(
-        self, *, role: str, project: str, issue_number: int, ticket_id: int,
+        self,
+        *,
+        role: str,
+        project: str,
+        issue_number: int,
+        ticket_id: int,
         state_instance_id: int | None = None,
         session_id: str | None = None,
         resume: bool = False,
@@ -259,9 +267,12 @@ class SubprocessRoleDispatcher:
             raise ValueError(f"unknown role: {role}") from exc
 
         cmd = [
-            *self._foreman_cli, inv.subcommand,
-            "--project", project,
-            "--issue-number", str(issue_number),
+            *self._foreman_cli,
+            inv.subcommand,
+            "--project",
+            project,
+            "--issue-number",
+            str(issue_number),
         ]
         if inv.target is not None:
             cmd += ["--target", inv.target]
@@ -294,9 +305,7 @@ class SubprocessRoleDispatcher:
         role_base = _base_role(role)
         role_log_dir = self._log_dir / role_base
         role_log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = (
-            role_log_dir / f"{ticket_id}__{_fs_safe_iso_utc(started_at)}.log"
-        )
+        log_path = role_log_dir / f"{ticket_id}__{_fs_safe_iso_utc(started_at)}.log"
 
         stdout_chunks: list[str] = []
         # ``buffering=1`` + explicit ``flush()`` after every line: belt
@@ -304,7 +313,11 @@ class SubprocessRoleDispatcher:
         # POSIX but historically squishy on Windows; the explicit flushes
         # are the load-bearing guarantee.
         log_file = open(
-            log_path, "w", encoding="utf-8", buffering=1, newline="",
+            log_path,
+            "w",
+            encoding="utf-8",
+            buffering=1,
+            newline="",
         )
         # Lock + failure-event are owned at the dispatch layer so we
         # can safely write the ABORTED/TIMEOUT markers without racing
@@ -315,15 +328,22 @@ class SubprocessRoleDispatcher:
         try:
             _write_banner(
                 log_file,
-                role=role, ticket_id=ticket_id,
-                project=project, issue_number=issue_number,
-                started_at=started_at, cmd=cmd,
+                role=role,
+                ticket_id=ticket_id,
+                project=project,
+                issue_number=issue_number,
+                started_at=started_at,
+                cmd=cmd,
             )
 
             return self._run_and_stream(
-                cmd=cmd, env=env, role=role,
-                log_file=log_file, log_path=log_path,
-                log_lock=log_lock, writer_failed=writer_failed,
+                cmd=cmd,
+                env=env,
+                role=role,
+                log_file=log_file,
+                log_path=log_path,
+                log_lock=log_lock,
+                writer_failed=writer_failed,
                 stdout_chunks=stdout_chunks,
             )
         except BaseException as exc:
@@ -383,9 +403,14 @@ class SubprocessRoleDispatcher:
         # errors="replace" is belt-and-suspenders for truly bad bytes
         # from a misbehaving child.
         proc = subprocess.Popen(
-            cmd, env=env, text=True, bufsize=1,
-            encoding="utf-8", errors="replace",
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cmd,
+            env=env,
+            text=True,
+            bufsize=1,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
 
         # EVERYTHING from here through the finally clause must be inside
@@ -429,8 +454,7 @@ class SubprocessRoleDispatcher:
                 # proc.kill() + explicit wait happens in the finally
                 # block below so the cleanup path is single-sourced.
                 raise RoleSubprocessError(
-                    f"role={role} exceeded timeout {self._timeout}s; "
-                    f"see log at {log_path}"
+                    f"role={role} exceeded timeout {self._timeout}s; see log at {log_path}"
                 ) from None
         finally:
             # Resource cleanup runs on EVERY exit path: happy success,
@@ -446,7 +470,8 @@ class SubprocessRoleDispatcher:
                     # Already dying or already dead; either way the
                     # wait() below handles the cleanup.
                     logger.exception(
-                        "role=%s: proc.kill() failed during cleanup", role,
+                        "role=%s: proc.kill() failed during cleanup",
+                        role,
                     )
                 try:
                     proc.wait(timeout=5.0)
@@ -454,8 +479,9 @@ class SubprocessRoleDispatcher:
                     # Truly stuck. Log loud, move on — daemon worker
                     # mustn't wedge forever on one stuck child.
                     logger.warning(
-                        "role=%s: subprocess did not exit within 5s "
-                        "after kill; leaking PID %s", role, proc.pid,
+                        "role=%s: subprocess did not exit within 5s after kill; leaking PID %s",
+                        role,
+                        proc.pid,
                     )
 
             # Join the reader threads. They're draining pipes that the
@@ -470,9 +496,10 @@ class SubprocessRoleDispatcher:
                 thread.join(timeout=_READER_JOIN_TIMEOUT_SECONDS)
                 if thread.is_alive():
                     logger.warning(
-                        "role=%s: %s reader thread did not drain within "
-                        "%.0fs; proceeding",
-                        role, label, _READER_JOIN_TIMEOUT_SECONDS,
+                        "role=%s: %s reader thread did not drain within %.0fs; proceeding",
+                        role,
+                        label,
+                        _READER_JOIN_TIMEOUT_SECONDS,
                     )
 
             # Write the TIMEOUT marker now that the readers have
@@ -483,15 +510,14 @@ class SubprocessRoleDispatcher:
             if timed_out:
                 try:
                     with log_lock:
-                        log_file.write(
-                            f"--- TIMEOUT after {self._timeout}s ---\n"
-                        )
+                        log_file.write(f"--- TIMEOUT after {self._timeout}s ---\n")
                         log_file.flush()
                 except Exception:
                     # If the log file is broken we can't do anything
                     # useful; just don't mask the original exception.
                     logger.exception(
-                        "role=%s: failed to write TIMEOUT marker", role,
+                        "role=%s: failed to write TIMEOUT marker",
+                        role,
                     )
 
         # Past the finally: subprocess is reaped, readers are joined,

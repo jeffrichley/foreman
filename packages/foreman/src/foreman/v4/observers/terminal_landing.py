@@ -31,6 +31,7 @@ import logging
 import re
 from collections.abc import Callable
 from pathlib import Path
+from types import MappingProxyType
 
 from foreman.roles._escalation_comment import (
     EscalationComment,
@@ -64,14 +65,16 @@ _TERMINAL_STATES: frozenset[str] = frozenset({"NeedsHelp", "Failed"})
 #   - values: keys of ``foreman.v4.subprocess_dispatcher._ROLE_TO_INVOCATION``
 # A drift in either source is caught at test-collection time by a
 # regression test (see test_terminal_landing_observer.py).
-_STATE_NAME_TO_ROLE: dict[str, str] = {
-    "Planning":     "planner",
-    "SpecReview":   "reviewer-spec",
-    "SpecFix":      "fixer-spec",
-    "Implementing": "worker",
-    "ImplReview":   "reviewer-impl",
-    "ImplFix":      "fixer-impl",
-}
+_STATE_NAME_TO_ROLE: MappingProxyType[str, str] = MappingProxyType(
+    {
+        "Planning": "planner",
+        "SpecReview": "reviewer-spec",
+        "SpecFix": "fixer-spec",
+        "Implementing": "worker",
+        "ImplReview": "reviewer-impl",
+        "ImplFix": "fixer-impl",
+    }
+)
 
 # Used by retry-cap walkback: the EARLIEST same-state crash row whose
 # failure_reason carries an ``exited <N>`` substring is the actual
@@ -124,14 +127,16 @@ class TerminalLandingObserver:
         # Fetch existing comments for both dedup checks.
         try:
             comments = self._git.get_issue_comments(
-                project=ticket.project, issue_number=ticket.issue_number,
+                project=ticket.project,
+                issue_number=ticket.issue_number,
             )
         except Exception:
             logger.exception(
                 "TerminalLandingObserver: get_issue_comments failed for "
                 "%s#%d; proceeding without dedup (duplicate preferable "
                 "to missing)",
-                ticket.project, ticket.issue_number,
+                ticket.project,
+                ticket.issue_number,
             )
             comments = []
 
@@ -139,15 +144,11 @@ class TerminalLandingObserver:
         key = f"ticket-{ticket_id}-instance-{instance_id}"
 
         # Belt: same-key dedup.
-        if already_posted_for_key(
-            comments, source="terminal-landing", key=key
-        ):
+        if already_posted_for_key(comments, source="terminal-landing", key=key):
             return
         # Suspenders: recent-in-role suppress.
         since = self._clock() - self._role_comment_window
-        if any_recent_marker_with_source_prefix(
-            comments, source_prefix="role:", since=since
-        ):
+        if any_recent_marker_with_source_prefix(comments, source_prefix="role:", since=since):
             return
 
         # Walk back from [-2] to find the prior (cause) row. The
@@ -195,9 +196,7 @@ class TerminalLandingObserver:
         if role_name is not None:
             log_dir_for_role = self._log_dir / _base_role(role_name)
             try:
-                candidates = list(
-                    log_dir_for_role.glob(f"{ticket_id}__*.log")
-                )
+                candidates = list(log_dir_for_role.glob(f"{ticket_id}__*.log"))
             except OSError:
                 candidates = []
             if candidates:
@@ -205,9 +204,9 @@ class TerminalLandingObserver:
                 log_path = candidates[0]
             else:
                 logger.warning(
-                    "TerminalLandingObserver: no log file found for "
-                    "ticket %d under %s",
-                    ticket_id, log_dir_for_role,
+                    "TerminalLandingObserver: no log file found for ticket %d under %s",
+                    ticket_id,
+                    log_dir_for_role,
                 )
 
         # Render the extra_context block when the prior row carries a
@@ -216,23 +215,25 @@ class TerminalLandingObserver:
         # paths — the in-role self-report path is suppressed by the
         # 5-minute heuristic earlier in this method.
         exit_code, log_tail = extract_subprocess_failure_signals(
-            failure_reason=failure_reason, log_path=log_path,
+            failure_reason=failure_reason,
+            log_path=log_path,
         )
         extra_context: str | None = None
         if exit_code is not None or log_tail is not None or log_path is not None:
             exit_code_str = (
-                str(exit_code) if exit_code is not None
+                str(exit_code)
+                if exit_code is not None
                 else "(unknown — TIMEOUT or generic cap-trip; see log)"
             )
             log_path_str = (
-                str(log_path) if log_path is not None
+                str(log_path)
+                if log_path is not None
                 else f"(log file not found under {log_dir_for_role})"
                 if log_dir_for_role is not None
                 else "(log path could not be resolved)"
             )
             log_tail_block = (
-                log_tail if log_tail is not None
-                else "(log file missing or unreadable)"
+                log_tail if log_tail is not None else "(log file missing or unreadable)"
             )
             extra_context = (
                 "## Subprocess signals\n"
@@ -248,11 +249,7 @@ class TerminalLandingObserver:
 
         # Build the structured payload from the prior row's failure
         # signature.
-        summary = (
-            summary_from_payload
-            or failure_reason
-            or f"state landed on {event.state_name}"
-        )
+        summary = summary_from_payload or failure_reason or f"state landed on {event.state_name}"
         why = (
             f"State `{prior_state_name}` failed; the state machine "
             f"transitioned to `{event.state_name}`."
@@ -304,5 +301,6 @@ class TerminalLandingObserver:
                 "TerminalLandingObserver: post_issue_comment failed for "
                 "%s#%d; swallowing (the helper-helper contract treats a "
                 "post failure as non-fatal)",
-                ticket.project, ticket.issue_number,
+                ticket.project,
+                ticket.issue_number,
             )

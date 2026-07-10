@@ -34,6 +34,7 @@ distinguishable from PR-lookup misses while staying inside the
 from __future__ import annotations
 
 from collections.abc import Mapping
+from collections.abc import Set as AbstractSet
 
 from foreman.git_host import CommentRef
 from foreman.v4.git_provider import GitProvider, PRState
@@ -78,100 +79,142 @@ class RoutingGitProvider:
         except KeyError as exc:
             known = ", ".join(sorted(self._providers)) or "<none>"
             raise UnknownProjectError(
-                f"No GitProvider registered for project {project!r}. "
-                f"Known: {known}.",
+                f"No GitProvider registered for project {project!r}. Known: {known}.",
             ) from exc
 
     def list_open_issues_with_label(
-        self, *, project: str, label: str,
+        self,
+        *,
+        project: str,
+        label: str,
     ) -> list[int]:
         """Route to ``project``'s provider to list open issues carrying ``label``."""
         return self._resolve(project).list_open_issues_with_label(
-            project=project, label=label,
+            project=project,
+            label=label,
         )
 
     def get_pr_state(self, *, project: str, pr_number: int) -> PRState:
         """Route to ``project``'s provider to fetch the PR's merge state."""
         return self._resolve(project).get_pr_state(
-            project=project, pr_number=pr_number,
+            project=project,
+            pr_number=pr_number,
         )
 
     def merge_pr(self, *, project: str, pr_number: int) -> None:
         """Route to ``project``'s provider to merge the PR."""
         self._resolve(project).merge_pr(
-            project=project, pr_number=pr_number,
+            project=project,
+            pr_number=pr_number,
         )
 
     def update_branch(self, *, project: str, pr_number: int) -> None:
         """Route to ``project``'s provider to update the PR's branch from base."""
         self._resolve(project).update_branch(
-            project=project, pr_number=pr_number,
+            project=project,
+            pr_number=pr_number,
         )
 
     def add_labels(
-        self, *, project: str, issue_number: int, labels: set[str],
+        self,
+        *,
+        project: str,
+        issue_number: int,
+        labels: AbstractSet[str],
     ) -> None:
         """Route to ``project``'s provider to add labels to the issue."""
         self._resolve(project).add_labels(
-            project=project, issue_number=issue_number, labels=labels,
+            project=project,
+            issue_number=issue_number,
+            labels=labels,
         )
 
     def remove_labels(
-        self, *, project: str, issue_number: int, labels: set[str],
+        self,
+        *,
+        project: str,
+        issue_number: int,
+        labels: AbstractSet[str],
     ) -> None:
         """Route to ``project``'s provider to remove labels from the issue."""
         self._resolve(project).remove_labels(
-            project=project, issue_number=issue_number, labels=labels,
+            project=project,
+            issue_number=issue_number,
+            labels=labels,
         )
 
     def close_issue(self, *, project: str, issue_number: int) -> None:
         """Route to ``project``'s provider to close the issue."""
         self._resolve(project).close_issue(
-            project=project, issue_number=issue_number,
+            project=project,
+            issue_number=issue_number,
         )
 
     def delete_branch(
-        self, *, project: str, branch_name: str,
+        self,
+        *,
+        project: str,
+        branch_name: str,
     ) -> None:
         """Route to ``project``'s provider to delete the branch."""
         self._resolve(project).delete_branch(
-            project=project, branch_name=branch_name,
+            project=project,
+            branch_name=branch_name,
         )
 
     def close_pr(self, *, project: str, pr_number: int) -> None:
         """Route to ``project``'s provider to close the PR without merging."""
         self._resolve(project).close_pr(
-            project=project, pr_number=pr_number,
+            project=project,
+            pr_number=pr_number,
         )
 
     def find_open_pr_by_head_branch(
-        self, *, project: str, branch_name: str,
+        self,
+        *,
+        project: str,
+        branch_name: str,
     ) -> int | None:
         """Route to ``project``'s provider to find an open PR by head branch."""
         return self._resolve(project).find_open_pr_by_head_branch(
-            project=project, branch_name=branch_name,
+            project=project,
+            branch_name=branch_name,
         )
 
     def get_issue_labels(
-        self, *, project: str, issue_number: int,
+        self,
+        *,
+        project: str,
+        issue_number: int,
     ) -> set[str]:
         """Route to ``project``'s provider to fetch the issue's current labels."""
         return self._resolve(project).get_issue_labels(
-            project=project, issue_number=issue_number,
+            project=project,
+            issue_number=issue_number,
         )
 
     def get_issue_comments(
-        self, *, project: str, issue_number: int,
+        self,
+        *,
+        project: str,
+        issue_number: int,
     ) -> list[CommentRef]:
         """Route to ``project``'s provider to fetch the issue's comments."""
         return self._resolve(project).get_issue_comments(
-            project=project, issue_number=issue_number,
+            project=project,
+            issue_number=issue_number,
         )
 
     def post_issue_comment(
-        self, *, project: str, issue_number: int, body: str,
+        self,
+        *,
+        project: str,
+        issue_number: int,
+        body: str,
     ) -> None:
         """Route to ``project``'s provider to post a new comment on the issue."""
         self._resolve(project).post_issue_comment(
-            project=project, issue_number=issue_number, body=body,
+            project=project,
+            issue_number=issue_number,
+            body=body,
         )

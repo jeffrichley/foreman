@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from types import MappingProxyType
 from typing import Any
 
 from foreman.v4.events import (
@@ -20,16 +21,18 @@ from foreman.v4.events import (
     TransientProviderErrorEvent,
 )
 
-_EVENT_NAMES: dict[type[Event], tuple[str, int]] = {
-    StateEnteredEvent:     ("state_entered", logging.INFO),
-    ExecuteStartedEvent:   ("execute_started", logging.INFO),
-    ExecuteCompletedEvent: ("execute_completed", logging.INFO),
-    StateExitedEvent:      ("state_exited", logging.INFO),
-    StateFailedEvent:      ("state_failed", logging.WARNING),
-    TransientProviderErrorEvent: ("transient_provider_error", logging.WARNING),
-    BackupTakenEvent:  ("backup_taken", logging.INFO),
-    BackupFailedEvent: ("backup_failed", logging.ERROR),
-}
+_EVENT_NAMES: MappingProxyType[type[Event], tuple[str, int]] = MappingProxyType(
+    {
+        StateEnteredEvent: ("state_entered", logging.INFO),
+        ExecuteStartedEvent: ("execute_started", logging.INFO),
+        ExecuteCompletedEvent: ("execute_completed", logging.INFO),
+        StateExitedEvent: ("state_exited", logging.INFO),
+        StateFailedEvent: ("state_failed", logging.WARNING),
+        TransientProviderErrorEvent: ("transient_provider_error", logging.WARNING),
+        BackupTakenEvent: ("backup_taken", logging.INFO),
+        BackupFailedEvent: ("backup_failed", logging.ERROR),
+    }
+)
 
 
 class StructuredLogObserver:

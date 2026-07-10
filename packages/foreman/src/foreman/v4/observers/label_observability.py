@@ -34,6 +34,7 @@ actually exercised under load.
 
 from __future__ import annotations
 
+from collections.abc import Set as AbstractSet
 from typing import Protocol
 
 from foreman.v4.events import Event, StateEnteredEvent, StateExitedEvent
@@ -47,15 +48,11 @@ class LabelWriter(Protocol):
     Reads are out of scope — this observer never inspects existing labels.
     """
 
-    def add_labels(
-        self, *, project: str, issue_number: int, labels: set[str]
-    ) -> None:
+    def add_labels(self, *, project: str, issue_number: int, labels: AbstractSet[str]) -> None:
         """Add ``labels`` to the issue, leaving any other labels untouched."""
         ...
 
-    def remove_labels(
-        self, *, project: str, issue_number: int, labels: set[str]
-    ) -> None:
+    def remove_labels(self, *, project: str, issue_number: int, labels: AbstractSet[str]) -> None:
         """Remove ``labels`` from the issue, leaving any other labels untouched."""
         ...
 
@@ -92,10 +89,12 @@ _COMPLETION_TERMINAL = "Done"
 #: Labels for the two non-completion terminals. These are stripped when the
 #: ticket enters Done so completed issues don't carry misleading residue.
 #: Computed via ``_state_label()`` to stay consistent with the naming helper.
-_SIBLING_TERMINAL_LABELS: set[str] = {
-    _state_label("NeedsHelp"),
-    _state_label("Failed"),
-}
+_SIBLING_TERMINAL_LABELS: frozenset[str] = frozenset(
+    {
+        _state_label("NeedsHelp"),
+        _state_label("Failed"),
+    }
+)
 
 
 class LabelObservabilityObserver:
