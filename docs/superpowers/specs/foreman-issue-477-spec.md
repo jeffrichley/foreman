@@ -107,13 +107,15 @@ the signal handler itself) avoids network I/O inside a signal context.
 5. For each added project: call `self._git_provider_factory(pc.repo)` →
    `GitProvider`; if `self._routing_git is not None`, call
    `self._routing_git.register_provider(name, provider)`; create a `Poller`
-   (same arguments as in `bootstrap_cli_context`); append to `self._pollers`;
+   (same arguments as in `bootstrap_cli_context`); call `self._with_qm(new_poller)`
+   to wire the shared QueueManager into the poller before appending it; append
+   the wired poller to `self._pollers`;
    update `self._project_configs[name] = pc`; call
    `self._clone_refresher.register_project(name, Path(pc.local_clone_path))`.
 6. **Removed** = current names not in the new set **plus** current names whose
    `ProjectConfig` differs from the loaded version (same remove-then-re-add
    treatment prescribed in step 4). For each: remove from
-   `self._pollers` (filter by `poller.project != name`); if
+   `self._pollers` (filter by `poller._project != name`); if
    `self._routing_git is not None`, call
    `self._routing_git.unregister_provider(name)`; delete
    `self._project_configs[name]`; call
@@ -219,8 +221,8 @@ and paths that don't supply `daemon=` continue to work unchanged.
 7. Add `register_provider(name: str, provider: GitProvider) -> None` and
    `unregister_provider(name: str) -> None` public methods to
    `packages/foreman/src/foreman/v4/routing_git_provider.py:RoutingGitProvider`.
-   `unregister_provider` raises `KeyError` if name not found (consistent with
-   the existing `UnknownProjectError` family).
+   `unregister_provider` raises `UnknownProjectError` if name not found
+   (matching the error raised by `RoutingGitProvider._resolve`).
 
 8. Add `register_project(name: str, path: Path) -> None` and
    `unregister_project(name: str) -> None` public methods to
