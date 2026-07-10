@@ -343,6 +343,23 @@ def test_impl_prompt_file_exists_for_target_roles(impl_role: str) -> None:
 
 @pytest.mark.parametrize(
     "prompt_file",
+    ["planner.md", "worker.md"],
+)
+def test_pr_title_subject_lowercase_rule_in_prompt(prompt_file: str) -> None:
+    """foreman#445: every prompt that produces a pr_title must instruct the
+    role LLM to begin the subject with a lowercase letter, matching the
+    repo's pr-title-lint subjectPattern. Drift here causes spec and impl
+    PRs to fail title-lint on any target repo that enforces the rule."""
+    path = resources.files("foreman.prompts").joinpath(prompt_file)
+    content = path.read_text(encoding="utf-8")
+    assert "lowercase letter" in content, (
+        f"{prompt_file} must instruct the role to begin the pr_title subject "
+        "with a lowercase letter — see foreman#445."
+    )
+
+
+@pytest.mark.parametrize(
+    "prompt_file",
     [
         "planner.md",
         "worker.md",
