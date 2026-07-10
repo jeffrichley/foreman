@@ -433,6 +433,33 @@ class V4Config(BaseModel):
         return v
 
 
+class ProjectRegistry:
+    """Atomic-rebind holder for the live project-config map.
+
+    Shared by the Daemon (writer) and WorkerPool (reader) so that a
+    hot-reload swap is a single reference assignment — not an in-place
+    mutation of a shared dict. The GIL makes that single assignment
+    atomic in CPython, so readers always see either the old dict or the
+    new one; never a half-mutated intermediate.
+
+    Usage::
+
+        # Daemon init
+        registry = ProjectRegistry({pc.name: pc for pc in projects})
+
+        # Hot-reload (Daemon._apply_project_reload)
+        registry.current = {pc.name: pc for pc in new_projects}
+
+        # Reader (StateContext / WorkerPool)
+        pc = registry.current.get(ticket.project)
+    """
+
+    def __init__(self, initial: dict[str, ProjectConfig]) -> None:
+        # ``current`` is a plain dict attribute; assignment is atomic
+        # under the GIL. No lock needed for reads.
+        self.current: dict[str, ProjectConfig] = initial
+
+
 def load_config(path: Path) -> V4Config:
     """Parse the TOML at ``path`` and validate as V4Config.
 

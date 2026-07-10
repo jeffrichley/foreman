@@ -35,7 +35,7 @@ from foreman.v4.states.registry import build_state
 from foreman.v4.work import WorkItem
 
 if TYPE_CHECKING:
-    from foreman.v4.config import ProjectConfig
+    from foreman.v4.config import ProjectConfig, ProjectRegistry
 
 _LOG = logging.getLogger(__name__)
 
@@ -62,6 +62,7 @@ class WorkerPool:
         clock: Callable[[], dt.datetime],
         max_state_attempts: int = 3,
         project_configs: dict[str, ProjectConfig] | None = None,
+        registry: ProjectRegistry | None = None,
     ) -> None:
         self._repo = repo
         self._qm = qm
@@ -73,12 +74,21 @@ class WorkerPool:
         # the state machine can enforce the runaway-defense cap (Phase
         # 8c.2). Daemon plumbs DaemonConfig.max_state_attempts here.
         self._max_state_attempts = max_state_attempts
-        # foreman#357: per-project ProjectConfig map keyed by name.
-        # MergingState's base-ref guard reads ``dev_base_branch`` from
-        # the entry for ``ticket.project``. Default empty dict so direct
-        # ``WorkerPool(...)`` constructions in tests keep working — the
-        # guard short-circuits with a warning when the map is empty.
-        self._project_configs: dict[str, ProjectConfig] = project_configs or {}
+        # issue #503 FIX 1: prefer the shared ``ProjectRegistry`` when the
+        # Daemon wires it in.  Holding the registry (not a snapshot of
+        # registry.current) means every ``_run_transition`` call reads the
+        # live map after a hot-reload, without any per-thread snapshot.
+        # The fallback to ``project_configs`` (or an empty dict wrapped in
+        # a one-shot registry) keeps direct ``WorkerPool(...)`` test
+        # constructions working without change.
+        from foreman.v4.config import ProjectRegistry as _ProjectRegistry
+
+        if registry is not None:
+            self._registry: ProjectRegistry = registry
+        else:
+            # Backward-compat: wrap the legacy project_configs dict in a
+            # one-shot registry so the rest of the code has a uniform path.
+            self._registry = _ProjectRegistry(project_configs or {})
         # Single concurrency knob: the pool size = the QM's in-flight cap.
         # Splitting them would let pool < QM silently throttle, or pool > QM
         # waste OS threads. Operators dial ONE number in V4Config.
@@ -157,7 +167,11 @@ class WorkerPool:
                 role_dispatcher=self._dispatcher,
                 git=self._git,
                 max_state_attempts=self._max_state_attempts,
-                project_configs=self._project_configs,
+                # FIX 1: read the live map from the registry at transition
+                # time so a hot-reload that fires between tick() and this
+                # point is immediately visible.  No snapshot needed — readers
+                # always see a consistent (non-torn) dict under the GIL.
+                project_configs=self._registry.current,
             )
             state.transition(ctx)
         except Exception:

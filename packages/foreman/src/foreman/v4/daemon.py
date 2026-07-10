@@ -54,7 +54,7 @@ _DISABLED_CLONE_REFRESHER: CloneRefresherLike = _DisabledCloneRefresher()
 _log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from foreman.v4.config import ProjectConfig
+    from foreman.v4.config import ProjectConfig, ProjectRegistry
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +102,8 @@ class Daemon:
         projects_loader: Callable[[], list[ProjectConfig]] | None = None,
         git_provider_factory: Callable[[str], GitProvider] | None = None,
     ) -> None:
+        from foreman.v4.config import ProjectRegistry
+
         self._repo = repo
         self._git = git
         self._dispatcher = dispatcher
@@ -112,10 +114,17 @@ class Daemon:
         # MergingState's base-ref guard can read dev_base_branch. Default
         # None → empty dict keeps test-only ``Daemon(...)`` constructions
         # working without the kwarg.
-        self._project_configs: dict[str, ProjectConfig] = project_configs or {}
+        #
+        # issue #503 (FIX 1): wrap in ProjectRegistry so hot-reload swaps
+        # the whole dict atomically (a single ``registry.current = new_dict``
+        # reference rebind) instead of mutating the shared dict in place.
+        # The WorkerPool holds the same registry object and reads
+        # ``registry.current`` live at each access — no per-thread snapshot
+        # is needed because the straddle-two-generations window is negligible.
+        self._registry: ProjectRegistry = ProjectRegistry(project_configs or {})
         # issue #472: extract per-project caps and pass to QueueManager so it
         # can enforce per-project concurrency limits in its dequeue filter.
-        project_caps = {name: pc.max_in_flight for name, pc in self._project_configs.items()}
+        project_caps = {name: pc.max_in_flight for name, pc in self._registry.current.items()}
         self._qm = QueueManager(
             repo=repo,
             max_in_flight=config.max_in_flight,
@@ -131,7 +140,7 @@ class Daemon:
             bus=bus,
             clock=clock,
             max_state_attempts=config.max_state_attempts,
-            project_configs=self._project_configs,
+            registry=self._registry,
         )
         # foreman#407: per-poll project clone refresh. Default is the no-op
         # ``_DisabledCloneRefresher`` sentinel so test-only ``Daemon(...)``
@@ -167,6 +176,16 @@ class Daemon:
         """Exposed so the CLI can wire `ctx.obj.qm` to the shared QM."""
         return self._qm
 
+    @property
+    def _project_configs(self) -> dict[str, ProjectConfig]:
+        """Read-only view of the current project-config map.
+
+        Provided for backward-compatibility with tests that read
+        ``daemon._project_configs`` directly.  Always returns
+        ``_registry.current`` — the live, post-reload map.
+        """
+        return self._registry.current
+
     def request_project_reload(self) -> None:
         """Signal that ``_apply_project_reload`` should run on the next tick.
 
@@ -179,25 +198,50 @@ class Daemon:
     def _apply_project_reload(self) -> None:
         """Diff the project list from the loader against the live registry.
 
-        Computes the added and removed sets from a pre-mutation snapshot of
-        ``_project_configs``, then applies removals before additions so a
-        changed project is treated as remove-then-re-add without self-overwrite
-        confusion.  See the Approach section of the issue #477 spec for the
-        ordering rationale.
+        Computes the added and removed sets from the current registry
+        snapshot, then applies removals before additions so a changed
+        project is treated as remove-then-re-add without self-overwrite
+        confusion.  See the Approach section of the issue #477 spec for
+        the ordering rationale.
+
+        issue #503 FIX 1: after computing the full new project map, the
+        registry is updated via a SINGLE atomic reference rebind
+        (``self._registry.current = new_dict``) rather than in-place
+        ``pop``/``insert`` mutations.  Worker threads read
+        ``registry.current`` live at each access; the GIL makes the
+        reference rebind atomic so they always see either the pre-reload
+        or the post-reload snapshot — never a torn intermediate state.
+
+        issue #503 FIX 3: if the loader raises ``FileNotFoundError`` or
+        ``pydantic.ValidationError`` during a running-daemon reload, the
+        exception is caught, a warning is logged, and the current project
+        set is kept unchanged.  A malformed projects file edited during
+        ``foreman daemon reload`` must never take the daemon down.
 
         No-ops when ``_projects_loader`` is ``None`` (daemon constructed
         without a loader — test isolation path).
         """
         from pathlib import Path  # local import — only needed here
 
+        from pydantic import ValidationError
+
         if self._projects_loader is None:
             return
 
-        new_projects = self._projects_loader()
-        # Pre-mutation snapshot — both Removed and Added sets are derived
-        # from this so that step-7 additions don't overwrite a step-6
-        # removal of the same changed project.
-        snapshot = dict(self._project_configs)
+        # FIX 3: graceful degradation — bad file keeps the current set.
+        try:
+            new_projects = self._projects_loader()
+        except (FileNotFoundError, ValidationError) as exc:
+            _log.warning(
+                "config reload: failed to load projects file (%s: %s); "
+                "keeping current project set unchanged",
+                type(exc).__name__,
+                exc,
+            )
+            return
+
+        # Snapshot of the CURRENT registry for computing the diff.
+        snapshot = self._registry.current
         new_by_name = {pc.name: pc for pc in new_projects}
 
         removed_names: set[str] = set()
@@ -215,15 +259,20 @@ class Daemon:
             _log.info("config reload: no changes")
             return
 
-        # Step 6: process removals first.
+        # Build the new project map starting from the current snapshot.
+        # We never mutate the existing dict — we build a fresh one and
+        # swap the registry reference atomically at the end (FIX 1).
+        working: dict[str, ProjectConfig] = dict(snapshot)
+
+        # Step 6: process removals first (unregister providers / pollers).
         for name in removed_names:
             self._pollers = [p for p in self._pollers if p._project != name]
             if self._routing_git is not None:
                 self._routing_git.unregister_provider(name)
-            self._project_configs.pop(name, None)
+            working.pop(name, None)
             self._clone_refresher.unregister_project(name)
 
-        # Step 7: process additions.
+        # Step 7: process additions (register providers / pollers).
         for pc in added_pcs:
             if self._git_provider_factory is not None:
                 provider = self._git_provider_factory(pc.repo)
@@ -238,8 +287,13 @@ class Daemon:
                     clock=self._clock,
                 )
                 self._pollers.append(self._with_qm(new_poller))
-            self._project_configs[pc.name] = pc
+            working[pc.name] = pc
             self._clone_refresher.register_project(pc.name, Path(pc.local_clone_path))
+
+        # FIX 1: single atomic reference rebind.  Worker threads reading
+        # ``registry.current`` see either the old or the new snapshot;
+        # never a half-mutated intermediate.
+        self._registry.current = working
 
         _log.info(
             "config reload: added=%s removed=%s",
