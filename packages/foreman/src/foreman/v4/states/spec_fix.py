@@ -1,4 +1,5 @@
 """SpecFixState — fixer-spec dispatch; CLEAN routes back to SpecReview."""
+
 from __future__ import annotations
 
 from foreman.v4.outcome import Outcome, OutcomeKind

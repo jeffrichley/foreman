@@ -181,9 +181,7 @@ _TRANSIENT_PATTERNS: tuple[str, ...] = (
 # <stderr>"). One module-level tuple so the signature has a single edit point,
 # mirroring _TRANSIENT_PATTERNS. Patterns are matched against a lowercased
 # haystack, so keep them lowercase.
-_MISSING_SESSION_PATTERNS: tuple[str, ...] = (
-    "no conversation found",
-)
+_MISSING_SESSION_PATTERNS: tuple[str, ...] = ("no conversation found",)
 
 
 def _is_missing_session_sdk_error(exc: BaseException) -> bool:
@@ -486,15 +484,11 @@ class AnthropicSDKProvider(ProviderFacade):
                         "retrying fresh (foreman#461)",
                         session_id,
                     )
-                    fresh_kwargs = {
-                        k: v for k, v in options_kwargs.items() if k != "resume"
-                    }
+                    fresh_kwargs = {k: v for k, v in options_kwargs.items() if k != "resume"}
                     if session_id is not None:
                         fresh_kwargs["session_id"] = session_id
                     fresh_options = ClaudeAgentOptions(**fresh_kwargs)
-                    partial = PartialResult(
-                        result_message=None, output_model=output_model
-                    )
+                    partial = PartialResult(result_message=None, output_model=output_model)
                     try:
                         return await self._iterate_query(
                             user_prompt=user_prompt,

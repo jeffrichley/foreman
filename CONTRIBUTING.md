@@ -35,7 +35,8 @@ Need `just`? `cargo install just` (with a Rust toolchain) or `brew install just`
 
 | Tool | What it catches | Run via |
 |---|---|---|
-| `ruff` | lint + format | `just lint` / `just fix` |
+| `ruff check` | lint (style, unused imports, etc.) | `just lint` / `just fix` |
+| `ruff format --check` | formatting (canonical whitespace / trailing commas) | `just format-check` / `just fix` |
 | `mypy` | type errors in `packages/foreman/src` | `just typecheck` |
 | `lint-imports` | architecture boundaries (R1: prod can't import tests; R2: v4 can't import v3 substrate) | `just import-lint` |
 | `pytest` | tests | `just test` |

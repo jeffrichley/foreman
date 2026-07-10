@@ -80,12 +80,20 @@ class MetricsObserver:
         if isinstance(event, StateEnteredEvent):
             self._backend.increment("foreman.v4.state.entered", tags=tags)
         elif isinstance(event, ExecuteCompletedEvent):
-            self._backend.increment("foreman.v4.state.completed", tags={
-                **tags, "kind": event.outcome.kind.value,
-            })
+            self._backend.increment(
+                "foreman.v4.state.completed",
+                tags={
+                    **tags,
+                    "kind": event.outcome.kind.value,
+                },
+            )
         elif isinstance(event, StateFailedEvent):
-            self._backend.increment("foreman.v4.state.failed", tags={
-                **tags, "phase": event.failure_phase,
-            })
+            self._backend.increment(
+                "foreman.v4.state.failed",
+                tags={
+                    **tags,
+                    "phase": event.failure_phase,
+                },
+            )
         elif isinstance(event, StateExitedEvent):
             self._backend.increment("foreman.v4.state.exited", tags=tags)

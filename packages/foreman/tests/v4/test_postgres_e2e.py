@@ -58,7 +58,11 @@ def test_happy_path_queued_to_done_on_postgres(clean_postgres_dsn):  # noqa: F81
     bus.subscribe(StructuredLogObserver())
 
     final = _run_until_terminal(
-        repo, ticket.id, dispatcher=dispatcher, git=git, bus=bus,
+        repo,
+        ticket.id,
+        dispatcher=dispatcher,
+        git=git,
+        bus=bus,
         project_configs=_auto_merge_configs(),
     )
     assert final.current_state == "Done"

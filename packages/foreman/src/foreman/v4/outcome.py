@@ -191,7 +191,7 @@ def parse_outcome_from_stdout(stdout: str) -> Outcome:
         idx = line.find(OUTCOME_MARKER)
         if idx == -1:
             continue
-        suffix = line[idx + len(OUTCOME_MARKER):].strip()
+        suffix = line[idx + len(OUTCOME_MARKER) :].strip()
         try:
             payload = json.loads(suffix)
         except json.JSONDecodeError as exc:

@@ -10,6 +10,7 @@ Plus the runaway-cap exemption: N consecutive BLOCKED polls must NOT
 trip the cap and escalate to NeedsHelp (BLOCKED rows are skip-listed
 by count_consecutive_same_state per Phase 8d.18).
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -23,6 +24,7 @@ from foreman.v4.states.impl_approved import ImplApprovedState
 # ---------------------------------------------------------------------------
 # Shared test fixture
 # ---------------------------------------------------------------------------
+
 
 def _ctx(
     pr_state: PRState,
@@ -40,14 +42,19 @@ def _ctx(
 
     # Simulate a prior ImplReview outcome carrying pr_number=42.
     prior = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="ImplReview", sequence=1,
+        ticket_id=ticket.id,
+        state_name="ImplReview",
+        sequence=1,
         now=dt.datetime(2026, 6, 13),
     )
     repo.mark_execute_completed(
-        prior.id, now=dt.datetime(2026, 6, 13),
+        prior.id,
+        now=dt.datetime(2026, 6, 13),
         outcome_kind=OutcomeKind.CLEAN,
         outcome_payload={
-            "kind": "clean", "confidence": "high", "summary": "test",
+            "kind": "clean",
+            "confidence": "high",
+            "summary": "test",
             "artifacts": {"pr_number": 42},
         },
         next_state="ImplApproved",
@@ -58,14 +65,18 @@ def _ctx(
     ticket = repo.get_ticket(ticket.id)
 
     instance = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="ImplApproved", sequence=2,
+        ticket_id=ticket.id,
+        state_name="ImplApproved",
+        sequence=2,
         now=dt.datetime(2026, 6, 13),
     )
     git = FakeGitProvider()
     git.set_pr_state(project="p", pr_number=42, state=pr_state)
 
     ctx = StateContext(
-        ticket=ticket, instance=instance, repo=repo,
+        ticket=ticket,
+        instance=instance,
+        repo=repo,
         clock=lambda: dt.datetime(2026, 6, 13),
         git=git,
     )
@@ -75,6 +86,7 @@ def _ctx(
 # ---------------------------------------------------------------------------
 # Identity / structural
 # ---------------------------------------------------------------------------
+
 
 def test_impl_approved_state_name() -> None:
     assert ImplApprovedState().state_name == "ImplApproved"
@@ -95,6 +107,7 @@ def test_impl_approved_is_NOT_terminal_for_the_machine() -> None:
 # Branch: impl PR merged → CLEAN + close + Done
 # ---------------------------------------------------------------------------
 
+
 def test_impl_approved_merged_returns_clean() -> None:
     """When the impl PR is merged, execute() returns CLEAN."""
     pr = PRState(merged=True, closed=True, mergeable=False, ci_passing=False)
@@ -114,6 +127,7 @@ def test_impl_approved_merged_closes_originating_issue() -> None:
 def test_impl_approved_merged_next_state_is_done() -> None:
     """When merged, next_state returns DoneState."""
     from foreman.v4.states.terminal import DoneState
+
     pr = PRState(merged=True, closed=True, mergeable=False, ci_passing=False)
     ctx, _repo, _git = _ctx(pr)
     state = ImplApprovedState()
@@ -134,6 +148,7 @@ def test_impl_approved_merged_records_pr_artifact() -> None:
 # ---------------------------------------------------------------------------
 # Branch: impl PR open → BLOCKED + self-loop, no close
 # ---------------------------------------------------------------------------
+
 
 def test_impl_approved_open_returns_blocked() -> None:
     """While the impl PR is open, execute() returns BLOCKED."""
@@ -165,6 +180,7 @@ def test_impl_approved_open_next_state_is_self() -> None:
 # Branch: impl PR closed-without-merge → NEEDS_HELP
 # ---------------------------------------------------------------------------
 
+
 def test_impl_approved_closed_without_merge_returns_needs_help() -> None:
     """A closed-but-not-merged impl PR escalates to NeedsHelp."""
     pr = PRState(merged=False, closed=True, mergeable=False, ci_passing=False)
@@ -184,6 +200,7 @@ def test_impl_approved_closed_without_merge_does_not_close_issue() -> None:
 def test_impl_approved_closed_without_merge_next_state_is_needs_help() -> None:
     """Closed-without-merge routes to NeedsHelpState."""
     from foreman.v4.states.terminal import NeedsHelpState
+
     pr = PRState(merged=False, closed=True, mergeable=False, ci_passing=False)
     ctx, _repo, _git = _ctx(pr)
     state = ImplApprovedState()
@@ -195,6 +212,7 @@ def test_impl_approved_closed_without_merge_next_state_is_needs_help() -> None:
 # ---------------------------------------------------------------------------
 # Branch: already-closed issue → idempotent close
 # ---------------------------------------------------------------------------
+
 
 def test_impl_approved_already_closed_issue_idempotent() -> None:
     """close_originating_issue is idempotent: calling on an already-closed
@@ -217,6 +235,7 @@ def test_impl_approved_already_closed_issue_idempotent() -> None:
 # merged-checked-first: merged=True, closed=True → CLEAN (not NEEDS_HELP)
 # ---------------------------------------------------------------------------
 
+
 def test_impl_approved_merged_wins_over_closed() -> None:
     """GitHub sets both merged=True AND closed=True for a merged PR.
     ImplApproved must check merged FIRST so a merged PR is treated
@@ -230,6 +249,7 @@ def test_impl_approved_merged_wins_over_closed() -> None:
 # ---------------------------------------------------------------------------
 # Runaway-cap exemption: N BLOCKED polls must NOT escalate to NeedsHelp
 # ---------------------------------------------------------------------------
+
 
 def test_impl_approved_blocked_does_not_count_toward_runaway_cap() -> None:
     """Five consecutive BLOCKED polls (> max_state_attempts=3) must NOT
@@ -253,7 +273,9 @@ def test_impl_approved_blocked_does_not_count_toward_runaway_cap() -> None:
             now=dt.datetime(2026, 6, 13),
         )
         ctx = StateContext(
-            ticket=ticket, instance=instance, repo=repo,
+            ticket=ticket,
+            instance=instance,
+            repo=repo,
             clock=lambda: dt.datetime(2026, 6, 13),
             git=git,
             max_state_attempts=3,

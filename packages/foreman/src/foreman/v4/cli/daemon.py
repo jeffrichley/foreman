@@ -173,7 +173,8 @@ def cmd_daemon_start(ctx: typer.Context) -> None:
         existing_pid = int(PID_PATH.read_text().strip())
         if is_pid_alive(existing_pid):
             typer.echo(
-                f"daemon already running (pid {existing_pid})", err=True,
+                f"daemon already running (pid {existing_pid})",
+                err=True,
             )
             raise typer.Exit(code=1)
     PID_PATH.parent.mkdir(parents=True, exist_ok=True)

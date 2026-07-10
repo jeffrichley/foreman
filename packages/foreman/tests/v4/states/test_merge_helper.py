@@ -18,6 +18,7 @@ cycles on this state, the helper emits NEEDS_HELP instead of RETRY.
 These tests drive ``attempt_merge`` directly with a FakeGitProvider and an
 InMemoryTicketRepository, asserting outcome kind + side effects per branch.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -48,7 +49,9 @@ def _ctx(
     """
     repo = repo or InMemoryTicketRepository()
     ticket = repo.create_ticket(
-        project="p", issue_number=1, now=dt.datetime(2026, 6, 13),
+        project="p",
+        issue_number=1,
+        now=dt.datetime(2026, 6, 13),
     )
     repo.set_ticket_state(ticket.id, state_name, now=dt.datetime(2026, 6, 13))
     seq = 0
@@ -57,14 +60,17 @@ def _ctx(
         nonlocal seq
         seq += 1
         inst = repo.open_state_instance(
-            ticket_id=ticket.id, state_name=state_name, sequence=seq,
+            ticket_id=ticket.id,
+            state_name=state_name,
+            sequence=seq,
             now=dt.datetime(2026, 6, 13),
         )
         payload: dict = {"artifacts": {"pr_number": 99}}
         if heal_action is not None:
             payload["details"] = {"heal_action": heal_action}
         repo.mark_execute_completed(
-            inst.id, now=dt.datetime(2026, 6, 13),
+            inst.id,
+            now=dt.datetime(2026, 6, 13),
             outcome_kind=OutcomeKind.BLOCKED,
             outcome_payload=payload,
             next_state=state_name,
@@ -77,19 +83,27 @@ def _ctx(
         _seed_blocked(heal_action=None)
     seq += 1
     instance = repo.open_state_instance(
-        ticket_id=ticket.id, state_name=state_name, sequence=seq,
+        ticket_id=ticket.id,
+        state_name=state_name,
+        sequence=seq,
         now=dt.datetime(2026, 6, 13),
     )
     return StateContext(
-        ticket=repo.get_ticket(ticket.id), instance=instance, repo=repo,
-        clock=lambda: dt.datetime(2026, 6, 13), git=git,
+        ticket=repo.get_ticket(ticket.id),
+        instance=instance,
+        repo=repo,
+        clock=lambda: dt.datetime(2026, 6, 13),
+        git=git,
     )
 
 
 def _seed_pr(git: FakeGitProvider, **kwargs) -> None:
     defaults = dict(
-        merged=False, mergeable=False, ci_passing=True,
-        base_ref="main", mergeable_state="blocked",
+        merged=False,
+        mergeable=False,
+        ci_passing=True,
+        base_ref="main",
+        mergeable_state="blocked",
     )
     defaults.update(kwargs)
     git.set_pr_state(project="p", pr_number=99, state=PRState(**defaults))
@@ -101,7 +115,9 @@ def test_merged_short_circuits_to_clean_without_merge_call():
     ctx = _ctx(git=git)
     calls: list[str] = []
     outcome = attempt_merge(
-        ctx, pr_number=99, on_merge_success=lambda: calls.append("ok"),
+        ctx,
+        pr_number=99,
+        on_merge_success=lambda: calls.append("ok"),
     )
     assert outcome.kind == OutcomeKind.CLEAN
     assert ("p", 99) not in git.merge_pr_calls
@@ -115,7 +131,9 @@ def test_mergeable_and_ci_passing_merges_then_clean():
     ctx = _ctx(git=git)
     calls: list[str] = []
     outcome = attempt_merge(
-        ctx, pr_number=99, on_merge_success=lambda: calls.append("ok"),
+        ctx,
+        pr_number=99,
+        on_merge_success=lambda: calls.append("ok"),
     )
     assert outcome.kind == OutcomeKind.CLEAN
     assert ("p", 99) in git.merge_pr_calls
@@ -129,7 +147,9 @@ def test_behind_pr_updates_branch_and_returns_blocked():
     ctx = _ctx(git=git)
     calls: list[str] = []
     outcome = attempt_merge(
-        ctx, pr_number=99, on_merge_success=lambda: calls.append("ok"),
+        ctx,
+        pr_number=99,
+        on_merge_success=lambda: calls.append("ok"),
     )
     assert outcome.kind == OutcomeKind.BLOCKED
     # The healer acted: update_branch once, no merge, no escalate, no success.
@@ -294,12 +314,14 @@ def test_pre_merge_guard_short_circuits():
     from foreman.v4.outcome import Outcome, OutcomeConfidence
 
     guard_outcome = Outcome(
-        kind=OutcomeKind.NEEDS_HELP, confidence=OutcomeConfidence.HIGH,
+        kind=OutcomeKind.NEEDS_HELP,
+        confidence=OutcomeConfidence.HIGH,
         summary="wrong base",
     )
     calls: list[str] = []
     outcome = attempt_merge(
-        ctx, pr_number=99,
+        ctx,
+        pr_number=99,
         on_merge_success=lambda: calls.append("ok"),
         pre_merge_guard=lambda _pr: guard_outcome,
     )

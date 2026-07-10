@@ -47,22 +47,14 @@ def test_returns_pr_when_open_pr_exists_on_head_branch() -> None:
 
     assert found is not None
     assert found.number == 42
-    repo.get_pulls.assert_called_once_with(
-        state="open", head=f"{owner}:{branch}"
-    )
+    repo.get_pulls.assert_called_once_with(state="open", head=f"{owner}:{branch}")
 
 
 def test_returns_none_when_no_open_pr_on_head_branch() -> None:
     owner = "testowner"
-    repo = _build_repo(
-        owner=owner, matched_branch="foreman/issue-341", pr_number=42
-    )
+    repo = _build_repo(owner=owner, matched_branch="foreman/issue-341", pr_number=42)
 
-    found = find_open_pr_by_head_branch(
-        repo, owner=owner, branch="foreman/issue-999"
-    )
+    found = find_open_pr_by_head_branch(repo, owner=owner, branch="foreman/issue-999")
 
     assert found is None
-    repo.get_pulls.assert_called_once_with(
-        state="open", head=f"{owner}:foreman/issue-999"
-    )
+    repo.get_pulls.assert_called_once_with(state="open", head=f"{owner}:foreman/issue-999")

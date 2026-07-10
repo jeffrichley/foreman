@@ -125,6 +125,7 @@ class ExecuteStartedEvent(TicketEvent):
 @dataclass(frozen=True, slots=True)
 class ExecuteCompletedEvent(TicketEvent):
     """``execute()`` returned an Outcome and ``verify()`` passed."""
+
     outcome: Outcome
     next_state: str
 
@@ -132,12 +133,14 @@ class ExecuteCompletedEvent(TicketEvent):
 @dataclass(frozen=True, slots=True)
 class StateExitedEvent(TicketEvent):
     """``exit()`` returned. ``outcome`` is None if execute() raised."""
+
     outcome: Outcome | None
 
 
 @dataclass(frozen=True, slots=True)
 class StateFailedEvent(TicketEvent):
     """A lifecycle hook raised. ``failure_phase`` matches the failed hook."""
+
     failure_phase: str
     failure_reason: str
 

@@ -364,9 +364,7 @@ class WorktreeManager:
         # left over from a prior container generation (ephemeral
         # worktree dir vs persistent clone state). Cheap no-op on a
         # clean clone; recovers transparently when stranded.
-        self._self_heal_orphaned_branch(
-            clone_path=clone_path, branch_name=impl_branch_name
-        )
+        self._self_heal_orphaned_branch(clone_path=clone_path, branch_name=impl_branch_name)
         subprocess.run(
             [
                 "git",
@@ -653,9 +651,7 @@ def _resolve_default_branch(clone_path: Path, *, role_token: str | None = None) 
     return ref or "main"
 
 
-def _fetch_origin_branch(
-    clone_path: Path, branch: str, *, role_token: str | None = None
-) -> None:
+def _fetch_origin_branch(clone_path: Path, branch: str, *, role_token: str | None = None) -> None:
     """Best-effort ``git fetch origin <branch>`` to refresh the local origin ref.
 
     Without this, ``origin/<branch>`` may be stale and basing the new spec
@@ -785,9 +781,7 @@ def resolve_default_branch(
     return _resolve_default_branch(clone_path, role_token=role_token)
 
 
-def _local_branch_exists(
-    clone_path: Path, branch: str, *, role_token: str | None = None
-) -> bool:
+def _local_branch_exists(clone_path: Path, branch: str, *, role_token: str | None = None) -> bool:
     """Return True if ``branch`` exists as a local ref in ``clone_path``.
 
     Purely local probe (no network), but still routes through the env
@@ -809,9 +803,7 @@ def _local_branch_exists(
     return result.returncode == 0
 
 
-def _origin_branch_exists(
-    clone_path: Path, branch: str, *, role_token: str | None = None
-) -> bool:
+def _origin_branch_exists(clone_path: Path, branch: str, *, role_token: str | None = None) -> bool:
     """Return True if ``origin/<branch>`` resolves as a remote-tracking ref in ``clone_path``.
 
     Uses ``git rev-parse --verify --quiet`` against
@@ -834,9 +826,7 @@ def _origin_branch_exists(
     return result.returncode == 0
 
 
-def _maybe_sync_worktree_deps(
-    worktree_path: Path, *, role_token: str | None = None
-) -> None:
+def _maybe_sync_worktree_deps(worktree_path: Path, *, role_token: str | None = None) -> None:
     """Best-effort ``uv sync --all-packages`` for the worktree's venv.
 
     Skips silently if the worktree has no ``pyproject.toml`` at root or

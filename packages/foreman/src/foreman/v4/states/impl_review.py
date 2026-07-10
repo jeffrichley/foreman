@@ -14,6 +14,7 @@ TRANSIENT_PROVIDER_ERROR intercept + ``next_action_at`` clearing
 (foreman#361) is preserved by delegating to
 ``RoleDispatchState.next_state`` for every outcome except CLEAN.
 """
+
 from __future__ import annotations
 
 from foreman.v4.outcome import Outcome, OutcomeKind

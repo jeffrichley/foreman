@@ -1,4 +1,5 @@
 """EventBus — fan-out with subscriber exception isolation."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -10,8 +11,11 @@ from foreman.v4.events import StateEnteredEvent
 
 def _make_event() -> StateEnteredEvent:
     return StateEnteredEvent(
-        ticket_id=1, instance_id=10, state_name="Planning",
-        sequence=1, at=dt.datetime(2026, 6, 13),
+        ticket_id=1,
+        instance_id=10,
+        state_name="Planning",
+        sequence=1,
+        at=dt.datetime(2026, 6, 13),
     )
 
 
@@ -53,7 +57,8 @@ def test_subscriber_exception_does_not_break_others(caplog):
     assert after_third == [ev]
     # Both failures should be logged for forensics.
     boom_logs = [
-        r for r in caplog.records
+        r
+        for r in caplog.records
         if r.levelno == logging.WARNING
         and "observer raised" in r.getMessage()
         and r.exc_info is not None

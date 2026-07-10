@@ -43,9 +43,7 @@ class SpecReviewState(RoleDispatchState):
         if outcome.kind != OutcomeKind.CLEAN:
             return
         if outcome.artifacts.pr_number is None:
-            raise ValueError(
-                "Reviewer-on-spec returned CLEAN but no pr_number in artifacts"
-            )
+            raise ValueError("Reviewer-on-spec returned CLEAN but no pr_number in artifacts")
 
     def next_state_for(self, outcome: Outcome) -> TicketState | None:
         """Route CLEAN to SpecMerging, NEEDS_FIX to SpecFix, else NeedsHelp/Failed."""

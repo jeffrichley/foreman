@@ -1,4 +1,5 @@
 """Template Method orchestration — happy path + per-phase failures."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -31,7 +32,8 @@ class _HappyState(TicketState):
     def execute(self, ctx: StateContext) -> Outcome:
         self.r.calls.append("execute")
         return Outcome(
-            kind=OutcomeKind.CLEAN, confidence=OutcomeConfidence.HIGH,
+            kind=OutcomeKind.CLEAN,
+            confidence=OutcomeConfidence.HIGH,
             summary="ok",
         )
 
@@ -50,7 +52,8 @@ class _NextState(TicketState):
 
     def execute(self, ctx: StateContext) -> Outcome:
         return Outcome(
-            kind=OutcomeKind.CLEAN, confidence=OutcomeConfidence.HIGH,
+            kind=OutcomeKind.CLEAN,
+            confidence=OutcomeConfidence.HIGH,
             summary="done",
         )
 
@@ -75,7 +78,8 @@ class _RaisingState(TicketState):
         if self._raise_in == "execute":
             raise RuntimeError("execute boom")
         return Outcome(
-            kind=OutcomeKind.CLEAN, confidence=OutcomeConfidence.HIGH,
+            kind=OutcomeKind.CLEAN,
+            confidence=OutcomeConfidence.HIGH,
             summary="ok",
         )
 
@@ -98,7 +102,9 @@ def setup() -> tuple[InMemoryTicketRepository, Any, Any]:
     repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
     instance = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="Happy", sequence=1,
+        ticket_id=ticket.id,
+        state_name="Happy",
+        sequence=1,
         now=dt.datetime(2026, 6, 13),
     )
     return repo, ticket, instance
@@ -106,12 +112,16 @@ def setup() -> tuple[InMemoryTicketRepository, Any, Any]:
 
 def _ctx(repo: InMemoryTicketRepository, ticket: Any, instance: Any) -> StateContext:
     return StateContext(
-        ticket=ticket, instance=instance, repo=repo,
+        ticket=ticket,
+        instance=instance,
+        repo=repo,
         clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
     )
 
 
-def test_happy_path_invokes_all_five_hooks_in_order(setup: tuple[InMemoryTicketRepository, Any, Any]) -> None:
+def test_happy_path_invokes_all_five_hooks_in_order(
+    setup: tuple[InMemoryTicketRepository, Any, Any],
+) -> None:
     repo, ticket, instance = setup
     recorder = _Recorder()
     next_state = _NextState()
@@ -126,7 +136,9 @@ def test_happy_path_invokes_all_five_hooks_in_order(setup: tuple[InMemoryTicketR
     assert repo.get_ticket(ticket.id).current_state == "Next"
 
 
-def test_can_run_false_records_held_and_returns_none(setup: tuple[InMemoryTicketRepository, Any, Any]) -> None:
+def test_can_run_false_records_held_and_returns_none(
+    setup: tuple[InMemoryTicketRepository, Any, Any],
+) -> None:
     repo, ticket, instance = setup
     repo.hold_ticket(ticket.id, held_by="jeff", reason="vacation", now=dt.datetime(2026, 6, 13))
     held_ticket = repo.get_ticket(ticket.id)
@@ -145,7 +157,9 @@ def test_can_run_false_records_held_and_returns_none(setup: tuple[InMemoryTicket
     assert not fetched.is_in_flight
 
 
-def test_enter_raises_records_failure_and_skips_exit(setup: tuple[InMemoryTicketRepository, Any, Any]) -> None:
+def test_enter_raises_records_failure_and_skips_exit(
+    setup: tuple[InMemoryTicketRepository, Any, Any],
+) -> None:
     repo, ticket, instance = setup
     recorder = _Recorder()
     state = _RaisingState(raise_in="enter", recorder=recorder)
@@ -157,7 +171,9 @@ def test_enter_raises_records_failure_and_skips_exit(setup: tuple[InMemoryTicket
     assert "enter boom" in (fetched.failure_reason or "")
 
 
-def test_execute_raises_records_failure_and_calls_exit(setup: tuple[InMemoryTicketRepository, Any, Any]) -> None:
+def test_execute_raises_records_failure_and_calls_exit(
+    setup: tuple[InMemoryTicketRepository, Any, Any],
+) -> None:
     repo, ticket, instance = setup
     recorder = _Recorder()
     state = _RaisingState(raise_in="execute", recorder=recorder)
@@ -167,7 +183,9 @@ def test_execute_raises_records_failure_and_calls_exit(setup: tuple[InMemoryTick
     assert fetched.failure_phase == "execute"
 
 
-def test_verify_raises_records_failure_and_calls_exit(setup: tuple[InMemoryTicketRepository, Any, Any]) -> None:
+def test_verify_raises_records_failure_and_calls_exit(
+    setup: tuple[InMemoryTicketRepository, Any, Any],
+) -> None:
     repo, ticket, instance = setup
     recorder = _Recorder()
     state = _RaisingState(raise_in="verify", recorder=recorder)
@@ -177,7 +195,9 @@ def test_verify_raises_records_failure_and_calls_exit(setup: tuple[InMemoryTicke
     assert fetched.failure_phase == "verify"
 
 
-def test_exit_raises_records_failure_but_transition_completes(setup: tuple[InMemoryTicketRepository, Any, Any]) -> None:
+def test_exit_raises_records_failure_but_transition_completes(
+    setup: tuple[InMemoryTicketRepository, Any, Any],
+) -> None:
     repo, ticket, instance = setup
     recorder = _Recorder()
     state = _RaisingState(raise_in="exit", recorder=recorder)
@@ -192,7 +212,10 @@ def test_exit_raises_records_failure_but_transition_completes(setup: tuple[InMem
 
 
 def _seed_consecutive_failures(
-    repo: InMemoryTicketRepository, ticket_id: int, state_name: str, count: int,
+    repo: InMemoryTicketRepository,
+    ticket_id: int,
+    state_name: str,
+    count: int,
 ) -> int:
     """Open + record-failure + close ``count`` consecutive same-state rows.
 
@@ -204,10 +227,15 @@ def _seed_consecutive_failures(
     last_seq = 0
     for seq in range(1, count + 1):
         inst = repo.open_state_instance(
-            ticket_id=ticket_id, state_name=state_name, sequence=seq, now=now,
+            ticket_id=ticket_id,
+            state_name=state_name,
+            sequence=seq,
+            now=now,
         )
         repo.record_failure(
-            inst.id, now=now, failure_phase="execute",
+            inst.id,
+            now=now,
+            failure_phase="execute",
             failure_reason="role crashed",
         )
         repo.close_state_instance(inst.id, now=now)
@@ -226,7 +254,9 @@ def test_state_retry_cap_escalates_to_needs_help_after_n_failures() -> None:
     # Open the 4th attempt — this is what WorkerPool would do on the
     # next tick. The cap check should trip immediately.
     instance = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="Raising", sequence=last_seq + 1,
+        ticket_id=ticket.id,
+        state_name="Raising",
+        sequence=last_seq + 1,
         now=now,
     )
     held_ticket = repo.get_ticket(ticket.id)
@@ -234,8 +264,11 @@ def test_state_retry_cap_escalates_to_needs_help_after_n_failures() -> None:
     # State.execute would raise if it ran — but it shouldn't.
     state = _RaisingState(raise_in="execute", recorder=recorder)
     ctx = StateContext(
-        ticket=held_ticket, instance=instance, repo=repo,
-        clock=lambda: now, max_state_attempts=3,
+        ticket=held_ticket,
+        instance=instance,
+        repo=repo,
+        clock=lambda: now,
+        max_state_attempts=3,
     )
     result = state.transition(ctx)
     assert result is not None
@@ -264,30 +297,41 @@ def test_state_retry_cap_resets_after_state_advance() -> None:
     _seed_consecutive_failures(repo, ticket.id, "SpecReview", count=3)
     # 1 ImplReview success (just open + close — no failure recorded).
     impl_inst = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="ImplReview", sequence=4, now=now,
+        ticket_id=ticket.id,
+        state_name="ImplReview",
+        sequence=4,
+        now=now,
     )
     repo.close_state_instance(impl_inst.id, now=now)
     # Latest run: 1 SpecReview — well under cap.
     consecutive = repo.count_consecutive_same_state(
-        ticket_id=ticket.id, state="SpecReview",
+        ticket_id=ticket.id,
+        state="SpecReview",
     )
     assert consecutive == 0  # the latest sequence is ImplReview
     # Now open a fresh SpecReview attempt.
     instance = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="SpecReview", sequence=5, now=now,
+        ticket_id=ticket.id,
+        state_name="SpecReview",
+        sequence=5,
+        now=now,
     )
     # Consecutive count from sequence=5 (SpecReview) walking back hits
     # ImplReview at sequence=4 — count is 1, not 4.
     consecutive_after = repo.count_consecutive_same_state(
-        ticket_id=ticket.id, state="SpecReview",
+        ticket_id=ticket.id,
+        state="SpecReview",
     )
     assert consecutive_after == 1
     recorder = _Recorder()
     next_state = _NextState()
     state = _HappyState(recorder, next_state)
     ctx = StateContext(
-        ticket=ticket, instance=instance, repo=repo,
-        clock=lambda: now, max_state_attempts=3,
+        ticket=ticket,
+        instance=instance,
+        repo=repo,
+        clock=lambda: now,
+        max_state_attempts=3,
     )
     result = state.transition(ctx)
     # Cap NOT tripped — lifecycle ran normally.
@@ -303,10 +347,16 @@ def test_state_retry_cap_default_max_state_attempts_is_3() -> None:
     now = dt.datetime(2026, 6, 15, 12, 0, 0)
     ticket = repo.create_ticket(project="p", issue_number=1, now=now)
     instance = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="Happy", sequence=1, now=now,
+        ticket_id=ticket.id,
+        state_name="Happy",
+        sequence=1,
+        now=now,
     )
     ctx = StateContext(
-        ticket=ticket, instance=instance, repo=repo, clock=lambda: now,
+        ticket=ticket,
+        instance=instance,
+        repo=repo,
+        clock=lambda: now,
     )
     assert ctx.max_state_attempts == 3
 
@@ -321,10 +371,15 @@ def test_state_retry_cap_publishes_state_failed_event() -> None:
     now = dt.datetime(2026, 6, 15, 12, 0, 0)
     ticket = repo.create_ticket(project="p", issue_number=1, now=now)
     last_seq = _seed_consecutive_failures(
-        repo, ticket.id, "Raising", count=3,
+        repo,
+        ticket.id,
+        "Raising",
+        count=3,
     )
     instance = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="Raising", sequence=last_seq + 1,
+        ticket_id=ticket.id,
+        state_name="Raising",
+        sequence=last_seq + 1,
         now=now,
     )
     received: list[object] = []
@@ -333,8 +388,12 @@ def test_state_retry_cap_publishes_state_failed_event() -> None:
     recorder = _Recorder()
     state = _RaisingState(raise_in="execute", recorder=recorder)
     ctx = StateContext(
-        ticket=ticket, instance=instance, repo=repo,
-        clock=lambda: now, bus=bus, max_state_attempts=3,
+        ticket=ticket,
+        instance=instance,
+        repo=repo,
+        clock=lambda: now,
+        bus=bus,
+        max_state_attempts=3,
     )
     state.transition(ctx)
     failed_events = [e for e in received if isinstance(e, StateFailedEvent)]
@@ -374,12 +433,18 @@ def test_held_ticket_does_not_escalate_to_needs_help_under_repeated_polls() -> N
     # and runs transition().
     for seq in range(1, 6):
         instance = repo.open_state_instance(
-            ticket_id=ticket.id, state_name="Happy", sequence=seq, now=now,
+            ticket_id=ticket.id,
+            state_name="Happy",
+            sequence=seq,
+            now=now,
         )
         held_ticket = repo.get_ticket(ticket.id)
         ctx = StateContext(
-            ticket=held_ticket, instance=instance, repo=repo,
-            clock=lambda: now, max_state_attempts=3,
+            ticket=held_ticket,
+            instance=instance,
+            repo=repo,
+            clock=lambda: now,
+            max_state_attempts=3,
         )
         recorder = _Recorder()
         result = _HappyState(recorder, None).transition(ctx)
@@ -391,12 +456,18 @@ def test_held_ticket_does_not_escalate_to_needs_help_under_repeated_polls() -> N
     # rows, otherwise the resumed ticket immediately escalates.
     repo.resume_ticket(ticket.id, now=now)
     next_instance = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="Happy", sequence=6, now=now,
+        ticket_id=ticket.id,
+        state_name="Happy",
+        sequence=6,
+        now=now,
     )
     resumed_ticket = repo.get_ticket(ticket.id)
     ctx = StateContext(
-        ticket=resumed_ticket, instance=next_instance, repo=repo,
-        clock=lambda: now, max_state_attempts=3,
+        ticket=resumed_ticket,
+        instance=next_instance,
+        repo=repo,
+        clock=lambda: now,
+        max_state_attempts=3,
     )
     next_state = _NextState()
     result = _HappyState(_Recorder(), next_state).transition(ctx)
@@ -416,11 +487,16 @@ def test_held_ticket_closes_state_instance_and_clears_in_flight() -> None:
     repo.hold_ticket(ticket.id, held_by="jeff", reason="paused", now=now)
 
     instance = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="Happy", sequence=1, now=now,
+        ticket_id=ticket.id,
+        state_name="Happy",
+        sequence=1,
+        now=now,
     )
     held_ticket = repo.get_ticket(ticket.id)
     ctx = StateContext(
-        ticket=held_ticket, instance=instance, repo=repo,
+        ticket=held_ticket,
+        instance=instance,
+        repo=repo,
         clock=lambda: now,
     )
     _HappyState(_Recorder(), None).transition(ctx)
@@ -445,7 +521,8 @@ class _BlockedPollingState(TicketState):
 
     def execute(self, ctx: StateContext) -> Outcome:
         return Outcome(
-            kind=OutcomeKind.BLOCKED, confidence=OutcomeConfidence.HIGH,
+            kind=OutcomeKind.BLOCKED,
+            confidence=OutcomeConfidence.HIGH,
             summary="still waiting",
         )
 
@@ -491,13 +568,19 @@ def test_blocked_loop_does_not_trip_retry_cap() -> None:
     # runs transition(). The state always returns BLOCKED.
     for seq in range(1, 6):
         instance = repo.open_state_instance(
-            ticket_id=ticket.id, state_name="Polling", sequence=seq,
+            ticket_id=ticket.id,
+            state_name="Polling",
+            sequence=seq,
             now=now,
         )
         fresh_ticket = repo.get_ticket(ticket.id)
         ctx = StateContext(
-            ticket=fresh_ticket, instance=instance, repo=repo,
-            clock=lambda: now, bus=bus, max_state_attempts=3,
+            ticket=fresh_ticket,
+            instance=instance,
+            repo=repo,
+            clock=lambda: now,
+            bus=bus,
+            max_state_attempts=3,
         )
         result = _BlockedPollingState().transition(ctx)
         # Each cycle should return a fresh Polling state (self-loop) —
@@ -512,9 +595,6 @@ def test_blocked_loop_does_not_trip_retry_cap() -> None:
 
     # NO StateFailedEvent with failure_phase=='retry_cap' was published.
     retry_cap_events = [
-        e for e in received
-        if isinstance(e, StateFailedEvent) and e.failure_phase == "retry_cap"
+        e for e in received if isinstance(e, StateFailedEvent) and e.failure_phase == "retry_cap"
     ]
-    assert retry_cap_events == [], (
-        f"expected no retry_cap events; got {retry_cap_events}"
-    )
+    assert retry_cap_events == [], f"expected no retry_cap events; got {retry_cap_events}"

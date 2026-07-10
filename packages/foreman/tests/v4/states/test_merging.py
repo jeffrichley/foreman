@@ -17,6 +17,7 @@ Granular ``mergeable_state`` handling (CI failed → ImplFix, dirty →
 ImplFix, etc.) is deferred to foreman#317. The BLOCKED branch is the
 catch-all today.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -31,7 +32,9 @@ from foreman.v4.states.merging import MergingState
 
 
 def _project_config(
-    *, name: str = "p", dev_base_branch: str | None = "main",
+    *,
+    name: str = "p",
+    dev_base_branch: str | None = "main",
 ) -> ProjectConfig:
     """Build a minimal ProjectConfig for the merging tests."""
     return ProjectConfig(
@@ -42,9 +45,7 @@ def _project_config(
     )
 
 
-def _seed_prior_outcome(
-    repo: InMemoryTicketRepository, ticket_id: int, pr_number: int
-) -> None:
+def _seed_prior_outcome(repo: InMemoryTicketRepository, ticket_id: int, pr_number: int) -> None:
     """Seed a prior ExecuteCompleted state instance carrying the PR number.
 
     Mirrors what ImplReviewState would have written before the ticket reached
@@ -52,11 +53,14 @@ def _seed_prior_outcome(
     `pr_number`.
     """
     prior = repo.open_state_instance(
-        ticket_id=ticket_id, state_name="ImplReview", sequence=0,
+        ticket_id=ticket_id,
+        state_name="ImplReview",
+        sequence=0,
         now=dt.datetime(2026, 6, 13),
     )
     repo.mark_execute_completed(
-        prior.id, now=dt.datetime(2026, 6, 13),
+        prior.id,
+        now=dt.datetime(2026, 6, 13),
         outcome_kind=OutcomeKind.CLEAN,
         outcome_payload={"artifacts": {"pr_number": pr_number}},
         next_state="Merging",
@@ -86,7 +90,10 @@ def _ctx_with_pr(
     """
     if pr_state is None:
         pr_state = PRState(
-            merged=False, mergeable=True, ci_passing=True, base_ref=base_ref,
+            merged=False,
+            mergeable=True,
+            ci_passing=True,
+            base_ref=base_ref,
         )
     if project_configs is None:
         project_configs = {"p": _project_config()}
@@ -95,13 +102,17 @@ def _ctx_with_pr(
     repo.set_ticket_state(ticket.id, "Merging", now=dt.datetime(2026, 6, 13))
     _seed_prior_outcome(repo, ticket.id, pr_number)
     instance = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="Merging", sequence=1,
+        ticket_id=ticket.id,
+        state_name="Merging",
+        sequence=1,
         now=dt.datetime(2026, 6, 13),
     )
     git = FakeGitProvider()
     git.set_pr_state(project="p", pr_number=pr_number, state=pr_state)
     ctx = StateContext(
-        ticket=repo.get_ticket(ticket.id), instance=instance, repo=repo,
+        ticket=repo.get_ticket(ticket.id),
+        instance=instance,
+        repo=repo,
         clock=lambda: dt.datetime(2026, 6, 13),
         git=git,
         project_configs=project_configs,
@@ -125,7 +136,10 @@ def test_merging_state_returns_clean_when_pr_merged_externally():
     ctx, _repo, git = _ctx_with_pr(
         pr_number=99,
         pr_state=PRState(
-            merged=True, mergeable=True, ci_passing=True, base_ref="main",
+            merged=True,
+            mergeable=True,
+            ci_passing=True,
+            base_ref="main",
         ),
     )
     next_state = MergingState().transition(ctx)
@@ -147,7 +161,10 @@ def test_merging_state_calls_merge_pr_when_mergeable_and_ci_passing():
     ctx, _repo, git = _ctx_with_pr(
         pr_number=99,
         pr_state=PRState(
-            merged=False, mergeable=True, ci_passing=True, base_ref="main",
+            merged=False,
+            mergeable=True,
+            ci_passing=True,
+            base_ref="main",
         ),
     )
     next_state = MergingState().transition(ctx)
@@ -166,7 +183,10 @@ def test_merging_state_returns_blocked_when_ci_pending():
     ctx, _repo, git = _ctx_with_pr(
         pr_number=99,
         pr_state=PRState(
-            merged=False, mergeable=True, ci_passing=False, base_ref="main",
+            merged=False,
+            mergeable=True,
+            ci_passing=False,
+            base_ref="main",
         ),
     )
     next_state = MergingState().transition(ctx)
@@ -185,7 +205,10 @@ def test_merging_state_returns_blocked_when_not_mergeable():
     ctx, _repo, git = _ctx_with_pr(
         pr_number=99,
         pr_state=PRState(
-            merged=False, mergeable=False, ci_passing=True, base_ref="main",
+            merged=False,
+            mergeable=False,
+            ci_passing=True,
+            base_ref="main",
         ),
     )
     next_state = MergingState().transition(ctx)
@@ -202,7 +225,10 @@ def test_merging_state_blocked_does_not_close_issue():
     ctx, _repo, git = _ctx_with_pr(
         pr_number=99,
         pr_state=PRState(
-            merged=False, mergeable=False, ci_passing=False, base_ref="main",
+            merged=False,
+            mergeable=False,
+            ci_passing=False,
+            base_ref="main",
         ),
     )
     next_state = MergingState().transition(ctx)
@@ -223,7 +249,10 @@ def test_merging_state_behind_impl_pr_updates_branch_and_blocks():
     ctx, _repo, git = _ctx_with_pr(
         pr_number=99,
         pr_state=PRState(
-            merged=False, mergeable=False, ci_passing=True, base_ref="main",
+            merged=False,
+            mergeable=False,
+            ci_passing=True,
+            base_ref="main",
             mergeable_state="behind",
         ),
     )
@@ -241,7 +270,10 @@ def test_merging_state_behind_then_healed_merges_and_closes_issue():
     ctx, _repo, git = _ctx_with_pr(
         pr_number=99,
         pr_state=PRState(
-            merged=False, mergeable=True, ci_passing=True, base_ref="main",
+            merged=False,
+            mergeable=True,
+            ci_passing=True,
+            base_ref="main",
             mergeable_state="clean",
         ),
     )
@@ -259,11 +291,15 @@ def test_missing_git_provider_routes_through_execute_failure():
     ticket = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
     _seed_prior_outcome(repo, ticket.id, 99)
     instance = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="Merging", sequence=1,
+        ticket_id=ticket.id,
+        state_name="Merging",
+        sequence=1,
         now=dt.datetime(2026, 6, 13),
     )
     ctx = StateContext(
-        ticket=ticket, instance=instance, repo=repo,
+        ticket=ticket,
+        instance=instance,
+        repo=repo,
         clock=lambda: dt.datetime(2026, 6, 13),
         # git omitted
     )
@@ -307,7 +343,9 @@ def test_merging_state_refuses_to_merge_when_pr_base_diverges_from_dev_base_bran
     ctx, repo, git = _ctx_with_pr(
         pr_number=99,
         pr_state=PRState(
-            merged=False, mergeable=True, ci_passing=True,
+            merged=False,
+            mergeable=True,
+            ci_passing=True,
             base_ref="foreman/issue-1",
         ),
         project_configs={"p": _project_config(dev_base_branch="main")},
@@ -335,7 +373,10 @@ def test_merging_state_merges_when_pr_base_matches_dev_base_branch():
     ctx, _repo, git = _ctx_with_pr(
         pr_number=99,
         pr_state=PRState(
-            merged=False, mergeable=True, ci_passing=True, base_ref="main",
+            merged=False,
+            mergeable=True,
+            ci_passing=True,
+            base_ref="main",
         ),
         project_configs={"p": _project_config(dev_base_branch="main")},
     )
@@ -355,7 +396,10 @@ def test_merging_state_base_ref_comparison_is_case_insensitive():
     ctx_a, _repo_a, git_a = _ctx_with_pr(
         pr_number=99,
         pr_state=PRState(
-            merged=False, mergeable=True, ci_passing=True, base_ref="main",
+            merged=False,
+            mergeable=True,
+            ci_passing=True,
+            base_ref="main",
         ),
         project_configs={"p": _project_config(dev_base_branch="Main")},
     )
@@ -366,7 +410,10 @@ def test_merging_state_base_ref_comparison_is_case_insensitive():
     ctx_b, _repo_b, git_b = _ctx_with_pr(
         pr_number=99,
         pr_state=PRState(
-            merged=False, mergeable=True, ci_passing=True, base_ref="MAIN",
+            merged=False,
+            mergeable=True,
+            ci_passing=True,
+            base_ref="MAIN",
         ),
         project_configs={"p": _project_config(dev_base_branch="main")},
     )
@@ -385,7 +432,10 @@ def test_merging_state_falls_back_to_main_when_dev_base_branch_unset():
     ctx_ok, _repo_ok, git_ok = _ctx_with_pr(
         pr_number=99,
         pr_state=PRState(
-            merged=False, mergeable=True, ci_passing=True, base_ref="main",
+            merged=False,
+            mergeable=True,
+            ci_passing=True,
+            base_ref="main",
         ),
         project_configs={"p": _project_config(dev_base_branch=None)},
     )
@@ -397,7 +447,9 @@ def test_merging_state_falls_back_to_main_when_dev_base_branch_unset():
     ctx_bad, _repo_bad, git_bad = _ctx_with_pr(
         pr_number=99,
         pr_state=PRState(
-            merged=False, mergeable=True, ci_passing=True,
+            merged=False,
+            mergeable=True,
+            ci_passing=True,
             base_ref="foreman/issue-1",
         ),
         project_configs={"p": _project_config(dev_base_branch=None)},
@@ -415,7 +467,10 @@ def test_merging_state_refuses_when_base_ref_empty():
     ctx, _repo, git = _ctx_with_pr(
         pr_number=99,
         pr_state=PRState(
-            merged=False, mergeable=True, ci_passing=True, base_ref="",
+            merged=False,
+            mergeable=True,
+            ci_passing=True,
+            base_ref="",
         ),
         project_configs={"p": _project_config(dev_base_branch="main")},
     )
@@ -436,7 +491,9 @@ def test_merging_state_skips_guard_when_project_config_missing(caplog):
     ctx, _repo, git = _ctx_with_pr(
         pr_number=99,
         pr_state=PRState(
-            merged=False, mergeable=True, ci_passing=True,
+            merged=False,
+            mergeable=True,
+            ci_passing=True,
             base_ref="anything",
         ),
         project_configs={},
@@ -447,7 +504,6 @@ def test_merging_state_skips_guard_when_project_config_missing(caplog):
     assert next_state.state_name == "Done"
     assert ("p", 99) in git.merge_pr_calls
     # The skip must be operator-visible.
-    assert any(
-        "no project_config for project=p" in rec.message
-        for rec in caplog.records
-    ), caplog.records
+    assert any("no project_config for project=p" in rec.message for rec in caplog.records), (
+        caplog.records
+    )

@@ -52,10 +52,14 @@ def test_tick_polls_every_project_and_advances_each() -> None:
     git_voice = FakeGitProvider()
     git_foreman = FakeGitProvider()
     git_voice.set_open_issues_with_label(
-        project="voice", label="foreman:plan", issue_numbers={1},
+        project="voice",
+        label="foreman:plan",
+        issue_numbers={1},
     )
     git_foreman.set_open_issues_with_label(
-        project="foreman", label="foreman:plan", issue_numbers={2},
+        project="foreman",
+        label="foreman:plan",
+        issue_numbers={2},
     )
 
     # Router for cross-project consumers (Daemon, label observer).
@@ -70,10 +74,12 @@ def test_tick_polls_every_project_and_advances_each() -> None:
     bus = EventBus()
     bus.subscribe(LabelObservabilityObserver(writer=router, repo=repo))
 
-    dispatcher = FakeRoleDispatcher(responses={
-        ("planner", "voice", 1): _canned("clean"),
-        ("planner", "foreman", 2): _canned("clean"),
-    })
+    dispatcher = FakeRoleDispatcher(
+        responses={
+            ("planner", "voice", 1): _canned("clean"),
+            ("planner", "foreman", 2): _canned("clean"),
+        }
+    )
 
     def clock() -> dt.datetime:
         return dt.datetime(2026, 6, 13, 12, 0, 0)
@@ -86,12 +92,20 @@ def test_tick_polls_every_project_and_advances_each() -> None:
             # Pollers operate on ONE project each — they take their own
             # per-project provider directly. No routing hop needed.
             Poller(
-                repo=repo, qm=None, git=git_voice, project="voice",
-                trigger_label="foreman:plan", clock=clock,
+                repo=repo,
+                qm=None,
+                git=git_voice,
+                project="voice",
+                trigger_label="foreman:plan",
+                clock=clock,
             ),
             Poller(
-                repo=repo, qm=None, git=git_foreman, project="foreman",
-                trigger_label="foreman:plan", clock=clock,
+                repo=repo,
+                qm=None,
+                git=git_foreman,
+                project="foreman",
+                trigger_label="foreman:plan",
+                clock=clock,
             ),
         ],
         config=DaemonConfig(tick_seconds=0, max_in_flight=4),

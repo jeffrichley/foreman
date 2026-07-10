@@ -22,9 +22,7 @@ def test_emit_transient_provider_outcome_with_cause(capsys) -> None:
     class _FakeRateLimitError(Exception):
         pass
 
-    original = _FakeRateLimitError(
-        "Claude Code returned an error result: 429 Too Many Requests"
-    )
+    original = _FakeRateLimitError("Claude Code returned an error result: 429 Too Many Requests")
     transient = ProviderTransientError(str(original))
     transient.__cause__ = original
 

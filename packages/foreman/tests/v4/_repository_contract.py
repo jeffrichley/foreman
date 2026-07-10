@@ -63,9 +63,7 @@ class RepositoryContract:
         fetched = repo.get_ticket_by_issue(project="foreman", issue_number=7)
         assert fetched == created
 
-    def test_list_open_tickets_excludes_done_and_failed(
-        self, repo: TicketRepository
-    ) -> None:
+    def test_list_open_tickets_excludes_done_and_failed(self, repo: TicketRepository) -> None:
         a = repo.create_ticket(project="p", issue_number=1, now=_now())
         b = repo.create_ticket(project="p", issue_number=2, now=_now())
         c = repo.create_ticket(project="p", issue_number=3, now=_now())
@@ -127,9 +125,7 @@ class RepositoryContract:
 
     def test_list_in_flight_state_instances(self, repo: TicketRepository) -> None:
         t = repo.create_ticket(project="p", issue_number=1, now=_now())
-        done = repo.open_state_instance(
-            ticket_id=t.id, state_name="Queued", sequence=1, now=_now()
-        )
+        done = repo.open_state_instance(ticket_id=t.id, state_name="Queued", sequence=1, now=_now())
         repo.mark_execute_started(done.id, now=_now())
         repo.mark_execute_completed(
             done.id,
@@ -145,9 +141,7 @@ class RepositoryContract:
         rows = repo.list_in_flight_state_instances()
         assert [r.id for r in rows] == [in_flight.id]
 
-    def test_record_failure_writes_phase_and_reason(
-        self, repo: TicketRepository
-    ) -> None:
+    def test_record_failure_writes_phase_and_reason(self, repo: TicketRepository) -> None:
         t = repo.create_ticket(project="p", issue_number=1, now=_now())
         inst = repo.open_state_instance(
             ticket_id=t.id, state_name="Planning", sequence=1, now=_now()
@@ -177,10 +171,14 @@ class RepositoryContract:
         t = repo.create_ticket(project="p", issue_number=1, now=_now())
         # First state has no PR
         i1 = repo.open_state_instance(
-            ticket_id=t.id, state_name="Queued", sequence=1, now=_now(),
+            ticket_id=t.id,
+            state_name="Queued",
+            sequence=1,
+            now=_now(),
         )
         repo.mark_execute_completed(
-            i1.id, now=_now(),
+            i1.id,
+            now=_now(),
             outcome_kind=OutcomeKind.CLEAN,
             outcome_payload={"artifacts": {}},
             next_state="Planning",
@@ -188,10 +186,14 @@ class RepositoryContract:
         repo.close_state_instance(i1.id, now=_now())
         # Second state records PR 42
         i2 = repo.open_state_instance(
-            ticket_id=t.id, state_name="Planning", sequence=2, now=_now(),
+            ticket_id=t.id,
+            state_name="Planning",
+            sequence=2,
+            now=_now(),
         )
         repo.mark_execute_completed(
-            i2.id, now=_now(),
+            i2.id,
+            now=_now(),
             outcome_kind=OutcomeKind.CLEAN,
             outcome_payload={"artifacts": {"pr_number": 42}},
             next_state="SpecReview",
@@ -207,20 +209,28 @@ class RepositoryContract:
         t = repo.create_ticket(project="p", issue_number=3, now=_now())
         # Most recent outcome has no PR; earlier outcome had PR 7 — return 7.
         i1 = repo.open_state_instance(
-            ticket_id=t.id, state_name="Queued", sequence=1, now=_now(),
+            ticket_id=t.id,
+            state_name="Queued",
+            sequence=1,
+            now=_now(),
         )
         repo.mark_execute_completed(
-            i1.id, now=_now(),
+            i1.id,
+            now=_now(),
             outcome_kind=OutcomeKind.CLEAN,
             outcome_payload={"artifacts": {"pr_number": 7}},
             next_state="Planning",
         )
         repo.close_state_instance(i1.id, now=_now())
         i2 = repo.open_state_instance(
-            ticket_id=t.id, state_name="Planning", sequence=2, now=_now(),
+            ticket_id=t.id,
+            state_name="Planning",
+            sequence=2,
+            now=_now(),
         )
         repo.mark_execute_completed(
-            i2.id, now=_now(),
+            i2.id,
+            now=_now(),
             outcome_kind=OutcomeKind.CLEAN,
             outcome_payload={"artifacts": {}},
             next_state="SpecReview",
@@ -232,7 +242,10 @@ class RepositoryContract:
         t = repo.create_ticket(project="p", issue_number=1, now=_now())
         assert repo.count_state_instances_for_ticket(t.id) == 0
         repo.open_state_instance(
-            ticket_id=t.id, state_name="Queued", sequence=1, now=_now(),
+            ticket_id=t.id,
+            state_name="Queued",
+            sequence=1,
+            now=_now(),
         )
         assert repo.count_state_instances_for_ticket(t.id) == 1
 
@@ -240,13 +253,9 @@ class RepositoryContract:
         self, repo: TicketRepository
     ):
         t = repo.create_ticket(project="p", issue_number=1, now=_now())
-        assert repo.count_consecutive_same_state(
-            ticket_id=t.id, state="SpecReview"
-        ) == 0
+        assert repo.count_consecutive_same_state(ticket_id=t.id, state="SpecReview") == 0
 
-    def test_count_consecutive_same_state_counts_run_correctly(
-        self, repo: TicketRepository
-    ):
+    def test_count_consecutive_same_state_counts_run_correctly(self, repo: TicketRepository):
         """Walk back from latest sequence; stop at first non-match.
 
         History: SpecReview, SpecReview, SpecReview, Planning, SpecReview,
@@ -255,38 +264,32 @@ class RepositoryContract:
         """
         t = repo.create_ticket(project="p", issue_number=1, now=_now())
         for seq, name in enumerate(
-            ["SpecReview", "SpecReview", "SpecReview", "Planning",
-             "SpecReview", "SpecReview"],
+            ["SpecReview", "SpecReview", "SpecReview", "Planning", "SpecReview", "SpecReview"],
             start=1,
         ):
             repo.open_state_instance(
-                ticket_id=t.id, state_name=name, sequence=seq, now=_now(),
+                ticket_id=t.id,
+                state_name=name,
+                sequence=seq,
+                now=_now(),
             )
-        assert repo.count_consecutive_same_state(
-            ticket_id=t.id, state="SpecReview"
-        ) == 2
+        assert repo.count_consecutive_same_state(ticket_id=t.id, state="SpecReview") == 2
         # A different state name never matched the latest sequence.
-        assert repo.count_consecutive_same_state(
-            ticket_id=t.id, state="Planning"
-        ) == 0
+        assert repo.count_consecutive_same_state(ticket_id=t.id, state="Planning") == 0
 
-    def test_count_consecutive_same_state_full_history_match(
-        self, repo: TicketRepository
-    ):
+    def test_count_consecutive_same_state_full_history_match(self, repo: TicketRepository):
         """Every row matches → count equals total instances."""
         t = repo.create_ticket(project="p", issue_number=1, now=_now())
         for seq in range(1, 4):
             repo.open_state_instance(
-                ticket_id=t.id, state_name="SpecReview", sequence=seq,
+                ticket_id=t.id,
+                state_name="SpecReview",
+                sequence=seq,
                 now=_now(),
             )
-        assert repo.count_consecutive_same_state(
-            ticket_id=t.id, state="SpecReview"
-        ) == 3
+        assert repo.count_consecutive_same_state(ticket_id=t.id, state="SpecReview") == 3
 
-    def test_count_consecutive_same_state_skips_can_run_failures(
-        self, repo: TicketRepository
-    ):
+    def test_count_consecutive_same_state_skips_can_run_failures(self, repo: TicketRepository):
         """Phase 8d.15 (F4): can_run-failed rows mean "ticket was held,
         state never ran". They MUST NOT count toward the runaway-defense
         consecutive-failures cap (and must not break the run either) —
@@ -296,38 +299,40 @@ class RepositoryContract:
         # 3 can_run-failed rows (operator hold polled 3 times).
         for seq in range(1, 4):
             inst = repo.open_state_instance(
-                ticket_id=t.id, state_name="SpecReview", sequence=seq,
+                ticket_id=t.id,
+                state_name="SpecReview",
+                sequence=seq,
                 now=_now(),
             )
             repo.record_failure(
-                inst.id, now=_now(), failure_phase="can_run",
+                inst.id,
+                now=_now(),
+                failure_phase="can_run",
                 failure_reason="held",
             )
             repo.close_state_instance(inst.id, now=_now())
         # Cap-relevant count: 0 — operator's hold polls don't count.
-        assert repo.count_consecutive_same_state(
-            ticket_id=t.id, state="SpecReview"
-        ) == 0
+        assert repo.count_consecutive_same_state(ticket_id=t.id, state="SpecReview") == 0
 
         # Add one real execute-failure on top.
         inst = repo.open_state_instance(
-            ticket_id=t.id, state_name="SpecReview", sequence=4,
+            ticket_id=t.id,
+            state_name="SpecReview",
+            sequence=4,
             now=_now(),
         )
         repo.record_failure(
-            inst.id, now=_now(), failure_phase="execute",
+            inst.id,
+            now=_now(),
+            failure_phase="execute",
             failure_reason="role crashed",
         )
         repo.close_state_instance(inst.id, now=_now())
         # Now count is 1 — the held-period rows are still skipped, but
         # the real failure counts.
-        assert repo.count_consecutive_same_state(
-            ticket_id=t.id, state="SpecReview"
-        ) == 1
+        assert repo.count_consecutive_same_state(ticket_id=t.id, state="SpecReview") == 1
 
-    def test_count_consecutive_same_state_skips_blocked_outcomes(
-        self, repo: TicketRepository
-    ):
+    def test_count_consecutive_same_state_skips_blocked_outcomes(self, repo: TicketRepository):
         """Phase 8d.18: rows whose ``outcome_kind == 'blocked'`` record a
         legitimate async-polling self-loop (e.g. MergingState polling a
         pending merge verdict; ImplementingState polling impl-PR CI).
@@ -340,11 +345,14 @@ class RepositoryContract:
         # 5 polling-loop rows: each ran execute() and emitted BLOCKED.
         for seq in range(1, 6):
             inst = repo.open_state_instance(
-                ticket_id=t.id, state_name="Merging", sequence=seq,
+                ticket_id=t.id,
+                state_name="Merging",
+                sequence=seq,
                 now=_now(),
             )
             repo.mark_execute_completed(
-                inst.id, now=_now(),
+                inst.id,
+                now=_now(),
                 outcome_kind=OutcomeKind.BLOCKED,
                 outcome_payload={"summary": "still polling"},
                 next_state="Merging",
@@ -352,9 +360,7 @@ class RepositoryContract:
             repo.close_state_instance(inst.id, now=_now())
         # All 5 are async-polling re-entries — none are runaway-defense
         # signal.
-        assert repo.count_consecutive_same_state(
-            ticket_id=t.id, state="Merging"
-        ) == 0
+        assert repo.count_consecutive_same_state(ticket_id=t.id, state="Merging") == 0
 
     def test_count_consecutive_same_state_counts_after_one_execute_failure(
         self, repo: TicketRepository
@@ -370,11 +376,14 @@ class RepositoryContract:
         # 2 BLOCKED polling rows.
         for seq in (1, 2):
             inst = repo.open_state_instance(
-                ticket_id=t.id, state_name="Merging", sequence=seq,
+                ticket_id=t.id,
+                state_name="Merging",
+                sequence=seq,
                 now=_now(),
             )
             repo.mark_execute_completed(
-                inst.id, now=_now(),
+                inst.id,
+                now=_now(),
                 outcome_kind=OutcomeKind.BLOCKED,
                 outcome_payload={"summary": "polling"},
                 next_state="Merging",
@@ -382,21 +391,29 @@ class RepositoryContract:
             repo.close_state_instance(inst.id, now=_now())
         # 1 real execute-phase failure.
         inst = repo.open_state_instance(
-            ticket_id=t.id, state_name="Merging", sequence=3, now=_now(),
+            ticket_id=t.id,
+            state_name="Merging",
+            sequence=3,
+            now=_now(),
         )
         repo.record_failure(
-            inst.id, now=_now(), failure_phase="execute",
+            inst.id,
+            now=_now(),
+            failure_phase="execute",
             failure_reason="something blew up",
         )
         repo.close_state_instance(inst.id, now=_now())
         # 2 more BLOCKED polling rows after the failure.
         for seq in (4, 5):
             inst = repo.open_state_instance(
-                ticket_id=t.id, state_name="Merging", sequence=seq,
+                ticket_id=t.id,
+                state_name="Merging",
+                sequence=seq,
                 now=_now(),
             )
             repo.mark_execute_completed(
-                inst.id, now=_now(),
+                inst.id,
+                now=_now(),
                 outcome_kind=OutcomeKind.BLOCKED,
                 outcome_payload={"summary": "polling"},
                 next_state="Merging",
@@ -404,9 +421,7 @@ class RepositoryContract:
             repo.close_state_instance(inst.id, now=_now())
         # Only the real execute-failure row contributes — the BLOCKED
         # rows on both sides are skipped.
-        assert repo.count_consecutive_same_state(
-            ticket_id=t.id, state="Merging"
-        ) == 1
+        assert repo.count_consecutive_same_state(ticket_id=t.id, state="Merging") == 1
 
     def test_crash_recovery_rows_are_exempt_from_consecutive_same_state(
         self, repo: TicketRepository
@@ -423,17 +438,26 @@ class RepositoryContract:
         # Three crash-orphans on the same state, each closed by reconciliation:
         for seq in (1, 2, 3):
             inst = repo.open_state_instance(
-                ticket_id=ticket.id, state_name="Implementing", sequence=seq, now=now,
+                ticket_id=ticket.id,
+                state_name="Implementing",
+                sequence=seq,
+                now=now,
             )
             repo.record_failure(
-                inst.id, now=now,
-                failure_phase="crash_recovery", failure_reason="daemon crash",
+                inst.id,
+                now=now,
+                failure_phase="crash_recovery",
+                failure_reason="daemon crash",
             )
             repo.close_state_instance(inst.id, now=now)
         # All three are crash_recovery → none count toward the cap.
-        assert repo.count_consecutive_same_state(
-            ticket_id=ticket.id, state="Implementing",
-        ) == 0
+        assert (
+            repo.count_consecutive_same_state(
+                ticket_id=ticket.id,
+                state="Implementing",
+            )
+            == 0
+        )
         # And the transient counter (already None-outcome-skipping) is also 0.
         assert repo.count_consecutive_transient_provider_errors(ticket.id) == 0
 
@@ -494,19 +518,30 @@ class RepositoryContract:
     def test_list_all_tickets_returns_empty_when_no_tickets(self, repo: TicketRepository):
         assert repo.list_all_tickets() == []
 
-    def test_list_state_instances_for_ticket_returns_in_sequence_order(self, repo: TicketRepository):
+    def test_list_state_instances_for_ticket_returns_in_sequence_order(
+        self, repo: TicketRepository
+    ):
         now = _now()
         t = repo.create_ticket(project="p", issue_number=1, now=now)
         inst1 = repo.open_state_instance(
-            ticket_id=t.id, state_name="Queued", sequence=1, now=now,
+            ticket_id=t.id,
+            state_name="Queued",
+            sequence=1,
+            now=now,
         )
         repo.mark_execute_completed(
-            inst1.id, now=now, outcome_kind=OutcomeKind.CLEAN,
-            outcome_payload={"summary": "ok"}, next_state="Planning",
+            inst1.id,
+            now=now,
+            outcome_kind=OutcomeKind.CLEAN,
+            outcome_payload={"summary": "ok"},
+            next_state="Planning",
         )
         repo.close_state_instance(inst1.id, now=now)
         inst2 = repo.open_state_instance(
-            ticket_id=t.id, state_name="Planning", sequence=2, now=now,
+            ticket_id=t.id,
+            state_name="Planning",
+            sequence=2,
+            now=now,
         )
         instances = repo.list_state_instances_for_ticket(t.id)
         assert [i.sequence for i in instances] == [1, 2]
@@ -533,14 +568,21 @@ class RepositoryContract:
         assert recreated.issue_number == 42
 
     def test_delete_ticket_cascades_state_instances(
-        self, repo: TicketRepository,
+        self,
+        repo: TicketRepository,
     ) -> None:
         t = repo.create_ticket(project="p", issue_number=1, now=_now())
         repo.open_state_instance(
-            ticket_id=t.id, state_name="Planning", sequence=1, now=_now(),
+            ticket_id=t.id,
+            state_name="Planning",
+            sequence=1,
+            now=_now(),
         )
         repo.open_state_instance(
-            ticket_id=t.id, state_name="SpecReview", sequence=2, now=_now(),
+            ticket_id=t.id,
+            state_name="SpecReview",
+            sequence=2,
+            now=_now(),
         )
         repo.delete_ticket(t.id)
         assert repo.list_state_instances_for_ticket(t.id) == []

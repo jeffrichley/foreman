@@ -5,6 +5,7 @@ and creates ``Queued`` ticket rows. ``foreman enqueue`` shortcuts that
 loop for dogfood + recovery: insert the row directly, let the next
 worker tick pick it up. No GitHub round-trip.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -43,7 +44,8 @@ def _make_config(tmp_path: Path, project_names: tuple[str, ...] = ("algokit",)) 
             worker=fake_creds,
         ),
         orchestrator=OrchestratorConfig(
-            app_id=2, private_key_path="/tmp/fake-orch.pem",
+            app_id=2,
+            private_key_path="/tmp/fake-orch.pem",
         ),
         operator=OperatorConfig(
             supervisor=OperatorIdentity(name="Test Sup", email="sup@example.com"),
@@ -51,7 +53,8 @@ def _make_config(tmp_path: Path, project_names: tuple[str, ...] = ("algokit",)) 
         ),
         projects=[
             ProjectConfig(
-                name=name, repo=f"o/{name}",
+                name=name,
+                repo=f"o/{name}",
                 local_clone_path=str(tmp_path / name),
             )
             for name in project_names

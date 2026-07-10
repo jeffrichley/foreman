@@ -130,9 +130,7 @@ async def test_worker_opens_impl_pr_with_base_main_not_spec_branch(
     # This is the foreman#341 contract under test — the result's
     # base_branch is "main", not "foreman/issue-341".
     mock_wt_mgr = MagicMock()
-    mock_wt_mgr.create_impl.return_value = ImplWorktreeResult(
-        path=impl_wt_path, base_branch="main"
-    )
+    mock_wt_mgr.create_impl.return_value = ImplWorktreeResult(path=impl_wt_path, base_branch="main")
 
     # PyGithub Repository mock. `create_pull` returns a PR object with
     # an `html_url` so the Worker can record `pr_url` on its result.
@@ -244,8 +242,7 @@ async def test_worker_opens_impl_pr_with_base_main_not_spec_branch(
         f"{create_pull_kwargs['base']!r}"
     )
     assert create_pull_kwargs["head"] == "foreman/impl-341", (
-        f"impl PR head must be the impl branch; got "
-        f"{create_pull_kwargs['head']!r}"
+        f"impl PR head must be the impl branch; got {create_pull_kwargs['head']!r}"
     )
 
     # Defense-in-depth: confirm the WorktreeManager was asked for the
@@ -319,9 +316,7 @@ def _build_existing_impl_pr_scaffold(
     identity_registry = MagicMock()
 
     mock_wt_mgr = MagicMock()
-    mock_wt_mgr.create_impl.return_value = ImplWorktreeResult(
-        path=impl_wt_path, base_branch="main"
-    )
+    mock_wt_mgr.create_impl.return_value = ImplWorktreeResult(path=impl_wt_path, base_branch="main")
 
     mock_repo = MagicMock()
     mock_repo.default_branch = "main"
@@ -345,9 +340,7 @@ def _build_existing_impl_pr_scaffold(
     # ``repo.create_pull`` is only exercised on the first-run path; the
     # existing-PR path must NOT touch it (assertions below check this).
     first_run_pr = MagicMock()
-    first_run_pr.html_url = (
-        f"https://github.com/testowner/myrepo/pull/{9000 + issue_number}"
-    )
+    first_run_pr.html_url = f"https://github.com/testowner/myrepo/pull/{9000 + issue_number}"
     first_run_pr.number = 9000 + issue_number
     mock_repo.create_pull.return_value = first_run_pr
 
@@ -609,9 +602,7 @@ async def test_worker_first_run_with_no_existing_pr_calls_push_and_create_pull(
 
     # First-run path: push + create_pull both called exactly once with
     # the contract-shaped kwargs.
-    mock_host.push_branch.assert_called_once_with(
-        worktree_path=ANY, branch="foreman/impl-341"
-    )
+    mock_host.push_branch.assert_called_once_with(worktree_path=ANY, branch="foreman/impl-341")
     mock_repo.create_pull.assert_called_once()
     create_pull_kwargs = mock_repo.create_pull.call_args.kwargs
     assert create_pull_kwargs["base"] == "main"

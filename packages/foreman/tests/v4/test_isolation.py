@@ -8,6 +8,7 @@ If this test fails, the failing module reached into a legacy package.
 Either move the dependency into foreman.v4 (correct) or reconsider whether
 the legacy module belongs in the survival set instead (cite a reason).
 """
+
 from __future__ import annotations
 
 import ast
@@ -15,12 +16,7 @@ from pathlib import Path
 
 import pytest
 
-V4_ROOT = (
-    Path(__file__).resolve().parents[2]
-    / "src"
-    / "foreman"
-    / "v4"
-)
+V4_ROOT = Path(__file__).resolve().parents[2] / "src" / "foreman" / "v4"
 
 # Modules whose entire purpose is the v2/v3 substrate. v4 must NOT import them.
 KILL_SET = frozenset(
@@ -68,8 +64,7 @@ def _imports_in(path: Path) -> set[str]:
 def test_v4_module_does_not_import_kill_set(path: Path) -> None:
     imports = _imports_in(path)
     forbidden = {
-        imp for imp in imports
-        if any(imp == k or imp.startswith(k + ".") for k in KILL_SET)
+        imp for imp in imports if any(imp == k or imp.startswith(k + ".") for k in KILL_SET)
     }
     assert not forbidden, (
         f"{path.relative_to(V4_ROOT)} imports from the kill set: {forbidden}. "

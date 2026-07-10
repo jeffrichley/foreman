@@ -1,4 +1,5 @@
 """JsonLinesHandler — one JSON object per log record."""
+
 from __future__ import annotations
 
 import json

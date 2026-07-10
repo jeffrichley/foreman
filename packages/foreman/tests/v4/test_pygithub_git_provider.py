@@ -6,6 +6,7 @@ is controlled by the test. Token-refresh tests assert that a new ``Github``
 client is built iff the registry returns a different token string — rather
 than relying on a clock seam.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -50,11 +51,16 @@ def test_get_pr_state_returns_mapped_fields(mock_github, mock_repo, mock_identit
     mock_pr.base.ref = "main"
     mock_repo.get_pull.return_value = mock_pr
     provider = PyGithubGitProvider(
-        identity=mock_identity, role="orchestrator", repo_full_name="owner/p",
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
     )
     state = provider.get_pr_state(project="p", pr_number=7)
     assert state == PRState(
-        merged=False, mergeable=True, ci_passing=True, base_ref="main",
+        merged=False,
+        mergeable=True,
+        ci_passing=True,
+        base_ref="main",
         mergeable_state="clean",
     )
     mock_repo.get_pull.assert_called_once_with(7)
@@ -62,9 +68,12 @@ def test_get_pr_state_returns_mapped_fields(mock_github, mock_repo, mock_identit
 
 def test_get_pr_state_missing_raises(mock_github, mock_repo, mock_identity):
     from github import GithubException  # type: ignore[import-not-found]
+
     mock_repo.get_pull.side_effect = GithubException(status=404, data={}, headers={})
     provider = PyGithubGitProvider(
-        identity=mock_identity, role="orchestrator", repo_full_name="owner/p",
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
     )
     with pytest.raises(PRNotFoundError):
         provider.get_pr_state(project="p", pr_number=999)
@@ -82,10 +91,13 @@ def test_list_open_issues_with_label(mock_github, mock_repo, mock_identity):
     issue_pr.pull_request = MagicMock()  # PRs come back from get_issues too
     mock_repo.get_issues.return_value = [issue1, issue2, issue_pr]
     provider = PyGithubGitProvider(
-        identity=mock_identity, role="orchestrator", repo_full_name="owner/p",
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
     )
     issues = provider.list_open_issues_with_label(
-        project="p", label="foreman:plan",
+        project="p",
+        label="foreman:plan",
     )
     # PRs filtered out:
     assert issues == [1, 2]
@@ -99,7 +111,9 @@ def test_merge_pr_calls_merge(mock_github, mock_repo, mock_identity):
     mock_pr = MagicMock()
     mock_repo.get_pull.return_value = mock_pr
     provider = PyGithubGitProvider(
-        identity=mock_identity, role="orchestrator", repo_full_name="owner/p",
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
     )
     provider.merge_pr(project="p", pr_number=5)
     mock_pr.merge.assert_called_once_with(merge_method="squash")
@@ -112,7 +126,9 @@ def test_update_branch_calls_pr_update_branch(mock_github, mock_repo, mock_ident
     mock_pr = MagicMock()
     mock_repo.get_pull.return_value = mock_pr
     provider = PyGithubGitProvider(
-        identity=mock_identity, role="orchestrator", repo_full_name="owner/p",
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
     )
     provider.update_branch(project="p", pr_number=5)
     mock_repo.get_pull.assert_called_once_with(5)
@@ -126,10 +142,14 @@ def test_add_labels_calls_add_to_labels_with_sorted_names(mock_github, mock_repo
     mock_issue = MagicMock()
     mock_repo.get_issue.return_value = mock_issue
     provider = PyGithubGitProvider(
-        identity=mock_identity, role="orchestrator", repo_full_name="owner/p",
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
     )
     provider.add_labels(
-        project="p", issue_number=42, labels={"b", "a", "c"},
+        project="p",
+        issue_number=42,
+        labels={"b", "a", "c"},
     )
     mock_repo.get_issue.assert_called_once_with(42)
     mock_issue.add_to_labels.assert_called_once_with("a", "b", "c")
@@ -143,7 +163,9 @@ def test_add_labels_empty_set_is_no_op(mock_github, mock_repo, mock_identity):
     mock_issue = MagicMock()
     mock_repo.get_issue.return_value = mock_issue
     provider = PyGithubGitProvider(
-        identity=mock_identity, role="orchestrator", repo_full_name="owner/p",
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
     )
     provider.add_labels(project="p", issue_number=42, labels=set())
     mock_repo.get_issue.assert_not_called()
@@ -157,10 +179,14 @@ def test_remove_labels_calls_remove_from_labels_per_label(mock_github, mock_repo
     mock_issue = MagicMock()
     mock_repo.get_issue.return_value = mock_issue
     provider = PyGithubGitProvider(
-        identity=mock_identity, role="orchestrator", repo_full_name="owner/p",
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
     )
     provider.remove_labels(
-        project="p", issue_number=42, labels={"b", "a"},
+        project="p",
+        issue_number=42,
+        labels={"b", "a"},
     )
     mock_repo.get_issue.assert_called_once_with(42)
     # One call per label, sorted ascending.
@@ -185,11 +211,15 @@ def test_remove_labels_swallows_unknown_object_exception(mock_github, mock_repo,
         None,
     ]
     provider = PyGithubGitProvider(
-        identity=mock_identity, role="orchestrator", repo_full_name="owner/p",
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
     )
     # Must not raise — even though the first label triggers 404.
     provider.remove_labels(
-        project="p", issue_number=42, labels={"missing", "present"},
+        project="p",
+        issue_number=42,
+        labels={"missing", "present"},
     )
     # Both labels were attempted; the 404 didn't short-circuit the loop.
     assert mock_issue.remove_from_labels.call_count == 2
@@ -200,7 +230,9 @@ def test_remove_labels_empty_set_is_no_op(mock_github, mock_repo, mock_identity)
     mock_issue = MagicMock()
     mock_repo.get_issue.return_value = mock_issue
     provider = PyGithubGitProvider(
-        identity=mock_identity, role="orchestrator", repo_full_name="owner/p",
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
     )
     provider.remove_labels(project="p", issue_number=42, labels=set())
     mock_repo.get_issue.assert_not_called()
@@ -219,7 +251,9 @@ def test_close_issue_calls_edit_when_open(mock_github, mock_repo, mock_identity)
     mock_issue.state = "open"
     mock_repo.get_issue.return_value = mock_issue
     provider = PyGithubGitProvider(
-        identity=mock_identity, role="orchestrator", repo_full_name="owner/p",
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
     )
     provider.close_issue(project="p", issue_number=23)
     mock_repo.get_issue.assert_called_once_with(23)
@@ -237,7 +271,9 @@ def test_close_issue_skips_edit_when_already_closed(mock_github, mock_repo, mock
     mock_issue.state = "closed"
     mock_repo.get_issue.return_value = mock_issue
     provider = PyGithubGitProvider(
-        identity=mock_identity, role="orchestrator", repo_full_name="owner/p",
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
     )
     provider.close_issue(project="p", issue_number=23)
     mock_repo.get_issue.assert_called_once_with(23)
@@ -261,7 +297,9 @@ def test_constructor_does_not_invoke_identity(mock_identity):
     resolution. Construction must succeed without querying the registry.
     """
     PyGithubGitProvider(
-        identity=mock_identity, role="orchestrator", repo_full_name="owner/p",
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
     )
     mock_identity.get_role_token.assert_not_called()
 
@@ -278,7 +316,9 @@ def test_gh_does_not_rebuild_when_registry_returns_same_token(mock_identity):
         mock_identity.get_role_token.return_value = "token_v1"
 
         provider = PyGithubGitProvider(
-            identity=mock_identity, role="orchestrator", repo_full_name="owner/p",
+            identity=mock_identity,
+            role="orchestrator",
+            repo_full_name="owner/p",
         )
         for _ in range(100):
             _ = provider._gh
@@ -297,7 +337,9 @@ def test_gh_rebuilds_when_registry_token_changes(mock_identity):
 
     with patch("foreman.v4.pygithub_git_provider.Github", side_effect=[gh_v1, gh_v2]):
         provider = PyGithubGitProvider(
-            identity=mock_identity, role="orchestrator", repo_full_name="owner/p",
+            identity=mock_identity,
+            role="orchestrator",
+            repo_full_name="owner/p",
         )
 
         mock_identity.get_role_token.return_value = "token_v1"
@@ -326,11 +368,14 @@ def test_repo_access_alone_triggers_gh_rebuild_on_token_change(mock_identity):
     gh_v2.get_repo.return_value = repo_v2
 
     with patch(
-        "foreman.v4.pygithub_git_provider.Github", side_effect=[gh_v1, gh_v2],
+        "foreman.v4.pygithub_git_provider.Github",
+        side_effect=[gh_v1, gh_v2],
     ) as MockGithub:
         mock_identity.get_role_token.return_value = "token_v1"
         provider = PyGithubGitProvider(
-            identity=mock_identity, role="orchestrator", repo_full_name="owner/p",
+            identity=mock_identity,
+            role="orchestrator",
+            repo_full_name="owner/p",
         )
 
         # Simulate the Poller's access pattern: only `_repo`, never `_gh`.
@@ -379,11 +424,14 @@ def test_get_issue_comments_uses_refreshed_client_on_token_change(mock_identity)
     repo_v2.get_issue.return_value = fake_issue_v2
 
     with patch(
-        "foreman.v4.pygithub_git_provider.Github", side_effect=[client_v1, client_v2],
+        "foreman.v4.pygithub_git_provider.Github",
+        side_effect=[client_v1, client_v2],
     ):
         mock_identity.get_role_token.return_value = "token_v1"
         provider = PyGithubGitProvider(
-            identity=mock_identity, role="orchestrator", repo_full_name="org/repo",
+            identity=mock_identity,
+            role="orchestrator",
+            repo_full_name="org/repo",
         )
 
         # First call: token_v1, uses client_v1.
@@ -411,7 +459,9 @@ def test_delete_branch_calls_git_ref_delete(mock_github, mock_repo, mock_identit
     fake_ref = MagicMock()
     mock_repo.get_git_ref.return_value = fake_ref
     provider = PyGithubGitProvider(
-        identity=mock_identity, role="orchestrator", repo_full_name="org/repo",
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="org/repo",
     )
     provider.delete_branch(project="ignored", branch_name="foreman/issue-1")
     mock_repo.get_git_ref.assert_called_once_with("heads/foreman/issue-1")
@@ -423,10 +473,14 @@ def test_delete_branch_swallows_404(mock_github, mock_repo, mock_identity):
     from github import GithubException  # type: ignore[import-not-found]
 
     mock_repo.get_git_ref.side_effect = GithubException(
-        status=404, data={"message": "Not Found"}, headers={},
+        status=404,
+        data={"message": "Not Found"},
+        headers={},
     )
     provider = PyGithubGitProvider(
-        identity=mock_identity, role="orchestrator", repo_full_name="org/repo",
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="org/repo",
     )
     # Must NOT raise.
     provider.delete_branch(project="ignored", branch_name="foreman/issue-1")
@@ -436,7 +490,9 @@ def test_close_pr_calls_pull_edit_state_closed(mock_github, mock_repo, mock_iden
     fake_pr = MagicMock()
     mock_repo.get_pull.return_value = fake_pr
     provider = PyGithubGitProvider(
-        identity=mock_identity, role="orchestrator", repo_full_name="org/repo",
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="org/repo",
     )
     provider.close_pr(project="ignored", pr_number=19)
     mock_repo.get_pull.assert_called_once_with(19)
@@ -450,46 +506,64 @@ def test_close_pr_swallows_already_closed(mock_github, mock_repo, mock_identity)
     fake_pr = MagicMock()
     fake_pr.edit.side_effect = GithubException(
         status=422,
-        data={"message": "Validation Failed", "errors": [
-            {"resource": "PullRequest", "code": "invalid"}]},
+        data={
+            "message": "Validation Failed",
+            "errors": [{"resource": "PullRequest", "code": "invalid"}],
+        },
         headers={},
     )
     mock_repo.get_pull.return_value = fake_pr
     provider = PyGithubGitProvider(
-        identity=mock_identity, role="orchestrator", repo_full_name="org/repo",
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="org/repo",
     )
     provider.close_pr(project="ignored", pr_number=19)
 
 
 def test_find_open_pr_by_head_branch_uses_get_pulls_with_head_filter(
-    mock_github, mock_repo, mock_identity,
+    mock_github,
+    mock_repo,
+    mock_identity,
 ):
     fake_pr = MagicMock(number=19)
     mock_repo.owner.login = "org"
     mock_repo.get_pulls.return_value = [fake_pr]
     provider = PyGithubGitProvider(
-        identity=mock_identity, role="orchestrator", repo_full_name="org/repo",
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="org/repo",
     )
     result = provider.find_open_pr_by_head_branch(
-        project="ignored", branch_name="foreman/issue-180",
+        project="ignored",
+        branch_name="foreman/issue-180",
     )
     assert result == 19
     mock_repo.get_pulls.assert_called_once_with(
-        state="open", head="org:foreman/issue-180",
+        state="open",
+        head="org:foreman/issue-180",
     )
 
 
 def test_find_open_pr_by_head_branch_returns_none_on_empty(
-    mock_github, mock_repo, mock_identity,
+    mock_github,
+    mock_repo,
+    mock_identity,
 ):
     mock_repo.owner.login = "org"
     mock_repo.get_pulls.return_value = []
     provider = PyGithubGitProvider(
-        identity=mock_identity, role="orchestrator", repo_full_name="org/repo",
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="org/repo",
     )
-    assert provider.find_open_pr_by_head_branch(
-        project="ignored", branch_name="foreman/issue-180",
-    ) is None
+    assert (
+        provider.find_open_pr_by_head_branch(
+            project="ignored",
+            branch_name="foreman/issue-180",
+        )
+        is None
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -557,7 +631,9 @@ def test_get_issue_labels_returns_label_names(mock_github, mock_repo, mock_ident
     fake_issue = MagicMock(labels=[fake_label_a, fake_label_b])
     mock_repo.get_issue.return_value = fake_issue
     provider = PyGithubGitProvider(
-        identity=mock_identity, role="orchestrator", repo_full_name="org/repo",
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="org/repo",
     )
     labels = provider.get_issue_labels(project="ignored", issue_number=180)
     assert labels == {"foreman:state-failed", "bug"}
@@ -594,7 +670,9 @@ def test_get_issue_comments_returns_sorted_comment_refs(mock_github, mock_repo, 
     mock_repo.get_issue.return_value = fake_issue
 
     provider = PyGithubGitProvider(
-        identity=mock_identity, role="orchestrator", repo_full_name="org/repo",
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="org/repo",
     )
     result = provider.get_issue_comments(project="ignored", issue_number=55)
 
@@ -620,7 +698,9 @@ def test_post_issue_comment_calls_create_comment(mock_github, mock_repo, mock_id
     mock_repo.get_issue.return_value = fake_issue
 
     provider = PyGithubGitProvider(
-        identity=mock_identity, role="orchestrator", repo_full_name="org/repo",
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="org/repo",
     )
     provider.post_issue_comment(project="ignored", issue_number=99, body="test body")
 

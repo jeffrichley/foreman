@@ -1,4 +1,5 @@
 """ImplementingState — Worker; BLOCKED stays in state pending Poller re-check."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -128,8 +129,7 @@ def test_implementing_retry_with_blocked_does_not_transition_to_failed():
     assert outcome_1.artifacts.pr_number == 9001
     next_state_1 = state_1.next_state(ctx, outcome_1)
     assert isinstance(next_state_1, ImplementingState), (
-        f"BLOCKED must route back to ImplementingState, got "
-        f"{type(next_state_1).__name__}"
+        f"BLOCKED must route back to ImplementingState, got {type(next_state_1).__name__}"
     )
 
     # Second dispatch on the new ImplementingState instance — the

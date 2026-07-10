@@ -56,14 +56,16 @@ def _dsn_without_password(dsn: str) -> str:
     host = parsed.hostname or ""
     port_suffix = f":{parsed.port}" if parsed.port else ""
     netloc = f"{userinfo}@{host}{port_suffix}" if userinfo else f"{host}{port_suffix}"
-    return urllib.parse.urlunparse((
-        parsed.scheme,
-        netloc,
-        parsed.path,
-        parsed.params,
-        parsed.query,
-        parsed.fragment,
-    ))
+    return urllib.parse.urlunparse(
+        (
+            parsed.scheme,
+            netloc,
+            parsed.path,
+            parsed.params,
+            parsed.query,
+            parsed.fragment,
+        )
+    )
 
 
 def _subprocess_pg_env(dsn: str) -> dict[str, str]:
@@ -208,10 +210,7 @@ def prune_snapshots(
     # ------------------------------------------------------------------
     # Tier 2: daily window — [now-7d, now-24h)
     # ------------------------------------------------------------------
-    daily_window = [
-        (ts, p) for ts, p in snapshots
-        if horizon_daily <= ts < horizon_hourly
-    ]
+    daily_window = [(ts, p) for ts, p in snapshots if horizon_daily <= ts < horizon_hourly]
     # Bucket by UTC calendar date (YYYY-MM-DD); keep most-recent per day.
     day_survivors: dict[str, tuple[dt.datetime, Path]] = {}
     for ts, p in daily_window:
@@ -219,9 +218,7 @@ def prune_snapshots(
         if day_key not in day_survivors or ts > day_survivors[day_key][0]:
             day_survivors[day_key] = (ts, p)
     # Sort day survivors by their representative timestamp descending.
-    sorted_day_survivors = sorted(
-        day_survivors.values(), key=lambda x: x[0], reverse=True
-    )
+    sorted_day_survivors = sorted(day_survivors.values(), key=lambda x: x[0], reverse=True)
     # Keep most-recent ``retention.daily`` days.
     for _, p in sorted_day_survivors[: retention.daily]:
         to_keep.add(p)
@@ -229,19 +226,14 @@ def prune_snapshots(
     # ------------------------------------------------------------------
     # Tier 3: weekly window — [now-28d, now-7d)
     # ------------------------------------------------------------------
-    weekly_window = [
-        (ts, p) for ts, p in snapshots
-        if horizon_weekly <= ts < horizon_daily
-    ]
+    weekly_window = [(ts, p) for ts, p in snapshots if horizon_weekly <= ts < horizon_daily]
     # Bucket by ISO 8601 week (Monday UTC); keep most-recent per week.
     week_survivors: dict[tuple[int, int], tuple[dt.datetime, Path]] = {}
     for ts, p in weekly_window:
         week_key = ts.isocalendar()[:2]  # (ISO year, ISO week)
         if week_key not in week_survivors or ts > week_survivors[week_key][0]:
             week_survivors[week_key] = (ts, p)
-    sorted_week_survivors = sorted(
-        week_survivors.values(), key=lambda x: x[0], reverse=True
-    )
+    sorted_week_survivors = sorted(week_survivors.values(), key=lambda x: x[0], reverse=True)
     for _, p in sorted_week_survivors[: retention.weekly]:
         to_keep.add(p)
 
@@ -336,9 +328,7 @@ class BackupScheduler:
         # --- prune old snapshots ---
         pruned: list[Path] = []
         try:
-            pruned = prune_snapshots(
-                dst_dir=self._dst_dir, now=now, retention=self._retention
-            )
+            pruned = prune_snapshots(dst_dir=self._dst_dir, now=now, retention=self._retention)
         except OSError as exc:
             self._bus.publish(
                 BackupFailedEvent(

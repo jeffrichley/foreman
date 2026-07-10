@@ -72,7 +72,9 @@ def test_build_body_with_payload_renders_all_three_sections() -> None:
 
 def test_build_body_with_extra_context_renders_block() -> None:
     payload = EscalationComment(
-        why="x", what_tried="y", what_would_unblock="z",
+        why="x",
+        what_tried="y",
+        what_would_unblock="z",
         extra_context="## Subprocess signals\n- exit code: 137",
     )
     body = build_escalation_comment_body(
@@ -126,9 +128,7 @@ def test_body_contains_no_github_closing_keywords() -> None:
     )
     import re
 
-    pattern = re.compile(
-        r"(?i)\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\b\s*:?\s+#\d+"
-    )
+    pattern = re.compile(r"(?i)\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\b\s*:?\s+#\d+")
     assert pattern.search(body) is None
 
 
@@ -175,9 +175,7 @@ def test_already_posted_for_key_matches_substring() -> None:
             "body\n<!-- foreman:escalation:end -->"
         ),
     ]
-    assert already_posted_for_key(
-        comments, source="role:planner", key="k1"
-    ) is True
+    assert already_posted_for_key(comments, source="role:planner", key="k1") is True
 
 
 def test_already_posted_for_key_misses_when_source_differs() -> None:
@@ -187,9 +185,7 @@ def test_already_posted_for_key_misses_when_source_differs() -> None:
             "body\n<!-- foreman:escalation:end -->"
         ),
     ]
-    assert already_posted_for_key(
-        comments, source="role:planner", key="k1"
-    ) is False
+    assert already_posted_for_key(comments, source="role:planner", key="k1") is False
 
 
 def test_already_posted_for_key_misses_when_key_differs() -> None:
@@ -199,9 +195,7 @@ def test_already_posted_for_key_misses_when_key_differs() -> None:
             "body\n<!-- foreman:escalation:end -->"
         ),
     ]
-    assert already_posted_for_key(
-        comments, source="role:planner", key="k2"
-    ) is False
+    assert already_posted_for_key(comments, source="role:planner", key="k2") is False
 
 
 def test_already_posted_for_key_empty_list() -> None:
@@ -227,9 +221,14 @@ def test_any_recent_marker_with_source_prefix_matches_recent_prefix() -> None:
         ),
     ]
     since = _now() - dt.timedelta(minutes=5)
-    assert any_recent_marker_with_source_prefix(
-        comments, source_prefix="role:", since=since,
-    ) is True
+    assert (
+        any_recent_marker_with_source_prefix(
+            comments,
+            source_prefix="role:",
+            since=since,
+        )
+        is True
+    )
 
 
 def test_any_recent_marker_with_source_prefix_misses_stale_marker() -> None:
@@ -242,9 +241,14 @@ def test_any_recent_marker_with_source_prefix_misses_stale_marker() -> None:
         ),
     ]
     since = _now() - dt.timedelta(minutes=5)
-    assert any_recent_marker_with_source_prefix(
-        comments, source_prefix="role:", since=since,
-    ) is False
+    assert (
+        any_recent_marker_with_source_prefix(
+            comments,
+            source_prefix="role:",
+            since=since,
+        )
+        is False
+    )
 
 
 def test_any_recent_marker_with_source_prefix_misses_wrong_prefix() -> None:
@@ -257,9 +261,14 @@ def test_any_recent_marker_with_source_prefix_misses_wrong_prefix() -> None:
         ),
     ]
     since = _now() - dt.timedelta(minutes=5)
-    assert any_recent_marker_with_source_prefix(
-        comments, source_prefix="role:", since=since,
-    ) is False
+    assert (
+        any_recent_marker_with_source_prefix(
+            comments,
+            source_prefix="role:",
+            since=since,
+        )
+        is False
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -353,9 +362,7 @@ def test_post_escalation_returns_false_on_post_failure(
         )
     assert result is False
     # Verify the helper logged the exception via logger.exception.
-    assert any(
-        "post_issue_comment failed" in r.message for r in caplog.records
-    )
+    assert any("post_issue_comment failed" in r.message for r in caplog.records)
 
 
 def test_post_escalation_renders_fallback_when_payload_is_none() -> None:
@@ -406,8 +413,7 @@ def test_extract_subprocess_failure_signals_parses_on_disk_footer_form() -> None
 def test_extract_subprocess_failure_signals_returns_none_on_timeout() -> None:
     exit_code, _ = extract_subprocess_failure_signals(
         failure_reason=(
-            "RoleSubprocessError('role=worker exceeded timeout 600s; "
-            "see log at /tmp/x.log')"
+            "RoleSubprocessError('role=worker exceeded timeout 600s; see log at /tmp/x.log')"
         ),
         log_path=None,
     )
@@ -416,7 +422,8 @@ def test_extract_subprocess_failure_signals_returns_none_on_timeout() -> None:
 
 def test_extract_subprocess_failure_signals_handles_none_failure_reason() -> None:
     exit_code, _ = extract_subprocess_failure_signals(
-        failure_reason=None, log_path=None,
+        failure_reason=None,
+        log_path=None,
     )
     assert exit_code is None
 
@@ -428,7 +435,8 @@ def test_extract_subprocess_failure_signals_reads_last_500_chars(
     body = "abcdefg" * 2000  # 14000 chars
     p.write_text(body, encoding="utf-8")
     _, log_tail = extract_subprocess_failure_signals(
-        failure_reason=None, log_path=p,
+        failure_reason=None,
+        log_path=p,
     )
     assert log_tail is not None
     assert len(log_tail) == 500
@@ -441,7 +449,8 @@ def test_extract_subprocess_failure_signals_handles_missing_log(
 ) -> None:
     nonexistent = tmp_path / "does-not-exist.log"
     exit_code, log_tail = extract_subprocess_failure_signals(
-        failure_reason="exited 1", log_path=nonexistent,
+        failure_reason="exited 1",
+        log_path=nonexistent,
     )
     assert exit_code == 1
     assert log_tail is None

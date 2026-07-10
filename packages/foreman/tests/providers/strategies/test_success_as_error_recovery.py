@@ -115,9 +115,7 @@ def test_recovers_when_exception_is_wrapped_success_form() -> None:
         structured_output={"name": "ok", "count": 7},
         usage={"input_tokens": 11, "output_tokens": 22},
     )
-    partial: PartialResult[_DemoOutput] = PartialResult(
-        result_message=rm, output_model=_DemoOutput
-    )
+    partial: PartialResult[_DemoOutput] = PartialResult(result_message=rm, output_model=_DemoOutput)
     exc = Exception("Claude Code returned an error result: success")
     strategy = SuccessAsErrorRecovery()
 

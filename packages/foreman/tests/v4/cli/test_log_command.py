@@ -1,4 +1,5 @@
 """log — recent + filtered JSON-lines view."""
+
 from __future__ import annotations
 
 import json
@@ -19,15 +20,28 @@ def _write_log(path: Path, lines: list[dict]) -> None:
 
 def test_log_prints_recent_lines(tmp_path: Path):
     log_path = tmp_path / "transitions.jsonl"
-    _write_log(log_path, [
-        {"event": "state_entered", "ticket_id": 1, "state": "Planning",
-         "at": "2026-06-13T12:00:00"},
-        {"event": "execute_completed", "ticket_id": 1, "state": "Planning",
-         "outcome_kind": "clean", "at": "2026-06-13T12:01:00"},
-    ])
+    _write_log(
+        log_path,
+        [
+            {
+                "event": "state_entered",
+                "ticket_id": 1,
+                "state": "Planning",
+                "at": "2026-06-13T12:00:00",
+            },
+            {
+                "event": "execute_completed",
+                "ticket_id": 1,
+                "state": "Planning",
+                "outcome_kind": "clean",
+                "at": "2026-06-13T12:01:00",
+            },
+        ],
+    )
     runner = CliRunner()
     result = runner.invoke(
-        app, ["log", "--log-path", str(log_path)],
+        app,
+        ["log", "--log-path", str(log_path)],
         obj=build_cli_context(repo=InMemoryTicketRepository()),
     )
     assert result.exit_code == 0
@@ -37,13 +51,17 @@ def test_log_prints_recent_lines(tmp_path: Path):
 
 def test_log_filter_by_ticket(tmp_path: Path):
     log_path = tmp_path / "transitions.jsonl"
-    _write_log(log_path, [
-        {"event": "state_entered", "ticket_id": 1, "state": "Planning"},
-        {"event": "state_entered", "ticket_id": 2, "state": "SpecReview"},
-    ])
+    _write_log(
+        log_path,
+        [
+            {"event": "state_entered", "ticket_id": 1, "state": "Planning"},
+            {"event": "state_entered", "ticket_id": 2, "state": "SpecReview"},
+        ],
+    )
     runner = CliRunner()
     result = runner.invoke(
-        app, ["log", "--log-path", str(log_path), "--ticket", "1"],
+        app,
+        ["log", "--log-path", str(log_path), "--ticket", "1"],
         obj=build_cli_context(repo=InMemoryTicketRepository()),
     )
     assert "Planning" in result.output
@@ -52,13 +70,17 @@ def test_log_filter_by_ticket(tmp_path: Path):
 
 def test_log_filter_by_state(tmp_path: Path):
     log_path = tmp_path / "transitions.jsonl"
-    _write_log(log_path, [
-        {"event": "state_entered", "ticket_id": 1, "state": "Planning"},
-        {"event": "state_entered", "ticket_id": 2, "state": "Merging"},
-    ])
+    _write_log(
+        log_path,
+        [
+            {"event": "state_entered", "ticket_id": 1, "state": "Planning"},
+            {"event": "state_entered", "ticket_id": 2, "state": "Merging"},
+        ],
+    )
     runner = CliRunner()
     result = runner.invoke(
-        app, ["log", "--log-path", str(log_path), "--state", "Merging"],
+        app,
+        ["log", "--log-path", str(log_path), "--state", "Merging"],
         obj=build_cli_context(repo=InMemoryTicketRepository()),
     )
     assert "Merging" in result.output
@@ -67,13 +89,14 @@ def test_log_filter_by_state(tmp_path: Path):
 
 def test_log_limit_caps_output(tmp_path: Path):
     log_path = tmp_path / "transitions.jsonl"
-    _write_log(log_path, [
-        {"event": "state_entered", "ticket_id": i, "state": "Planning"}
-        for i in range(100)
-    ])
+    _write_log(
+        log_path,
+        [{"event": "state_entered", "ticket_id": i, "state": "Planning"} for i in range(100)],
+    )
     runner = CliRunner()
     result = runner.invoke(
-        app, ["log", "--log-path", str(log_path), "--limit", "5"],
+        app,
+        ["log", "--log-path", str(log_path), "--limit", "5"],
         obj=build_cli_context(repo=InMemoryTicketRepository()),
     )
     assert result.output.count("state_entered") == 5

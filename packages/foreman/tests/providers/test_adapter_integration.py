@@ -349,9 +349,7 @@ async def test_drain_returns_captured_success_when_loop_exits_cleanly(
     assert result.count == 3
     assert isinstance(usage, UsageInfo)
 
-    drain_lines = [
-        r.getMessage() for r in caplog.records if "provider drain:" in r.getMessage()
-    ]
+    drain_lines = [r.getMessage() for r in caplog.records if "provider drain:" in r.getMessage()]
     assert any("_FakeOtherMessage" in line for line in drain_lines), (
         f"expected an instrumentation log line naming _FakeOtherMessage; got {drain_lines!r}"
     )

@@ -1,4 +1,5 @@
 """Daemon class — owns the Poller(s) + QM + WorkerPool tick loop."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -22,22 +23,31 @@ def test_daemon_one_tick_processes_one_ticket():
     repo = InMemoryTicketRepository()
     git = FakeGitProvider()
     git.set_open_issues_with_label(
-        project="p", label="foreman:plan", issue_numbers={1},
+        project="p",
+        label="foreman:plan",
+        issue_numbers={1},
     )
-    dispatcher = FakeRoleDispatcher(responses={
-        ("planner", "p", 1): _canned("clean"),
-    })
+    dispatcher = FakeRoleDispatcher(
+        responses={
+            ("planner", "p", 1): _canned("clean"),
+        }
+    )
 
     def clock() -> dt.datetime:
         return dt.datetime(2026, 6, 13, 12, 0, 0)
 
     poller = Poller(
-        repo=repo, qm=None, git=git,
-        project="p", trigger_label="foreman:plan",
+        repo=repo,
+        qm=None,
+        git=git,
+        project="p",
+        trigger_label="foreman:plan",
         clock=clock,
     )
     daemon = Daemon(
-        repo=repo, git=git, dispatcher=dispatcher,
+        repo=repo,
+        git=git,
+        dispatcher=dispatcher,
         pollers=[poller],
         config=DaemonConfig(tick_seconds=0, max_in_flight=4),
         clock=clock,
@@ -52,12 +62,16 @@ def test_daemon_one_tick_processes_one_ticket():
 def test_daemon_run_until_stopped_responds_to_stop_event():
     repo = InMemoryTicketRepository()
     poller = Poller(
-        repo=repo, qm=None, git=FakeGitProvider(),
-        project="p", trigger_label="foreman:plan",
+        repo=repo,
+        qm=None,
+        git=FakeGitProvider(),
+        project="p",
+        trigger_label="foreman:plan",
         clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
     )
     daemon = Daemon(
-        repo=repo, git=FakeGitProvider(),
+        repo=repo,
+        git=FakeGitProvider(),
         dispatcher=FakeRoleDispatcher(responses={}),
         pollers=[poller],
         config=DaemonConfig(tick_seconds=0.01, max_in_flight=4),
@@ -80,13 +94,17 @@ def test_daemon_shutdown_waits_for_in_flight_work():
     repo = InMemoryTicketRepository()
     git = FakeGitProvider()
     git.set_open_issues_with_label(
-        project="p", label="foreman:plan", issue_numbers={1},
+        project="p",
+        label="foreman:plan",
+        issue_numbers={1},
     )
 
     release = threading.Event()
-    base = FakeRoleDispatcher(responses={
-        ("planner", "p", 1): _canned("clean"),
-    })
+    base = FakeRoleDispatcher(
+        responses={
+            ("planner", "p", 1): _canned("clean"),
+        }
+    )
 
     class BlockingDispatcher:
         def dispatch(self, **kwargs):
@@ -97,12 +115,17 @@ def test_daemon_shutdown_waits_for_in_flight_work():
         return dt.datetime(2026, 6, 13, 12, 0, 0)
 
     poller = Poller(
-        repo=repo, qm=None, git=git,
-        project="p", trigger_label="foreman:plan",
+        repo=repo,
+        qm=None,
+        git=git,
+        project="p",
+        trigger_label="foreman:plan",
         clock=clock,
     )
     daemon = Daemon(
-        repo=repo, git=git, dispatcher=BlockingDispatcher(),
+        repo=repo,
+        git=git,
+        dispatcher=BlockingDispatcher(),
         pollers=[poller],
         config=DaemonConfig(tick_seconds=0, max_in_flight=4),
         clock=clock,
@@ -120,9 +143,7 @@ def test_daemon_shutdown_waits_for_in_flight_work():
     for p in daemon._pollers:
         p.tick()
     submitted = daemon._pool.tick()
-    assert submitted == 1, (
-        f"expected Planning WorkItem to be submitted; submitted={submitted}"
-    )
+    assert submitted == 1, f"expected Planning WorkItem to be submitted; submitted={submitted}"
     # Confirm Planning is actually in-flight, parked on the release Event.
     assert daemon.qm.in_flight_count() == 1, (
         "expected Planning transition to be in-flight before shutdown"
@@ -159,12 +180,16 @@ def test_daemon_shutdown_is_idempotent():
     """
     repo = InMemoryTicketRepository()
     poller = Poller(
-        repo=repo, qm=None, git=FakeGitProvider(),
-        project="p", trigger_label="foreman:plan",
+        repo=repo,
+        qm=None,
+        git=FakeGitProvider(),
+        project="p",
+        trigger_label="foreman:plan",
         clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
     )
     daemon = Daemon(
-        repo=repo, git=FakeGitProvider(),
+        repo=repo,
+        git=FakeGitProvider(),
         dispatcher=FakeRoleDispatcher(responses={}),
         pollers=[poller],
         config=DaemonConfig(tick_seconds=0, max_in_flight=4),
@@ -186,12 +211,16 @@ def test_tick_once_calls_clone_refresher():
     stub_refresher = MagicMock()
     stub_refresher.tick.return_value = None
     poller = Poller(
-        repo=repo, qm=None, git=FakeGitProvider(),
-        project="p", trigger_label="foreman:plan",
+        repo=repo,
+        qm=None,
+        git=FakeGitProvider(),
+        project="p",
+        trigger_label="foreman:plan",
         clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
     )
     daemon = Daemon(
-        repo=repo, git=FakeGitProvider(),
+        repo=repo,
+        git=FakeGitProvider(),
         dispatcher=FakeRoleDispatcher(responses={}),
         pollers=[poller],
         config=DaemonConfig(tick_seconds=0, max_in_flight=4),
@@ -207,12 +236,16 @@ def test_tick_once_runs_with_disabled_clone_refresher_default():
     ``tick_once`` must not raise."""
     repo = InMemoryTicketRepository()
     poller = Poller(
-        repo=repo, qm=None, git=FakeGitProvider(),
-        project="p", trigger_label="foreman:plan",
+        repo=repo,
+        qm=None,
+        git=FakeGitProvider(),
+        project="p",
+        trigger_label="foreman:plan",
         clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
     )
     daemon = Daemon(
-        repo=repo, git=FakeGitProvider(),
+        repo=repo,
+        git=FakeGitProvider(),
         dispatcher=FakeRoleDispatcher(responses={}),
         pollers=[poller],
         config=DaemonConfig(tick_seconds=0, max_in_flight=4),
@@ -231,12 +264,16 @@ def test_tick_once_calls_backup_scheduler():
     stub_scheduler = MagicMock()
     stub_scheduler.tick.return_value = None
     poller = Poller(
-        repo=repo, qm=None, git=FakeGitProvider(),
-        project="p", trigger_label="foreman:plan",
+        repo=repo,
+        qm=None,
+        git=FakeGitProvider(),
+        project="p",
+        trigger_label="foreman:plan",
         clock=lambda: dt.datetime(2026, 6, 27, 12, 0, 0),
     )
     daemon = Daemon(
-        repo=repo, git=FakeGitProvider(),
+        repo=repo,
+        git=FakeGitProvider(),
         dispatcher=FakeRoleDispatcher(responses={}),
         pollers=[poller],
         config=DaemonConfig(tick_seconds=0, max_in_flight=4),
@@ -252,12 +289,16 @@ def test_tick_once_uses_disabled_scheduler_by_default():
     ``tick_once`` must not raise."""
     repo = InMemoryTicketRepository()
     poller = Poller(
-        repo=repo, qm=None, git=FakeGitProvider(),
-        project="p", trigger_label="foreman:plan",
+        repo=repo,
+        qm=None,
+        git=FakeGitProvider(),
+        project="p",
+        trigger_label="foreman:plan",
         clock=lambda: dt.datetime(2026, 6, 27, 12, 0, 0),
     )
     daemon = Daemon(
-        repo=repo, git=FakeGitProvider(),
+        repo=repo,
+        git=FakeGitProvider(),
         dispatcher=FakeRoleDispatcher(responses={}),
         pollers=[poller],
         config=DaemonConfig(tick_seconds=0, max_in_flight=4),

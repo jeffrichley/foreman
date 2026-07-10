@@ -17,6 +17,7 @@ class PlanningState(RoleDispatchState):
         """Route CLEAN to SpecReview, NEEDS_HELP to NeedsHelp, else Failed."""
         from foreman.v4.states.spec_review import SpecReviewState
         from foreman.v4.states.terminal import FailedState, NeedsHelpState
+
         if outcome.kind == OutcomeKind.CLEAN:
             return SpecReviewState()
         if outcome.kind == OutcomeKind.NEEDS_HELP:

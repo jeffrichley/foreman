@@ -83,7 +83,8 @@ class WorkerPool:
         # Splitting them would let pool < QM silently throttle, or pool > QM
         # waste OS threads. Operators dial ONE number in V4Config.
         self._executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=qm.max_in_flight, thread_name_prefix="foreman-worker",
+            max_workers=qm.max_in_flight,
+            thread_name_prefix="foreman-worker",
         )
 
     def tick(self) -> int:
@@ -94,6 +95,7 @@ class WorkerPool:
             if item is None:
                 return submitted
             future = self._executor.submit(self._run_transition, item)
+
             # `_item=item` default-arg captures by value — avoids the classic
             # "all lambdas see the last loop iteration" bug. Both callbacks
             # fire on success AND exception:
@@ -105,12 +107,14 @@ class WorkerPool:
             #      silently captured by the future and never reach an
             #      operator, turning a stuck pipeline into guess-and-check.
             def _on_done_mark(
-                _f: concurrent.futures.Future[Any], _item: WorkItem = item,
+                _f: concurrent.futures.Future[Any],
+                _item: WorkItem = item,
             ) -> None:
                 self._qm.mark_done(_item)
 
             def _on_done_log(
-                _f: concurrent.futures.Future[Any], _item: WorkItem = item,
+                _f: concurrent.futures.Future[Any],
+                _item: WorkItem = item,
             ) -> None:
                 self._log_exception(_f, _item)
 
@@ -119,13 +123,16 @@ class WorkerPool:
             submitted += 1
 
     def _log_exception(
-        self, future: concurrent.futures.Future[Any], item: WorkItem,
+        self,
+        future: concurrent.futures.Future[Any],
+        item: WorkItem,
     ) -> None:
         exc = future.exception()
         if exc is not None:
             _LOG.exception(
                 "WorkerPool transition raised for ticket %d state=%s",
-                item.ticket_id, item.state_name,
+                item.ticket_id,
+                item.state_name,
                 exc_info=exc,
             )
 
@@ -167,7 +174,9 @@ class WorkerPool:
             raise
 
     def _escalate_crashed_transition(
-        self, item: WorkItem, ctx: StateContext | None,
+        self,
+        item: WorkItem,
+        ctx: StateContext | None,
     ) -> None:
         """Best-effort park-to-NeedsHelp after a worker-thread crash (#454).
 
@@ -182,7 +191,8 @@ class WorkerPool:
                 # foreman:state-needshelp). Idempotent against transition()'s
                 # own finally if it already closed the row.
                 escalate_to_needs_help(
-                    ctx, failure_phase="worker_crash",
+                    ctx,
+                    failure_phase="worker_crash",
                     failure_reason="worker-thread transition raised",
                 )
             else:
@@ -192,13 +202,17 @@ class WorkerPool:
                 # stops re-enqueueing. If the repo is itself broken this raises
                 # and is logged below — nothing more we can safely do.
                 from foreman.v4.states.terminal import NeedsHelpState
+
                 self._repo.set_ticket_state(
-                    item.ticket_id, NeedsHelpState().state_name, now=self._clock(),
+                    item.ticket_id,
+                    NeedsHelpState().state_name,
+                    now=self._clock(),
                 )
         except Exception:
             _LOG.exception(
                 "WorkerPool crash-escalation failed for ticket %d state=%s",
-                item.ticket_id, item.state_name,
+                item.ticket_id,
+                item.state_name,
             )
 
     def shutdown(self, *, wait: bool = True) -> None:

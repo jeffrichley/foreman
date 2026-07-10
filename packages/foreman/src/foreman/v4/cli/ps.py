@@ -16,10 +16,14 @@ from foreman.v4.cli.formatters import get_formatter
 def cmd_ps(
     ctx: typer.Context,
     show_all: bool = typer.Option(
-        False, "--all", help="Include terminal states (Done/Failed)",
+        False,
+        "--all",
+        help="Include terminal states (Done/Failed)",
     ),
     format: str = typer.Option(
-        "table", "--format", help="table | json | yaml",
+        "table",
+        "--format",
+        help="table | json | yaml",
     ),
 ) -> None:
     """List tickets."""

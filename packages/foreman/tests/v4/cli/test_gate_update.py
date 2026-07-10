@@ -50,18 +50,14 @@ def _idle_repo() -> InMemoryTicketRepository:
 def test_gate_update_busy_exits_75() -> None:
     """When the board has ≥1 open ticket, gate-update must exit 75 (EX_TEMPFAIL)."""
     runner = CliRunner()
-    result = runner.invoke(
-        app, ["gate-update"], obj=build_cli_context(repo=_busy_repo())
-    )
+    result = runner.invoke(app, ["gate-update"], obj=build_cli_context(repo=_busy_repo()))
     assert result.exit_code == 75
 
 
 def test_gate_update_idle_exits_0() -> None:
     """When the board is empty (all tickets terminal), gate-update must exit 0."""
     runner = CliRunner()
-    result = runner.invoke(
-        app, ["gate-update"], obj=build_cli_context(repo=_idle_repo())
-    )
+    result = runner.invoke(app, ["gate-update"], obj=build_cli_context(repo=_idle_repo()))
     assert result.exit_code == 0
 
 
@@ -71,7 +67,9 @@ def test_gate_update_error_exits_0_and_warns() -> None:
     # CliRunner (typer.testing) mixes stderr into output by default.
     runner = CliRunner()
     result = runner.invoke(
-        app, ["gate-update"], obj=build_cli_context(repo=_RaisingRepo())  # type: ignore[arg-type]
+        app,
+        ["gate-update"],
+        obj=build_cli_context(repo=_RaisingRepo()),  # type: ignore[arg-type]
     )
     assert result.exit_code == 0
     assert "WARNING" in result.output

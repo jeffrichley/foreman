@@ -57,7 +57,10 @@ def _outcome(summary: str = "impl PR open, CI in flight") -> Outcome:
 
 
 def _event(
-    *, at: dt.datetime, outcome: Outcome, state_name: str = "Implementing",
+    *,
+    at: dt.datetime,
+    outcome: Outcome,
+    state_name: str = "Implementing",
 ) -> ExecuteCompletedEvent:
     return ExecuteCompletedEvent(
         at=at,
@@ -74,11 +77,15 @@ def _repo(history: list[StateInstanceRecord]) -> MagicMock:
     repo = MagicMock()
     repo.list_state_instances_for_ticket.return_value = history
     repo.get_ticket.return_value = TicketRecord(
-        id=1, project="proj", issue_number=42,
+        id=1,
+        project="proj",
+        issue_number=42,
         current_state="Implementing",
         created_at=dt.datetime(2026, 6, 20, tzinfo=dt.UTC),
         updated_at=dt.datetime(2026, 6, 20, tzinfo=dt.UTC),
-        held_by=None, held_at=None, held_reason=None,
+        held_by=None,
+        held_at=None,
+        held_reason=None,
         depends_on=[],
     )
     return repo
@@ -118,12 +125,14 @@ def test_sustained_blocked_above_threshold_posts_once() -> None:
     history: list[StateInstanceRecord] = []
     payload = {"summary": "impl PR open, CI in flight"}
     for i in range(32):
-        history.append(_record(
-            seq=i + 1,
-            outcome_kind=OutcomeKind.BLOCKED,
-            outcome_payload=payload,
-            execute_completed_at=sixteen_min_ago + dt.timedelta(seconds=30 * i),
-        ))
+        history.append(
+            _record(
+                seq=i + 1,
+                outcome_kind=OutcomeKind.BLOCKED,
+                outcome_payload=payload,
+                execute_completed_at=sixteen_min_ago + dt.timedelta(seconds=30 * i),
+            )
+        )
     repo = _repo(history)
     fake_git = FakeGitProvider()
     obs = SustainedBlockedObserver(
@@ -248,10 +257,12 @@ def test_handler_swallows_exceptions() -> None:
         git=fake_git,
     )
     # Should not raise; observer wraps handler.
-    obs(_event(
-        at=dt.datetime(2026, 6, 20, tzinfo=dt.UTC),
-        outcome=_outcome(),
-    ))
+    obs(
+        _event(
+            at=dt.datetime(2026, 6, 20, tzinfo=dt.UTC),
+            outcome=_outcome(),
+        )
+    )
 
 
 def test_non_blocked_event_is_ignored() -> None:
@@ -261,21 +272,26 @@ def test_non_blocked_event_is_ignored() -> None:
         repo=repo,
         git=fake_git,
     )
-    obs(_event(
-        at=dt.datetime(2026, 6, 20, tzinfo=dt.UTC),
-        outcome=Outcome(
-            kind=OutcomeKind.CLEAN,
-            confidence=OutcomeConfidence.HIGH,
-            summary="ok",
-        ),
-    ))
+    obs(
+        _event(
+            at=dt.datetime(2026, 6, 20, tzinfo=dt.UTC),
+            outcome=Outcome(
+                kind=OutcomeKind.CLEAN,
+                confidence=OutcomeConfidence.HIGH,
+                summary="ok",
+            ),
+        )
+    )
     assert fake_git.posted_comments == []
 
 
-@pytest.mark.parametrize("threshold", [
-    dt.timedelta(minutes=15),
-    dt.timedelta(seconds=0.001),
-])
+@pytest.mark.parametrize(
+    "threshold",
+    [
+        dt.timedelta(minutes=15),
+        dt.timedelta(seconds=0.001),
+    ],
+)
 def test_threshold_is_configurable(threshold: dt.timedelta) -> None:
     assert isinstance(SUSTAINED_BLOCKED_THRESHOLD, dt.timedelta)
     # Confirm the observer accepts the threshold override.

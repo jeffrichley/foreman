@@ -1,4 +1,5 @@
 """RoleDispatchState — common dispatch + outcome-parse mechanism."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -30,11 +31,15 @@ def _make_ctx(dispatcher: FakeRoleDispatcher) -> tuple[StateContext, InMemoryTic
     repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
     instance = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="Demo", sequence=1,
+        ticket_id=ticket.id,
+        state_name="Demo",
+        sequence=1,
         now=dt.datetime(2026, 6, 13),
     )
     ctx = StateContext(
-        ticket=ticket, instance=instance, repo=repo,
+        ticket=ticket,
+        instance=instance,
+        repo=repo,
         clock=lambda: dt.datetime(2026, 6, 13),
         role_dispatcher=dispatcher,
     )
@@ -42,10 +47,15 @@ def _make_ctx(dispatcher: FakeRoleDispatcher) -> tuple[StateContext, InMemoryTic
 
 
 def test_dispatches_role_and_parses_outcome():
-    dispatcher = FakeRoleDispatcher(responses={
-        ("planner", "p", 1):
-            'FOREMAN_OUTCOME:{"kind":"clean","confidence":"high","summary":"ok"}',
-    })
+    dispatcher = FakeRoleDispatcher(
+        responses={
+            (
+                "planner",
+                "p",
+                1,
+            ): 'FOREMAN_OUTCOME:{"kind":"clean","confidence":"high","summary":"ok"}',
+        }
+    )
     ctx, _ = _make_ctx(dispatcher)
     outcome = _Demo().execute(ctx)
     assert outcome.kind == OutcomeKind.CLEAN
@@ -53,18 +63,22 @@ def test_dispatches_role_and_parses_outcome():
 
 
 def test_missing_marker_propagates_as_outcome_missing():
-    dispatcher = FakeRoleDispatcher(responses={
-        ("planner", "p", 1): "lots of log lines but no marker\n",
-    })
+    dispatcher = FakeRoleDispatcher(
+        responses={
+            ("planner", "p", 1): "lots of log lines but no marker\n",
+        }
+    )
     ctx, _ = _make_ctx(dispatcher)
     with pytest.raises(OutcomeMissingError):
         _Demo().execute(ctx)
 
 
 def test_malformed_json_propagates_as_outcome_malformed():
-    dispatcher = FakeRoleDispatcher(responses={
-        ("planner", "p", 1): "FOREMAN_OUTCOME:{not valid}\n",
-    })
+    dispatcher = FakeRoleDispatcher(
+        responses={
+            ("planner", "p", 1): "FOREMAN_OUTCOME:{not valid}\n",
+        }
+    )
     ctx, _ = _make_ctx(dispatcher)
     with pytest.raises(OutcomeMalformedError):
         _Demo().execute(ctx)
@@ -74,11 +88,15 @@ def test_missing_dispatcher_raises_at_execute():
     repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
     instance = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="Demo", sequence=1,
+        ticket_id=ticket.id,
+        state_name="Demo",
+        sequence=1,
         now=dt.datetime(2026, 6, 13),
     )
     ctx = StateContext(
-        ticket=ticket, instance=instance, repo=repo,
+        ticket=ticket,
+        instance=instance,
+        repo=repo,
         clock=lambda: dt.datetime(2026, 6, 13),
         # role_dispatcher omitted
     )
@@ -90,10 +108,15 @@ def test_missing_dispatcher_raises_at_execute():
 def test_first_run_stamps_session_id_and_dispatches_fresh():
     """Crash-recovery resume arm: a FIRST run (no prior) stamps the derived
     session id on the instance row and dispatches with ``resume=False``."""
-    dispatcher = FakeRoleDispatcher(responses={
-        ("planner", "p", 1):
-            'FOREMAN_OUTCOME:{"kind":"clean","confidence":"high","summary":"ok"}',
-    })
+    dispatcher = FakeRoleDispatcher(
+        responses={
+            (
+                "planner",
+                "p",
+                1,
+            ): 'FOREMAN_OUTCOME:{"kind":"clean","confidence":"high","summary":"ok"}',
+        }
+    )
     ctx, repo = _make_ctx(dispatcher)
 
     # The id resolve_dispatch will derive for a first run: run_key is the
@@ -114,10 +137,15 @@ def test_first_run_stamps_session_id_and_dispatches_fresh():
 def test_interrupted_prior_with_matching_id_resumes():
     """A prior interrupted same-state attempt whose stored session id matches
     the run's derived id makes execute forward ``resume=True``."""
-    dispatcher = FakeRoleDispatcher(responses={
-        ("planner", "p", 1):
-            'FOREMAN_OUTCOME:{"kind":"clean","confidence":"high","summary":"ok"}',
-    })
+    dispatcher = FakeRoleDispatcher(
+        responses={
+            (
+                "planner",
+                "p",
+                1,
+            ): 'FOREMAN_OUTCOME:{"kind":"clean","confidence":"high","summary":"ok"}',
+        }
+    )
     repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
 
@@ -125,7 +153,9 @@ def test_interrupted_prior_with_matching_id_resumes():
     # (interrupted), and carrying the id derived for THIS run. run_key is the
     # first sequence in the run (1), so derive with run_key="1".
     prior = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="Demo", sequence=1,
+        ticket_id=ticket.id,
+        state_name="Demo",
+        sequence=1,
         now=dt.datetime(2026, 6, 13),
     )
     run_id = derive_session_id(ticket.id, "planner", None, "1")
@@ -134,11 +164,15 @@ def test_interrupted_prior_with_matching_id_resumes():
 
     # Current in-flight instance (seq 2): same state → same run as the prior.
     current = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="Demo", sequence=2,
+        ticket_id=ticket.id,
+        state_name="Demo",
+        sequence=2,
         now=dt.datetime(2026, 6, 13),
     )
     ctx = StateContext(
-        ticket=ticket, instance=current, repo=repo,
+        ticket=ticket,
+        instance=current,
+        repo=repo,
         clock=lambda: dt.datetime(2026, 6, 13),
         role_dispatcher=dispatcher,
     )

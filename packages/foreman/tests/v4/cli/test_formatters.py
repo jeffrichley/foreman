@@ -1,4 +1,5 @@
 """Strategy pattern for output formatting — table | json | yaml."""
+
 from __future__ import annotations
 
 import json
@@ -37,6 +38,7 @@ def test_json_formatter_round_trips():
 
 def test_yaml_formatter_emits_valid_yaml():
     import yaml
+
     out = YamlFormatter().format(_ROWS)
     assert yaml.safe_load(out) == _ROWS
 

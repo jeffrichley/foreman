@@ -16,7 +16,9 @@ from foreman.v4.cli import app
 
 
 def _make_completed(
-    returncode: int, stdout: str = "", stderr: str = "",
+    returncode: int,
+    stdout: str = "",
+    stderr: str = "",
 ) -> subprocess.CompletedProcess[str]:
     """Build a CompletedProcess[str] the doctor's stub layer expects."""
     return subprocess.CompletedProcess(
@@ -33,7 +35,8 @@ def test_doctor_image_fresh_ok_when_shas_match(monkeypatch) -> None:
 
     def fake_run(*args, **kwargs):
         return _make_completed(
-            0, stdout="abc1234deadbeefcafefeed00112233445566778\trefs/heads/main\n",
+            0,
+            stdout="abc1234deadbeefcafefeed00112233445566778\trefs/heads/main\n",
         )
 
     monkeypatch.setattr("foreman.v4.cli.doctor.subprocess.run", fake_run)
@@ -49,7 +52,8 @@ def test_doctor_image_fresh_stale_when_shas_differ(monkeypatch) -> None:
 
     def fake_run(*args, **kwargs):
         return _make_completed(
-            0, stdout="ffffffffdeadbeefcafefeed00112233445566778\trefs/heads/main\n",
+            0,
+            stdout="ffffffffdeadbeefcafefeed00112233445566778\trefs/heads/main\n",
         )
 
     monkeypatch.setattr("foreman.v4.cli.doctor.subprocess.run", fake_run)
@@ -83,7 +87,9 @@ def test_doctor_image_fresh_warn_on_subprocess_failure(monkeypatch) -> None:
 
     def fake_run(*args, **kwargs):
         return _make_completed(
-            128, stdout="", stderr="fatal: unable to access 'https://github.com/...': Could not resolve host: github.com\n",
+            128,
+            stdout="",
+            stderr="fatal: unable to access 'https://github.com/...': Could not resolve host: github.com\n",
         )
 
     monkeypatch.setattr("foreman.v4.cli.doctor.subprocess.run", fake_run)

@@ -1,4 +1,5 @@
 """configure_logging — installs RichHandler + JsonLinesHandler."""
+
 from __future__ import annotations
 
 import json

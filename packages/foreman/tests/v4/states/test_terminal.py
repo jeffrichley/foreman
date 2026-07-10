@@ -1,4 +1,5 @@
 """Terminal states — Done, Failed, NeedsHelp."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -17,13 +18,22 @@ def ctx_for():
         repo = InMemoryTicketRepository()
         ticket = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
         instance = repo.open_state_instance(
-            ticket_id=ticket.id, state_name=state_class.state_name,
-            sequence=1, now=dt.datetime(2026, 6, 13),
+            ticket_id=ticket.id,
+            state_name=state_class.state_name,
+            sequence=1,
+            now=dt.datetime(2026, 6, 13),
         )
-        return StateContext(
-            ticket=ticket, instance=instance, repo=repo,
-            clock=lambda: dt.datetime(2026, 6, 13),
-        ), repo, ticket
+        return (
+            StateContext(
+                ticket=ticket,
+                instance=instance,
+                repo=repo,
+                clock=lambda: dt.datetime(2026, 6, 13),
+            ),
+            repo,
+            ticket,
+        )
+
     return _make
 
 
@@ -35,7 +45,9 @@ def ctx_for():
         (NeedsHelpState, "NeedsHelp"),
     ],
 )
-def test_terminal_state_returns_clean_outcome_and_no_next_state(state_class, expected_name, ctx_for):
+def test_terminal_state_returns_clean_outcome_and_no_next_state(
+    state_class, expected_name, ctx_for
+):
     ctx, _repo, _ticket = ctx_for(state_class)
     state = state_class()
     assert state.state_name == expected_name

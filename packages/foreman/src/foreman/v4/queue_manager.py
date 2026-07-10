@@ -28,18 +28,18 @@ from foreman.v4.repository import TicketRepository
 from foreman.v4.work import WorkItem
 
 _STATE_PRIORITY = {
-    "Merging":      1,
+    "Merging": 1,
     # foreman#416: SpecMerging is a fast non-role merge state (like
     # Merging) that should drain promptly so the spec PR lands and the
     # build can start — same top priority tier as Merging.
-    "SpecMerging":  1,
-    "ImplReview":   2,
+    "SpecMerging": 1,
+    "ImplReview": 2,
     "Implementing": 3,
-    "ImplFix":      3,
-    "SpecReview":   4,
-    "SpecFix":      4,
-    "Planning":     5,
-    "Queued":       6,
+    "ImplFix": 3,
+    "SpecReview": 4,
+    "SpecFix": 4,
+    "Planning": 5,
+    "Queued": 6,
 }
 _DEFAULT_PRIORITY = 99
 
