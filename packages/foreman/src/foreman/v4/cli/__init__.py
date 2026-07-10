@@ -189,6 +189,8 @@ def main() -> None:
 
     # Local imports keep the typer app importable for tests without
     # requiring PyGithub or any App credentials to be configured.
+    from pydantic import ValidationError
+
     from foreman.v4.bootstrap import bootstrap_cli_context
     from foreman.v4.config import load_config, load_projects
     from foreman.v4.identity import V4IdentityRegistry
@@ -201,7 +203,25 @@ def main() -> None:
     # instead of from the baked config.toml template (which ships zero
     # [[projects]] tables after this change).
     projects_path = Path(os.environ.get("FOREMAN_PROJECTS_PATH", str(_DEFAULT_PROJECTS_PATH)))
-    projects = load_projects(projects_path)
+    # issue #503 FIX 2: emit a clean operator-facing error on startup failure
+    # (missing file or malformed TOML/schema) instead of a raw traceback.
+    # Mirrors how cmd_init already handles FileNotFoundError.
+    try:
+        projects = load_projects(projects_path)
+    except FileNotFoundError:
+        typer.echo(
+            f"ERROR: projects file not found at {projects_path}\n"
+            "Create the file with at least one [[projects]] block before "
+            "starting the daemon.",
+            err=True,
+        )
+        raise typer.Exit(code=1) from None
+    except ValidationError as exc:
+        typer.echo(
+            f"ERROR: projects file at {projects_path} failed validation:\n{exc}",
+            err=True,
+        )
+        raise typer.Exit(code=1) from None
 
     # Single-installation-per-role-bot assumption (see
     # ``foreman.v4.identity`` module docstring): the orchestrator's App
