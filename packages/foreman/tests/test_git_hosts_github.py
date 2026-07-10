@@ -896,6 +896,87 @@ def test_push_branch_uses_force_with_lease(tmp_path: Path) -> None:
     )
 
 
+# ----------------------------------------------------------------------
+# foreman#484 — push_branch retry on non-fast-forward rejection
+#
+# When a foreman/issue-N or foreman/impl-N remote branch has divergent
+# history from a prior run, a plain push is rejected with
+# "! [rejected] ... (fetch first)" or "(non-fast-forward)". Foreman
+# owns these branch namespaces, so a force-refresh is safe. The fix
+# adds a try/except around the initial push: on rejection it retries
+# with --force-with-lease; all other errors re-raise immediately.
+# ----------------------------------------------------------------------
+
+
+def test_push_branch_retries_with_force_on_non_fast_forward(tmp_path: Path) -> None:
+    """push_branch() retries with --force-with-lease when rejected as non-fast-forward."""
+    wt = _init_worktree(tmp_path)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/owner/name.git"],
+        cwd=wt,
+        check=True,
+        capture_output=True,
+    )
+
+    real_run = subprocess.run
+    push_calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git" and cmd[1] == "push":
+            push_calls.append(list(cmd))
+            if len(push_calls) == 1:
+                raise subprocess.CalledProcessError(
+                    1,
+                    cmd,
+                    output="",
+                    stderr="! [rejected] foreman/issue-7 -> foreman/issue-7 (fetch first)\n",
+                )
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return real_run(cmd, *args, **kwargs)
+
+    provider = GitHubProvider(identity=_identity("ghs_abc"), client=MagicMock())
+
+    with patch("foreman.git_hosts.github.subprocess.run", side_effect=fake_run):
+        provider.push_branch(worktree_path=wt, branch="foreman/issue-7")
+
+    assert len(push_calls) == 2, "expected initial push + force-with-lease retry"
+    assert "--force-with-lease" in push_calls[1], "retry must use --force-with-lease"
+
+
+def test_push_branch_does_not_retry_on_non_rejection_error(tmp_path: Path) -> None:
+    """A push failure that is NOT a non-fast-forward rejection must not trigger retry."""
+    wt = _init_worktree(tmp_path)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/owner/name.git"],
+        cwd=wt,
+        check=True,
+        capture_output=True,
+    )
+
+    real_run = subprocess.run
+    push_calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git" and cmd[1] == "push":
+            push_calls.append(list(cmd))
+            raise subprocess.CalledProcessError(
+                1,
+                cmd,
+                output="",
+                stderr="refusing to allow a GitHub App to create or update workflow without workflows permission",
+            )
+        return real_run(cmd, *args, **kwargs)
+
+    provider = GitHubProvider(identity=_identity("ghs_abc"), client=MagicMock())
+
+    with patch("foreman.git_hosts.github.subprocess.run", side_effect=fake_run):
+        with pytest.raises(GitCommandError) as excinfo:
+            provider.push_branch(worktree_path=wt, branch="foreman/issue-7")
+
+    assert len(push_calls) == 1, "only one push attempt, no retry"
+    assert "workflows permission" in excinfo.value.stderr
+
+
 def test_git_subprocess_preserves_uv_cache_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
