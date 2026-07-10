@@ -11,6 +11,7 @@ The records are built through the real repository write methods
 ``record_failure`` / ``close_state_instance`` / ``mark_execute_completed``)
 so the journal rows are exactly the shape production produces.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -90,9 +91,7 @@ def test_prior_never_started_is_fresh():
     repo, ticket_id = _make_repo_and_ticket()
     # prior row opened but never marked execute-started, then crash-closed
     prior = _open(repo, ticket_id=ticket_id, state_name=_STATE, sequence=1)
-    repo.record_failure(
-        prior.id, now=_at(1), failure_phase="crash_recovery", failure_reason="x"
-    )
+    repo.record_failure(prior.id, now=_at(1), failure_phase="crash_recovery", failure_reason="x")
     repo.close_state_instance(prior.id, now=_at(1))
 
     current = _open(repo, ticket_id=ticket_id, state_name=_STATE, sequence=2)
@@ -118,9 +117,7 @@ def test_prior_interrupted_matching_session_resumes():
     repo.mark_execute_started(prior.id, now=_at(1))
     repo.set_session_id(prior.id, sid)
     # crash: record_failure + close, but NO mark_execute_completed
-    repo.record_failure(
-        prior.id, now=_at(1), failure_phase="crash_recovery", failure_reason="x"
-    )
+    repo.record_failure(prior.id, now=_at(1), failure_phase="crash_recovery", failure_reason="x")
     repo.close_state_instance(prior.id, now=_at(1))
 
     current = _open(repo, ticket_id=ticket_id, state_name=_STATE, sequence=2)
@@ -173,9 +170,7 @@ def test_prior_interrupted_mismatched_session_is_fresh():
     repo.mark_execute_started(prior.id, now=_at(1))
     # store a WRONG id (e.g. some other work's session) — never matches.
     repo.set_session_id(prior.id, "deadbeef-0000-0000-0000-000000000000")
-    repo.record_failure(
-        prior.id, now=_at(1), failure_phase="crash_recovery", failure_reason="x"
-    )
+    repo.record_failure(prior.id, now=_at(1), failure_phase="crash_recovery", failure_reason="x")
     repo.close_state_instance(prior.id, now=_at(1))
 
     current = _open(repo, ticket_id=ticket_id, state_name=_STATE, sequence=2)
@@ -200,12 +195,8 @@ def test_state_changed_breaks_run_is_fresh():
     repo.mark_execute_started(planning.id, now=_at(1))
     # store the id it would have for the Planning run — must NOT be picked up
     # by a SpecReview dispatch.
-    repo.set_session_id(
-        planning.id, derive_session_id(ticket_id, "planner", None, "1")
-    )
-    repo.record_failure(
-        planning.id, now=_at(1), failure_phase="crash_recovery", failure_reason="x"
-    )
+    repo.set_session_id(planning.id, derive_session_id(ticket_id, "planner", None, "1"))
+    repo.record_failure(planning.id, now=_at(1), failure_phase="crash_recovery", failure_reason="x")
     repo.close_state_instance(planning.id, now=_at(1))
 
     # Now the ticket is in SpecReview (different state) — current instance.
@@ -235,7 +226,9 @@ def test_resume_bound_exhausted_is_fresh():
         repo.mark_execute_started(prior.id, now=_at(seq))
         repo.set_session_id(prior.id, sid)
         repo.record_failure(
-            prior.id, now=_at(seq), failure_phase="crash_recovery",
+            prior.id,
+            now=_at(seq),
+            failure_phase="crash_recovery",
             failure_reason="x",
         )
         repo.close_state_instance(prior.id, now=_at(seq))
@@ -260,9 +253,7 @@ def test_single_interrupted_prior_still_resumes():
     prior = _open(repo, ticket_id=ticket_id, state_name=_STATE, sequence=1)
     repo.mark_execute_started(prior.id, now=_at(1))
     repo.set_session_id(prior.id, sid)
-    repo.record_failure(
-        prior.id, now=_at(1), failure_phase="crash_recovery", failure_reason="x"
-    )
+    repo.record_failure(prior.id, now=_at(1), failure_phase="crash_recovery", failure_reason="x")
     repo.close_state_instance(prior.id, now=_at(1))
 
     current = _open(repo, ticket_id=ticket_id, state_name=_STATE, sequence=2)

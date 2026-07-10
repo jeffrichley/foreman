@@ -35,6 +35,7 @@ Not terminal — it transitions onward, so it is deliberately NOT in
 ``state._TERMINAL_STATE_NAMES`` / ``poller._TERMINAL_STATES``; it keeps
 being polled exactly like MergingState.
 """
+
 from __future__ import annotations
 
 from foreman.v4.outcome import Outcome, OutcomeKind

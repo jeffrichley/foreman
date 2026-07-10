@@ -1,4 +1,5 @@
 """WorkItem — the v4 queue item shape."""
+
 from __future__ import annotations
 
 import pytest

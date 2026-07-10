@@ -1,4 +1,5 @@
 """Phase 4 completion — 3 concurrent tickets including one dep-blocked."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -15,10 +16,7 @@ from foreman.v4.worker_pool import WorkerPool
 
 def _canned(kind: str, *, pr_number: int | None = None) -> str:
     artifacts = f',"artifacts":{{"pr_number":{pr_number}}}' if pr_number else ""
-    return (
-        f'FOREMAN_OUTCOME:{{"kind":"{kind}","confidence":"high",'
-        f'"summary":"x"{artifacts}}}'
-    )
+    return f'FOREMAN_OUTCOME:{{"kind":"{kind}","confidence":"high","summary":"x"{artifacts}}}'
 
 
 def _wait_idle(qm: QueueManager, timeout: float = 5.0) -> None:
@@ -34,17 +32,23 @@ def test_three_concurrent_tickets_with_one_dep_blocked():
     git = FakeGitProvider()
     # 3 fresh labeled issues
     git.set_open_issues_with_label(
-        project="p", label="foreman:plan", issue_numbers={1, 2, 3},
+        project="p",
+        label="foreman:plan",
+        issue_numbers={1, 2, 3},
     )
     # Each ticket gets its own PR; the mergeable + ci_passing seed
     # state satisfies MergingState's direct-merge gate in one pass.
     for pr in (101, 102, 103):
         git.set_pr_state(
-            project="p", pr_number=pr,
+            project="p",
+            pr_number=pr,
             # foreman#357: base_ref="main" passes MergingState's base-ref
             # guard once a project_config is present (added for #418).
             state=PRState(
-                merged=False, mergeable=True, ci_passing=True, base_ref="main",
+                merged=False,
+                mergeable=True,
+                ci_passing=True,
+                base_ref="main",
             ),
         )
 
@@ -59,18 +63,27 @@ def test_three_concurrent_tickets_with_one_dep_blocked():
     # max_in_flight=4 sizes both the QM cap and the WorkerPool thread pool.
     qm = QueueManager(repo=repo, max_in_flight=4)
     poller = Poller(
-        repo=repo, qm=qm, git=git,
-        project="p", trigger_label="foreman:plan",
+        repo=repo,
+        qm=qm,
+        git=git,
+        project="p",
+        trigger_label="foreman:plan",
         clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
     )
     pool = WorkerPool(
-        repo=repo, qm=qm, dispatcher=dispatcher, git=git, bus=None,
+        repo=repo,
+        qm=qm,
+        dispatcher=dispatcher,
+        git=git,
+        bus=None,
         clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
         # foreman#418: opt in to auto-merge so the impl PR reaches Done
         # (default parks at ImplApproved for human merge).
         project_configs={
             "p": ProjectConfig(
-                name="p", repo="o/p", local_clone_path="/tmp/p",
+                name="p",
+                repo="o/p",
+                local_clone_path="/tmp/p",
                 auto_merge_impl=True,
             )
         },
@@ -89,10 +102,7 @@ def test_three_concurrent_tickets_with_one_dep_blocked():
             poller.tick()
             pool.tick()
             _wait_idle(qm)
-            tickets = [
-                repo.get_ticket_by_issue(project="p", issue_number=i)
-                for i in (1, 2, 3)
-            ]
+            tickets = [repo.get_ticket_by_issue(project="p", issue_number=i) for i in (1, 2, 3)]
             if all(t.current_state in ("Done", "Failed", "NeedsHelp") for t in tickets):
                 break
         else:

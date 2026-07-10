@@ -1,4 +1,5 @@
 """hold/resume/retry/skip/drop/set-state — operator mutations."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -32,7 +33,9 @@ def _make_with_history(*states: str) -> tuple[InMemoryTicketRepository, int]:
     t = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
     for seq, name in enumerate(states):
         repo.open_state_instance(
-            ticket_id=t.id, state_name=name, sequence=seq,
+            ticket_id=t.id,
+            state_name=name,
+            sequence=seq,
             now=dt.datetime(2026, 6, 13),
         )
     repo.set_ticket_state(t.id, states[-1], now=dt.datetime(2026, 6, 13))
@@ -43,7 +46,8 @@ def test_hold_sets_held_columns():
     repo, tid = _make()
     runner = CliRunner()
     result = runner.invoke(
-        app, ["hold", str(tid), "--reason", "vacation", "--by", "jeff"],
+        app,
+        ["hold", str(tid), "--reason", "vacation", "--by", "jeff"],
         obj=build_cli_context(repo=repo),
     )
     assert result.exit_code == 0
@@ -65,7 +69,8 @@ def test_retry_enqueues_workitem_for_current_state():
     qm = QueueManager(repo=repo, max_in_flight=4)
     runner = CliRunner()
     result = runner.invoke(
-        app, ["retry", str(tid)],
+        app,
+        ["retry", str(tid)],
         obj=build_cli_context(repo=repo, qm=qm),
     )
     assert result.exit_code == 0
@@ -80,13 +85,12 @@ def test_retry_clears_next_action_at():
     elapses.
     """
     repo, tid = _make()
-    repo.set_next_action_at(
-        tid, when=dt.datetime(2026, 6, 13, 12, 30, tzinfo=dt.UTC)
-    )
+    repo.set_next_action_at(tid, when=dt.datetime(2026, 6, 13, 12, 30, tzinfo=dt.UTC))
     qm = QueueManager(repo=repo, max_in_flight=4)
     runner = CliRunner()
     result = runner.invoke(
-        app, ["retry", str(tid)],
+        app,
+        ["retry", str(tid)],
         obj=build_cli_context(repo=repo, qm=qm),
     )
     assert result.exit_code == 0
@@ -100,12 +104,16 @@ def test_retry_needshelp_resumes_escalated_role_state():
     re-enqueue of the terminal NeedsHelp state.
     """
     repo, tid = _make_with_history(
-        "Queued", "Planning", "Implementing", "NeedsHelp",
+        "Queued",
+        "Planning",
+        "Implementing",
+        "NeedsHelp",
     )
     qm = QueueManager(repo=repo, max_in_flight=4)
     runner = CliRunner()
     result = runner.invoke(
-        app, ["retry", str(tid)],
+        app,
+        ["retry", str(tid)],
         obj=build_cli_context(repo=repo, qm=qm),
     )
     assert result.exit_code == 0, result.output
@@ -121,7 +129,8 @@ def test_retry_needshelp_message_names_resumed_state():
     qm = QueueManager(repo=repo, max_in_flight=4)
     runner = CliRunner()
     result = runner.invoke(
-        app, ["retry", str(tid)],
+        app,
+        ["retry", str(tid)],
         obj=build_cli_context(repo=repo, qm=qm),
     )
     assert result.exit_code == 0
@@ -136,7 +145,8 @@ def test_retry_failed_also_resumes_role_state():
     qm = QueueManager(repo=repo, max_in_flight=4)
     runner = CliRunner()
     result = runner.invoke(
-        app, ["retry", str(tid)],
+        app,
+        ["retry", str(tid)],
         obj=build_cli_context(repo=repo, qm=qm),
     )
     assert result.exit_code == 0, result.output
@@ -150,7 +160,8 @@ def test_retry_done_refuses():
     qm = QueueManager(repo=repo, max_in_flight=4)
     runner = CliRunner()
     result = runner.invoke(
-        app, ["retry", str(tid)],
+        app,
+        ["retry", str(tid)],
         obj=build_cli_context(repo=repo, qm=qm),
     )
     assert result.exit_code != 0
@@ -165,7 +176,8 @@ def test_retry_needshelp_without_role_history_errors():
     qm = QueueManager(repo=repo, max_in_flight=4)
     runner = CliRunner()
     result = runner.invoke(
-        app, ["retry", str(tid)],
+        app,
+        ["retry", str(tid)],
         obj=build_cli_context(repo=repo, qm=qm),
     )
     assert result.exit_code != 0
@@ -176,7 +188,8 @@ def test_set_state_changes_current_state():
     repo, tid = _make()
     runner = CliRunner()
     result = runner.invoke(
-        app, ["set-state", str(tid), "SpecReview"],
+        app,
+        ["set-state", str(tid), "SpecReview"],
         obj=build_cli_context(repo=repo),
     )
     assert result.exit_code == 0
@@ -187,7 +200,8 @@ def test_set_state_unknown_state_errors():
     repo, tid = _make()
     runner = CliRunner()
     result = runner.invoke(
-        app, ["set-state", str(tid), "NotAState"],
+        app,
+        ["set-state", str(tid), "NotAState"],
         obj=build_cli_context(repo=repo),
     )
     assert result.exit_code != 0
@@ -204,7 +218,8 @@ def test_skip_targets_next_state():
     repo, tid = _make()
     runner = CliRunner()
     runner.invoke(
-        app, ["skip", str(tid), "ImplReview"],
+        app,
+        ["skip", str(tid), "ImplReview"],
         obj=build_cli_context(repo=repo),
     )
     assert repo.get_ticket(tid).current_state == "ImplReview"
@@ -216,39 +231,53 @@ def test_discover_collects_full_state_when_everything_present():
 
     repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(
-        project="agent_core", issue_number=180, now=dt.datetime(2026, 6, 17),
+        project="agent_core",
+        issue_number=180,
+        now=dt.datetime(2026, 6, 17),
     )
     git = FakeGitProvider()
     git.seed_issue_labels(
-        project="agent_core", issue_number=180,
+        project="agent_core",
+        issue_number=180,
         labels={"foreman:state-failed", "foreman:plan", "bug"},
     )
     git.seed_branch(project="agent_core", branch_name="foreman/issue-180")
     git.seed_branch(project="agent_core", branch_name="foreman/impl-180")
     git.set_pr_state(
-        project="agent_core", pr_number=19,
+        project="agent_core",
+        pr_number=19,
         state=PRState(merged=False, mergeable=True, ci_passing=True),
     )
     git.set_pr_head_branch(
-        project="agent_core", pr_number=19, branch_name="foreman/issue-180",
+        project="agent_core",
+        pr_number=19,
+        branch_name="foreman/issue-180",
     )
     git.set_pr_state(
-        project="agent_core", pr_number=21,
+        project="agent_core",
+        pr_number=21,
         state=PRState(merged=False, mergeable=False, ci_passing=False),
     )
     git.set_pr_head_branch(
-        project="agent_core", pr_number=21, branch_name="foreman/impl-180",
+        project="agent_core",
+        pr_number=21,
+        branch_name="foreman/impl-180",
     )
     plan = _discover(
-        git=git, repo=repo,
-        project="agent_core", issue_number=180,
-        keep_pr=False, keep_worktree=False, retrigger=True,
+        git=git,
+        repo=repo,
+        project="agent_core",
+        issue_number=180,
+        keep_pr=False,
+        keep_worktree=False,
+        retrigger=True,
     )
     assert isinstance(plan, ResetPlan)
     assert plan.spec_pr == 19
     assert plan.impl_pr == 21
     assert plan.delete_branches == [
-        "foreman/issue-180", "foreman/impl-180",
+        "foreman/issue-180",
+        "foreman/impl-180",
     ]
     assert plan.prune_worktrees is True
     assert plan.strip_labels == {"foreman:state-failed", "foreman:plan"}
@@ -264,9 +293,13 @@ def test_discover_no_row_no_branches_no_prs_minimal_plan():
     git = FakeGitProvider()
     # No labels, no branches, no PRs, no ticket row.
     plan = _discover(
-        git=git, repo=repo,
-        project="agent_core", issue_number=999,
-        keep_pr=False, keep_worktree=False, retrigger=True,
+        git=git,
+        repo=repo,
+        project="agent_core",
+        issue_number=999,
+        keep_pr=False,
+        keep_worktree=False,
+        retrigger=True,
     )
     assert plan.spec_pr is None
     assert plan.impl_pr is None
@@ -282,16 +315,23 @@ def test_discover_keep_pr_skips_pr_lookup():
     repo = InMemoryTicketRepository()
     git = FakeGitProvider()
     git.set_pr_state(
-        project="agent_core", pr_number=19,
+        project="agent_core",
+        pr_number=19,
         state=PRState(merged=False, mergeable=True, ci_passing=True),
     )
     git.set_pr_head_branch(
-        project="agent_core", pr_number=19, branch_name="foreman/issue-180",
+        project="agent_core",
+        pr_number=19,
+        branch_name="foreman/issue-180",
     )
     plan = _discover(
-        git=git, repo=repo,
-        project="agent_core", issue_number=180,
-        keep_pr=True, keep_worktree=False, retrigger=True,
+        git=git,
+        repo=repo,
+        project="agent_core",
+        issue_number=180,
+        keep_pr=True,
+        keep_worktree=False,
+        retrigger=True,
     )
     assert plan.spec_pr is None
     assert plan.impl_pr is None
@@ -313,20 +353,26 @@ def _full_reset_ctx(tmp_path):
 
     repo = InMemoryTicketRepository()
     repo.create_ticket(
-        project="agent_core", issue_number=180, now=dt.datetime(2026, 6, 17),
+        project="agent_core",
+        issue_number=180,
+        now=dt.datetime(2026, 6, 17),
     )
     git = FakeGitProvider()
     git.seed_issue_labels(
-        project="agent_core", issue_number=180,
+        project="agent_core",
+        issue_number=180,
         labels={"foreman:state-failed", "bug"},
     )
     git.seed_branch(project="agent_core", branch_name="foreman/issue-180")
     git.set_pr_state(
-        project="agent_core", pr_number=19,
+        project="agent_core",
+        pr_number=19,
         state=PRState(merged=False, mergeable=True, ci_passing=True),
     )
     git.set_pr_head_branch(
-        project="agent_core", pr_number=19, branch_name="foreman/issue-180",
+        project="agent_core",
+        pr_number=19,
+        branch_name="foreman/issue-180",
     )
     # Seed both worktrees.
     wt_root = tmp_path / "worktrees"
@@ -350,7 +396,8 @@ def _full_reset_ctx(tmp_path):
             worker=fake_creds,
         ),
         orchestrator=OrchestratorConfig(
-            app_id=2, private_key_path="/tmp/fake-orch.pem",
+            app_id=2,
+            private_key_path="/tmp/fake-orch.pem",
         ),
         operator=OperatorConfig(
             supervisor=OperatorIdentity(name="Test Sup", email="sup@example.com"),
@@ -377,10 +424,13 @@ def test_reset_dry_run_prints_plan_no_mutations(tmp_path):
         app,
         [
             "reset",
-            "--project", "agent_core",
-            "--issue-number", "180",
+            "--project",
+            "agent_core",
+            "--issue-number",
+            "180",
             "--dry-run",
-            "--worktrees-root", str(wt_root),
+            "--worktrees-root",
+            str(wt_root),
         ],
         obj=ctx,
     )
@@ -406,10 +456,13 @@ def test_reset_yes_executes_full_plan(tmp_path):
         app,
         [
             "reset",
-            "--project", "agent_core",
-            "--issue-number", "180",
+            "--project",
+            "agent_core",
+            "--issue-number",
+            "180",
             "--yes",
-            "--worktrees-root", str(wt_root),
+            "--worktrees-root",
+            str(wt_root),
         ],
         obj=ctx,
     )
@@ -437,9 +490,12 @@ def test_reset_prompt_declined_aborts(tmp_path):
         app,
         [
             "reset",
-            "--project", "agent_core",
-            "--issue-number", "180",
-            "--worktrees-root", str(wt_root),
+            "--project",
+            "agent_core",
+            "--issue-number",
+            "180",
+            "--worktrees-root",
+            str(wt_root),
         ],
         obj=ctx,
         input="n\n",
@@ -457,11 +513,14 @@ def test_reset_keep_pr_skips_pr_close(tmp_path):
         app,
         [
             "reset",
-            "--project", "agent_core",
-            "--issue-number", "180",
+            "--project",
+            "agent_core",
+            "--issue-number",
+            "180",
             "--yes",
             "--keep-pr",
-            "--worktrees-root", str(wt_root),
+            "--worktrees-root",
+            str(wt_root),
         ],
         obj=ctx,
     )
@@ -477,11 +536,14 @@ def test_reset_keep_worktree_skips_worktree_prune(tmp_path):
         app,
         [
             "reset",
-            "--project", "agent_core",
-            "--issue-number", "180",
+            "--project",
+            "agent_core",
+            "--issue-number",
+            "180",
             "--yes",
             "--keep-worktree",
-            "--worktrees-root", str(wt_root),
+            "--worktrees-root",
+            str(wt_root),
         ],
         obj=ctx,
     )
@@ -496,11 +558,14 @@ def test_reset_no_retrigger_skips_apply_plan_label(tmp_path):
         app,
         [
             "reset",
-            "--project", "agent_core",
-            "--issue-number", "180",
+            "--project",
+            "agent_core",
+            "--issue-number",
+            "180",
             "--yes",
             "--no-retrigger",
-            "--worktrees-root", str(wt_root),
+            "--worktrees-root",
+            str(wt_root),
         ],
         obj=ctx,
     )
@@ -514,14 +579,32 @@ def test_reset_idempotent_second_run_minimal(tmp_path):
     ctx, repo, git, wt_root = _full_reset_ctx(tmp_path)
     runner = CliRunner()
     first = runner.invoke(
-        app, ["reset", "--project", "agent_core", "--issue-number", "180",
-              "--yes", "--worktrees-root", str(wt_root)],
+        app,
+        [
+            "reset",
+            "--project",
+            "agent_core",
+            "--issue-number",
+            "180",
+            "--yes",
+            "--worktrees-root",
+            str(wt_root),
+        ],
         obj=ctx,
     )
     assert first.exit_code == 0
     second = runner.invoke(
-        app, ["reset", "--project", "agent_core", "--issue-number", "180",
-              "--yes", "--worktrees-root", str(wt_root)],
+        app,
+        [
+            "reset",
+            "--project",
+            "agent_core",
+            "--issue-number",
+            "180",
+            "--yes",
+            "--worktrees-root",
+            str(wt_root),
+        ],
         obj=ctx,
     )
     assert second.exit_code == 0
@@ -542,8 +625,16 @@ def test_reset_no_row_still_cleans_debris(tmp_path):
     runner = CliRunner()
     result = runner.invoke(
         app,
-        ["reset", "--project", "agent_core", "--issue-number", "180",
-         "--yes", "--worktrees-root", str(wt_root)],
+        [
+            "reset",
+            "--project",
+            "agent_core",
+            "--issue-number",
+            "180",
+            "--yes",
+            "--worktrees-root",
+            str(wt_root),
+        ],
         obj=ctx,
     )
     assert result.exit_code == 0
@@ -551,7 +642,8 @@ def test_reset_no_row_still_cleans_debris(tmp_path):
     assert not (wt_root / "agent_core" / "issue-180").exists()
     # foreman:plan re-applied.
     assert "foreman:plan" in git.get_issue_labels(
-        project="agent_core", issue_number=180,
+        project="agent_core",
+        issue_number=180,
     )
 
 
@@ -561,17 +653,27 @@ def test_reset_partial_failure_continues_and_exits_nonzero(tmp_path, monkeypatch
 
     # Force close_pr to explode on PR 19 — every other step must still execute.
     original_close_pr = git.close_pr
+
     def boom_close_pr(*, project, pr_number):
         if pr_number == 19:
             raise RuntimeError("synthetic PR close failure")
         return original_close_pr(project=project, pr_number=pr_number)
+
     monkeypatch.setattr(git, "close_pr", boom_close_pr)
 
     runner = CliRunner()
     result = runner.invoke(
         app,
-        ["reset", "--project", "agent_core", "--issue-number", "180",
-         "--yes", "--worktrees-root", str(wt_root)],
+        [
+            "reset",
+            "--project",
+            "agent_core",
+            "--issue-number",
+            "180",
+            "--yes",
+            "--worktrees-root",
+            str(wt_root),
+        ],
         obj=ctx,
     )
     assert result.exit_code == 1

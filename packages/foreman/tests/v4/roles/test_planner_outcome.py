@@ -1,4 +1,5 @@
 """Planner v4 CLI emits FOREMAN_OUTCOME on exit."""
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch

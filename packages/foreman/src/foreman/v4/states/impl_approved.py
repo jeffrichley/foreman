@@ -65,7 +65,8 @@ class ImplApprovedState(TicketState):
         pr_number = self._pr_number_for(ctx)
 
         state = ctx.git.get_pr_state(
-            project=ctx.ticket.project, pr_number=pr_number,
+            project=ctx.ticket.project,
+            pr_number=pr_number,
         )
 
         # Check merged FIRST — GitHub sets both merged=True and

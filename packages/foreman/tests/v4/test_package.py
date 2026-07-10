@@ -1,4 +1,5 @@
 """Smoke test for the foreman.v4 package."""
+
 import importlib
 
 

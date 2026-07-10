@@ -314,8 +314,7 @@ def _get_pr_diff(worktree_path: Path, base_branch: str, head_sha: str, *, role_t
     default_branch = resolve_default_branch(worktree_path, role_token=role_token)
     fetch_origin_branch(worktree_path, default_branch, role_token=role_token)
     _LOG.warning(
-        "reviewer._get_pr_diff: base ref origin/%s missing for head %s; "
-        "fell back to origin/%s",
+        "reviewer._get_pr_diff: base ref origin/%s missing for head %s; fell back to origin/%s",
         base_branch,
         head_sha,
         default_branch,
@@ -471,14 +470,11 @@ async def _run_reviewer_core(
 
     try:
         owner, repo_name, pr_number = parse_pr_url(pr_url)
-        project = next(
-            (p for p in config.projects if p.name == project_name), None
-        )
+        project = next((p for p in config.projects if p.name == project_name), None)
         if project is None:
             known = [p.name for p in config.projects]
             raise ValueError(
-                f"project {project_name!r} not found in V4Config. "
-                f"Known projects: {known}"
+                f"project {project_name!r} not found in V4Config. Known projects: {known}"
             )
         expected_repo_slug = project.repo
         actual_repo_slug = f"{owner}/{repo_name}"
@@ -625,13 +621,13 @@ async def _run_reviewer_core(
                 private_key_path=config.apps.reviewer.private_key_path,
             )
             state_instance_id = os.environ.get(
-                "FOREMAN_STATE_INSTANCE_ID", "unknown",
+                "FOREMAN_STATE_INSTANCE_ID",
+                "unknown",
             )
             fallback_reason = None
             if llm_output.escalation_comment is None:
                 fallback_reason = (
-                    "reviewer LLM produced confidence=low but did not "
-                    "populate escalation_comment"
+                    "reviewer LLM produced confidence=low but did not populate escalation_comment"
                 )
             post_escalation_comment(
                 host=_host_for_post,
@@ -643,10 +639,7 @@ async def _run_reviewer_core(
                 payload=llm_output.escalation_comment,
                 fallback_reason=fallback_reason,
                 source=f"role:reviewer-{target}",
-                key=(
-                    f"state-instance-{state_instance_id}-pr-"
-                    f"{pr_number}-{llm_output.outcome}"
-                ),
+                key=(f"state-instance-{state_instance_id}-pr-{pr_number}-{llm_output.outcome}"),
             )
 
         # foreman#227: append the per-call token usage + cost to the
@@ -767,9 +760,7 @@ class _V4ReviewerResult:
         self.details: dict[str, object] = details if details is not None else {}
 
 
-def _run_reviewer_for_v4(
-    *, project: str, issue_number: int, target: str
-) -> _V4ReviewerResult:
+def _run_reviewer_for_v4(*, project: str, issue_number: int, target: str) -> _V4ReviewerResult:
     """Run the reviewer the same way the legacy ``review`` command does, but without label-writing on top.
 
     Calls :func:`_run_reviewer_core` (worktree → diff → LLM → review-post,
@@ -786,8 +777,7 @@ def _run_reviewer_for_v4(
     if project_cfg is None:
         known = [p.name for p in cfg.projects]
         raise ValueError(
-            f"project {project!r} not found in V4Config at {cfg_path}. "
-            f"Known projects: {known}"
+            f"project {project!r} not found in V4Config at {cfg_path}. Known projects: {known}"
         )
 
     # Locate the open PR for this issue. The Reviewer's legacy entry-
@@ -896,9 +886,7 @@ def run_reviewer_cli(*, project: str, issue_number: int, target: str) -> int:
         )
         return 0
     try:
-        result = _run_reviewer_for_v4(
-            project=project, issue_number=issue_number, target=target
-        )
+        result = _run_reviewer_for_v4(project=project, issue_number=issue_number, target=target)
     except ProviderTransientError as exc:
         # foreman#361: classify Anthropic-side transient failures so
         # the state machine's RoleDispatchState Template Method can
@@ -931,9 +919,7 @@ def run_reviewer_cli(*, project: str, issue_number: int, target: str) -> int:
                 kind=OutcomeKind.CLEAN,
                 confidence=OutcomeConfidence.HIGH,
                 summary=getattr(result, "summary", None) or "approved",
-                artifacts=OutcomeArtifacts(
-                    pr_number=getattr(result, "pr_number", None)
-                ),
+                artifacts=OutcomeArtifacts(pr_number=getattr(result, "pr_number", None)),
                 details=details,
             )
         )

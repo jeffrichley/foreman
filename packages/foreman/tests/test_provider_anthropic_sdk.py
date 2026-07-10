@@ -272,9 +272,7 @@ async def test_run_agent_resume_missing_session_falls_back_to_fresh(
                     stderr="No conversation found with session ID: s1",
                 )
             # Retry: fresh session succeeds.
-            yield _make_result(
-                subtype="success", structured_output={"name": "ok", "count": 1}
-            )
+            yield _make_result(subtype="success", structured_output={"name": "ok", "count": 1})
 
         return gen()
 

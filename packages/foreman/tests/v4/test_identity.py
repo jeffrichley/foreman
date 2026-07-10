@@ -4,6 +4,7 @@ Tests patch ``mint_installation_token`` so no real GitHub round-trips
 fire. The clock is injected so cache-vs-refresh behavior is
 deterministic at the second.
 """
+
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -70,7 +71,8 @@ def test_get_role_token_for_each_role():
         )
 
     with patch(
-        "foreman.v4.identity.mint_installation_token", side_effect=fake_mint,
+        "foreman.v4.identity.mint_installation_token",
+        side_effect=fake_mint,
     ):
         assert registry.get_role_token("planner") == "token-app-1"
         assert registry.get_role_token("reviewer") == "token-app-2"
@@ -97,7 +99,8 @@ def test_token_cached_within_refresh_window():
         )
 
     with patch(
-        "foreman.v4.identity.mint_installation_token", side_effect=fake_mint,
+        "foreman.v4.identity.mint_installation_token",
+        side_effect=fake_mint,
     ) as mint:
         first = registry.get_role_token("planner")
         clock.now += 60  # 1 minute later — well inside the 15-minute safety window
@@ -128,7 +131,8 @@ def test_token_refreshed_when_near_expiry():
         )
 
     with patch(
-        "foreman.v4.identity.mint_installation_token", side_effect=fake_mint,
+        "foreman.v4.identity.mint_installation_token",
+        side_effect=fake_mint,
     ) as mint:
         first = registry.get_role_token("planner")
         # Advance past the refresh threshold (3600s - 900s safety = 2700s).
@@ -172,7 +176,8 @@ def test_get_role_token_mints_fresh_when_in_safety_window():
         )
 
     with patch(
-        "foreman.v4.identity.mint_installation_token", side_effect=fake_mint,
+        "foreman.v4.identity.mint_installation_token",
+        side_effect=fake_mint,
     ) as mint:
         first = registry.get_role_token("planner")
         # Advance so the cached token has exactly 700s remaining — inside
@@ -208,7 +213,8 @@ def test_get_role_token_uses_cache_outside_safety_window():
         )
 
     with patch(
-        "foreman.v4.identity.mint_installation_token", side_effect=fake_mint,
+        "foreman.v4.identity.mint_installation_token",
+        side_effect=fake_mint,
     ) as mint:
         first = registry.get_role_token("planner")
         # Advance so the cached token has exactly 901s remaining — just
@@ -254,7 +260,8 @@ def test_role_aliases_reviewer_spec_and_impl_to_reviewer_app():
         )
 
     with patch(
-        "foreman.v4.identity.mint_installation_token", side_effect=fake_mint,
+        "foreman.v4.identity.mint_installation_token",
+        side_effect=fake_mint,
     ):
         # Use a fresh registry instance per call by clearing the cache
         # would suppress the test's value — instead bump time past the
@@ -294,7 +301,8 @@ def test_role_aliases_fixer_spec_and_impl_to_fixer_app():
         )
 
     with patch(
-        "foreman.v4.identity.mint_installation_token", side_effect=fake_mint,
+        "foreman.v4.identity.mint_installation_token",
+        side_effect=fake_mint,
     ):
         spec_token = registry.get_role_token("fixer-spec")
         clock.now += 3400  # Force refresh so the second variant also mints.
@@ -334,7 +342,8 @@ def test_alias_cache_is_shared_across_target_suffixes():
         )
 
     with patch(
-        "foreman.v4.identity.mint_installation_token", side_effect=fake_mint,
+        "foreman.v4.identity.mint_installation_token",
+        side_effect=fake_mint,
     ) as mint:
         spec_token = registry.get_role_token("reviewer-spec")
         clock.now += 60  # 1 minute later — well inside the safety window.
@@ -382,7 +391,8 @@ def test_orchestrator_uses_same_installation_repo():
         )
 
     with patch(
-        "foreman.v4.identity.mint_installation_token", side_effect=fake_mint,
+        "foreman.v4.identity.mint_installation_token",
+        side_effect=fake_mint,
     ):
         registry.get_role_token("orchestrator")
         registry.get_role_token("planner")
@@ -426,7 +436,8 @@ def test_get_role_bot_logins_returns_one_login_per_role_when_slugs_collapse() ->
     set stays correct."""
     fake_meta = _fake_app_metadata(app_id=1, slug="foreman-planner")
     with patch(
-        "foreman.v4.identity.fetch_app_metadata", return_value=fake_meta,
+        "foreman.v4.identity.fetch_app_metadata",
+        return_value=fake_meta,
     ):
         registry = V4IdentityRegistry(
             apps=_apps(),
@@ -456,7 +467,8 @@ def test_get_role_bot_logins_returns_all_four_when_slugs_differ() -> None:
         return AppMetadata(app_id=app_id, slug=per_id_slug[app_id], name="x")
 
     with patch(
-        "foreman.v4.identity.fetch_app_metadata", side_effect=_meta_per_role,
+        "foreman.v4.identity.fetch_app_metadata",
+        side_effect=_meta_per_role,
     ):
         registry = V4IdentityRegistry(
             apps=_apps(),
@@ -484,7 +496,8 @@ def test_get_role_bot_logins_caches_metadata_per_role() -> None:
     """
     fake_meta = _fake_app_metadata(app_id=1, slug="foreman-planner")
     with patch(
-        "foreman.v4.identity.fetch_app_metadata", return_value=fake_meta,
+        "foreman.v4.identity.fetch_app_metadata",
+        return_value=fake_meta,
     ) as mock_fetch:
         registry = V4IdentityRegistry(
             apps=_apps(),

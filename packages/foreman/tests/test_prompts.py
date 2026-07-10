@@ -102,9 +102,7 @@ def test_compose_role_prompt_includes_adapter_preamble_first() -> None:
     does not own. The preamble MUST appear first so the LLM reads the
     interpretation rules before the discipline that needs interpreting.
     """
-    composed = compose_role_prompt(
-        role="planner", superpowers=["writing-plans"]
-    )
+    composed = compose_role_prompt(role="planner", superpowers=["writing-plans"])
     skill = load_superpowers_skill("writing-plans")
     preamble_idx = composed.index("Foreman role adapter")
     skill_idx = composed.index(skill)
@@ -118,9 +116,7 @@ def test_compose_role_prompt_includes_adapter_preamble_first() -> None:
         "the role contract wins",
         "No `Skill` tool",
     ):
-        assert required in composed, (
-            f"adapter preamble lost required clause: {required!r}"
-        )
+        assert required in composed, f"adapter preamble lost required clause: {required!r}"
 
 
 def test_each_vendored_skill_gets_inline_header() -> None:
@@ -147,10 +143,9 @@ def test_each_vendored_skill_gets_inline_header() -> None:
         "finishing-a-development-branch",
     ):
         assert f"## superpowers:{skill} (inlined)" in composed
-        assert (
-            f"When any\nother section says ``Use superpowers:{skill}``"
-            in composed
-        ), f"{skill}: lost the cross-reference resolution clause"
+        assert f"When any\nother section says ``Use superpowers:{skill}``" in composed, (
+            f"{skill}: lost the cross-reference resolution clause"
+        )
 
 
 def test_compose_role_prompt_orders_superpowers_before_role() -> None:
@@ -158,9 +153,7 @@ def test_compose_role_prompt_orders_superpowers_before_role() -> None:
     Foreman-specific contract), then the role prompt. Inverting this
     order would let the role's narrow contract override the discipline
     in the LLM's attention budget — the opposite of the design."""
-    composed = compose_role_prompt(
-        role="planner", superpowers=["writing-plans"]
-    )
+    composed = compose_role_prompt(role="planner", superpowers=["writing-plans"])
     skill = load_superpowers_skill("writing-plans")
     role = load_role_prompt("planner")
     assert composed.index(skill) < composed.index(role), (
@@ -319,23 +312,15 @@ def test_compose_role_prompt_forwards_target_to_loader() -> None:
     loaded role content) catches forwarding regressions even while
     the two compose outputs are byte-identical.
     """
-    composed_impl = compose_role_prompt(
-        role="reviewer", target="impl_pr", superpowers=[]
-    )
-    composed_spec = compose_role_prompt(
-        role="reviewer", target="spec_pr", superpowers=[]
-    )
+    composed_impl = compose_role_prompt(role="reviewer", target="impl_pr", superpowers=[])
+    composed_spec = compose_role_prompt(role="reviewer", target="spec_pr", superpowers=[])
     # The composed prompt must end with whatever load_role_prompt
     # returned for this target. If compose silently dropped target,
     # composed_impl would end with the spec content even when the
     # impl file exists (after Task 2/3 land). This assertion catches
     # the forwarding regression directly.
-    assert composed_impl.endswith(
-        load_role_prompt("reviewer", target="impl_pr")
-    )
-    assert composed_spec.endswith(
-        load_role_prompt("reviewer", target="spec_pr")
-    )
+    assert composed_impl.endswith(load_role_prompt("reviewer", target="impl_pr"))
+    assert composed_spec.endswith(load_role_prompt("reviewer", target="spec_pr"))
 
 
 @pytest.mark.parametrize("impl_role", ["reviewer", "fixer"])
@@ -344,10 +329,7 @@ def test_impl_prompt_file_exists_for_target_roles(impl_role: str) -> None:
     This is the resource-packaging guard: forgetting either file means
     the daemon's RUN_REVIEWER_IMPL / RUN_FIXER_IMPL silently falls
     back to the spec prompt — same bug, different symptom."""
-    impl_path = (
-        resources.files("foreman.prompts")
-        .joinpath(f"{impl_role}_impl.md")
-    )
+    impl_path = resources.files("foreman.prompts").joinpath(f"{impl_role}_impl.md")
     assert impl_path.is_file(), (
         f"{impl_role}_impl.md must exist in packages/foreman/src/foreman/"
         "prompts/ — the impl-target loader resolves to that path"
@@ -357,6 +339,7 @@ def test_impl_prompt_file_exists_for_target_roles(impl_role: str) -> None:
 
 
 # --- foreman#127: context7 MCP must be named in every role prompt ----
+
 
 @pytest.mark.parametrize(
     "prompt_file",

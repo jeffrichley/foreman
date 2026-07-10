@@ -1,4 +1,5 @@
 """daemon status — read PID file, report state."""
+
 from __future__ import annotations
 
 import logging
@@ -40,10 +41,12 @@ _V4_LOGGER_NAMES = (
 
 def test_status_when_no_pid_file(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
-        "foreman.v4.cli.daemon.PID_PATH", tmp_path / "missing.pid",
+        "foreman.v4.cli.daemon.PID_PATH",
+        tmp_path / "missing.pid",
     )
     result = CliRunner().invoke(
-        app, ["daemon", "status"],
+        app,
+        ["daemon", "status"],
         obj=build_cli_context(repo=InMemoryTicketRepository()),
     )
     assert "not running" in result.output
@@ -56,7 +59,8 @@ def test_status_when_pid_alive(tmp_path: Path, monkeypatch):
     with patch("os.kill") as mock_kill:
         mock_kill.return_value = None
         result = CliRunner().invoke(
-            app, ["daemon", "status"],
+            app,
+            ["daemon", "status"],
             obj=build_cli_context(repo=InMemoryTicketRepository()),
         )
     assert "running" in result.output
@@ -69,7 +73,8 @@ def test_status_when_pid_stale(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("foreman.v4.cli.daemon.PID_PATH", pid_path)
     with patch("os.kill", side_effect=ProcessLookupError):
         result = CliRunner().invoke(
-            app, ["daemon", "status"],
+            app,
+            ["daemon", "status"],
             obj=build_cli_context(repo=InMemoryTicketRepository()),
         )
     assert "stale" in result.output
@@ -84,7 +89,8 @@ def test_stop_when_pid_stale_posix(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("foreman.v4.cli.daemon.PID_PATH", pid_path)
     with patch("os.kill", side_effect=ProcessLookupError):
         result = CliRunner().invoke(
-            app, ["daemon", "stop"],
+            app,
+            ["daemon", "stop"],
             obj=build_cli_context(repo=InMemoryTicketRepository()),
         )
     assert result.exit_code == 0
@@ -93,6 +99,7 @@ def test_stop_when_pid_stale_posix(tmp_path: Path, monkeypatch):
 
 
 # --- Single-instance start guard ---------------------------------------
+
 
 def test_start_refuses_when_daemon_already_running(tmp_path: Path, monkeypatch):
     """A second daemon must NOT start while the first is alive.
@@ -110,9 +117,11 @@ def test_start_refuses_when_daemon_already_running(tmp_path: Path, monkeypatch):
     mock_daemon = MagicMock()
     with patch("os.kill", return_value=None):  # PID 12345 reads as alive
         result = CliRunner().invoke(
-            app, ["daemon", "start"],
+            app,
+            ["daemon", "start"],
             obj=build_cli_context(
-                repo=InMemoryTicketRepository(), daemon=mock_daemon,
+                repo=InMemoryTicketRepository(),
+                daemon=mock_daemon,
             ),
         )
     assert result.exit_code == 1
@@ -142,9 +151,11 @@ def test_start_overwrites_stale_pid_and_proceeds(tmp_path: Path, monkeypatch):
 
     with patch("os.kill", side_effect=ProcessLookupError):  # 99999 is dead
         result = CliRunner().invoke(
-            app, ["daemon", "start"],
+            app,
+            ["daemon", "start"],
             obj=build_cli_context(
-                repo=InMemoryTicketRepository(), daemon=mock_daemon,
+                repo=InMemoryTicketRepository(),
+                daemon=mock_daemon,
             ),
         )
     assert result.exit_code == 0
@@ -153,6 +164,7 @@ def test_start_overwrites_stale_pid_and_proceeds(tmp_path: Path, monkeypatch):
 
 
 # --- Claude session-dir persistence check (crash-recovery resume arm) --
+
 
 def test_session_dir_warns_when_not_mounted(monkeypatch, caplog):
     """An ephemeral CLAUDE_CONFIG_DIR (not on a mount) → loud warning +
@@ -187,6 +199,7 @@ def test_session_dir_skipped_when_unset(monkeypatch):
 
 
 # --- PID file location: ephemeral via FOREMAN_PID_DIR ------------------
+
 
 def test_pid_dir_env_override_relocates_pid_path(monkeypatch):
     """``FOREMAN_PID_DIR`` relocates PID_PATH onto the ephemeral (tmpfs) dir.
@@ -227,6 +240,7 @@ def test_pid_dir_defaults_to_home_when_env_unset(monkeypatch):
 
 # --- Task 8.5: SIGHUP handler reset+reconfigure logging ----------------
 
+
 def _minimal_v4_config(tmp_path: Path) -> V4Config:
     """The smallest V4Config that satisfies validation.
 
@@ -239,11 +253,14 @@ def _minimal_v4_config(tmp_path: Path) -> V4Config:
         log_dir=str(tmp_path / "logs"),
         log_level="INFO",
         apps=AppsConfig(
-            planner=fake_creds, reviewer=fake_creds,
-            fixer=fake_creds, worker=fake_creds,
+            planner=fake_creds,
+            reviewer=fake_creds,
+            fixer=fake_creds,
+            worker=fake_creds,
         ),
         orchestrator=OrchestratorConfig(
-            app_id=2, private_key_path="/tmp/fake-orch.pem",
+            app_id=2,
+            private_key_path="/tmp/fake-orch.pem",
         ),
         operator=OperatorConfig(
             supervisor=OperatorIdentity(name="Test Sup", email="sup@example.com"),
@@ -251,7 +268,8 @@ def _minimal_v4_config(tmp_path: Path) -> V4Config:
         ),
         projects=[
             ProjectConfig(
-                name="p", repo="o/p",
+                name="p",
+                repo="o/p",
                 local_clone_path=str(tmp_path / "p"),
             ),
         ],
@@ -323,15 +341,9 @@ def test_sighup_handler_closes_old_file_handles_on_reset(tmp_path: Path):
     reset_logging()
     config = _minimal_v4_config(tmp_path)
     configure_logging(log_dir=Path(config.log_dir), level=config.log_level)
-    first = {
-        name: list(logging.getLogger(name).handlers)
-        for name in _V4_LOGGER_NAMES
-    }
+    first = {name: list(logging.getLogger(name).handlers) for name in _V4_LOGGER_NAMES}
     _build_sighup_handler(config)()
-    second = {
-        name: list(logging.getLogger(name).handlers)
-        for name in _V4_LOGGER_NAMES
-    }
+    second = {name: list(logging.getLogger(name).handlers) for name in _V4_LOGGER_NAMES}
     for name in _V4_LOGGER_NAMES:
         for h_before in first[name]:
             # Each old handler instance is gone from the new list.
@@ -340,8 +352,5 @@ def test_sighup_handler_closes_old_file_handles_on_reset(tmp_path: Path):
             )
         # Sanity: file handler in second snapshot really points
         # at the configured log_dir.
-        jsonl = [
-            h for h in second[name]
-            if isinstance(h, JsonLinesHandler)
-        ]
+        jsonl = [h for h in second[name] if isinstance(h, JsonLinesHandler)]
         assert len(jsonl) == 1

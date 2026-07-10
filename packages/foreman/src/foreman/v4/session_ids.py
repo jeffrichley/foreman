@@ -55,7 +55,10 @@ def _norm_target(target: str | None) -> str:
 
 
 def derive_session_id(
-    ticket_id: int, role: str, target: str | None, run_key: str,
+    ticket_id: int,
+    role: str,
+    target: str | None,
+    run_key: str,
 ) -> str:
     """Derive the stable Claude-session id for one role run.
 

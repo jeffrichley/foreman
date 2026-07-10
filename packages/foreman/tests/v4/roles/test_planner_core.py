@@ -151,9 +151,7 @@ def _build_planner_scaffold(
     )
 
     mock_provider = MagicMock()
-    mock_provider.run_agent = AsyncMock(
-        return_value=(_fake_planner_output(), UsageInfo())
-    )
+    mock_provider.run_agent = AsyncMock(return_value=(_fake_planner_output(), UsageInfo()))
 
     # The mock client/host are injected via build_role_resources at call time.
     mock_host._injected_client = mock_client  # test wiring marker

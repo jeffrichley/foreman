@@ -23,4 +23,5 @@ class QueuedState(TicketState):
         """Advance every Queued ticket straight to Planning."""
         # Late import to keep the states package import-cycle-free.
         from foreman.v4.states.planning import PlanningState
+
         return PlanningState()

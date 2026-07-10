@@ -1,4 +1,5 @@
 """Reviewer v4 CLI emits FOREMAN_OUTCOME on exit (target-aware)."""
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
@@ -96,9 +97,7 @@ def test_reviewer_transient_outcome(capsys):
     """
     from foreman.providers import ProviderTransientError
 
-    original_cause = Exception(
-        "Claude Code returned an error result: 503 Service Unavailable"
-    )
+    original_cause = Exception("Claude Code returned an error result: 503 Service Unavailable")
     transient = ProviderTransientError(str(original_cause))
     transient.__cause__ = original_cause
     with patch(

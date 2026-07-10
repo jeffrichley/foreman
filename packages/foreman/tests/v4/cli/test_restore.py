@@ -1,4 +1,5 @@
 """Tests for the ``foreman restore`` CLI command (foreman#434)."""
+
 from __future__ import annotations
 
 import gzip
@@ -15,7 +16,10 @@ from foreman.v4.cli import app
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_config(tmp_path: Path, dsn: str = "postgresql://foreman:pw@localhost:5432/foreman") -> MagicMock:
+
+def _make_config(
+    tmp_path: Path, dsn: str = "postgresql://foreman:pw@localhost:5432/foreman"
+) -> MagicMock:
     """Build a minimal mock config for CliContext.obj."""
     config = MagicMock()
     config.storage.dsn = dsn
@@ -32,6 +36,7 @@ def _make_ctx(config: MagicMock) -> MagicMock:
 # ---------------------------------------------------------------------------
 # test_restore_calls_psql_with_correct_args
 # ---------------------------------------------------------------------------
+
 
 def test_restore_calls_psql_with_correct_args(tmp_path: Path) -> None:
     """Happy path: restore a .sql file, psql called with correct args."""
@@ -89,6 +94,7 @@ def test_restore_calls_psql_with_correct_args(tmp_path: Path) -> None:
 # test_restore_refuses_when_daemon_alive
 # ---------------------------------------------------------------------------
 
+
 def test_restore_refuses_when_daemon_alive(tmp_path: Path) -> None:
     """Exit 1 and no psql call when a live daemon PID file exists."""
     dsn = "postgresql://foreman:pw@localhost:5432/foreman"
@@ -123,6 +129,7 @@ def test_restore_refuses_when_daemon_alive(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # test_restore_refuses_missing_snapshot
 # ---------------------------------------------------------------------------
+
 
 def test_restore_refuses_missing_snapshot(tmp_path: Path) -> None:
     """Exit 1 when the snapshot file doesn't exist."""
@@ -206,9 +213,7 @@ def test_restore_gz_decompresses_and_cleans_tempfile(tmp_path: Path) -> None:
                     catch_exceptions=False,
                 )
 
-    assert result.exit_code == 0, (
-        f"Expected exit 0; got {result.exit_code}\n{result.output}"
-    )
+    assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}\n{result.output}"
 
     # psql was called exactly once.
     assert len(tempfile_path_at_psql_call) == 1
@@ -224,6 +229,4 @@ def test_restore_gz_decompresses_and_cleans_tempfile(tmp_path: Path) -> None:
 
     # Decompressed tempfile is cleaned up by the finally block.
     tmp_p = tempfile_path_at_psql_call[0]
-    assert not tmp_p.exists(), (
-        f"Decompressed tempfile {tmp_p} must be deleted after restore"
-    )
+    assert not tmp_p.exists(), f"Decompressed tempfile {tmp_p} must be deleted after restore"

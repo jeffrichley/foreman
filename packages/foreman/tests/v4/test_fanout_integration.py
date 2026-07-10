@@ -1,4 +1,5 @@
 """Phase 2 completion check — one transition reaches all four observers."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -20,7 +21,8 @@ class _DoneState(TicketState):
 
     def execute(self, ctx: StateContext) -> Outcome:
         return Outcome(
-            kind=OutcomeKind.CLEAN, confidence=OutcomeConfidence.HIGH,
+            kind=OutcomeKind.CLEAN,
+            confidence=OutcomeConfidence.HIGH,
             summary="all set",
         )
 
@@ -33,7 +35,8 @@ class _DemoState(TicketState):
 
     def execute(self, ctx: StateContext) -> Outcome:
         return Outcome(
-            kind=OutcomeKind.CLEAN, confidence=OutcomeConfidence.HIGH,
+            kind=OutcomeKind.CLEAN,
+            confidence=OutcomeConfidence.HIGH,
             summary="demo ok",
         )
 
@@ -63,7 +66,9 @@ def test_one_transition_reaches_all_four_observers(caplog):
     repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
     instance = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="Demo", sequence=1,
+        ticket_id=ticket.id,
+        state_name="Demo",
+        sequence=1,
         now=dt.datetime(2026, 6, 13),
     )
 
@@ -75,7 +80,9 @@ def test_one_transition_reaches_all_four_observers(caplog):
     bus.subscribe(MetricsObserver())
 
     ctx = StateContext(
-        ticket=ticket, instance=instance, repo=repo,
+        ticket=ticket,
+        instance=instance,
+        repo=repo,
         clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
         bus=bus,
     )
@@ -84,7 +91,12 @@ def test_one_transition_reaches_all_four_observers(caplog):
     # 1. Structured-log observer wrote JSON lines:
     log_lines = [r.message for r in caplog.records if "ticket_id" in r.message]
     events_logged = {json.loads(line)["event"] for line in log_lines}
-    assert {"state_entered", "execute_started", "execute_completed", "state_exited"} <= events_logged
+    assert {
+        "state_entered",
+        "execute_started",
+        "execute_completed",
+        "state_exited",
+    } <= events_logged
 
     # 2. Label observer fired on every lifecycle boundary. The Demo
     #    transition advances to Done — a terminal — so Phase 8d.12's
@@ -99,14 +111,17 @@ def test_one_transition_reaches_all_four_observers(caplog):
     #    foreman:state-failed so completed tickets don't carry misleading residue
     #    from any NeedsHelp/Failed detours taken en route to Done.
     assert writer.calls == [
-        ("add", {"project": "p", "issue_number": 1,
-                 "labels": {"foreman:state-demo"}}),
-        ("add", {"project": "p", "issue_number": 1,
-                 "labels": {"foreman:state-done"}}),
-        ("remove", {"project": "p", "issue_number": 1,
-                    "labels": {"foreman:state-needshelp", "foreman:state-failed"}}),
-        ("remove", {"project": "p", "issue_number": 1,
-                    "labels": {"foreman:state-demo"}}),
+        ("add", {"project": "p", "issue_number": 1, "labels": {"foreman:state-demo"}}),
+        ("add", {"project": "p", "issue_number": 1, "labels": {"foreman:state-done"}}),
+        (
+            "remove",
+            {
+                "project": "p",
+                "issue_number": 1,
+                "labels": {"foreman:state-needshelp", "foreman:state-failed"},
+            },
+        ),
+        ("remove", {"project": "p", "issue_number": 1, "labels": {"foreman:state-demo"}}),
     ]
 
     # 3. Event-archive observer wrote rows into events table. The

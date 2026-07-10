@@ -1,4 +1,5 @@
 """StructuredLogObserver — JSON-lines emission per event."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -27,10 +28,15 @@ def observer_and_records(caplog):
 
 def test_state_entered_emits_one_json_line(observer_and_records):
     obs, caplog = observer_and_records
-    obs(StateEnteredEvent(
-        ticket_id=1, instance_id=10, state_name="Planning",
-        sequence=1, at=_T0,
-    ))
+    obs(
+        StateEnteredEvent(
+            ticket_id=1,
+            instance_id=10,
+            state_name="Planning",
+            sequence=1,
+            at=_T0,
+        )
+    )
     record = caplog.records[-1]
     payload = json.loads(record.message)
     assert payload["event"] == "state_entered"
@@ -41,15 +47,21 @@ def test_state_entered_emits_one_json_line(observer_and_records):
 
 def test_execute_completed_includes_outcome_and_next_state(observer_and_records):
     obs, caplog = observer_and_records
-    obs(ExecuteCompletedEvent(
-        ticket_id=1, instance_id=10, state_name="Planning",
-        sequence=1, at=_T0,
-        outcome=Outcome(
-            kind=OutcomeKind.CLEAN, confidence=OutcomeConfidence.HIGH,
-            summary="spec PR open",
-        ),
-        next_state="SpecReview",
-    ))
+    obs(
+        ExecuteCompletedEvent(
+            ticket_id=1,
+            instance_id=10,
+            state_name="Planning",
+            sequence=1,
+            at=_T0,
+            outcome=Outcome(
+                kind=OutcomeKind.CLEAN,
+                confidence=OutcomeConfidence.HIGH,
+                summary="spec PR open",
+            ),
+            next_state="SpecReview",
+        )
+    )
     payload = json.loads(caplog.records[-1].message)
     assert payload["event"] == "execute_completed"
     assert payload["outcome_kind"] == "clean"
@@ -60,11 +72,17 @@ def test_execute_completed_includes_outcome_and_next_state(observer_and_records)
 
 def test_state_failed_uses_warning_level(observer_and_records):
     obs, caplog = observer_and_records
-    obs(StateFailedEvent(
-        ticket_id=1, instance_id=10, state_name="Planning",
-        sequence=1, at=_T0,
-        failure_phase="execute", failure_reason="timeout",
-    ))
+    obs(
+        StateFailedEvent(
+            ticket_id=1,
+            instance_id=10,
+            state_name="Planning",
+            sequence=1,
+            at=_T0,
+            failure_phase="execute",
+            failure_reason="timeout",
+        )
+    )
     record = caplog.records[-1]
     assert record.levelno == logging.WARNING
     payload = json.loads(record.message)

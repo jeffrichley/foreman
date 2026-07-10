@@ -181,7 +181,9 @@ class V4IdentityRegistry:
             return cached.token
         # Mint (or refresh) — token is missing or near expiry.
         token = mint_installation_token(
-            creds.app_id, creds.private_key_path, repo_slug,
+            creds.app_id,
+            creds.private_key_path,
+            repo_slug,
         )
         self._cache[key] = token
         return token.token
@@ -253,6 +255,5 @@ class V4IdentityRegistry:
                 self._installation_repo,
             )
         raise ValueError(
-            f"Unknown role: {role!r}. Supported: "
-            f"{' | '.join(_KNOWN_ROLES)}.",
+            f"Unknown role: {role!r}. Supported: {' | '.join(_KNOWN_ROLES)}.",
         )

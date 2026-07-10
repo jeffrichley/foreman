@@ -53,6 +53,7 @@ SAME skip/break window as ``count_consecutive_same_state``). It is stable across
 retries within a run and changes when the state changes — so a *completed*
 Planning session can never bleed into a later SpecReview run.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -149,9 +150,7 @@ def _current_run(
     return run
 
 
-def resolve_dispatch(
-    ctx: StateContext, *, role: str, target: str | None
-) -> DispatchPlan:
+def resolve_dispatch(ctx: StateContext, *, role: str, target: str | None) -> DispatchPlan:
     """Decide whether this role-dispatch runs FRESH or RESUMEs.
 
     ``role`` and ``target`` name the work identity together with the ticket id;
@@ -185,9 +184,7 @@ def resolve_dispatch(
     # re-run already happened; a second interrupted prior means that re-run also
     # crashed), stop resuming and go fresh — fresh is always safe.
     interrupted_priors = [
-        i
-        for i in priors
-        if i.execute_started_at is not None and i.execute_completed_at is None
+        i for i in priors if i.execute_started_at is not None and i.execute_completed_at is None
     ]
     if len(interrupted_priors) > _MAX_INTERRUPTED_PRIORS_FOR_RESUME:
         return DispatchPlan(session_id=session_id, resume=False)

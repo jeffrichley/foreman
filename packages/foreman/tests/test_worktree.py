@@ -114,18 +114,14 @@ def test_fetch_origin_branch_prunes_stale_ref_when_remote_branch_is_gone(
         capture_output=True,
     )
     (clone / "spec.md").write_text("# stub spec\n")
-    subprocess.run(
-        ["git", "add", "spec.md"], cwd=clone, check=True, capture_output=True
-    )
+    subprocess.run(["git", "add", "spec.md"], cwd=clone, check=True, capture_output=True)
     subprocess.run(
         ["git", "commit", "-m", "stub spec"],
         cwd=clone,
         check=True,
         capture_output=True,
     )
-    subprocess.run(
-        ["git", "push", "origin", branch], cwd=clone, check=True, capture_output=True
-    )
+    subprocess.run(["git", "push", "origin", branch], cwd=clone, check=True, capture_output=True)
     # Confirm the precondition: local origin ref resolves.
     assert _origin_branch_exists(clone, branch) is True
 
@@ -749,8 +745,7 @@ def test_create_impl_branches_from_default_when_dev_base_branch_none(
         text=True,
     ).stdout.strip()
     assert impl_tip == origin_main_tip, (
-        f"impl-<N> branch must be based on origin/main tip "
-        f"({origin_main_tip}); got {impl_tip}"
+        f"impl-<N> branch must be based on origin/main tip ({origin_main_tip}); got {impl_tip}"
     )
     # Sanity: confirm the spec branch tip is NOT what we built from
     # (proves the foreman#341 behavior change is exercised).
@@ -1015,8 +1010,7 @@ def test_create_impl_branches_from_default_when_dev_base_branch_none_and_no_spec
         text=True,
     ).stdout.strip()
     assert head == origin_main_tip, (
-        f"Impl branch must be based on origin/main's tip "
-        f"({origin_main_tip}); got {head}"
+        f"Impl branch must be based on origin/main's tip ({origin_main_tip}); got {head}"
     )
 
 
@@ -1087,8 +1081,7 @@ def test_create_impl_branches_from_dev_base_branch_override(
 
     assert result.path.exists()
     assert result.base_branch == "develop", (
-        f"dev_base_branch override must propagate to base_branch; got "
-        f"{result.base_branch!r}"
+        f"dev_base_branch override must propagate to base_branch; got {result.base_branch!r}"
     )
 
     # The worktree's HEAD must equal origin/develop's tip — proof we
@@ -1101,8 +1094,7 @@ def test_create_impl_branches_from_dev_base_branch_override(
         text=True,
     ).stdout.strip()
     assert head == develop_tip, (
-        f"Impl branch must be based on origin/develop's tip "
-        f"({develop_tip}); got {head}"
+        f"Impl branch must be based on origin/develop's tip ({develop_tip}); got {head}"
     )
 
 
@@ -1133,9 +1125,7 @@ def test_create_impl_idempotent_returns_result_with_recomputed_base(
     # Second call: worktree exists → idempotent path → base_branch
     # recomputed the same way (still main with dev_base_branch=None).
     second = mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
-    assert second.path == first.path, (
-        "Idempotent re-call must return the same worktree path"
-    )
+    assert second.path == first.path, "Idempotent re-call must return the same worktree path"
     assert second.base_branch == "main", (
         "Idempotent re-call must recompute base_branch from the same "
         f"input as a fresh call (dev_base_branch=None → 'main'); got "
@@ -1302,9 +1292,7 @@ def test_attach_impl_pr_attaches_to_existing_impl_branch(tmp_path: Path) -> None
 
     worktrees_root = tmp_path / "worktrees"
     mgr = WorktreeManager(worktrees_root=worktrees_root)
-    wt_path = mgr.attach(
-        clone_path=clone, repo_slug="voice", ticket_id=42, target="impl_pr"
-    )
+    wt_path = mgr.attach(clone_path=clone, repo_slug="voice", ticket_id=42, target="impl_pr")
 
     assert wt_path.exists()
     branch_check = subprocess.run(
@@ -1340,9 +1328,7 @@ def test_attach_impl_pr_uses_impl_dir_name(tmp_path: Path) -> None:
 
     worktrees_root = tmp_path / "worktrees"
     mgr = WorktreeManager(worktrees_root=worktrees_root)
-    wt_path = mgr.attach(
-        clone_path=clone, repo_slug="voice", ticket_id=42, target="impl_pr"
-    )
+    wt_path = mgr.attach(clone_path=clone, repo_slug="voice", ticket_id=42, target="impl_pr")
 
     assert wt_path.name == "impl-42", (
         f"target='impl_pr' must produce 'impl-42' worktree dir; got {wt_path.name!r}"
@@ -1389,16 +1375,12 @@ def test_attach_impl_pr_does_not_pass_dash_b_to_git_worktree_add(tmp_path: Path)
         return real_run(argv, *args, **kwargs)
 
     with patch("foreman.worktree.subprocess.run", side_effect=_capture):
-        mgr.attach(
-            clone_path=clone, repo_slug="voice", ticket_id=42, target="impl_pr"
-        )
+        mgr.attach(clone_path=clone, repo_slug="voice", ticket_id=42, target="impl_pr")
 
     add_argvs = [
         argv for argv in captured_argvs if len(argv) >= 3 and argv[1:3] == ["worktree", "add"]
     ]
-    assert add_argvs, (
-        "expected at least one 'git worktree add' invocation during impl-path attach"
-    )
+    assert add_argvs, "expected at least one 'git worktree add' invocation during impl-path attach"
     for argv in add_argvs:
         assert "-b" not in argv, (
             f"impl-path attach must not pass -b to 'git worktree add' "
@@ -1435,9 +1417,7 @@ def test_attach_impl_pr_does_not_pass_dash_b_to_git_worktree_add(tmp_path: Path)
         spec_mgr.attach(clone_path=spec_clone, repo_slug="voice", ticket_id=43)
 
     spec_add_argvs = [
-        argv
-        for argv in captured_spec_argvs
-        if len(argv) >= 3 and argv[1:3] == ["worktree", "add"]
+        argv for argv in captured_spec_argvs if len(argv) >= 3 and argv[1:3] == ["worktree", "add"]
     ]
     assert spec_add_argvs, "expected at least one 'git worktree add' on spec path"
     for argv in spec_add_argvs:
@@ -1909,9 +1889,7 @@ def test_attach_impl_threads_role_token_into_git_subprocess_envs(
     )
     (clone / "impl.txt").write_text("impl seed\n")
     subprocess.run(["git", "add", "impl.txt"], cwd=clone, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "impl seed"], cwd=clone, check=True, capture_output=True
-    )
+    subprocess.run(["git", "commit", "-m", "impl seed"], cwd=clone, check=True, capture_output=True)
     subprocess.run(
         ["git", "push", "origin", impl_branch_name],
         cwd=clone,
@@ -1959,21 +1937,28 @@ def test_ensure_clone_creates_clone_when_missing(tmp_path: Path) -> None:
     subprocess.run(["git", "init", "-b", "main"], cwd=seed, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "seed@example.com"],
-        cwd=seed, check=True, capture_output=True,
+        cwd=seed,
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "config", "user.name", "Seed"],
-        cwd=seed, check=True, capture_output=True,
+        cwd=seed,
+        check=True,
+        capture_output=True,
     )
     (seed / "README.md").write_text("seed\n")
     subprocess.run(["git", "add", "."], cwd=seed, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "seed"], cwd=seed, check=True, capture_output=True)
-    subprocess.run(["git", "clone", "--bare", str(seed), str(origin)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "clone", "--bare", str(seed), str(origin)], check=True, capture_output=True
+    )
 
     target = tmp_path / "repos" / "myproject"
     assert not target.exists(), "precondition: target must be missing"
 
     from foreman.worktree import ensure_clone
+
     ensure_clone(repo_url=str(origin), clone_path=target)
 
     assert target.exists(), "clone directory should exist after ensure_clone"
@@ -2032,18 +2017,14 @@ def test_fetch_origin_default_branch_refreshes_origin_default(tmp_path: Path) ->
         capture_output=True,
     )
     (side / "new.txt").write_text("upstream advanced\n")
-    subprocess.run(
-        ["git", "add", "new.txt"], cwd=side, check=True, capture_output=True
-    )
+    subprocess.run(["git", "add", "new.txt"], cwd=side, check=True, capture_output=True)
     subprocess.run(
         ["git", "commit", "-m", "upstream advanced"],
         cwd=side,
         check=True,
         capture_output=True,
     )
-    subprocess.run(
-        ["git", "push", "origin", "main"], cwd=side, check=True, capture_output=True
-    )
+    subprocess.run(["git", "push", "origin", "main"], cwd=side, check=True, capture_output=True)
 
     # Confirm precondition: client clone is still on the old tip.
     cached_origin_tip = subprocess.run(
@@ -2054,8 +2035,7 @@ def test_fetch_origin_default_branch_refreshes_origin_default(tmp_path: Path) ->
         text=True,
     ).stdout.strip()
     assert cached_origin_tip == baseline_origin_tip, (
-        "test setup: client clone's cached origin/main must NOT have moved "
-        "without a fetch"
+        "test setup: client clone's cached origin/main must NOT have moved without a fetch"
     )
 
     # The fix: fetch_origin_default_branch resolves the default branch
@@ -2070,8 +2050,7 @@ def test_fetch_origin_default_branch_refreshes_origin_default(tmp_path: Path) ->
         text=True,
     ).stdout.strip()
     assert refreshed_origin_tip != baseline_origin_tip, (
-        "After fetch_origin_default_branch, client's origin/main must "
-        "track the new upstream tip"
+        "After fetch_origin_default_branch, client's origin/main must track the new upstream tip"
     )
 
 

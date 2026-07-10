@@ -32,6 +32,7 @@ NEEDS_HELP instead of asking a healer to act again. No new repository
 method, no GitProvider counter — the existing journal is the counter, and
 the mechanism works identically across InMemory / Sqlite / Postgres.
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -48,6 +49,7 @@ from foreman.v4.outcome import (
 if TYPE_CHECKING:
     from foreman.v4.git_provider import PRState
     from foreman.v4.state import StateContext
+
 
 def close_originating_issue(ctx: StateContext) -> None:
     """Close the originating GitHub issue after a successful impl-PR merge.
@@ -151,7 +153,8 @@ def attempt_merge(
     if state.merged:
         on_merge_success()
         return Outcome(
-            kind=OutcomeKind.CLEAN, confidence=OutcomeConfidence.HIGH,
+            kind=OutcomeKind.CLEAN,
+            confidence=OutcomeConfidence.HIGH,
             summary="PR already merged",
             artifacts=OutcomeArtifacts(pr_number=pr_number),
         )
@@ -160,7 +163,8 @@ def attempt_merge(
         ctx.git.merge_pr(project=ctx.ticket.project, pr_number=pr_number)
         on_merge_success()
         return Outcome(
-            kind=OutcomeKind.CLEAN, confidence=OutcomeConfidence.HIGH,
+            kind=OutcomeKind.CLEAN,
+            confidence=OutcomeConfidence.HIGH,
             summary="PR merged",
             artifacts=OutcomeArtifacts(pr_number=pr_number),
         )
@@ -175,7 +179,8 @@ def attempt_merge(
         # than we can catch.
         if _prior_blocked_heal_count(ctx) >= MAX_HEAL_ACTIONS:
             return Outcome(
-                kind=OutcomeKind.NEEDS_HELP, confidence=OutcomeConfidence.HIGH,
+                kind=OutcomeKind.NEEDS_HELP,
+                confidence=OutcomeConfidence.HIGH,
                 summary=(
                     f"PR still {state.mergeable_state!r} after "
                     f"{MAX_HEAL_ACTIONS} heal attempts ({healer.name}); "
@@ -190,11 +195,15 @@ def attempt_merge(
                 },
             )
         result = healer.heal(
-            ctx, project=ctx.ticket.project, pr_number=pr_number, pr=state,
+            ctx,
+            project=ctx.ticket.project,
+            pr_number=pr_number,
+            pr=state,
         )
         if result is HealResult.ESCALATE:
             return Outcome(
-                kind=OutcomeKind.NEEDS_HELP, confidence=OutcomeConfidence.HIGH,
+                kind=OutcomeKind.NEEDS_HELP,
+                confidence=OutcomeConfidence.HIGH,
                 summary=f"healer {healer.name} escalated to human",
                 artifacts=OutcomeArtifacts(pr_number=pr_number),
                 details={
@@ -207,11 +216,9 @@ def attempt_merge(
         # Tag the outcome with the heal-action marker so the bound counts
         # this cycle (and ONLY heal-acted cycles, not CI-pending polls).
         return Outcome(
-            kind=OutcomeKind.BLOCKED, confidence=OutcomeConfidence.HIGH,
-            summary=(
-                f"healer {healer.name} acted ({state.mergeable_state!r}); "
-                f"re-polling"
-            ),
+            kind=OutcomeKind.BLOCKED,
+            confidence=OutcomeConfidence.HIGH,
+            summary=(f"healer {healer.name} acted ({state.mergeable_state!r}); re-polling"),
             artifacts=OutcomeArtifacts(pr_number=pr_number),
             details={
                 HEAL_ACTION_DETAIL_KEY: healer.name,
@@ -222,7 +229,8 @@ def attempt_merge(
 
     # No healer applied: the plain "wait for CI" case — unchanged.
     return Outcome(
-        kind=OutcomeKind.BLOCKED, confidence=OutcomeConfidence.HIGH,
+        kind=OutcomeKind.BLOCKED,
+        confidence=OutcomeConfidence.HIGH,
         summary="PR not yet mergeable (CI pending or merge conflict)",
         artifacts=OutcomeArtifacts(pr_number=pr_number),
     )

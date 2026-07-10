@@ -23,9 +23,7 @@ from foreman.v4.repository import TicketRepository
 logger = logging.getLogger(__name__)
 
 
-def reconcile_on_startup(
-    repo: TicketRepository, *, clock: Callable[[], dt.datetime]
-) -> int:
+def reconcile_on_startup(repo: TicketRepository, *, clock: Callable[[], dt.datetime]) -> int:
     """Close every orphaned in-flight row as crash_recovery. Returns the count.
 
     Idempotent: a second run finds no in-flight rows (the first closed them),
@@ -35,7 +33,8 @@ def reconcile_on_startup(
     now = clock()
     for inst in orphans:
         repo.record_failure(
-            inst.id, now=now,
+            inst.id,
+            now=now,
             failure_phase=FAILURE_PHASE_CRASH_RECOVERY,
             failure_reason=(
                 f"daemon restart: state {inst.state_name!r} was in-flight "

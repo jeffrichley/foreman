@@ -136,15 +136,11 @@ async def test_run_agent_classifies_wrapped_transient_as_transient(
     call surfaces as ``ProviderTransientError`` AND does NOT trigger
     the credential-refresh helper.
     """
-    wrapped_503 = Exception(
-        "Claude Code returned an error result: 503 Service Unavailable"
-    )
+    wrapped_503 = Exception("Claude Code returned an error result: 503 Service Unavailable")
     _patch_query_raises_sequence(monkeypatch, exceptions=[wrapped_503])
 
     refresh = MagicMock(return_value=False)
-    monkeypatch.setattr(
-        anthropic_sdk_module, "_maybe_refresh_container_creds", refresh
-    )
+    monkeypatch.setattr(anthropic_sdk_module, "_maybe_refresh_container_creds", refresh)
 
     provider = AnthropicSDKProvider()
     with pytest.raises(ProviderTransientError) as exc_info:
@@ -178,17 +174,11 @@ async def test_run_agent_classifies_wrapped_429_post_retry_as_transient(
     rather than the "auth failed twice" ``ProviderAuthError``.
     """
     non_transient_auth = Exception("Claude Code returned an error result: success")
-    wrapped_429 = Exception(
-        "Claude Code returned an error result: 429 Too Many Requests"
-    )
-    _patch_query_raises_sequence(
-        monkeypatch, exceptions=[non_transient_auth, wrapped_429]
-    )
+    wrapped_429 = Exception("Claude Code returned an error result: 429 Too Many Requests")
+    _patch_query_raises_sequence(monkeypatch, exceptions=[non_transient_auth, wrapped_429])
 
     refresh = MagicMock(return_value=True)
-    monkeypatch.setattr(
-        anthropic_sdk_module, "_maybe_refresh_container_creds", refresh
-    )
+    monkeypatch.setattr(anthropic_sdk_module, "_maybe_refresh_container_creds", refresh)
 
     provider = AnthropicSDKProvider()
     with pytest.raises(ProviderTransientError) as exc_info:

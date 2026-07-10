@@ -26,6 +26,7 @@ new ``main()``-shaped entry point — get cleanup for free. The cost is
 trivial: a 3-key snapshot + a ``reset_logging`` call that's a no-op
 when nothing's attached.
 """
+
 from __future__ import annotations
 
 import logging

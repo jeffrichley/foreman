@@ -1,4 +1,5 @@
 """QueueManager — priority heap + multi-filter dequeue."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -151,11 +152,13 @@ def test_repo_exception_leaves_entry_in_heap(repo):
     # Patch get_ticket to raise on first call, succeed after
     original_get_ticket = repo.get_ticket
     call_count = {"n": 0}
+
     def flaky_get_ticket(ticket_id):
         call_count["n"] += 1
         if call_count["n"] == 1:
             raise RuntimeError("simulated transient repo error")
         return original_get_ticket(ticket_id)
+
     repo.get_ticket = flaky_get_ticket  # type: ignore[method-assign]
 
     with pytest.raises(RuntimeError, match="simulated"):
@@ -224,7 +227,8 @@ def test_per_project_cap_does_not_block_other_projects(repo):
     a = _ticket(repo, 1, project="alpha")
     b = _ticket(repo, 2, project="beta")
     qm = QueueManager(
-        repo=repo, max_in_flight=2,
+        repo=repo,
+        max_in_flight=2,
         project_caps={"alpha": 1, "beta": 1},
     )
     qm.enqueue(WorkItem(ticket_id=a, state_name="Planning", project="alpha"))

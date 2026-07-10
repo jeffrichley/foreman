@@ -53,13 +53,10 @@ def cmd_show(
         outcome = inst.outcome_kind.value if inst.outcome_kind else "in-flight"
         next_state = inst.next_state or "—"
         node = tree.add(
-            f"[cyan]{inst.state_name}[/cyan] #{inst.sequence} "
-            f"→ {outcome} → {next_state}"
+            f"[cyan]{inst.state_name}[/cyan] #{inst.sequence} → {outcome} → {next_state}"
         )
         if inst.failure_reason:
-            node.add(
-                f"[red]failed @ {inst.failure_phase}: {inst.failure_reason}[/red]"
-            )
+            node.add(f"[red]failed @ {inst.failure_phase}: {inst.failure_reason}[/red]")
 
     buffer = io.StringIO()
     # force_terminal=True so rich renders the tree shape even when stdout is

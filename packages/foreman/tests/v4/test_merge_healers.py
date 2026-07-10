@@ -16,6 +16,7 @@ These tests pin down:
   - The ``MERGE_HEALERS`` registry contains the BehindBranchHealer (the
     documented extension point).
 """
+
 from __future__ import annotations
 
 from foreman.v4.git_provider import FakeGitProvider, PRState
@@ -36,8 +37,11 @@ class _Ctx:
 
 def _pr(*, mergeable_state: str) -> PRState:
     return PRState(
-        merged=False, mergeable=False, ci_passing=True,
-        base_ref="main", mergeable_state=mergeable_state,
+        merged=False,
+        mergeable=False,
+        ci_passing=True,
+        base_ref="main",
+        mergeable_state=mergeable_state,
     )
 
 
@@ -52,11 +56,15 @@ def test_behind_healer_applies_only_when_behind():
 def test_behind_healer_heal_calls_update_branch_once_and_returns_retry():
     git = FakeGitProvider()
     git.set_pr_state(
-        project="p", pr_number=7, state=_pr(mergeable_state="behind"),
+        project="p",
+        pr_number=7,
+        state=_pr(mergeable_state="behind"),
     )
     healer = BehindBranchHealer()
     result = healer.heal(
-        _Ctx(git), project="p", pr_number=7,
+        _Ctx(git),
+        project="p",
+        pr_number=7,
         pr=git.get_pr_state(project="p", pr_number=7),
     )
     assert result is HealResult.RETRY

@@ -47,7 +47,9 @@ def test_ps_format_json_emits_parseable_json():
     repo = _setup_repo_with_two_tickets()
     runner = CliRunner()
     result = runner.invoke(
-        app, ["ps", "--format", "json"], obj=build_cli_context(repo=repo),
+        app,
+        ["ps", "--format", "json"],
+        obj=build_cli_context(repo=repo),
     )
     assert result.exit_code == 0
     rows = json.loads(result.output)
@@ -60,16 +62,24 @@ def test_show_renders_state_history_tree():
     now = dt.datetime(2026, 6, 13, 12, 0, 0)
     ticket = repo.create_ticket(project="p", issue_number=1, now=now)
     inst1 = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="Queued", sequence=1, now=now,
+        ticket_id=ticket.id,
+        state_name="Queued",
+        sequence=1,
+        now=now,
     )
     repo.mark_execute_completed(
-        inst1.id, now=now, outcome_kind=OutcomeKind.CLEAN,
-        outcome_payload={"summary": "ok"}, next_state="Planning",
+        inst1.id,
+        now=now,
+        outcome_kind=OutcomeKind.CLEAN,
+        outcome_payload={"summary": "ok"},
+        next_state="Planning",
     )
     repo.close_state_instance(inst1.id, now=now)
     runner = CliRunner()
     result = runner.invoke(
-        app, ["show", str(ticket.id)], obj=build_cli_context(repo=repo),
+        app,
+        ["show", str(ticket.id)],
+        obj=build_cli_context(repo=repo),
     )
     assert result.exit_code == 0
     assert "Queued" in result.output
@@ -80,7 +90,9 @@ def test_show_unknown_ticket_returns_nonzero():
     repo = InMemoryTicketRepository()
     runner = CliRunner()
     result = runner.invoke(
-        app, ["show", "999"], obj=build_cli_context(repo=repo),
+        app,
+        ["show", "999"],
+        obj=build_cli_context(repo=repo),
     )
     assert result.exit_code != 0
 
@@ -93,11 +105,10 @@ def test_queue_reports_depth_and_in_flight():
     qm.enqueue(WorkItem(ticket_id=2, state_name="Done", project="p"))  # +1 queued
     runner = CliRunner()
     result = runner.invoke(
-        app, ["queue"], obj=build_cli_context(repo=repo, qm=qm),
+        app,
+        ["queue"],
+        obj=build_cli_context(repo=repo, qm=qm),
     )
     assert result.exit_code == 0
-    assert (
-        "in_flight" in result.output.lower()
-        or "in flight" in result.output.lower()
-    )
+    assert "in_flight" in result.output.lower() or "in flight" in result.output.lower()
     assert "1" in result.output

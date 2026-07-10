@@ -83,7 +83,9 @@ class MergingState(TicketState):
         return pr
 
     def _base_ref_guard(
-        self, ctx: StateContext, pr_number: int,
+        self,
+        ctx: StateContext,
+        pr_number: int,
     ) -> Callable[[PRState], Outcome | None]:
         """Build the foreman#357 base-ref guard hook for ``attempt_merge``.
 
@@ -111,17 +113,14 @@ class MergingState(TicketState):
                 logger.warning(
                     "MergingState: no project_config for project=%s; "
                     "skipping base-ref guard for ticket=%d pr=%d",
-                    ctx.ticket.project, ctx.ticket.id, pr_number,
+                    ctx.ticket.project,
+                    ctx.ticket.id,
+                    pr_number,
                 )
                 return None
-            expected_base = (
-                project_config.dev_base_branch or DEFAULT_DEV_BASE_BRANCH
-            )
+            expected_base = project_config.dev_base_branch or DEFAULT_DEV_BASE_BRANCH
             actual_base = state.base_ref
-            if (
-                not actual_base
-                or actual_base.casefold() != expected_base.casefold()
-            ):
+            if not actual_base or actual_base.casefold() != expected_base.casefold():
                 return Outcome(
                     kind=OutcomeKind.NEEDS_HELP,
                     confidence=OutcomeConfidence.HIGH,
@@ -170,6 +169,7 @@ class MergingState(TicketState):
     def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:
         """Route CLEAN to Done, BLOCKED to a self-loop, else NeedsHelp."""
         from foreman.v4.states.terminal import DoneState, NeedsHelpState
+
         if outcome.kind == OutcomeKind.CLEAN:
             return DoneState()
         if outcome.kind == OutcomeKind.BLOCKED:

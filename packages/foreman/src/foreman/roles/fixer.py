@@ -735,7 +735,8 @@ async def _run_fixer_core(
         # the daemon log without preventing the JSONL row.
         if llm_output.outcome == "incomplete" or llm_output.confidence == "low":
             state_instance_id = os.environ.get(
-                "FOREMAN_STATE_INSTANCE_ID", "unknown",
+                "FOREMAN_STATE_INSTANCE_ID",
+                "unknown",
             )
             fallback_reason = None
             if llm_output.escalation_comment is None:
@@ -753,10 +754,7 @@ async def _run_fixer_core(
                 payload=llm_output.escalation_comment,
                 fallback_reason=fallback_reason,
                 source=f"role:fixer-{target}",
-                key=(
-                    f"state-instance-{state_instance_id}-pr-"
-                    f"{pr_number}-{llm_output.outcome}"
-                ),
+                key=(f"state-instance-{state_instance_id}-pr-{pr_number}-{llm_output.outcome}"),
             )
 
         log_fixer_run(

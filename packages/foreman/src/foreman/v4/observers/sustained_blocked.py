@@ -144,22 +144,21 @@ class SustainedBlockedObserver:
         ticket = self._repo.get_ticket(ticket_id)
 
         reason_hash = _reason_hash(signal)
-        key = (
-            f"ticket-{ticket_id}-state-{event.state_name}-"
-            f"reason-{reason_hash}"
-        )
+        key = f"ticket-{ticket_id}-state-{event.state_name}-reason-{reason_hash}"
 
         # Fetch existing comments for dedup check.
         try:
             comments = self._git.get_issue_comments(
-                project=ticket.project, issue_number=ticket.issue_number,
+                project=ticket.project,
+                issue_number=ticket.issue_number,
             )
         except Exception:
             logger.exception(
                 "SustainedBlockedObserver: get_issue_comments failed for "
                 "%s#%d; proceeding without dedup (duplicate preferable "
                 "to missing)",
-                ticket.project, ticket.issue_number,
+                ticket.project,
+                ticket.issue_number,
             )
             comments = []
 
@@ -205,5 +204,6 @@ class SustainedBlockedObserver:
             logger.exception(
                 "SustainedBlockedObserver: post_issue_comment failed for "
                 "%s#%d; swallowing (non-fatal)",
-                ticket.project, ticket.issue_number,
+                ticket.project,
+                ticket.issue_number,
             )

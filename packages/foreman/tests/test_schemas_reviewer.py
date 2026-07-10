@@ -183,9 +183,7 @@ def test_reviewer_run_result_rejects_non_list_final_labels() -> None:
 def test_reviewer_run_result_rejects_non_string_label_elements() -> None:
     llm = ReviewerOutput.model_validate(_minimal_clean_output_dict())
     with pytest.raises(ValidationError, match="final_labels"):
-        ReviewerRunResult.model_validate(
-            {"llm_output": llm.model_dump(), "final_labels": [42]}
-        )
+        ReviewerRunResult.model_validate({"llm_output": llm.model_dump(), "final_labels": [42]})
 
 
 def test_reviewer_run_result_requires_final_labels() -> None:

@@ -66,11 +66,15 @@ def _event(
 
 def _ticket(*, project: str = "proj") -> TicketRecord:
     return TicketRecord(
-        id=1, project=project, issue_number=42,
+        id=1,
+        project=project,
+        issue_number=42,
         current_state="Implementing",
         created_at=dt.datetime(2026, 6, 20, tzinfo=dt.UTC),
         updated_at=dt.datetime(2026, 6, 20, tzinfo=dt.UTC),
-        held_by=None, held_at=None, held_reason=None,
+        held_by=None,
+        held_at=None,
+        held_reason=None,
         depends_on=[],
     )
 
@@ -281,9 +285,7 @@ def test_recent_role_comment_path_skips_inline_exit_code_block(
             seq=1,
             state_name="Implementing",
             failure_phase="execute",
-            failure_reason=(
-                "RoleSubprocessError('role=worker exited 137 ...')"
-            ),
+            failure_reason=("RoleSubprocessError('role=worker exited 137 ...')"),
         ),
         _record(seq=2, state_name="Failed"),
     ]
@@ -363,8 +365,10 @@ def test_failed_landing_retry_cap_walks_back_to_crash_row(
 def test_failed_landing_post_failure_does_not_raise(tmp_path: Path) -> None:
     history = [
         _record(
-            seq=1, state_name="Implementing",
-            failure_phase="execute", failure_reason="exited 1",
+            seq=1,
+            state_name="Implementing",
+            failure_phase="execute",
+            failure_reason="exited 1",
         ),
         _record(seq=2, state_name="Failed"),
     ]

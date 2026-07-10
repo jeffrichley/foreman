@@ -5,6 +5,7 @@ line beginning with FOREMAN_OUTCOME: and ending with the JSON outcome. The
 parser scans stdout in reverse for the marker. Three distinct failures:
 missing marker, malformed JSON, schema-invalid JSON.
 """
+
 import pytest
 
 from foreman.v4.outcome import (

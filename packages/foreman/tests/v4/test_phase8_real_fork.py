@@ -27,6 +27,7 @@ Two acceptance angles are covered:
    present), but the failure must come from PyGithub / token-mint, not
    from a config-load shaped crash.
 """
+
 from __future__ import annotations
 
 import os
@@ -90,14 +91,22 @@ def _build_dry_run_env() -> dict[str, str]:
     ids=["plan", "review-spec", "fix-spec", "implement"],
 )
 def test_role_subcommand_real_fork_emits_parseable_outcome(
-    subcommand: str, extra_args: list[str], tmp_path: Path,
+    subcommand: str,
+    extra_args: list[str],
+    tmp_path: Path,
 ) -> None:
     """Each role subcommand, invoked as a real subprocess under
     ``FOREMAN_DRY_RUN=1``, emits a parseable CLEAN outcome and exits 0.
     """
     cmd = [
-        sys.executable, "-m", "foreman.v4.cli", subcommand,
-        "--project", "p", "--issue-number", "1",
+        sys.executable,
+        "-m",
+        "foreman.v4.cli",
+        subcommand,
+        "--project",
+        "p",
+        "--issue-number",
+        "1",
         *extra_args,
     ]
     result = subprocess.run(
@@ -123,12 +132,9 @@ def test_role_subcommand_real_fork_emits_parseable_outcome(
     )
     outcome = parse_outcome_from_stdout(result.stdout)
     assert outcome.kind == OutcomeKind.CLEAN, (
-        f"expected CLEAN outcome for dry-run, got {outcome.kind!r}\n"
-        f"stdout:\n{result.stdout}"
+        f"expected CLEAN outcome for dry-run, got {outcome.kind!r}\nstdout:\n{result.stdout}"
     )
-    assert outcome.summary == "dry-run", (
-        f"expected dry-run summary, got {outcome.summary!r}"
-    )
+    assert outcome.summary == "dry-run", f"expected dry-run summary, got {outcome.summary!r}"
 
 
 def _build_v4_only_env(*, v4_cfg_path: Path) -> dict[str, str]:
@@ -251,13 +257,21 @@ def test_planner_real_fork_loads_v4_config_without_v3_config_present(
     """
     cfg_path = tmp_path / "v4-config.toml"
     _write_v4_config_toml(
-        cfg_path=cfg_path, project_name="algokit", repo="jeffrichley/algokit",
+        cfg_path=cfg_path,
+        project_name="algokit",
+        repo="jeffrichley/algokit",
         storage_dsn=clean_postgres_dsn,
     )
 
     cmd = [
-        sys.executable, "-m", "foreman.v4.cli", "plan",
-        "--project", "algokit", "--issue-number", "1",
+        sys.executable,
+        "-m",
+        "foreman.v4.cli",
+        "plan",
+        "--project",
+        "algokit",
+        "--issue-number",
+        "1",
     ]
     result = subprocess.run(
         cmd,

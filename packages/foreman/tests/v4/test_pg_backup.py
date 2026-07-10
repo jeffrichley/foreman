@@ -3,6 +3,7 @@
 Covers: take_snapshot, prune_snapshots, BackupScheduler, _DisabledBackupScheduler,
 BackupScheduler.from_config.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -55,6 +56,7 @@ def test_take_snapshot_writes_gz_and_returns_path(tmp_path: Path) -> None:
     assert result_path.parent == tmp_path
     # Filename must match the timestamp-encoded pattern
     import re
+
     assert re.match(r"^foreman-\d{8}T\d{6}Z\.sql\.gz$", result_path.name)
     # Decompressing must yield the original dump bytes
     assert gzip.decompress(result_path.read_bytes()) == dump_bytes
@@ -96,6 +98,7 @@ def test_take_snapshot_creates_dst_dir_if_missing(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # prune_snapshots
 # ---------------------------------------------------------------------------
+
 
 def _make_snapshot(dst_dir: Path, ts: dt.datetime) -> Path:
     """Write a dummy .sql.gz file with a timestamp-encoded name."""
@@ -165,15 +168,11 @@ def test_prune_keeps_hourly_then_daily_then_weekly(tmp_path: Path) -> None:
             if wk not in week_best or ts > week_best[wk]:
                 week_best[wk] = ts
 
-    assert len(week_best) == 4, (
-        f"Expected 4 ISO weeks in weekly window, got {len(week_best)}"
-    )
+    assert len(week_best) == 4, f"Expected 4 ISO weeks in weekly window, got {len(week_best)}"
     survivor_names = {p.name for p in survivors}
     for wk, best_ts in week_best.items():
         name = f"foreman-{best_ts.strftime('%Y%m%dT%H%M%SZ')}.sql.gz"
-        assert name in survivor_names, (
-            f"Most-recent file for ISO week {wk} ({name}) was pruned"
-        )
+        assert name in survivor_names, f"Most-recent file for ISO week {wk} ({name}) was pruned"
 
 
 def test_prune_leaves_unparseable_filenames_alone(tmp_path: Path) -> None:
@@ -246,9 +245,7 @@ def test_scheduler_disabled_via_from_config_returns_none(tmp_path: Path) -> None
     """BackupScheduler.from_config with enabled=False returns _DisabledBackupScheduler."""
     config = BackupConfig(enabled=False)
     bus = EventBus()
-    scheduler = BackupScheduler.from_config(
-        config, dsn=_FIXED_DSN, bus=bus
-    )
+    scheduler = BackupScheduler.from_config(config, dsn=_FIXED_DSN, bus=bus)
     assert isinstance(scheduler, _DisabledBackupScheduler)
     assert scheduler.tick() is None
 

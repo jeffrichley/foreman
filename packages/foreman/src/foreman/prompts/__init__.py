@@ -97,11 +97,7 @@ def load_superpowers_skill(name: str) -> str:
     we didn't vendor, the role startup should fail loudly rather than
     silently dropping the discipline.
     """
-    return (
-        resources.files(_SUPERPOWERS_ROOT)
-        .joinpath(f"{name}.md")
-        .read_text(encoding="utf-8")
-    )
+    return resources.files(_SUPERPOWERS_ROOT).joinpath(f"{name}.md").read_text(encoding="utf-8")
 
 
 def load_role_prompt(role: str, *, target: Literal["spec_pr", "impl_pr"] | None = None) -> str:
@@ -126,11 +122,7 @@ def load_role_prompt(role: str, *, target: Literal["spec_pr", "impl_pr"] | None 
         impl_path = resources.files(_PROMPTS_ROOT).joinpath(f"{role}_impl.md")
         if impl_path.is_file():
             return impl_path.read_text(encoding="utf-8")
-    return (
-        resources.files(_PROMPTS_ROOT)
-        .joinpath(f"{role}.md")
-        .read_text(encoding="utf-8")
-    )
+    return resources.files(_PROMPTS_ROOT).joinpath(f"{role}.md").read_text(encoding="utf-8")
 
 
 def _wrap_skill(name: str) -> str:

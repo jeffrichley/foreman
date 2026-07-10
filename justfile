@@ -13,7 +13,7 @@ default:
     @just --list
 
 # Composite gate (recommended before push)
-check: lock-check lint typecheck import-lint test
+check: lock-check lint format-check typecheck import-lint test
 
 # Developer convenience: apply lint auto-fixes + formatter
 fix:
@@ -29,6 +29,10 @@ lock-check:
 # Lint
 lint:
     uv run --no-sync ruff check packages/foreman
+
+# Format check (read-only; fails if any file is not ruff-format-canonical)
+format-check:
+    uv run --no-sync ruff format --check packages/foreman
 
 # Type-check
 typecheck:

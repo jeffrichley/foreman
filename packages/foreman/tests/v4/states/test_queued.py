@@ -1,4 +1,5 @@
 """QueuedState — the entry hop. Transitions to Planning unconditionally."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -12,11 +13,15 @@ def test_queued_advances_to_planning():
     repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
     instance = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="Queued",
-        sequence=1, now=dt.datetime(2026, 6, 13),
+        ticket_id=ticket.id,
+        state_name="Queued",
+        sequence=1,
+        now=dt.datetime(2026, 6, 13),
     )
     ctx = StateContext(
-        ticket=ticket, instance=instance, repo=repo,
+        ticket=ticket,
+        instance=instance,
+        repo=repo,
         clock=lambda: dt.datetime(2026, 6, 13),
     )
     next_state = QueuedState().transition(ctx)

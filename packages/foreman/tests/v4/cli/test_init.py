@@ -7,6 +7,7 @@ is to prove the v4-config-load + project-lookup + helper-invocation
 wiring, not to re-test the v3 helpers themselves (those have their
 own coverage in ``tests/test_init.py``).
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -36,7 +37,8 @@ def _apps_config() -> AppsConfig:
 
 def _orchestrator_config() -> OrchestratorConfig:
     return OrchestratorConfig(
-        app_id=99999, private_key_path="/tmp/fake-orch.pem",
+        app_id=99999,
+        private_key_path="/tmp/fake-orch.pem",
     )
 
 
@@ -149,25 +151,32 @@ def _stub_helpers(monkeypatch, *, calls: dict[str, Any]) -> None:
             calls["github_auth_used"] = auth is not None
 
     monkeypatch.setattr(
-        "foreman.v4.cli.init._validate_clone_path", fake_validate_clone,
+        "foreman.v4.cli.init._validate_clone_path",
+        fake_validate_clone,
     )
     monkeypatch.setattr(
-        "foreman.v4.cli.init._write_instructions_template", fake_write_instructions,
+        "foreman.v4.cli.init._write_instructions_template",
+        fake_write_instructions,
     )
     monkeypatch.setattr(
-        "foreman.v4.cli.init._check_instructions_committed", fake_check_instructions,
+        "foreman.v4.cli.init._check_instructions_committed",
+        fake_check_instructions,
     )
     monkeypatch.setattr(
-        "foreman.v4.cli.init._ensure_labels", fake_ensure_labels,
+        "foreman.v4.cli.init._ensure_labels",
+        fake_ensure_labels,
     )
     monkeypatch.setattr(
-        "foreman.v4.cli.init._verify_bot_installation", fake_verify_bot,
+        "foreman.v4.cli.init._verify_bot_installation",
+        fake_verify_bot,
     )
     monkeypatch.setattr(
-        "foreman.v4.cli.init.V4IdentityRegistry", _FakeIdentity,
+        "foreman.v4.cli.init.V4IdentityRegistry",
+        _FakeIdentity,
     )
     monkeypatch.setattr(
-        "foreman.v4.cli.init.Github", _FakeGithub,
+        "foreman.v4.cli.init.Github",
+        _FakeGithub,
     )
 
 
@@ -286,7 +295,8 @@ def test_init_clone_validation_failure_exits_cleanly(tmp_path: Path, monkeypatch
         raise ValueError(f"Clone path does not exist: {clone_path}")
 
     monkeypatch.setattr(
-        "foreman.v4.cli.init._validate_clone_path", fake_validate_clone,
+        "foreman.v4.cli.init._validate_clone_path",
+        fake_validate_clone,
     )
 
     result = CliRunner().invoke(app, ["init", "algokit"])

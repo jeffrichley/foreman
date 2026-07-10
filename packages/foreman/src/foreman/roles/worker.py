@@ -1366,12 +1366,10 @@ async def _run_worker_core(
         # success-path telemetry write must proceed unconditionally.
         if final_outcome in ("incomplete", "spec_invalid"):
             state_instance_id = os.environ.get(
-                "FOREMAN_STATE_INSTANCE_ID", "unknown",
+                "FOREMAN_STATE_INSTANCE_ID",
+                "unknown",
             )
-            dedup_key = (
-                f"state-instance-{state_instance_id}-attempt-"
-                f"{attempt}-{final_outcome}"
-            )
+            dedup_key = f"state-instance-{state_instance_id}-attempt-{attempt}-{final_outcome}"
             fallback_reason: str | None = None
             if llm_output.escalation_comment is None:
                 fallback_reason = (

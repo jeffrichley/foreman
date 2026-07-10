@@ -1,4 +1,5 @@
 """Phase 5 e2e — SubprocessRoleDispatcher actually forks and we read its stdout."""
+
 from __future__ import annotations
 
 import sys
@@ -18,8 +19,8 @@ def stub_foreman(tmp_path: Path) -> Path:
     script.write_text(
         "import sys\n"
         "print('log line from stub')\n"
-        "print('FOREMAN_OUTCOME:{\"kind\":\"clean\",\"confidence\":\"high\","
-        "\"summary\":\"stub ok\"}')\n"
+        'print(\'FOREMAN_OUTCOME:{"kind":"clean","confidence":"high",'
+        '"summary":"stub ok"}\')\n'
         "sys.exit(0)\n",
         encoding="utf-8",
     )
@@ -37,7 +38,10 @@ def test_subprocess_round_trip(stub_foreman: Path, tmp_path: Path):
         log_dir=tmp_path,
     )
     stdout = dispatcher.dispatch(
-        role="planner", project="p", issue_number=1, ticket_id=1,
+        role="planner",
+        project="p",
+        issue_number=1,
+        ticket_id=1,
     )
     outcome = parse_outcome_from_stdout(stdout)
     assert outcome.kind == OutcomeKind.CLEAN

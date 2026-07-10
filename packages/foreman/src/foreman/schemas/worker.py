@@ -322,10 +322,7 @@ class WorkerOutput(BaseModel):
         # foreman#367: outcome in {'incomplete', 'spec_invalid'} requires
         # escalation_comment so Foreman core can render the
         # operator-visible comment.
-        if (
-            self.outcome in ("incomplete", "spec_invalid")
-            and self.escalation_comment is None
-        ):
+        if self.outcome in ("incomplete", "spec_invalid") and self.escalation_comment is None:
             raise ValueError(
                 f"outcome={self.outcome!r} requires escalation_comment "
                 "to be populated (why / what_tried / what_would_unblock); "

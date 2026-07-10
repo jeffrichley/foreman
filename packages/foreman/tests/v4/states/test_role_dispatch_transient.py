@@ -142,9 +142,7 @@ def _make_ctx(
     "state_class",
     [PlanningState, ImplementingState, ImplFixState],
 )
-def test_role_dispatch_transient_advances_full_schedule(
-    state_class, fake_clock
-) -> None:
+def test_role_dispatch_transient_advances_full_schedule(state_class, fake_clock) -> None:
     """Three transients in a row advance through the backoff schedule
     (30s, 2m, 10m) — NOT three identical 30s delays. This is the
     regression guard for the NULL-row skip in
@@ -201,9 +199,7 @@ def test_role_dispatch_transient_advances_full_schedule(
         repo.close_state_instance(instance.id, now=fake_clock.now)
 
     # Verify the delays — full schedule advance, NOT three 30s.
-    transient_events = [
-        ev for ev in received if isinstance(ev, TransientProviderErrorEvent)
-    ]
+    transient_events = [ev for ev in received if isinstance(ev, TransientProviderErrorEvent)]
     assert len(transient_events) == 3
     expected_delays_seconds = list(BACKOFF_SCHEDULE_SECONDS[:3])
     for ev, expected in zip(transient_events, expected_delays_seconds, strict=True):
@@ -213,12 +209,7 @@ def test_role_dispatch_transient_advances_full_schedule(
     assert [ev.attempt for ev in transient_events] == [0, 1, 2]
 
     # Runaway-defense cap exempted.
-    assert (
-        repo.count_consecutive_same_state(
-            ticket_id=ticket.id, state=state_class.state_name
-        )
-        == 0
-    )
+    assert repo.count_consecutive_same_state(ticket_id=ticket.id, state=state_class.state_name) == 0
 
     # Now drive a CLEAN outcome and assert next_action_at clears and
     # the state advances to the per-state CLEAN next.
@@ -326,9 +317,7 @@ def test_role_dispatch_transient_exhausts_to_needs_help(fake_clock) -> None:
     assert isinstance(next_state, NeedsHelpState)
 
     # The escalation event has next_retry_at=None and attempt=4.
-    transient_events = [
-        ev for ev in received if isinstance(ev, TransientProviderErrorEvent)
-    ]
+    transient_events = [ev for ev in received if isinstance(ev, TransientProviderErrorEvent)]
     assert transient_events[-1].next_retry_at is None
     assert transient_events[-1].attempt == 4
 
@@ -417,9 +406,7 @@ def test_impl_review_override_preserves_transient_intercept(fake_clock) -> None:
     assert (suspended.next_action_at - fake_clock.now).total_seconds() == expected_delay
 
     # And the structured event fired with a real retry time (attempt 0).
-    transient_events = [
-        ev for ev in received if isinstance(ev, TransientProviderErrorEvent)
-    ]
+    transient_events = [ev for ev in received if isinstance(ev, TransientProviderErrorEvent)]
     assert len(transient_events) == 1
     assert transient_events[0].next_retry_at is not None
     assert transient_events[0].attempt == 0

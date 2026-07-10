@@ -87,7 +87,8 @@ class Poller:
     def _adopt_new_tickets(self) -> None:
         assert self._qm is not None  # narrowed by tick()
         issue_numbers = self._git.list_open_issues_with_label(
-            project=self._project, label=self._trigger_label,
+            project=self._project,
+            label=self._trigger_label,
         )
         for issue_number in issue_numbers:
             try:
@@ -98,7 +99,9 @@ class Poller:
                 )
             except TicketAlreadyExistsError:
                 continue
-            self._qm.enqueue(WorkItem(ticket_id=ticket.id, state_name="Queued", project=ticket.project))
+            self._qm.enqueue(
+                WorkItem(ticket_id=ticket.id, state_name="Queued", project=ticket.project)
+            )
 
     def _enqueue_open_tickets(self) -> None:
         assert self._qm is not None  # narrowed by tick()
@@ -117,7 +120,10 @@ class Poller:
             # picks up the same suspension window from the repository.
             if ticket.next_action_at is not None and ticket.next_action_at > now:
                 continue
-            self._qm.enqueue(WorkItem(
-                ticket_id=ticket.id, state_name=ticket.current_state,
-                project=ticket.project,
-            ))
+            self._qm.enqueue(
+                WorkItem(
+                    ticket_id=ticket.id,
+                    state_name=ticket.current_state,
+                    project=ticket.project,
+                )
+            )

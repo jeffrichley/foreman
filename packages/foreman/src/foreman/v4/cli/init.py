@@ -11,6 +11,7 @@ isolation guard (``tests/v4/test_isolation.py``); after Phase 8d.9 the
 helpers it exposes operate directly on :class:`V4Config` /
 :class:`AppsConfig`, so this command no longer needs a v3 shim.
 """
+
 from __future__ import annotations
 
 import os
@@ -47,7 +48,8 @@ _DEFAULT_CONFIG = Path.home() / ".foreman" / "v4" / "config.toml"
 
 def cmd_init(
     project: str = typer.Argument(
-        ..., help="Project name (must exist in V4Config.projects).",
+        ...,
+        help="Project name (must exist in V4Config.projects).",
     ),
 ) -> None:
     """Bootstrap a project repo for v4.
@@ -75,8 +77,7 @@ def cmd_init(
     if project_cfg is None:
         known = [p.name for p in config.projects]
         typer.echo(
-            f"project {project!r} not found in V4Config at {config_path}. "
-            f"Known projects: {known}",
+            f"project {project!r} not found in V4Config at {config_path}. Known projects: {known}",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -116,7 +117,8 @@ def cmd_init(
 
     # Create the 19 labels (idempotent — existing labels preserved).
     labels_created, labels_existing = _ensure_labels(
-        client=admin_client, repo_slug=project_cfg.repo,
+        client=admin_client,
+        repo_slug=project_cfg.repo,
     )
 
     # Best-effort bot verification. v4 has shared apps at the V4Config

@@ -64,9 +64,7 @@ _OPERATOR_TOML = (
 # exercise the validator, so this shared block is sliced off for them
 # (see ``_STORAGE_TOML`` length used in those tests).
 _STORAGE_TOML = (
-    "[storage]\n"
-    'engine = "postgres"\n'
-    'dsn = "postgresql://foreman:pw@postgres:5432/foreman"\n'
+    '[storage]\nengine = "postgres"\ndsn = "postgresql://foreman:pw@postgres:5432/foreman"\n'
 )
 _APPS_TOML = _APPS_TOML + _OPERATOR_TOML + _STORAGE_TOML
 # Same shared apps+operator boilerplate WITHOUT the storage block, for
@@ -270,8 +268,7 @@ def test_missing_apps_block_raises(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'log_dir = "/tmp/foreman-logs"\n' + _STORAGE_TOML
-        + "[[projects]]\n"
+        'log_dir = "/tmp/foreman-logs"\n' + _STORAGE_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
@@ -298,10 +295,8 @@ def test_missing_role_app_raises(tmp_path: Path):
         'private_key_path = "/tmp/fake-reviewer.pem"\n'
         "[apps.fixer]\n"
         "app_id = 12347\n"
-        'private_key_path = "/tmp/fake-fixer.pem"\n'
+        'private_key_path = "/tmp/fake-fixer.pem"\n' + _STORAGE_TOML + "[[projects]]\n"
         # No [apps.worker].
-        + _STORAGE_TOML
-        + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
@@ -334,8 +329,10 @@ def test_apps_orchestrator_round_trip(tmp_path: Path):
         'private_key_path = "/tmp/fake-worker.pem"\n'
         "[orchestrator]\n"
         "app_id = 99999\n"
-        'private_key_path = "/tmp/fake-orchestrator.pem"\n' + _OPERATOR_TOML
-        + _STORAGE_TOML + "[[projects]]\n"
+        'private_key_path = "/tmp/fake-orchestrator.pem"\n'
+        + _OPERATOR_TOML
+        + _STORAGE_TOML
+        + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
@@ -543,10 +540,8 @@ def test_missing_orchestrator_raises(tmp_path: Path):
         'private_key_path = "/tmp/fake-fixer.pem"\n'
         "[apps.worker]\n"
         "app_id = 12348\n"
-        'private_key_path = "/tmp/fake-worker.pem"\n'
+        'private_key_path = "/tmp/fake-worker.pem"\n' + _STORAGE_TOML + "[[projects]]\n"
         # No [orchestrator] block.
-        + _STORAGE_TOML
-        + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
@@ -573,10 +568,7 @@ def _config_text(operator_block: str | None, project_extra: str = "") -> str:
     # swap the operator block; we re-append a valid [storage] block below
     # so the Postgres-only loud-fail validator stays satisfied.
     base_apps_only = _APPS_TOML[: -(len(_OPERATOR_TOML) + len(_STORAGE_TOML))]
-    body = (
-        "[daemon]\n"
-        'log_dir = "/tmp/foreman-logs"\n' + base_apps_only
-    )
+    body = '[daemon]\nlog_dir = "/tmp/foreman-logs"\n' + base_apps_only
     if operator_block is not None:
         body += operator_block
     body += _STORAGE_TOML
@@ -860,8 +852,7 @@ def test_storage_defaults_to_postgres_loud_fail_when_section_absent(
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML_NO_STORAGE
-        + "[[projects]]\n"
+        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML_NO_STORAGE + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
@@ -877,8 +868,7 @@ def test_storage_postgres_requires_dsn(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML_NO_STORAGE
-        + "[[projects]]\n"
+        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML_NO_STORAGE + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
@@ -895,8 +885,7 @@ def test_storage_postgres_accepts_dsn_and_pool_sizes(tmp_path: Path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
-        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML_NO_STORAGE
-        + "[[projects]]\n"
+        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML_NO_STORAGE + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
