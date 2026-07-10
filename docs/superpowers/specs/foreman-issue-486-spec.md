@@ -28,7 +28,7 @@ When an operator later runs `foreman retry`, `cmd_retry` in `packages/foreman/sr
 
 **Why only `needshelp` and `failed` labels need scrubbing.** Non-terminal state labels (Planning, SpecReview, Implementing, etc.) are always removed by `StateExitedEvent` when those states are exited — this is the existing `_on_state_exited` path in the observer (label_observability.py line 132–147). Only labels added by `_enter_terminal()` can linger, because `_enter_terminal` is the only path that emits `StateEnteredEvent` without a paired `StateExitedEvent`. `_enter_terminal` is called for `NeedsHelp` (via `escalate_to_needs_help`) and `Failed` (via the normal terminal-advancement branch in `transition()`). `Done` also goes through `_enter_terminal`, but that is the target state; we strip the *other* two.
 
-**The fix.** In `LabelObservabilityObserver._on_state_entered()`, add a branch immediately after the existing `_FIRST_STATES` guard: when `event.state_name == _COMPLETION_TERMINAL` (= `"Done"`), call `remove_labels` with `_SIBLING_TERMINAL_LABELS` (= `frozenset({"foreman:state-needshelp", "foreman:state-failed"})`).
+**The fix.** In `LabelObservabilityObserver._on_state_entered()`, add a branch immediately after the existing `_FIRST_STATES` guard: when `event.state_name == _COMPLETION_TERMINAL` (= `"Done"`), call `remove_labels` with `_SIBLING_TERMINAL_LABELS` (= `{"foreman:state-needshelp", "foreman:state-failed"}`).
 
 Two new module-level constants, placed after `_FIRST_STATES`:
 
@@ -40,10 +40,10 @@ _COMPLETION_TERMINAL = "Done"
 #: Labels for the two non-completion terminals. These are stripped when the
 #: ticket enters Done so completed issues don't carry misleading residue.
 #: Computed via ``_state_label()`` to stay consistent with the naming helper.
-_SIBLING_TERMINAL_LABELS: frozenset[str] = frozenset({
+_SIBLING_TERMINAL_LABELS: set[str] = {
     _state_label("NeedsHelp"),
     _state_label("Failed"),
-})
+}
 ```
 
 The extension to `_on_state_entered`, inserted after the `_FIRST_STATES` block:
@@ -67,10 +67,10 @@ if event.state_name == _COMPLETION_TERMINAL:
 
    ```python
    _COMPLETION_TERMINAL = "Done"
-   _SIBLING_TERMINAL_LABELS: frozenset[str] = frozenset({
+   _SIBLING_TERMINAL_LABELS: set[str] = {
        _state_label("NeedsHelp"),
        _state_label("Failed"),
-   })
+   }
    ```
 
 2. **Extend `LabelObservabilityObserver._on_state_entered()`** — after the `if event.state_name in _FIRST_STATES:` block (lines 125–130), insert:
