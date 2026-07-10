@@ -92,11 +92,10 @@ error. The operator must create the file before starting the daemon.
 the daemon PID. The SIGHUP handler in `cmd_daemon_start` currently calls
 `reset_logging() + configure_logging(...)`. For this issue, the handler is
 extended to also call `daemon.request_project_reload()` — a new method that
-sets a `threading.Event` flag (`_reload_projects_event`). The Daemon's
-`run_forever()` tick loop checks this flag at the **start** of each tick
-(before pollers run), clears it, and calls `_apply_project_reload()`. Doing the
-work in the tick loop (not in the signal handler itself) avoids network I/O
-inside a signal context.
+sets a `threading.Event` flag (`_reload_projects_event`). `tick_once()` checks
+this flag at the **start** of each invocation (before pollers run), clears it,
+and calls `_apply_project_reload()`. Doing the work in `tick_once()` (not in
+the signal handler itself) avoids network I/O inside a signal context.
 
 **`_apply_project_reload()` — diff and apply**:
 
@@ -106,14 +105,17 @@ inside a signal context.
 4. **Added** = names in new but not in current, plus names whose `ProjectConfig`
    fields changed (same name, different values — treat as remove + re-add).
 5. For each added project: call `self._git_provider_factory(pc.repo)` →
-   `GitProvider`; call `self._git.register_provider(name, provider)` on the
-   `RoutingGitProvider`; create a `Poller` (same arguments as in
-   `bootstrap_cli_context`); append to `self._pollers`; update
-   `self._project_configs[name] = pc`; call
+   `GitProvider`; if `self._routing_git is not None`, call
+   `self._routing_git.register_provider(name, provider)`; create a `Poller`
+   (same arguments as in `bootstrap_cli_context`); append to `self._pollers`;
+   update `self._project_configs[name] = pc`; call
    `self._clone_refresher.register_project(name, Path(pc.local_clone_path))`.
-6. **Removed** = current names not in the new set. For each: remove from
-   `self._pollers` (filter by `poller.project != name`); call
-   `self._git.unregister_provider(name)`; delete
+6. **Removed** = current names not in the new set **plus** current names whose
+   `ProjectConfig` differs from the loaded version (same remove-then-re-add
+   treatment prescribed in step 4). For each: remove from
+   `self._pollers` (filter by `poller.project != name`); if
+   `self._routing_git is not None`, call
+   `self._routing_git.unregister_provider(name)`; delete
    `self._project_configs[name]`; call
    `self._clone_refresher.unregister_project(name)`.
 7. Log a structured INFO entry with added/removed name lists; no-op log
@@ -125,6 +127,19 @@ inside a signal context.
 dict is now mutated by these two methods. Thread safety: `_apply_project_reload()`
 runs on the Daemon's main tick thread; `RoutingGitProvider` is never written
 from the WorkerPool threads (they only read via `_resolve`). No lock needed.
+
+**Type narrowing for `RoutingGitProvider` calls**: `Daemon._git` is typed
+`GitProvider` (a Protocol with no `register_provider` method); calling
+`self._git.register_provider(...)` directly fails mypy (`just check` runs
+mypy). Resolution: in `Daemon.__init__`, store a second attribute
+`self._routing_git: RoutingGitProvider | None = git if isinstance(git, RoutingGitProvider) else None`
+(import `RoutingGitProvider` from `foreman.v4.routing_git_provider`). Inside
+`_apply_project_reload()`, call `self._routing_git.register_provider(name, provider)`
+and `self._routing_git.unregister_provider(name)`, each guarded by
+`if self._routing_git is not None`. When `_routing_git` is `None` (e.g., in
+tests that supply a plain `GitProvider` stub), provider registration is a
+no-op — this is acceptable because the Daemon boots with a `RoutingGitProvider`
+in production, and the sentinel path is the test-isolation case only.
 
 **`CloneRefresher` mutability**: Add `register_project(name, path)` and
 `unregister_project(name)` public methods to `CloneRefresher`. The
@@ -217,16 +232,24 @@ and paths that don't supply `daemon=` continue to work unchanged.
    two new keyword-only parameters:
    `projects_loader: Callable[[], list[ProjectConfig]] | None = None` and
    `git_provider_factory: Callable[[str], GitProvider] | None = None`.
-   Add `self._reload_projects_event: threading.Event = threading.Event()`.
+   Add the following new instance attributes (after existing assignments):
+   `self._reload_projects_event: threading.Event = threading.Event()`;
+   `self._routing_git: RoutingGitProvider | None = git if isinstance(git, RoutingGitProvider) else None`
+   (import `RoutingGitProvider` from `foreman.v4.routing_git_provider`; this
+   stores a narrowed type for the mutating calls in `_apply_project_reload()`
+   without widening the public `_git: GitProvider` attribute).
    Add `request_project_reload(self) -> None` (calls
    `self._reload_projects_event.set()`). Add `_apply_project_reload(self) ->
    None` (implements the diff logic from the Approach section above).
 
-10. In `packages/foreman/src/foreman/v4/daemon.py:Daemon.run_forever()` (or
-    `tick_once()` — wherever the main tick loop fires pollers), add at the
-    **start** of each tick iteration: check
+10. In `packages/foreman/src/foreman/v4/daemon.py:Daemon.tick_once()`, add at
+    the **start** of the method (before pollers run): check
     `self._reload_projects_event.is_set()`; if so, clear it and call
-    `self._apply_project_reload()`.
+    `self._apply_project_reload()`. The check **must** be in `tick_once()`, not
+    in `run_forever()` — sub-request 15's tests call `tick_once()` directly and
+    assert the reload has applied; placing the check in `run_forever()` would
+    cause all three tests to fail because `tick_once()` would return without
+    ever consulting the event.
 
 11. Update `packages/foreman/src/foreman/v4/cli/daemon.py:_build_sighup_handler`
     signature to accept `daemon: Daemon | None = None`. When `daemon` is not
