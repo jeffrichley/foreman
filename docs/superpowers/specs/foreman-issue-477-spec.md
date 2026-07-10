@@ -249,6 +249,8 @@ and paths that don't supply `daemon=` continue to work unchanged.
    `git_provider_factory: Callable[[str], GitProvider] | None = None`.
    Add the following new instance attributes (after existing assignments):
    `self._reload_projects_event: threading.Event = threading.Event()`;
+   `self._projects_loader = projects_loader`;
+   `self._git_provider_factory = git_provider_factory`;
    `self._routing_git: RoutingGitProvider | None = git if isinstance(git, RoutingGitProvider) else None`
    (import `RoutingGitProvider` from `foreman.v4.routing_git_provider`; this
    stores a narrowed type for the mutating calls in `_apply_project_reload()`
@@ -321,9 +323,15 @@ and paths that don't supply `daemon=` continue to work unchanged.
     "to add a project, append a `[[projects]]` block to
     `~/.foreman/projects.toml` and run `foreman daemon reload`; to rename a
     repo, update `repo` and `local_clone_path` (and optionally `name`) in the
-    file and reload; to remove a project, delete its block and reload. In-flight
-    tickets for a removed project complete normally; future polls stop
-    immediately."
+    file and reload; to remove a project, delete its block and reload. **Warning
+    for removals**: `_apply_project_reload()` calls
+    `routing_git.unregister_provider(name)` synchronously; any WorkerPool thread
+    concurrently executing a state-machine transition for the removed project will
+    raise `UnknownProjectError` on its next GitHub API call (`add_labels`,
+    `merge_pr`, etc.), causing that ticket to fail rather than complete normally.
+    For safe removal, wait until no tickets for the project are in-flight before
+    reloading (check the dashboard or allow the current tick to finish). Future
+    polls stop immediately after reload."
 
 17. Run `just check` and confirm exit zero.
 
