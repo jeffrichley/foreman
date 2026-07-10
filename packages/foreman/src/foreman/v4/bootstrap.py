@@ -31,6 +31,7 @@ from foreman.v4.poller import Poller
 from foreman.v4.repository import TicketRepository
 from foreman.v4.routing_git_provider import RoutingGitProvider
 from foreman.v4.subprocess_dispatcher import SubprocessRoleDispatcher
+from foreman.worktree import ensure_clone
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,41 @@ def bootstrap_cli_context(
     a FakeGitProvider.
     """
     configure_logging(log_dir=Path(config.log_dir), level=config.log_level)
+
+    # Startup auto-clone: ensure each project's local_clone_path exists and
+    # is a valid git clone before any poll or clone-refresh runs.
+    # Uses the orchestrator App installation token (read-only; daemon-level
+    # operation, not tied to any role). Raises RuntimeError if a path exists
+    # but is not a git repo — daemon refuses to start with an actionable
+    # message. Idempotent: an existing valid clone is a no-op.
+    if config.projects:
+        orch_token = identity.get_role_token("orchestrator")
+        for pc in config.projects:
+            clone_path = Path(pc.local_clone_path)
+            if (clone_path / ".git").exists():
+                continue  # already a valid clone — skip, no log
+            logger.info(
+                "startup: cloning missing project repo",
+                extra={
+                    "project": pc.name,
+                    "repo": pc.repo,
+                    "clone_path": str(clone_path),
+                },
+            )
+            ensure_clone(
+                repo_url=f"https://github.com/{pc.repo}.git",
+                clone_path=clone_path,
+                token=orch_token,
+            )
+            logger.info(
+                "startup: project repo cloned",
+                extra={
+                    "project": pc.name,
+                    "repo": pc.repo,
+                    "clone_path": str(clone_path),
+                },
+            )
+
     repo: TicketRepository
     from foreman.v4.postgres_repository import PostgresTicketRepository
 

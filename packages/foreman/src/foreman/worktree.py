@@ -41,7 +41,7 @@ from foreman._env_filter import filtered_subprocess_env
 from foreman.branches import impl_branch, spec_branch
 
 
-def ensure_clone(*, repo_url: str, clone_path: Path) -> None:
+def ensure_clone(*, repo_url: str, clone_path: Path, token: str | None = None) -> None:
     """Ensure ``clone_path`` is a valid git clone of ``repo_url``.
 
     First-run helper for the container: when the ``foreman-repos`` Docker
@@ -56,15 +56,33 @@ def ensure_clone(*, repo_url: str, clone_path: Path) -> None:
             PATH-resolved credentials / ssh agent / app-token URL
             rewriting as per the caller's existing convention.
         clone_path: Local filesystem path where the clone should live.
+        token: Optional GitHub App installation token. When set and
+            ``repo_url`` starts with ``"https://"``, the token is
+            embedded in the clone URL as
+            ``https://x-access-token:<token>@...`` so git authenticates
+            without a credential helper. Non-HTTPS URLs (local paths,
+            ``file://``, SSH) pass through unchanged.
 
     Raises:
+        RuntimeError: if ``clone_path`` exists but is not a git
+            repository (no ``.git`` directory). The operator must remove
+            or repair the path manually before restarting the daemon.
         subprocess.CalledProcessError: if ``git clone`` fails.
     """
+    if clone_path.exists() and not (clone_path / ".git").exists():
+        raise RuntimeError(
+            f"ensure_clone: {clone_path} exists but is not a git "
+            f"repository (no .git directory). Remove the path or repair it "
+            f"manually before restarting the daemon."
+        )
     if (clone_path / ".git").exists():
         return
     clone_path.parent.mkdir(parents=True, exist_ok=True)
+    clone_url = repo_url
+    if token is not None and repo_url.startswith("https://"):
+        clone_url = f"https://x-access-token:{token}@" + repo_url[len("https://") :]
     subprocess.run(
-        ["git", "clone", repo_url, str(clone_path)],
+        ["git", "clone", clone_url, str(clone_path)],
         check=True,
         capture_output=True,
     )

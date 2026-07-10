@@ -361,3 +361,96 @@ def test_bootstrap_uses_postgres_when_engine_postgres(monkeypatch, tmp_path: Pat
     from foreman.v4.pg_backup import BackupScheduler
 
     assert isinstance(ctx.daemon._backup_scheduler, BackupScheduler)
+
+
+# ----------------------------------------------------------------------
+# foreman#476 — startup auto-clone loop
+#
+# bootstrap_cli_context now calls ensure_clone for each project whose
+# local_clone_path doesn't exist (or exists but has no .git). The
+# autouse fixture below stubs ensure_clone so the existing tests are
+# not affected by the new startup step (the paths they pass don't exist
+# on disk and would trigger a real clone attempt without the stub).
+# ----------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _stub_ensure_clone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub ``foreman.v4.bootstrap.ensure_clone`` to a no-op MagicMock so
+    existing bootstrap tests are not broken by the startup clone loop added
+    in foreman#476. Tests that need to assert clone behaviour override this
+    fixture with their own ``monkeypatch.setattr`` call."""
+    monkeypatch.setattr("foreman.v4.bootstrap.ensure_clone", MagicMock())
+
+
+def test_bootstrap_clones_missing_project_at_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ensure_clone is called at bootstrap for each project whose
+    local_clone_path doesn't exist on disk, using the orchestrator token
+    and the full HTTPS GitHub URL (foreman#476)."""
+    mock_ensure_clone = MagicMock()
+    monkeypatch.setattr("foreman.v4.bootstrap.ensure_clone", mock_ensure_clone)
+
+    config = V4Config(
+        log_dir=str(tmp_path / "logs"),
+        apps=_apps_config(),
+        orchestrator=_orchestrator_config(),
+        operator=_operator_config(),
+        storage=_storage_config(),
+        projects=[
+            ProjectConfig(
+                name="voice",
+                repo="owner/voice",
+                local_clone_path=str(tmp_path / "voice"),
+            ),
+        ],
+    )
+    identity = _stub_identity()
+    bootstrap_cli_context(
+        config=config,
+        identity=identity,
+        git_provider_factory=lambda repo: _stub_git_factory(),
+    )
+
+    mock_ensure_clone.assert_called_once_with(
+        repo_url="https://github.com/owner/voice.git",
+        clone_path=Path(str(tmp_path / "voice")),
+        token="ghp_TOKEN",
+    )
+
+
+def test_bootstrap_skips_clone_for_existing_valid_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ensure_clone is NOT called when local_clone_path already contains a
+    .git directory — the startup loop's idempotency fast-path fires and the
+    orchestrator token is never minted (foreman#476)."""
+    # Simulate an existing valid clone by creating the .git directory.
+    git_dir = tmp_path / "voice" / ".git"
+    git_dir.mkdir(parents=True)
+
+    mock_ensure_clone = MagicMock()
+    monkeypatch.setattr("foreman.v4.bootstrap.ensure_clone", mock_ensure_clone)
+
+    config = V4Config(
+        log_dir=str(tmp_path / "logs"),
+        apps=_apps_config(),
+        orchestrator=_orchestrator_config(),
+        operator=_operator_config(),
+        storage=_storage_config(),
+        projects=[
+            ProjectConfig(
+                name="voice",
+                repo="owner/voice",
+                local_clone_path=str(tmp_path / "voice"),
+            ),
+        ],
+    )
+    bootstrap_cli_context(
+        config=config,
+        identity=_stub_identity(),
+        git_provider_factory=lambda repo: _stub_git_factory(),
+    )
+
+    mock_ensure_clone.assert_not_called()
