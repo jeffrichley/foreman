@@ -33,6 +33,7 @@ ImplFix, dirty → rebase, etc.) is deferred to foreman#317.
 
 from __future__ import annotations
 
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -101,10 +102,14 @@ class GitProvider(Protocol):
     """
 
     def list_open_issues_with_label(
-        self, *, project: str, label: str,
+        self,
+        *,
+        project: str,
+        label: str,
     ) -> list[int]:
         """Return the numbers of open issues (excluding PRs) carrying ``label``."""
         ...
+
     def get_pr_state(self, *, project: str, pr_number: int) -> PRState:
         """Fetch the PR's current merge-relevant state.
 
@@ -112,9 +117,11 @@ class GitProvider(Protocol):
         ``(project, pr_number)``.
         """
         ...
+
     def merge_pr(self, *, project: str, pr_number: int) -> None:
         """Merge the PR using whichever merge method the target repo allows."""
         ...
+
     def update_branch(self, *, project: str, pr_number: int) -> None:
         """Update the PR's branch from its base (GitHub "Update branch").
 
@@ -129,9 +136,8 @@ class GitProvider(Protocol):
         base-churn.
         """
         ...
-    def add_labels(
-        self, *, project: str, issue_number: int, labels: set[str]
-    ) -> None:
+
+    def add_labels(self, *, project: str, issue_number: int, labels: AbstractSet[str]) -> None:
         """Add the given labels to the issue.
 
         Does NOT touch any other labels — the trigger label
@@ -141,9 +147,7 @@ class GitProvider(Protocol):
         """
         ...
 
-    def remove_labels(
-        self, *, project: str, issue_number: int, labels: set[str]
-    ) -> None:
+    def remove_labels(self, *, project: str, issue_number: int, labels: AbstractSet[str]) -> None:
         """Remove the given labels from the issue, if present.
 
         Silently no-ops on labels that aren't on the issue — the
@@ -165,7 +169,10 @@ class GitProvider(Protocol):
         ...
 
     def delete_branch(
-        self, *, project: str, branch_name: str,
+        self,
+        *,
+        project: str,
+        branch_name: str,
     ) -> None:
         """Delete a remote branch.
 
@@ -186,7 +193,10 @@ class GitProvider(Protocol):
         ...
 
     def find_open_pr_by_head_branch(
-        self, *, project: str, branch_name: str,
+        self,
+        *,
+        project: str,
+        branch_name: str,
     ) -> int | None:
         """Find an OPEN PR whose head branch matches ``branch_name``.
 
@@ -200,7 +210,10 @@ class GitProvider(Protocol):
         ...
 
     def get_issue_labels(
-        self, *, project: str, issue_number: int,
+        self,
+        *,
+        project: str,
+        issue_number: int,
     ) -> set[str]:
         """Return the current label set on this issue.
 
@@ -211,7 +224,10 @@ class GitProvider(Protocol):
         ...
 
     def get_issue_comments(
-        self, *, project: str, issue_number: int,
+        self,
+        *,
+        project: str,
+        issue_number: int,
     ) -> list[CommentRef]:
         """Fetch the issue's comments in chronological order (oldest first).
 
@@ -223,7 +239,11 @@ class GitProvider(Protocol):
         ...
 
     def post_issue_comment(
-        self, *, project: str, issue_number: int, body: str,
+        self,
+        *,
+        project: str,
+        issue_number: int,
+        body: str,
     ) -> None:
         """Post a new comment on the issue.
 
@@ -279,13 +299,20 @@ class FakeGitProvider:
         self.posted_comments: list[tuple[str, int, str]] = []
 
     def set_open_issues_with_label(
-        self, *, project: str, label: str, issue_numbers: set[int],
+        self,
+        *,
+        project: str,
+        label: str,
+        issue_numbers: set[int],
     ) -> None:
         """Test helper: seed the open-issue-number set returned for (project, label)."""
         self._labeled_issues[(project, label)] = set(issue_numbers)
 
     def list_open_issues_with_label(
-        self, *, project: str, label: str,
+        self,
+        *,
+        project: str,
+        label: str,
     ) -> list[int]:
         """Return the sorted issue numbers seeded for (project, label)."""
         return sorted(self._labeled_issues.get((project, label), set()))
@@ -334,7 +361,11 @@ class FakeGitProvider:
         self.update_branch_calls.append((project, pr_number))
 
     def seed_issue_labels(
-        self, *, project: str, issue_number: int, labels: set[str],
+        self,
+        *,
+        project: str,
+        issue_number: int,
+        labels: set[str],
     ) -> None:
         """Test helper: seed the issue's current label set.
 
@@ -345,14 +376,22 @@ class FakeGitProvider:
         self._issue_labels[(project, issue_number)] = set(labels)
 
     def add_labels(
-        self, *, project: str, issue_number: int, labels: set[str],
+        self,
+        *,
+        project: str,
+        issue_number: int,
+        labels: AbstractSet[str],
     ) -> None:
         """Union the given labels into the issue's current label set."""
         current = self._issue_labels.setdefault((project, issue_number), set())
         current.update(labels)
 
     def remove_labels(
-        self, *, project: str, issue_number: int, labels: set[str],
+        self,
+        *,
+        project: str,
+        issue_number: int,
+        labels: AbstractSet[str],
     ) -> None:
         """Remove the given labels from the issue's current set, if present.
 
@@ -366,7 +405,10 @@ class FakeGitProvider:
         current.difference_update(labels)
 
     def get_issue_labels(
-        self, *, project: str, issue_number: int,
+        self,
+        *,
+        project: str,
+        issue_number: int,
     ) -> set[str]:
         """Return the current label set on this issue."""
         return self._issue_labels.get((project, issue_number), set())
@@ -388,7 +430,10 @@ class FakeGitProvider:
         return set(self._branches.get(project, set()))
 
     def delete_branch(
-        self, *, project: str, branch_name: str,
+        self,
+        *,
+        project: str,
+        branch_name: str,
     ) -> None:
         """Drop the branch from this fake's branch set + record the call."""
         self.deleted_branches.add((project, branch_name))
@@ -422,13 +467,20 @@ class FakeGitProvider:
             )
 
     def set_pr_head_branch(
-        self, *, project: str, pr_number: int, branch_name: str,
+        self,
+        *,
+        project: str,
+        pr_number: int,
+        branch_name: str,
     ) -> None:
         """Test helper: seed the head branch for a PR."""
         self._pr_head_branches[(project, pr_number)] = branch_name
 
     def find_open_pr_by_head_branch(
-        self, *, project: str, branch_name: str,
+        self,
+        *,
+        project: str,
+        branch_name: str,
     ) -> int | None:
         """Linear-scan the PR head-branch map for an open PR on this branch."""
         for (proj, pr_num), head in self._pr_head_branches.items():
@@ -462,13 +514,20 @@ class FakeGitProvider:
         self._seeded_comments[(project, issue_number)] = list(comments)
 
     def get_issue_comments(
-        self, *, project: str, issue_number: int,
+        self,
+        *,
+        project: str,
+        issue_number: int,
     ) -> list[CommentRef]:
         """Return seeded comments for this (project, issue_number), or []."""
         return list(self._seeded_comments.get((project, issue_number), []))
 
     def post_issue_comment(
-        self, *, project: str, issue_number: int, body: str,
+        self,
+        *,
+        project: str,
+        issue_number: int,
+        body: str,
     ) -> None:
         """Record the comment-post call. Tests assert on ``posted_comments``."""
         self.posted_comments.append((project, issue_number, body))

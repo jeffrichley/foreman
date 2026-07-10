@@ -7,9 +7,11 @@ across StateEntered / StateExited events. These tests pin the
 preservation behavior — especially that ``foreman:plan`` is never in
 any writer call, which is the bug that wedged the 2026-06-15 dogfood.
 """
+
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Set as AbstractSet
 
 import pytest
 
@@ -37,15 +39,11 @@ class _RecordingWriter:
         # scan every call across both ops in one pass.
         self.all_calls: list[tuple[str, str, int, set[str]]] = []
 
-    def add_labels(
-        self, *, project: str, issue_number: int, labels: set[str]
-    ) -> None:
+    def add_labels(self, *, project: str, issue_number: int, labels: AbstractSet[str]) -> None:
         self.add_calls.append((project, issue_number, set(labels)))
         self.all_calls.append(("add", project, issue_number, set(labels)))
 
-    def remove_labels(
-        self, *, project: str, issue_number: int, labels: set[str]
-    ) -> None:
+    def remove_labels(self, *, project: str, issue_number: int, labels: AbstractSet[str]) -> None:
         self.remove_calls.append((project, issue_number, set(labels)))
         self.all_calls.append(("remove", project, issue_number, set(labels)))
 
@@ -193,9 +191,7 @@ def test_observer_does_not_touch_trigger_label() -> None:
     # Every single call's label set is inspected — the trigger label
     # must NEVER appear in any of them, on either op.
     for op, _, _, labels in writer.all_calls:
-        assert "foreman:plan" not in labels, (
-            f"foreman:plan leaked into {op}_labels call: {labels}"
-        )
+        assert "foreman:plan" not in labels, f"foreman:plan leaked into {op}_labels call: {labels}"
 
     # Sanity: the observer DID do its job (added new, removed old).
     assert writer.add_calls == [("foreman", 42, {"foreman:state-specreview"})]
@@ -229,12 +225,10 @@ def test_observer_removes_trigger_label_on_first_state_transition() -> None:
     )
     # Exactly one remove_labels call, carrying foreman:plan.
     trigger_removals = [
-        labels for _project, _issue, labels in writer.remove_calls
-        if "foreman:plan" in labels
+        labels for _project, _issue, labels in writer.remove_calls if "foreman:plan" in labels
     ]
     assert len(trigger_removals) == 1, (
-        f"expected one remove_labels call with foreman:plan, got: "
-        f"{writer.remove_calls!r}"
+        f"expected one remove_labels call with foreman:plan, got: {writer.remove_calls!r}"
     )
     assert trigger_removals[0] == {"foreman:plan"}
 
@@ -267,8 +261,7 @@ def test_observer_does_not_remove_trigger_label_on_later_transitions() -> None:
     )
     for _project, _issue, labels in writer.remove_calls:
         assert "foreman:plan" not in labels, (
-            f"foreman:plan leaked into remove_labels on a later "
-            f"transition: {labels!r}"
+            f"foreman:plan leaked into remove_labels on a later transition: {labels!r}"
         )
 
 
@@ -345,7 +338,8 @@ def test_needshelp_terminal_does_not_scrub_siblings() -> None:
     assert writer.add_calls == [("foreman", 42, {"foreman:state-needshelp"})]
     # No remove call for sibling terminal labels.
     sibling_scrub_calls = [
-        labels for _proj, _issue, labels in writer.remove_calls
+        labels
+        for _proj, _issue, labels in writer.remove_calls
         if labels & {"foreman:state-needshelp", "foreman:state-failed"}
     ]
     assert sibling_scrub_calls == [], (
@@ -372,7 +366,8 @@ def test_failed_terminal_does_not_scrub_siblings() -> None:
     )
     assert writer.add_calls == [("foreman", 42, {"foreman:state-failed"})]
     sibling_scrub_calls = [
-        labels for _proj, _issue, labels in writer.remove_calls
+        labels
+        for _proj, _issue, labels in writer.remove_calls
         if labels & {"foreman:state-needshelp", "foreman:state-failed"}
     ]
     assert sibling_scrub_calls == [], (
@@ -386,13 +381,11 @@ def test_writer_failure_propagates() -> None:
     blanket except sees it."""
 
     class _BoomWriter:
-        def add_labels(
-            self, *, project: str, issue_number: int, labels: set[str]
-        ) -> None:
+        def add_labels(self, *, project: str, issue_number: int, labels: AbstractSet[str]) -> None:
             raise RuntimeError("network down")
 
         def remove_labels(
-            self, *, project: str, issue_number: int, labels: set[str]
+            self, *, project: str, issue_number: int, labels: AbstractSet[str]
         ) -> None:
             raise RuntimeError("network down")
 

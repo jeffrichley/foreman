@@ -11,6 +11,7 @@ installation token is minted.
 
 from __future__ import annotations
 
+from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING
 
 from github import Github, GithubException
@@ -24,7 +25,8 @@ if TYPE_CHECKING:
 
 
 def _resolve_merge_method(
-    repo: Repository, preferred: str | None = None,
+    repo: Repository,
+    preferred: str | None = None,
 ) -> str:
     """Pick the merge method to pass to ``pr.merge(merge_method=...)``.
 
@@ -235,7 +237,10 @@ class PyGithubGitProvider:
         pr.update_branch()
 
     def list_open_issues_with_label(
-        self, *, project: str, label: str,
+        self,
+        *,
+        project: str,
+        label: str,
     ) -> list[int]:
         """Return open issue numbers (excluding PRs) that carry ``label``.
 
@@ -247,7 +252,11 @@ class PyGithubGitProvider:
         return [issue.number for issue in issues if issue.pull_request is None]
 
     def add_labels(
-        self, *, project: str, issue_number: int, labels: set[str],
+        self,
+        *,
+        project: str,
+        issue_number: int,
+        labels: AbstractSet[str],
     ) -> None:
         """Add the given labels to the issue without touching others.
 
@@ -290,7 +299,11 @@ class PyGithubGitProvider:
             issue.edit(state="closed")
 
     def remove_labels(
-        self, *, project: str, issue_number: int, labels: set[str],
+        self,
+        *,
+        project: str,
+        issue_number: int,
+        labels: AbstractSet[str],
     ) -> None:
         """Remove the given labels from the issue, swallowing 404s.
 
@@ -316,7 +329,10 @@ class PyGithubGitProvider:
                 continue
 
     def delete_branch(
-        self, *, project: str, branch_name: str,
+        self,
+        *,
+        project: str,
+        branch_name: str,
     ) -> None:
         """Delete the branch, idempotently.
 
@@ -356,7 +372,10 @@ class PyGithubGitProvider:
             raise
 
     def find_open_pr_by_head_branch(
-        self, *, project: str, branch_name: str,
+        self,
+        *,
+        project: str,
+        branch_name: str,
     ) -> int | None:
         """Return the number of the open PR with the given head branch.
 
@@ -373,7 +392,10 @@ class PyGithubGitProvider:
         return None
 
     def get_issue_labels(
-        self, *, project: str, issue_number: int,
+        self,
+        *,
+        project: str,
+        issue_number: int,
     ) -> set[str]:
         """Return the set of label names currently on the issue.
 
@@ -387,7 +409,10 @@ class PyGithubGitProvider:
         return {label.name for label in issue.labels}
 
     def get_issue_comments(
-        self, *, project: str, issue_number: int,
+        self,
+        *,
+        project: str,
+        issue_number: int,
     ) -> list[CommentRef]:
         """Fetch the issue's comments in chronological order (oldest first).
 
@@ -410,7 +435,11 @@ class PyGithubGitProvider:
         ]
 
     def post_issue_comment(
-        self, *, project: str, issue_number: int, body: str,
+        self,
+        *,
+        project: str,
+        issue_number: int,
+        body: str,
     ) -> None:
         """Post a new comment on the issue via PyGithub.
 
