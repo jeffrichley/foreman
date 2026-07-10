@@ -93,14 +93,18 @@ def test_one_transition_reaches_all_four_observers(caplog):
     #    emits StateExited for Demo. Order:
     #      - add Demo on StateEntered(Demo) at entry
     #      - add Done on StateEntered(Done) synthesized by _enter_terminal
+    #      - remove sibling terminal labels on StateEntered(Done) (issue #486)
     #      - remove Demo on StateExited(Demo) from the finally block
-    #    No remove for Done — terminal-landing is intentionally one-sided
-    #    so the issue keeps the terminal label visible for operators.
+    #    The Done-entry scrub (issue #486) strips foreman:state-needshelp and
+    #    foreman:state-failed so completed tickets don't carry misleading residue
+    #    from any NeedsHelp/Failed detours taken en route to Done.
     assert writer.calls == [
         ("add", {"project": "p", "issue_number": 1,
                  "labels": {"foreman:state-demo"}}),
         ("add", {"project": "p", "issue_number": 1,
                  "labels": {"foreman:state-done"}}),
+        ("remove", {"project": "p", "issue_number": 1,
+                    "labels": {"foreman:state-needshelp", "foreman:state-failed"}}),
         ("remove", {"project": "p", "issue_number": 1,
                     "labels": {"foreman:state-demo"}}),
     ]
