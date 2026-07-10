@@ -514,10 +514,12 @@ def test_push_branch_uses_installation_token_url(tmp_path: Path) -> None:
     assert len(push_calls) == 1
     pushed = push_calls[0]
     assert pushed[0:2] == ["git", "push"]
-    url = pushed[2]
+    assert pushed[2] == "--force-with-lease"
+    url = pushed[3]
     assert url == "https://x-access-token:ghs_abc@github.com/owner/name.git"
-    # refspec is branch:branch (so server-side rejects accidental force-push semantics)
-    assert pushed[3] == "foreman/issue-7:foreman/issue-7"
+    # refspec is branch:branch; --force-with-lease guards against unexpected
+    # remote movement without silently overwriting concurrent writes.
+    assert pushed[4] == "foreman/issue-7:foreman/issue-7"
 
 
 # ----------------------------------------------------------------------
@@ -855,6 +857,43 @@ def test_git_subprocess_drops_all_blocked_vars(
     env = capture["env"]
     assert env is not None, f"subprocess.run for git push must receive env= (var={var})"
     assert var not in env, f"{var}=sentinel-do-not-leak leaked into git subprocess env"
+
+
+def test_push_branch_uses_force_with_lease(tmp_path: Path) -> None:
+    """Regression for foreman#494: push_branch must use --force-with-lease.
+
+    After the Fixer rebases its branch (rewriting commit SHAs), a plain
+    ``git push`` is rejected non-fast-forward. ``--force-with-lease`` allows
+    the rewritten history to land while still refusing to overwrite if the
+    remote moved unexpectedly — the safe form for single-owner bot branches.
+    """
+    wt = _init_worktree(tmp_path)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/owner/name.git"],
+        cwd=wt,
+        check=True,
+        capture_output=True,
+    )
+
+    real_run = subprocess.run
+    push_calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git" and cmd[1] == "push":
+            push_calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return real_run(cmd, *args, **kwargs)
+
+    provider = GitHubProvider(identity=_identity("ghs_abc"), client=MagicMock())
+
+    with patch("foreman.git_hosts.github.subprocess.run", side_effect=fake_run):
+        provider.push_branch(worktree_path=wt, branch="foreman/impl-494")
+
+    assert len(push_calls) == 1
+    assert "--force-with-lease" in push_calls[0], (
+        "push_branch must use --force-with-lease so Fixer rebases survive "
+        "(foreman#494: plain push was rejected non-fast-forward after rebase)"
+    )
 
 
 def test_git_subprocess_preserves_uv_cache_dir(
