@@ -28,6 +28,7 @@ dispatcher ALWAYS passes an explicit ``session_id`` (never relies on Claude's
 layout plus the always-passed id, so it is covered by the worktree/dispatch
 integration surface rather than by these pure-decision tests.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -102,7 +103,9 @@ def _interrupted_prior_with_stored_id(
     repo.mark_execute_started(prior.id, now=_at(sequence))
     repo.set_session_id(prior.id, stored_session_id)
     repo.record_failure(
-        prior.id, now=_at(sequence), failure_phase="crash_recovery",
+        prior.id,
+        now=_at(sequence),
+        failure_phase="crash_recovery",
         failure_reason="x",
     )
     repo.close_state_instance(prior.id, now=_at(sequence))
@@ -122,7 +125,10 @@ def test_wrong_role_never_resumes_other_roles_session():
     # The interrupted prior stored an id derived for a DIFFERENT role (fixer-spec).
     stored = derive_session_id(ticket_id, "fixer-spec", target, run_key)
     _interrupted_prior_with_stored_id(
-        repo, ticket_id=ticket_id, state_name="SpecReview", sequence=1,
+        repo,
+        ticket_id=ticket_id,
+        state_name="SpecReview",
+        sequence=1,
         stored_session_id=stored,
     )
 
@@ -153,7 +159,10 @@ def test_wrong_ticket_never_resumes_other_tickets_session():
     other_ticket_id = ticket_id + 1000  # a ticket id that is definitively NOT ours
     stored = derive_session_id(other_ticket_id, role, target, run_key)
     _interrupted_prior_with_stored_id(
-        repo, ticket_id=ticket_id, state_name="Planning", sequence=1,
+        repo,
+        ticket_id=ticket_id,
+        state_name="Planning",
+        sequence=1,
         stored_session_id=stored,
     )
 
@@ -181,7 +190,10 @@ def test_wrong_target_never_resumes_other_targets_session():
     # Prior stored an id derived for target="impl"; current resolves target="spec".
     stored = derive_session_id(ticket_id, role, "impl", run_key)
     _interrupted_prior_with_stored_id(
-        repo, ticket_id=ticket_id, state_name="SpecReview", sequence=1,
+        repo,
+        ticket_id=ticket_id,
+        state_name="SpecReview",
+        sequence=1,
         stored_session_id=stored,
     )
 

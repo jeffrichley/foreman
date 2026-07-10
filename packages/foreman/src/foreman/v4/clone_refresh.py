@@ -29,6 +29,7 @@ Two resilience properties matter:
   project is retried on the next tick rather than parked for the full
   interval).
 """
+
 from __future__ import annotations
 
 import datetime as dt

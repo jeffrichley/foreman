@@ -1,4 +1,5 @@
 """CliContext — single source of construction for per-invocation deps."""
+
 from __future__ import annotations
 
 import pytest

@@ -13,9 +13,7 @@ from github.PullRequest import PullRequest
 from github.Repository import Repository
 
 
-def find_open_pr_by_head_branch(
-    repo: Repository, owner: str, branch: str
-) -> PullRequest | None:
+def find_open_pr_by_head_branch(repo: Repository, owner: str, branch: str) -> PullRequest | None:
     """Locate the open PR whose head branch matches ``branch``.
 
     Generalized from the original spec-PR-only ``_find_spec_pr`` helper

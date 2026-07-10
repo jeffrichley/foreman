@@ -82,8 +82,7 @@ class EventBus:
                     # ticket-and-instance context so a stuck ticket is
                     # immediately findable in the JSONL.
                     _log.warning(
-                        "observer raised on %s for ticket=%d instance=%d: "
-                        "observer=%s exc=%s: %s",
+                        "observer raised on %s for ticket=%d instance=%d: observer=%s exc=%s: %s",
                         type(event).__name__,
                         event.ticket_id,
                         event.instance_id,

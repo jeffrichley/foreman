@@ -11,6 +11,7 @@ Tests mirror the Reviewer's pattern (Task 5.3): parametrize on the v4
 ``target`` literal so the CLI's target-aware contract is exercised in
 both spec and impl shape with a single test body.
 """
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
@@ -102,9 +103,7 @@ def test_fixer_transient_outcome(capsys):
     """
     from foreman.providers import ProviderTransientError
 
-    original_cause = Exception(
-        "Claude Code returned an error result: 429 Too Many Requests"
-    )
+    original_cause = Exception("Claude Code returned an error result: 429 Too Many Requests")
     transient = ProviderTransientError(str(original_cause))
     transient.__cause__ = original_cause
     with patch(
@@ -136,8 +135,11 @@ def test_fixer_run_fixer_cli_populates_details_with_fix_comment(capsys):
         "outcome": "fixed",
         "confidence": "high",
         "commits_made": [
-            {"sha": "def456", "summary": "test: cover happy path",
-             "findings_addressed": ["foo.py:42"]},
+            {
+                "sha": "def456",
+                "summary": "test: cover happy path",
+                "findings_addressed": ["foo.py:42"],
+            },
         ],
         "addressed_findings": [{"target": "foo.py:42", "summary": "added test"}],
         "unaddressed_findings": [],
@@ -153,5 +155,3 @@ def test_fixer_run_fixer_cli_populates_details_with_fix_comment(capsys):
     assert outcome.details["outcome"] == "fixed"
     assert "missing test" in outcome.details["fix_comment"]
     assert outcome.details["commits_made"][0]["sha"] == "def456"
-
-

@@ -5,6 +5,7 @@ new ``SpecMerging`` state, which merges with the self-heal framework.
 ``verify()`` keeps only the pr_number-present validation (a malformed
 CLEAN fails fast here) and no longer touches git.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -21,16 +22,23 @@ def _ctx(*, response_stdout: str, git: FakeGitProvider):
     ticket = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
     repo.set_ticket_state(ticket.id, "SpecReview", now=dt.datetime(2026, 6, 13))
     instance = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="SpecReview", sequence=1,
+        ticket_id=ticket.id,
+        state_name="SpecReview",
+        sequence=1,
         now=dt.datetime(2026, 6, 13),
     )
-    dispatcher = FakeRoleDispatcher(responses={
-        ("reviewer-spec", "p", 1): response_stdout,
-    })
+    dispatcher = FakeRoleDispatcher(
+        responses={
+            ("reviewer-spec", "p", 1): response_stdout,
+        }
+    )
     return StateContext(
-        ticket=repo.get_ticket(ticket.id), instance=instance, repo=repo,
+        ticket=repo.get_ticket(ticket.id),
+        instance=instance,
+        repo=repo,
         clock=lambda: dt.datetime(2026, 6, 13),
-        role_dispatcher=dispatcher, git=git,
+        role_dispatcher=dispatcher,
+        git=git,
     ), repo
 
 
@@ -40,7 +48,8 @@ def test_clean_outcome_advances_to_spec_merging_without_merging():
     downstream in SpecMerging with the self-heal framework."""
     git = FakeGitProvider()
     git.set_pr_state(
-        project="p", pr_number=42,
+        project="p",
+        pr_number=42,
         state=PRState(merged=False, mergeable=True, ci_passing=True),
     )
     ctx, repo = _ctx(
@@ -65,7 +74,8 @@ def test_specreview_verify_no_longer_calls_merge_pr():
     find it), but no merge happens at SpecReview."""
     git = FakeGitProvider()
     git.set_pr_state(
-        project="p", pr_number=42,
+        project="p",
+        pr_number=42,
         state=PRState(merged=False, mergeable=True, ci_passing=True),
     )
     ctx, repo = _ctx(
@@ -85,7 +95,8 @@ def test_specreview_verify_no_longer_calls_merge_pr():
 def test_needs_fix_routes_to_spec_fix_without_merge():
     git = FakeGitProvider()
     git.set_pr_state(
-        project="p", pr_number=42,
+        project="p",
+        pr_number=42,
         state=PRState(merged=False, mergeable=True, ci_passing=True),
     )
     ctx, repo = _ctx(
@@ -104,9 +115,7 @@ def test_needs_fix_routes_to_spec_fix_without_merge():
 def test_clean_without_pr_number_routes_to_failed_via_verify():
     git = FakeGitProvider()
     ctx, repo = _ctx(
-        response_stdout=(
-            'FOREMAN_OUTCOME:{"kind":"clean","confidence":"high","summary":"no pr"}'
-        ),
+        response_stdout=('FOREMAN_OUTCOME:{"kind":"clean","confidence":"high","summary":"no pr"}'),
         git=git,
     )
     next_state = SpecReviewState().transition(ctx)

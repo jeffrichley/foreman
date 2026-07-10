@@ -40,9 +40,7 @@ class TicketRepository(Protocol):
 
     # --- Ticket CRUD ---
 
-    def create_ticket(
-        self, *, project: str, issue_number: int, now: dt.datetime
-    ) -> TicketRecord:
+    def create_ticket(self, *, project: str, issue_number: int, now: dt.datetime) -> TicketRecord:
         """Create and persist a new ticket in the Queued state.
 
         Raises:
@@ -50,9 +48,11 @@ class TicketRepository(Protocol):
                 tracked.
         """
         ...
+
     def get_ticket(self, ticket_id: int) -> TicketRecord:
         """Fetch a ticket by id, raising TicketNotFoundError if absent."""
         ...
+
     def get_ticket_by_issue(self, *, project: str, issue_number: int) -> TicketRecord:
         """Fetch a ticket by its ``(project, issue_number)`` natural key.
 
@@ -60,30 +60,35 @@ class TicketRepository(Protocol):
             TicketNotFoundError: no ticket is tracked for this key.
         """
         ...
+
     def list_open_tickets(self) -> list[TicketRecord]:
         """Return every ticket not in a terminal state (Done or Failed)."""
         ...
+
     def list_all_tickets(self) -> list[TicketRecord]:
         """Return every tracked ticket, including terminal ones."""
         ...
+
     def set_ticket_state(self, ticket_id: int, new_state: str, *, now: dt.datetime) -> None:
         """Transition a ticket to ``new_state`` and stamp ``updated_at``."""
         ...
-    def hold_ticket(
-        self, ticket_id: int, *, held_by: str, reason: str, now: dt.datetime
-    ) -> None:
+
+    def hold_ticket(self, ticket_id: int, *, held_by: str, reason: str, now: dt.datetime) -> None:
         """Mark a ticket held, blocking further state transitions until resumed.
 
         Records who requested the hold and why so operators and the
         contract suite can audit it later.
         """
         ...
+
     def resume_ticket(self, ticket_id: int, *, now: dt.datetime) -> None:
         """Clear a ticket's held status so state transitions can proceed again."""
         ...
+
     def delete_ticket(self, ticket_id: int) -> None:
         """Permanently remove a ticket, cascading to its state-instance history."""
         ...
+
     # foreman#361: schedule + clear the transient-provider-error
     # suspension window. Poller filters on these.
     def set_next_action_at(self, ticket_id: int, *, when: dt.datetime) -> None:
@@ -93,6 +98,7 @@ class TicketRepository(Protocol):
         filters out tickets whose ``next_action_at`` is still in the future.
         """
         ...
+
     def clear_next_action_at(self, ticket_id: int) -> None:
         """Clear a ticket's dispatch suspension so it is immediately eligible again."""
         ...
@@ -108,12 +114,15 @@ class TicketRepository(Protocol):
             TicketNotFoundError: ``ticket_id`` does not exist.
         """
         ...
+
     def get_state_instance(self, instance_id: int) -> StateInstanceRecord:
         """Fetch a state-instance by id, raising StateInstanceNotFoundError if absent."""
         ...
+
     def mark_execute_started(self, instance_id: int, *, now: dt.datetime) -> None:
         """Record the timestamp at which ``execute()`` began running."""
         ...
+
     def mark_execute_completed(
         self,
         instance_id: int,
@@ -129,9 +138,11 @@ class TicketRepository(Protocol):
         (below) walk back over.
         """
         ...
+
     def close_state_instance(self, instance_id: int, *, now: dt.datetime) -> None:
         """Record the timestamp ``exit()`` finished, closing the instance's lifecycle."""
         ...
+
     def record_failure(
         self,
         instance_id: int,
@@ -142,6 +153,7 @@ class TicketRepository(Protocol):
     ) -> None:
         """Record which lifecycle phase failed and why for a state-instance."""
         ...
+
     def set_session_id(self, instance_id: int, session_id: str) -> None:
         """Attach a role subprocess's Claude session id to a state-instance.
 
@@ -149,6 +161,7 @@ class TicketRepository(Protocol):
         state instance instead of starting a fresh one.
         """
         ...
+
     def list_in_flight_state_instances(self) -> list[StateInstanceRecord]:
         """Return every state-instance, across all tickets, not yet closed.
 
@@ -156,12 +169,14 @@ class TicketRepository(Protocol):
         got to call ``close_state_instance`` on).
         """
         ...
+
     def list_state_instances_for_ticket(
         self,
         ticket_id: int,
     ) -> list[StateInstanceRecord]:
         """Return every state-instance recorded for a ticket, ordered by sequence."""
         ...
+
     def append_event(
         self,
         *,
@@ -175,6 +190,7 @@ class TicketRepository(Protocol):
     ) -> None:
         """Append an audit-log row for a ticket/state-instance occurrence."""
         ...
+
     def list_events_for_ticket(self, ticket_id: int) -> list[dict[str, Any]]:
         """Return every recorded event for a ticket, in insertion order."""
         ...
@@ -189,9 +205,11 @@ class TicketRepository(Protocol):
         instance ever recorded one.
         """
         ...
+
     def count_state_instances_for_ticket(self, ticket_id: int) -> int:
         """Return how many state-instances have been opened for this ticket."""
         ...
+
     def count_consecutive_transient_provider_errors(self, ticket_id: int) -> int:
         """Return the count of consecutive completed transient-provider-error outcomes.
 
@@ -268,9 +286,11 @@ class TicketRepository(Protocol):
     def set_ticket_dependencies(self, ticket_id: int, *, deps: list[int]) -> None:
         """Replace a ticket's full set of dependency ticket ids with ``deps``."""
         ...
+
     def get_ticket_dependencies(self, ticket_id: int) -> list[int]:
         """Return the ticket ids this ticket is recorded as depending on."""
         ...
+
     def list_unmet_dependencies(self, ticket_id: int) -> list[int]:
         """Return the subset of a ticket's dependencies not yet in the Done state.
 

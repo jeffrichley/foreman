@@ -5,6 +5,7 @@ A daemon restart (incl. Watchtower redeploy) must close any in-flight
 tick loop starts a worker thread. This proves ``run_forever`` calls
 ``reconcile_on_startup`` once at the top, ahead of the ``while`` loop.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -32,17 +33,24 @@ def test_run_forever_reconciles_before_ticking():
     repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(project="p", issue_number=1, now=now)
     repo.open_state_instance(
-        ticket_id=ticket.id, state_name="Implementing", sequence=1, now=now,
+        ticket_id=ticket.id,
+        state_name="Implementing",
+        sequence=1,
+        now=now,
     )  # left in-flight, as a crash would leave it
     assert repo.list_in_flight_state_instances()  # precondition
 
     poller = Poller(
-        repo=repo, qm=None, git=FakeGitProvider(),
-        project="p", trigger_label="foreman:plan",
+        repo=repo,
+        qm=None,
+        git=FakeGitProvider(),
+        project="p",
+        trigger_label="foreman:plan",
         clock=clock,
     )
     daemon = Daemon(
-        repo=repo, git=FakeGitProvider(),
+        repo=repo,
+        git=FakeGitProvider(),
         dispatcher=FakeRoleDispatcher(responses={}),
         pollers=[poller],
         config=DaemonConfig(tick_seconds=0, max_in_flight=4),
@@ -67,13 +75,17 @@ def test_repeated_restarts_do_not_escalate_healthy_ticket():
     t = repo.create_ticket(project="p", issue_number=1, now=now)
     for seq in (1, 2, 3):
         repo.open_state_instance(
-            ticket_id=t.id, state_name="Implementing", sequence=seq, now=now,
+            ticket_id=t.id,
+            state_name="Implementing",
+            sequence=seq,
+            now=now,
         )
         reconcile_on_startup(repo, clock=lambda: now)  # simulate restart N
 
     assert (
         repo.count_consecutive_same_state(
-            ticket_id=t.id, state="Implementing",
+            ticket_id=t.id,
+            state="Implementing",
         )
         == 0
     )

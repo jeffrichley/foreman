@@ -33,9 +33,7 @@ def test_worker_transient_outcome(capsys) -> None:
     below — this test pins the CLI-level wiring, which is what the
     state machine reads.
     """
-    original_cause = Exception(
-        "Claude Code returned an error result: 503 Service Unavailable"
-    )
+    original_cause = Exception("Claude Code returned an error result: 503 Service Unavailable")
     transient = ProviderTransientError(str(original_cause))
     transient.__cause__ = original_cause
     with patch(
@@ -102,7 +100,10 @@ def test_worker_core_inner_arm_reraises_provider_transient_error() -> None:
 
     worker_src = (
         Path(__file__).resolve().parent.parent.parent.parent
-        / "src" / "foreman" / "roles" / "worker.py"
+        / "src"
+        / "foreman"
+        / "roles"
+        / "worker.py"
     )
     text = worker_src.read_text(encoding="utf-8")
     # The inner arm MUST contain the isinstance + raise short-circuit

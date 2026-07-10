@@ -336,6 +336,4 @@ def test_log_outcome_literals_exclude_dead_failure_values() -> None:
             f"{fn.__name__}: dead Literal value {dead_value!r} re-introduced"
         )
         # And the replacement is still in the vocabulary.
-        assert "exception" in allowed, (
-            f"{fn.__name__}: 'exception' missing from outcome Literal"
-        )
+        assert "exception" in allowed, f"{fn.__name__}: 'exception' missing from outcome Literal"

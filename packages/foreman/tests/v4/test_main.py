@@ -7,6 +7,7 @@ real subprocess, no real GitHub round-trip) and proves typer exits 0
 on ``--help`` even with dummy PEM files — :func:`mint_installation_token`
 is patched at the v4.identity import site so no real RSA parsing fires.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -19,7 +20,8 @@ from foreman.v4.repository import InMemoryTicketRepository
 
 
 def test_main_help_exits_cleanly(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``foreman --help`` exits 0 via typer's SystemExit, proving the
     full import graph + V4Config load + V4IdentityRegistry construction
@@ -44,7 +46,8 @@ def test_main_help_exits_cleanly(
         return InstallationToken(token="ghs_FAKE_TOKEN", expires_at=2_000_000_000)
 
     monkeypatch.setattr(
-        "foreman.v4.identity.mint_installation_token", _fake_mint,
+        "foreman.v4.identity.mint_installation_token",
+        _fake_mint,
     )
     monkeypatch.setattr(
         "foreman.v4.pygithub_git_provider.PyGithubGitProvider",

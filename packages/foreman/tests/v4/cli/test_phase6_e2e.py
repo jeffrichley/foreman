@@ -1,4 +1,5 @@
 """Phase 6 e2e — operator commands work against a live repo+QM."""
+
 from __future__ import annotations
 
 import datetime as dt

@@ -453,14 +453,15 @@ async def _run_planner_core(
         # False; we do not branch on the return.
         if llm_output.confidence == "low":
             import os as _os
+
             state_instance_id = _os.environ.get(
-                "FOREMAN_STATE_INSTANCE_ID", "unknown",
+                "FOREMAN_STATE_INSTANCE_ID",
+                "unknown",
             )
             fallback_reason = None
             if llm_output.escalation_comment is None:
                 fallback_reason = (
-                    "planner LLM produced confidence=low but did not "
-                    "populate escalation_comment"
+                    "planner LLM produced confidence=low but did not populate escalation_comment"
                 )
             post_escalation_comment(
                 host=host,

@@ -16,7 +16,9 @@ from foreman.v4.cli.formatters import get_formatter
 def cmd_queue(
     ctx: typer.Context,
     format: str = typer.Option(
-        "table", "--format", help="table | json | yaml",
+        "table",
+        "--format",
+        help="table | json | yaml",
     ),
 ) -> None:
     """Report queue depth and in-flight count."""

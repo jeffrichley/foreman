@@ -61,7 +61,8 @@ def test_dispatches_get_pr_state_to_correct_provider() -> None:
 def test_dispatches_merge_pr_to_correct_provider() -> None:
     foo, bar, router = _two_provider_router()
     bar.set_pr_state(
-        project="bar", pr_number=42,
+        project="bar",
+        pr_number=42,
         state=PRState(merged=False, mergeable=True, ci_passing=True),
     )
 
@@ -81,7 +82,9 @@ def test_dispatches_add_labels_to_correct_provider() -> None:
     foo, bar, router = _two_provider_router()
 
     router.add_labels(
-        project="bar", issue_number=7, labels={"foreman:state-planning"},
+        project="bar",
+        issue_number=7,
+        labels={"foreman:state-planning"},
     )
 
     assert bar.get_issue_labels(project="bar", issue_number=7) == {
@@ -95,14 +98,20 @@ def test_dispatches_remove_labels_to_correct_provider() -> None:
     # Seed both with the same label so we can prove the remove only
     # touched bar's copy.
     foo.seed_issue_labels(
-        project="foo", issue_number=7, labels={"foreman:state-planning"},
+        project="foo",
+        issue_number=7,
+        labels={"foreman:state-planning"},
     )
     bar.seed_issue_labels(
-        project="bar", issue_number=7, labels={"foreman:state-planning"},
+        project="bar",
+        issue_number=7,
+        labels={"foreman:state-planning"},
     )
 
     router.remove_labels(
-        project="bar", issue_number=7, labels={"foreman:state-planning"},
+        project="bar",
+        issue_number=7,
+        labels={"foreman:state-planning"},
     )
 
     assert bar.get_issue_labels(project="bar", issue_number=7) == set()
@@ -130,14 +139,19 @@ def test_dispatches_close_issue_to_correct_provider() -> None:
 def test_dispatches_list_open_issues_with_label_to_correct_provider() -> None:
     foo, bar, router = _two_provider_router()
     foo.set_open_issues_with_label(
-        project="foo", label="foreman:plan", issue_numbers={1, 2, 3},
+        project="foo",
+        label="foreman:plan",
+        issue_numbers={1, 2, 3},
     )
     bar.set_open_issues_with_label(
-        project="bar", label="foreman:plan", issue_numbers={99},
+        project="bar",
+        label="foreman:plan",
+        issue_numbers={99},
     )
 
     result = router.list_open_issues_with_label(
-        project="bar", label="foreman:plan",
+        project="bar",
+        label="foreman:plan",
     )
 
     assert result == [99]
@@ -166,7 +180,9 @@ def test_unknown_project_is_lookuperror_subclass() -> None:
 
     with pytest.raises(LookupError):
         router.add_labels(
-            project="never_registered", issue_number=1, labels={"x"},
+            project="never_registered",
+            issue_number=1,
+            labels={"x"},
         )
 
 
@@ -199,7 +215,8 @@ def test_close_pr_dispatches_to_per_project_provider():
     a = FakeGitProvider()
     b = FakeGitProvider()
     a.set_pr_state(
-        project="a", pr_number=5,
+        project="a",
+        pr_number=5,
         state=PRState(merged=False, mergeable=True, ci_passing=True),
     )
     router = RoutingGitProvider(providers={"a": a, "b": b})
@@ -212,22 +229,30 @@ def test_find_open_pr_by_head_branch_dispatches_to_per_project_provider():
     a = FakeGitProvider()
     b = FakeGitProvider()
     b.set_pr_state(
-        project="b", pr_number=42,
+        project="b",
+        pr_number=42,
         state=PRState(merged=False, mergeable=True, ci_passing=True),
     )
     b.set_pr_head_branch(
-        project="b", pr_number=42, branch_name="foreman/issue-180",
+        project="b",
+        pr_number=42,
+        branch_name="foreman/issue-180",
     )
     router = RoutingGitProvider(providers={"a": a, "b": b})
     found = router.find_open_pr_by_head_branch(
-        project="b", branch_name="foreman/issue-180",
+        project="b",
+        branch_name="foreman/issue-180",
     )
     assert found == 42
     # Same branch name on project "a" must NOT match — project routing
     # is the whole point.
-    assert router.find_open_pr_by_head_branch(
-        project="a", branch_name="foreman/issue-180",
-    ) is None
+    assert (
+        router.find_open_pr_by_head_branch(
+            project="a",
+            branch_name="foreman/issue-180",
+        )
+        is None
+    )
 
 
 def test_update_branch_dispatches_to_per_project_provider():
@@ -236,7 +261,8 @@ def test_update_branch_dispatches_to_per_project_provider():
     a = FakeGitProvider()
     b = FakeGitProvider()
     b.set_pr_state(
-        project="b", pr_number=42,
+        project="b",
+        pr_number=42,
         state=PRState(merged=False, mergeable=False, ci_passing=True),
     )
     router = RoutingGitProvider(providers={"a": a, "b": b})
@@ -255,7 +281,9 @@ def test_get_issue_labels_dispatches_to_per_project_provider():
     a = FakeGitProvider()
     b = FakeGitProvider()
     b.seed_issue_labels(
-        project="b", issue_number=1, labels={"foreman:plan"},
+        project="b",
+        issue_number=1,
+        labels={"foreman:plan"},
     )
     router = RoutingGitProvider(providers={"a": a, "b": b})
     assert router.get_issue_labels(project="b", issue_number=1) == {"foreman:plan"}

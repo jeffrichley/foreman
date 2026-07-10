@@ -1,4 +1,5 @@
 """FakeGitProvider — in-memory implementation of the v4 GitProvider Protocol."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -16,7 +17,8 @@ from foreman.v4.git_provider import (
 def test_set_and_get_pr_state():
     git = FakeGitProvider()
     git.set_pr_state(
-        project="p", pr_number=1,
+        project="p",
+        pr_number=1,
         state=PRState(merged=False, mergeable=True, ci_passing=True),
     )
     assert git.get_pr_state(project="p", pr_number=1).mergeable is True
@@ -35,7 +37,8 @@ def test_merge_pr_marks_merged_and_records_call():
     """
     git = FakeGitProvider()
     git.set_pr_state(
-        project="p", pr_number=1,
+        project="p",
+        pr_number=1,
         state=PRState(merged=False, mergeable=True, ci_passing=True),
     )
     git.merge_pr(project="p", pr_number=1)
@@ -55,10 +58,14 @@ def test_merge_pr_preserves_mergeable_state():
     (like base_ref), not silently reset it to ""."""
     git = FakeGitProvider()
     git.set_pr_state(
-        project="p", pr_number=1,
+        project="p",
+        pr_number=1,
         state=PRState(
-            merged=False, mergeable=True, ci_passing=True,
-            base_ref="main", mergeable_state="clean",
+            merged=False,
+            mergeable=True,
+            ci_passing=True,
+            base_ref="main",
+            mergeable_state="clean",
         ),
     )
     git.merge_pr(project="p", pr_number=1)
@@ -91,13 +98,19 @@ def test_add_labels_preserves_existing_labels():
     write_labels REPLACED the entire set, stripping foreman:plan."""
     git = FakeGitProvider()
     git.seed_issue_labels(
-        project="p", issue_number=42, labels={"foreman:plan", "custom"},
+        project="p",
+        issue_number=42,
+        labels={"foreman:plan", "custom"},
     )
     git.add_labels(
-        project="p", issue_number=42, labels={"foreman:state-planning"},
+        project="p",
+        issue_number=42,
+        labels={"foreman:state-planning"},
     )
     assert git.get_issue_labels(project="p", issue_number=42) == {
-        "foreman:plan", "custom", "foreman:state-planning",
+        "foreman:plan",
+        "custom",
+        "foreman:state-planning",
     }
 
 
@@ -106,14 +119,18 @@ def test_remove_labels_only_touches_specified():
     operator labels intact."""
     git = FakeGitProvider()
     git.seed_issue_labels(
-        project="p", issue_number=42,
+        project="p",
+        issue_number=42,
         labels={"foreman:plan", "custom", "foreman:state-planning"},
     )
     git.remove_labels(
-        project="p", issue_number=42, labels={"foreman:state-planning"},
+        project="p",
+        issue_number=42,
+        labels={"foreman:state-planning"},
     )
     assert git.get_issue_labels(project="p", issue_number=42) == {
-        "foreman:plan", "custom",
+        "foreman:plan",
+        "custom",
     }
 
 
@@ -123,11 +140,15 @@ def test_remove_labels_idempotent_on_missing():
     swallowing. Other labels unchanged."""
     git = FakeGitProvider()
     git.seed_issue_labels(
-        project="p", issue_number=42, labels={"foreman:plan"},
+        project="p",
+        issue_number=42,
+        labels={"foreman:plan"},
     )
     # remove_labels with a never-applied label — must not raise.
     git.remove_labels(
-        project="p", issue_number=42, labels={"foreman:state-nonexistent"},
+        project="p",
+        issue_number=42,
+        labels={"foreman:state-nonexistent"},
     )
     assert git.get_issue_labels(project="p", issue_number=42) == {
         "foreman:plan",
@@ -140,7 +161,9 @@ def test_remove_labels_on_unseen_issue_is_no_op():
     not raise."""
     git = FakeGitProvider()
     git.remove_labels(
-        project="p", issue_number=999, labels={"foreman:state-planning"},
+        project="p",
+        issue_number=999,
+        labels={"foreman:state-planning"},
     )
     assert git.get_issue_labels(project="p", issue_number=999) == set()
 
@@ -196,7 +219,8 @@ def test_close_pr_records_call_and_preserves_merged_state():
     fake = FakeGitProvider()
     # Branch A: close-without-merge — merged stays False.
     fake.set_pr_state(
-        project="p", pr_number=19,
+        project="p",
+        pr_number=19,
         state=PRState(merged=False, mergeable=True, ci_passing=True),
     )
     fake.close_pr(project="p", pr_number=19)
@@ -205,7 +229,8 @@ def test_close_pr_records_call_and_preserves_merged_state():
 
     # Branch B: close on an already-merged PR — merged stays True.
     fake.set_pr_state(
-        project="p", pr_number=20,
+        project="p",
+        pr_number=20,
         state=PRState(merged=True, mergeable=True, ci_passing=True),
     )
     fake.close_pr(project="p", pr_number=20)
@@ -216,7 +241,8 @@ def test_close_pr_records_call_and_preserves_merged_state():
 def test_close_pr_idempotent_on_already_closed():
     fake = FakeGitProvider()
     fake.set_pr_state(
-        project="p", pr_number=19,
+        project="p",
+        pr_number=19,
         state=PRState(merged=False, mergeable=False, ci_passing=True),
     )
     fake.close_pr(project="p", pr_number=19)
@@ -228,14 +254,18 @@ def test_close_pr_idempotent_on_already_closed():
 def test_find_open_pr_by_head_branch_returns_pr_number():
     fake = FakeGitProvider()
     fake.set_pr_state(
-        project="p", pr_number=19,
+        project="p",
+        pr_number=19,
         state=PRState(merged=False, mergeable=True, ci_passing=True),
     )
     fake.set_pr_head_branch(
-        project="p", pr_number=19, branch_name="foreman/issue-180",
+        project="p",
+        pr_number=19,
+        branch_name="foreman/issue-180",
     )
     found = fake.find_open_pr_by_head_branch(
-        project="p", branch_name="foreman/issue-180",
+        project="p",
+        branch_name="foreman/issue-180",
     )
     assert found == 19
 
@@ -243,7 +273,8 @@ def test_find_open_pr_by_head_branch_returns_pr_number():
 def test_find_open_pr_by_head_branch_no_match_returns_none():
     fake = FakeGitProvider()
     found = fake.find_open_pr_by_head_branch(
-        project="p", branch_name="foreman/issue-999",
+        project="p",
+        branch_name="foreman/issue-999",
     )
     assert found is None
 
@@ -251,15 +282,19 @@ def test_find_open_pr_by_head_branch_no_match_returns_none():
 def test_find_open_pr_by_head_branch_skips_closed_prs():
     fake = FakeGitProvider()
     fake.set_pr_state(
-        project="p", pr_number=19,
+        project="p",
+        pr_number=19,
         state=PRState(merged=False, mergeable=True, ci_passing=True),
     )
     fake.set_pr_head_branch(
-        project="p", pr_number=19, branch_name="foreman/issue-180",
+        project="p",
+        pr_number=19,
+        branch_name="foreman/issue-180",
     )
     fake.close_pr(project="p", pr_number=19)
     found = fake.find_open_pr_by_head_branch(
-        project="p", branch_name="foreman/issue-180",
+        project="p",
+        branch_name="foreman/issue-180",
     )
     assert found is None
 
@@ -299,7 +334,9 @@ def test_get_issue_comments_is_per_issue() -> None:
     """Comments seeded for one (project, issue) don't bleed into another."""
     fake = FakeGitProvider()
     fake.seed_issue_comments(
-        project="p", issue_number=1, comments=[_comment("only on 1")],
+        project="p",
+        issue_number=1,
+        comments=[_comment("only on 1")],
     )
     assert fake.get_issue_comments(project="p", issue_number=2) == []
     assert fake.get_issue_comments(project="other", issue_number=1) == []

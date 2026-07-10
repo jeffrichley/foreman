@@ -46,18 +46,12 @@ def test_strip_auto_close_keywords_idempotent() -> None:
 
 def test_strip_auto_close_keywords_owner_repo_form() -> None:
     """The cross-repo ``owner/repo#N`` form is preserved after the keyword strip."""
-    assert (
-        strip_auto_close_keywords("resolves jeffrichley/algokit#21")
-        == "jeffrichley/algokit#21"
-    )
+    assert strip_auto_close_keywords("resolves jeffrichley/algokit#21") == "jeffrichley/algokit#21"
 
 
 def test_strip_auto_close_keywords_no_op_on_clean() -> None:
     """A clean body with a bare ``See #N`` reference is unchanged."""
-    assert (
-        strip_auto_close_keywords("feat: add X\n\nSee #21")
-        == "feat: add X\n\nSee #21"
-    )
+    assert strip_auto_close_keywords("feat: add X\n\nSee #21") == "feat: add X\n\nSee #21"
 
 
 def test_strip_auto_close_keywords_handles_subject_line() -> None:

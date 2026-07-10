@@ -107,9 +107,7 @@ class RoleDispatchState(TicketState):
         ctx.repo.clear_next_action_at(ctx.ticket.id)
         return self.next_state_for(outcome)
 
-    def _handle_transient(
-        self, ctx: StateContext, outcome: Outcome
-    ) -> TicketState | None:
+    def _handle_transient(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:
         """Schedule a backoff retry OR escalate to NeedsHelp.
 
         See :meth:`next_state` for the call-site contract. The
@@ -117,9 +115,7 @@ class RoleDispatchState(TicketState):
         verbatim from ``outcome.details["provider_status"]`` so the
         runbook-promised cause-string detail flows end-to-end.
         """
-        consecutive = ctx.repo.count_consecutive_transient_provider_errors(
-            ctx.ticket.id
-        )
+        consecutive = ctx.repo.count_consecutive_transient_provider_errors(ctx.ticket.id)
         delay = next_retry_delay(consecutive)
         provider_status = ""
         details = outcome.details or {}
@@ -146,6 +142,7 @@ class RoleDispatchState(TicketState):
                     )
                 )
             from foreman.v4.states.terminal import NeedsHelpState
+
             return NeedsHelpState()
 
         now = ctx.clock()

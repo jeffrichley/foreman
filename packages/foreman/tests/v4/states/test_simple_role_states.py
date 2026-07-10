@@ -1,4 +1,5 @@
 """SpecFix, ImplReview, ImplFix — uniform-shape role-dispatch states."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -29,7 +30,8 @@ def _project_config(*, auto_merge_impl: bool = False) -> ProjectConfig:
 
 
 def _ctx(
-    *, project_configs: dict[str, ProjectConfig],
+    *,
+    project_configs: dict[str, ProjectConfig],
 ) -> tuple[StateContext, FakeGitProvider]:
     """Build a StateContext for an ImplReview ticket with the given
     per-project config map and a FakeGitProvider so tests can assert
@@ -38,12 +40,16 @@ def _ctx(
     ticket = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
     repo.set_ticket_state(ticket.id, "ImplReview", now=dt.datetime(2026, 6, 13))
     instance = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="ImplReview", sequence=1,
+        ticket_id=ticket.id,
+        state_name="ImplReview",
+        sequence=1,
         now=dt.datetime(2026, 6, 13),
     )
     git = FakeGitProvider()
     ctx = StateContext(
-        ticket=repo.get_ticket(ticket.id), instance=instance, repo=repo,
+        ticket=repo.get_ticket(ticket.id),
+        instance=instance,
+        repo=repo,
         clock=lambda: dt.datetime(2026, 6, 13),
         git=git,
         project_configs=project_configs,
@@ -129,12 +135,6 @@ def test_impl_review_non_clean_routing_via_next_state():
     """The gating override must preserve NEEDS_FIX → ImplFix and
     NEEDS_HELP → NeedsHelp routing through ``next_state``."""
     ctx, _git = _ctx(project_configs={"p": _project_config()})
-    assert (
-        ImplReviewState().next_state(ctx, _o(OutcomeKind.NEEDS_FIX)).state_name
-        == "ImplFix"
-    )
+    assert ImplReviewState().next_state(ctx, _o(OutcomeKind.NEEDS_FIX)).state_name == "ImplFix"
     ctx2, _git2 = _ctx(project_configs={"p": _project_config()})
-    assert (
-        ImplReviewState().next_state(ctx2, _o(OutcomeKind.NEEDS_HELP)).state_name
-        == "NeedsHelp"
-    )
+    assert ImplReviewState().next_state(ctx2, _o(OutcomeKind.NEEDS_HELP)).state_name == "NeedsHelp"

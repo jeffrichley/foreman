@@ -1,4 +1,5 @@
 """emit_outcome — writes the FOREMAN_OUTCOME: terminal line."""
+
 from __future__ import annotations
 
 import json
@@ -25,7 +26,7 @@ def test_emit_writes_marker_with_json_payload():
     emit_outcome(outcome, stream=buf)
     line = buf.getvalue().strip()
     assert line.startswith("FOREMAN_OUTCOME:")
-    payload = json.loads(line[len("FOREMAN_OUTCOME:"):])
+    payload = json.loads(line[len("FOREMAN_OUTCOME:") :])
     assert payload["kind"] == "clean"
     assert payload["artifacts"]["pr_number"] == 42
 
@@ -46,7 +47,8 @@ def test_emit_ends_with_newline():
     buf = StringIO()
     emit_outcome(
         Outcome(
-            kind=OutcomeKind.CLEAN, confidence=OutcomeConfidence.HIGH,
+            kind=OutcomeKind.CLEAN,
+            confidence=OutcomeConfidence.HIGH,
             summary="x",
         ),
         stream=buf,

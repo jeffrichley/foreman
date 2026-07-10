@@ -365,8 +365,7 @@ def test_write_project_block_preserves_apps_block_on_force(tmp_path: Path) -> No
         encoding="utf-8",
     )
     new_block = (
-        '[[projects]]\nname = "foreman"\nrepo = "jeffrichley/foreman"\n'
-        'local_clone_path = "/new"\n'
+        '[[projects]]\nname = "foreman"\nrepo = "jeffrichley/foreman"\nlocal_clone_path = "/new"\n'
     )
     _write_project_block_to_config(
         config_path=cfg, block_text=new_block, name="foreman", force=True
@@ -584,9 +583,7 @@ def test_run_init_skips_existing_labels(tmp_path: Path) -> None:
     assert len(result.labels_created) == total - 2
     assert sorted(result.labels_existing) == ["foreman:state-done", "foreman:state-planning"]
     # The pre-existing label's color/description was NOT overwritten.
-    plan_label = next(
-        lbl for lbl in fake_repo._labels if lbl.name == "foreman:state-planning"
-    )
+    plan_label = next(lbl for lbl in fake_repo._labels if lbl.name == "foreman:state-planning")
     assert plan_label.color == "CCCCCC"
     assert plan_label.description == "Custom operator description"
 
@@ -630,8 +627,7 @@ def test_run_init_refuses_overwrite_without_force(tmp_path: Path) -> None:
 def test_run_init_overwrites_with_force(tmp_path: Path) -> None:
     init_config, _clone = _make_init_config(tmp_path=tmp_path, force=True)
     init_config.config_path.write_text(
-        '[[projects]]\nname = "foreman"\nrepo = "someone/else"\n'
-        'local_clone_path = "/tmp/old"\n',
+        '[[projects]]\nname = "foreman"\nrepo = "someone/else"\nlocal_clone_path = "/tmp/old"\n',
         encoding="utf-8",
     )
     fake_repo = _FakeRepo(slug=init_config.repo)
@@ -712,9 +708,7 @@ def test_run_init_bot_verification_records_failure_without_aborting(
     # (without v4 apps on disk, run_init reports every role as skipped
     # without consulting the verifier at all).
     init_config.config_path.parent.mkdir(parents=True, exist_ok=True)
-    init_config.config_path.write_text(
-        _v4_skeleton_config(), encoding="utf-8"
-    )
+    init_config.config_path.write_text(_v4_skeleton_config(), encoding="utf-8")
 
     # Stub _verify_bot_installation to simulate one fail + three skip.
     from foreman import init as init_mod
@@ -973,9 +967,7 @@ def test_init_foreman_labels_covers_every_v4_state() -> None:
     from foreman.v4.states.registry import STATE_REGISTRY
 
     init_names = {str(entry[0]) for entry in _FOREMAN_LABELS}
-    expected_state_labels = {
-        f"foreman:state-{_kebab(name)}" for name in STATE_REGISTRY
-    }
+    expected_state_labels = {f"foreman:state-{_kebab(name)}" for name in STATE_REGISTRY}
     missing = expected_state_labels - init_names
     assert not missing, f"States in registry without an init-time label: {missing}"
 

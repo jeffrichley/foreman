@@ -359,4 +359,5 @@ def test_bootstrap_uses_postgres_when_engine_postgres(monkeypatch, tmp_path: Pat
     # scheduler is the replacement.
     assert ctx.daemon is not None
     from foreman.v4.pg_backup import BackupScheduler
+
     assert isinstance(ctx.daemon._backup_scheduler, BackupScheduler)

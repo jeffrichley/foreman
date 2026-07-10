@@ -19,9 +19,7 @@ def test_planner_transient_outcome(capsys) -> None:
     ``RoleSubprocessError`` in the dispatcher and lose the
     discriminator).
     """
-    original_cause = Exception(
-        "Claude Code returned an error result: 503 Service Unavailable"
-    )
+    original_cause = Exception("Claude Code returned an error result: 503 Service Unavailable")
     transient = ProviderTransientError(str(original_cause))
     transient.__cause__ = original_cause
     with patch(

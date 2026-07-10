@@ -6,6 +6,7 @@ against real pipes, not a mock. The dispatcher under test issues
 ``Popen([python, -c, script, ...])``; the script controls stdout /
 stderr / timing / exit code.
 """
+
 from __future__ import annotations
 
 import logging
@@ -47,9 +48,7 @@ def _python_script_cli(script: str) -> list[str]:
     return [sys.executable, "-c", script]
 
 
-_HAPPY_OUTCOME = (
-    'FOREMAN_OUTCOME:{"kind":"clean","confidence":"high","summary":"ok"}'
-)
+_HAPPY_OUTCOME = 'FOREMAN_OUTCOME:{"kind":"clean","confidence":"high","summary":"ok"}'
 
 
 def _outcome_script(outcome_json: str = _HAPPY_OUTCOME, exit_code: int = 0) -> str:
@@ -77,7 +76,10 @@ def test_planner_dispatch_returns_stdout_with_outcome(tmp_path: Path):
         log_dir=tmp_path,
     )
     stdout = dispatcher.dispatch(
-        role="planner", project="p", issue_number=1, ticket_id=1,
+        role="planner",
+        project="p",
+        issue_number=1,
+        ticket_id=1,
     )
     assert "FOREMAN_OUTCOME:" in stdout
     assert "log line 1" in stdout
@@ -95,7 +97,10 @@ def test_planner_dispatch_returns_stdout_with_outcome(tmp_path: Path):
     ],
 )
 def test_role_to_subcommand_mapping(
-    tmp_path: Path, role: str, subcmd: str, target: str | None,
+    tmp_path: Path,
+    role: str,
+    subcmd: str,
+    target: str | None,
 ):
     """The subprocess receives subcmd + --target on argv. Script echoes
     its argv to stderr so the test can assert command construction
@@ -134,7 +139,10 @@ def test_subprocess_nonzero_with_error_outcome_returns_stdout(tmp_path: Path):
         log_dir=tmp_path,
     )
     stdout = dispatcher.dispatch(
-        role="planner", project="p", issue_number=1, ticket_id=1,
+        role="planner",
+        project="p",
+        issue_number=1,
+        ticket_id=1,
     )
     assert '"kind":"error"' in stdout
 
@@ -154,7 +162,10 @@ def test_subprocess_nonzero_without_outcome_raises(tmp_path: Path):
     )
     with pytest.raises(RoleSubprocessError) as exc:
         dispatcher.dispatch(
-            role="planner", project="p", issue_number=1, ticket_id=1,
+            role="planner",
+            project="p",
+            issue_number=1,
+            ticket_id=1,
         )
     assert "137" in str(exc.value)
 
@@ -169,7 +180,10 @@ def test_unknown_role_raises_value_error(tmp_path: Path):
     )
     with pytest.raises(ValueError, match="unknown role"):
         dispatcher.dispatch(
-            role="not-a-role", project="p", issue_number=1, ticket_id=1,
+            role="not-a-role",
+            project="p",
+            issue_number=1,
+            ticket_id=1,
         )
     # No log directory should have been created for an unknown role.
     assert list(tmp_path.glob("*/*.log")) == []
@@ -191,7 +205,10 @@ def test_identity_token_injected_per_role(tmp_path: Path):
         log_dir=tmp_path,
     )
     stdout = dispatcher.dispatch(
-        role="reviewer-spec", project="p", issue_number=1, ticket_id=1,
+        role="reviewer-spec",
+        project="p",
+        issue_number=1,
+        ticket_id=1,
     )
     identity.get_role_token.assert_called_once_with("reviewer-spec")
     assert "GH_TOKEN=token-for-reviewer-spec" in stdout
@@ -203,7 +220,8 @@ def test_constructor_requires_log_dir():
     an explicit log_dir is the right failure mode."""
     with pytest.raises(TypeError):
         SubprocessRoleDispatcher(  # type: ignore[call-arg]
-            foreman_cli=["foreman"], identity=_stub_identity(),
+            foreman_cli=["foreman"],
+            identity=_stub_identity(),
         )
 
 
@@ -224,7 +242,10 @@ def test_dispatch_writes_log_file_under_role_base_dir(tmp_path: Path):
         log_dir=tmp_path,
     )
     dispatcher.dispatch(
-        role="planner", project="p", issue_number=42, ticket_id=99,
+        role="planner",
+        project="p",
+        issue_number=42,
+        ticket_id=99,
     )
     role_dir = tmp_path / "planner"
     assert role_dir.is_dir()
@@ -235,7 +256,8 @@ def test_dispatch_writes_log_file_under_role_base_dir(tmp_path: Path):
     assert name.endswith(".log")
     # ISO shape: 99__YYYY-MM-DD-HH-MM-SS-mmmZ.log
     assert re.match(
-        r"99__\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}-\d{3}Z\.log$", name,
+        r"99__\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}-\d{3}Z\.log$",
+        name,
     )
 
 
@@ -248,7 +270,10 @@ def test_dispatch_writes_start_banner_and_exit_code_footer(tmp_path: Path):
         log_dir=tmp_path,
     )
     dispatcher.dispatch(
-        role="planner", project="myproj", issue_number=42, ticket_id=99,
+        role="planner",
+        project="myproj",
+        issue_number=42,
+        ticket_id=99,
     )
     log_text = next((tmp_path / "planner").glob("*.log")).read_text(
         encoding="utf-8",
@@ -302,7 +327,10 @@ def test_dispatch_streams_stdout_to_log_file_with_flush(tmp_path: Path):
     poller = threading.Thread(target=poll_for_line, daemon=True)
     poller.start()
     dispatcher.dispatch(
-        role="planner", project="p", issue_number=1, ticket_id=7,
+        role="planner",
+        project="p",
+        issue_number=1,
+        ticket_id=7,
     )
     poller.join(timeout=1.0)
 
@@ -328,7 +356,10 @@ def test_dispatch_streams_stderr_with_prefix(tmp_path: Path):
         log_dir=tmp_path,
     )
     dispatcher.dispatch(
-        role="planner", project="p", issue_number=1, ticket_id=1,
+        role="planner",
+        project="p",
+        issue_number=1,
+        ticket_id=1,
     )
     log_text = next((tmp_path / "planner").glob("*.log")).read_text(
         encoding="utf-8",
@@ -357,7 +388,10 @@ def test_dispatch_timeout_writes_marker_and_raises(tmp_path: Path):
     )
     with pytest.raises(RoleSubprocessError) as exc:
         dispatcher.dispatch(
-            role="planner", project="p", issue_number=1, ticket_id=1,
+            role="planner",
+            project="p",
+            issue_number=1,
+            ticket_id=1,
         )
     assert "timeout" in str(exc.value).lower()
     log_text = next((tmp_path / "planner").glob("*.log")).read_text(
@@ -403,7 +437,10 @@ def test_dispatch_handles_concurrent_stdout_and_stderr_no_deadlock(
         timeout_seconds=10,
     )
     stdout = dispatcher.dispatch(
-        role="planner", project="p", issue_number=1, ticket_id=1,
+        role="planner",
+        project="p",
+        issue_number=1,
+        ticket_id=1,
     )
     # 80 stdout lines plus the outcome line all captured.
     assert stdout.count("out-") == 80
@@ -414,7 +451,8 @@ def test_dispatch_handles_concurrent_stdout_and_stderr_no_deadlock(
 
 
 def test_dispatch_aborted_marker_on_unexpected_exception(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """If a non-timeout exception fires mid-dispatch (e.g., Popen raises
     OSError because the binary is gone), the log file closes cleanly
@@ -434,7 +472,10 @@ def test_dispatch_aborted_marker_on_unexpected_exception(
     )
     with pytest.raises(OSError, match="simulated spawn failure"):
         dispatcher.dispatch(
-            role="planner", project="p", issue_number=1, ticket_id=1,
+            role="planner",
+            project="p",
+            issue_number=1,
+            ticket_id=1,
         )
     # Log file exists with the banner + ABORTED marker, no exit-code
     # footer (because the subprocess never ran).
@@ -478,7 +519,7 @@ def test_fs_safe_iso_utc_replaces_colons_and_dot_and_t_and_z():
     iso = _fs_safe_iso_utc(now)
     assert iso == "2026-06-19-23-30-12-456Z"
     # Filesystem-illegal characters on Windows must not appear.
-    for char in (":", "/", "\\", "*", "?", "\"", "<", ">", "|"):
+    for char in (":", "/", "\\", "*", "?", '"', "<", ">", "|"):
         assert char not in iso
 
 
@@ -489,7 +530,8 @@ def test_fs_safe_iso_utc_replaces_colons_and_dot_and_t_and_z():
 
 
 def test_dispatch_reaps_subprocess_when_internal_exception_raised_mid_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """If something raises AFTER Popen succeeds — e.g. an internal helper
     blows up — the subprocess must be killed + reaped and the log file
@@ -534,22 +576,22 @@ def test_dispatch_reaps_subprocess_when_internal_exception_raised_mid_run(
     start = time.monotonic()
     with pytest.raises(RuntimeError, match="synthetic mid-run failure"):
         dispatcher.dispatch(
-            role="planner", project="p", issue_number=1, ticket_id=1,
+            role="planner",
+            project="p",
+            issue_number=1,
+            ticket_id=1,
         )
     elapsed = time.monotonic() - start
     # Must NOT hang 10s waiting for the subprocess. Reaping should be fast.
     assert elapsed < 8.0, (
-        f"dispatch hung {elapsed:.1f}s after mid-run exception; "
-        "subprocess likely not reaped"
+        f"dispatch hung {elapsed:.1f}s after mid-run exception; subprocess likely not reaped"
     )
 
     # The subprocess we spawned must be reaped — poll() returns the
     # exit code (or signal), not None.
     assert len(spawned_procs) == 1
     proc = spawned_procs[0]
-    assert proc.poll() is not None, (
-        "subprocess leaked: still running after dispatch raised mid-run"
-    )
+    assert proc.poll() is not None, "subprocess leaked: still running after dispatch raised mid-run"
 
     # ABORTED marker present (this is a non-timeout failure path).
     logs = list((tmp_path / "planner").glob("*.log"))
@@ -592,27 +634,28 @@ def test_dispatch_joins_reader_threads_in_aborted_path(
 
     with pytest.raises(RoleSubprocessError):
         dispatcher.dispatch(
-            role="planner", project="p", issue_number=1, ticket_id=1,
+            role="planner",
+            project="p",
+            issue_number=1,
+            ticket_id=1,
         )
 
     # Give a brief moment in case OS scheduler hasn't reaped yet — but
     # any reader thread should already have been join()ed.
     time.sleep(0.05)
     new_threads = [
-        t for t in threading.enumerate()
-        if t.ident not in threads_before and t.is_alive()
+        t for t in threading.enumerate() if t.ident not in threads_before and t.is_alive()
     ]
     # Filter to threads obviously belonging to our reader pool. We name
     # them via Thread(name=...) in the dispatcher; if that name shows
     # up still alive, that's a leak.
     leaked_readers = [t for t in new_threads if "role-stream-" in t.name]
-    assert not leaked_readers, (
-        f"reader threads leaked after dispatch raised: {leaked_readers}"
-    )
+    assert not leaked_readers, f"reader threads leaked after dispatch raised: {leaked_readers}"
 
 
 def test_stream_to_log_failure_does_not_deadlock_subprocess(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ):
     """If the log_file.write/flush itself raises mid-stream (disk full,
@@ -695,7 +738,10 @@ def test_stream_to_log_failure_does_not_deadlock_subprocess(
         # the failure is logged.
         try:
             dispatcher.dispatch(
-                role="planner", project="p", issue_number=1, ticket_id=1,
+                role="planner",
+                project="p",
+                issue_number=1,
+                ticket_id=1,
             )
         except Exception:
             pass
@@ -725,7 +771,8 @@ def test_stream_to_log_failure_does_not_deadlock_subprocess(
 
 
 def test_popen_uses_explicit_utf8_encoding(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """I1: Popen must be called with explicit ``encoding='utf-8'`` so
     the decode side doesn't depend on ``locale.getpreferredencoding()``
@@ -752,11 +799,13 @@ def test_popen_uses_explicit_utf8_encoding(
         log_dir=tmp_path,
     )
     dispatcher.dispatch(
-        role="planner", project="p", issue_number=1, ticket_id=1,
+        role="planner",
+        project="p",
+        issue_number=1,
+        ticket_id=1,
     )
     assert captured["kwargs"].get("encoding") == "utf-8", (
-        f"Popen must specify encoding='utf-8' explicitly; got "
-        f"kwargs={captured['kwargs']!r}"
+        f"Popen must specify encoding='utf-8' explicitly; got kwargs={captured['kwargs']!r}"
     )
     assert captured["kwargs"].get("errors") == "replace", (
         f"Popen must specify errors='replace' as belt-and-suspenders; got "
@@ -779,7 +828,10 @@ def test_popen_utf8_roundtrips_non_ascii(tmp_path: Path):
         log_dir=tmp_path,
     )
     stdout = dispatcher.dispatch(
-        role="planner", project="p", issue_number=1, ticket_id=1,
+        role="planner",
+        project="p",
+        issue_number=1,
+        ticket_id=1,
     )
     assert "héllo" in stdout
     assert "\U0001fab6" in stdout
@@ -806,13 +858,14 @@ def test_error_message_includes_log_path(tmp_path: Path):
     )
     with pytest.raises(RoleSubprocessError) as exc_info:
         dispatcher.dispatch(
-            role="planner", project="p", issue_number=1, ticket_id=1,
+            role="planner",
+            project="p",
+            issue_number=1,
+            ticket_id=1,
         )
     msg = str(exc_info.value)
     log_path = next((tmp_path / "planner").glob("*.log"))
-    assert str(log_path) in msg, (
-        f"error message {msg!r} does not contain log path {log_path!s}"
-    )
+    assert str(log_path) in msg, f"error message {msg!r} does not contain log path {log_path!s}"
 
 
 def test_timeout_error_message_includes_log_path(tmp_path: Path):
@@ -830,7 +883,10 @@ def test_timeout_error_message_includes_log_path(tmp_path: Path):
     )
     with pytest.raises(RoleSubprocessError) as exc_info:
         dispatcher.dispatch(
-            role="planner", project="p", issue_number=1, ticket_id=1,
+            role="planner",
+            project="p",
+            issue_number=1,
+            ticket_id=1,
         )
     msg = str(exc_info.value)
     log_path = next((tmp_path / "planner").glob("*.log"))

@@ -1,4 +1,5 @@
 """transition() publishes the five lifecycle events at the right boundaries."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -24,7 +25,8 @@ class _ClassicState(TicketState):
 
     def execute(self, ctx: StateContext) -> Outcome:
         return Outcome(
-            kind=OutcomeKind.CLEAN, confidence=OutcomeConfidence.HIGH,
+            kind=OutcomeKind.CLEAN,
+            confidence=OutcomeConfidence.HIGH,
             summary="ok",
         )
 
@@ -41,7 +43,9 @@ class _FailEnter(TicketState):
     def execute(self, ctx: StateContext) -> Outcome:  # pragma: no cover
         raise NotImplementedError
 
-    def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:  # pragma: no cover
+    def next_state(
+        self, ctx: StateContext, outcome: Outcome
+    ) -> TicketState | None:  # pragma: no cover
         return None
 
 
@@ -50,14 +54,18 @@ def setup():
     repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
     instance = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="Classic", sequence=1,
+        ticket_id=ticket.id,
+        state_name="Classic",
+        sequence=1,
         now=dt.datetime(2026, 6, 13),
     )
     bus = EventBus()
     received: list[Event] = []
     bus.subscribe(received.append)
     ctx = StateContext(
-        ticket=ticket, instance=instance, repo=repo,
+        ticket=ticket,
+        instance=instance,
+        repo=repo,
         clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
         bus=bus,
     )
@@ -124,11 +132,15 @@ def test_execute_completed_event_payload_includes_details(setup):
     # Swap to a state-instance row for DiagnosticDetail to match what
     # transition() expects (state_name on the row matches the state).
     new_instance = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="DiagnosticDetail", sequence=2,
+        ticket_id=ticket.id,
+        state_name="DiagnosticDetail",
+        sequence=2,
         now=dt.datetime(2026, 6, 13),
     )
     ctx_diag = StateContext(
-        ticket=ticket, instance=new_instance, repo=repo,
+        ticket=ticket,
+        instance=new_instance,
+        repo=repo,
         clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
         bus=ctx.bus,
     )
@@ -154,7 +166,9 @@ def test_no_bus_means_no_events(setup):
     repo, ticket, instance, received, _ctx = setup
     # Rebuild ctx without a bus
     ctx_no_bus = StateContext(
-        ticket=ticket, instance=instance, repo=repo,
+        ticket=ticket,
+        instance=instance,
+        repo=repo,
         clock=lambda: dt.datetime(2026, 6, 13),
         bus=None,
     )
@@ -200,7 +214,8 @@ class _AdvanceToTerminalState(TicketState):
 
     def execute(self, ctx: StateContext) -> Outcome:
         return Outcome(
-            kind=OutcomeKind.CLEAN, confidence=OutcomeConfidence.HIGH,
+            kind=OutcomeKind.CLEAN,
+            confidence=OutcomeConfidence.HIGH,
             summary="advance",
         )
 
@@ -212,17 +227,23 @@ def _setup_terminal_advance(terminal: TicketState):
     """Repo + ctx + received-events list wired for a terminal-advance test."""
     repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(
-        project="p", issue_number=1, now=dt.datetime(2026, 6, 15),
+        project="p",
+        issue_number=1,
+        now=dt.datetime(2026, 6, 15),
     )
     instance = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="AdvanceToTerminal", sequence=1,
+        ticket_id=ticket.id,
+        state_name="AdvanceToTerminal",
+        sequence=1,
         now=dt.datetime(2026, 6, 15),
     )
     bus = EventBus()
     received: list[Event] = []
     bus.subscribe(received.append)
     ctx = StateContext(
-        ticket=ticket, instance=instance, repo=repo,
+        ticket=ticket,
+        instance=instance,
+        repo=repo,
         clock=lambda: dt.datetime(2026, 6, 15, 12, 0, 0),
         bus=bus,
     )
@@ -268,9 +289,7 @@ def test_transition_to_done_emits_state_entered_event() -> None:
     state = _AdvanceToTerminalState(DoneState())
     state.transition(ctx)
 
-    entered_state_names = [
-        e.state_name for e in received if isinstance(e, StateEnteredEvent)
-    ]
+    entered_state_names = [e.state_name for e in received if isinstance(e, StateEnteredEvent)]
     assert "Done" in entered_state_names
 
 
@@ -284,8 +303,7 @@ def test_terminal_landing_emits_no_state_exited_event() -> None:
     state.transition(ctx)
 
     exited_for_terminal = [
-        e for e in received
-        if isinstance(e, StateExitedEvent) and e.state_name == "NeedsHelp"
+        e for e in received if isinstance(e, StateExitedEvent) and e.state_name == "NeedsHelp"
     ]
     assert exited_for_terminal == []
 
@@ -310,16 +328,23 @@ def test_retry_cap_branch_emits_state_entered_for_needs_help() -> None:
     last_seq = 0
     for seq in range(1, 4):
         inst = repo.open_state_instance(
-            ticket_id=ticket.id, state_name="Burner", sequence=seq, now=now,
+            ticket_id=ticket.id,
+            state_name="Burner",
+            sequence=seq,
+            now=now,
         )
         repo.record_failure(
-            inst.id, now=now, failure_phase="execute",
+            inst.id,
+            now=now,
+            failure_phase="execute",
             failure_reason="role crashed",
         )
         repo.close_state_instance(inst.id, now=now)
         last_seq = seq
     instance = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="Burner", sequence=last_seq + 1,
+        ticket_id=ticket.id,
+        state_name="Burner",
+        sequence=last_seq + 1,
         now=now,
     )
 
@@ -336,8 +361,12 @@ def test_retry_cap_branch_emits_state_entered_for_needs_help() -> None:
     bus = EventBus()
     bus.subscribe(received.append)
     ctx = _Ctx(
-        ticket=ticket, instance=instance, repo=repo,
-        clock=lambda: now, bus=bus, max_state_attempts=3,
+        ticket=ticket,
+        instance=instance,
+        repo=repo,
+        clock=lambda: now,
+        bus=bus,
+        max_state_attempts=3,
     )
     result = _Burner().transition(ctx)
     assert result is not None
@@ -351,8 +380,7 @@ def test_retry_cap_branch_emits_state_entered_for_needs_help() -> None:
     # AND the new fix: StateEnteredEvent(NeedsHelp) fires for the
     # terminal landing so the label observer stamps the issue.
     entered_terminals = [
-        e for e in received
-        if isinstance(e, StateEnteredEvent) and e.state_name == "NeedsHelp"
+        e for e in received if isinstance(e, StateEnteredEvent) and e.state_name == "NeedsHelp"
     ]
     assert len(entered_terminals) == 1, (
         f"expected exactly one StateEnteredEvent(NeedsHelp) on retry-cap "
@@ -406,16 +434,23 @@ def test_retry_cap_emits_state_exited_for_failed_state() -> None:
     last_seq = 0
     for seq in range(1, 4):
         inst = repo.open_state_instance(
-            ticket_id=ticket.id, state_name="Burner", sequence=seq, now=now,
+            ticket_id=ticket.id,
+            state_name="Burner",
+            sequence=seq,
+            now=now,
         )
         repo.record_failure(
-            inst.id, now=now, failure_phase="execute",
+            inst.id,
+            now=now,
+            failure_phase="execute",
             failure_reason="role crashed",
         )
         repo.close_state_instance(inst.id, now=now)
         last_seq = seq
     instance = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="Burner", sequence=last_seq + 1,
+        ticket_id=ticket.id,
+        state_name="Burner",
+        sequence=last_seq + 1,
         now=now,
     )
 
@@ -432,16 +467,17 @@ def test_retry_cap_emits_state_exited_for_failed_state() -> None:
     bus = EventBus()
     bus.subscribe(received.append)
     ctx = StateContext(
-        ticket=ticket, instance=instance, repo=repo,
-        clock=lambda: now, bus=bus, max_state_attempts=3,
+        ticket=ticket,
+        instance=instance,
+        repo=repo,
+        clock=lambda: now,
+        bus=bus,
+        max_state_attempts=3,
     )
     _Burner().transition(ctx)
 
     # Assert the SEQUENCE: failed → exited(failed) → entered(NeedsHelp).
-    summary = [
-        (type(e).__name__, getattr(e, "state_name", ""))
-        for e in received
-    ]
+    summary = [(type(e).__name__, getattr(e, "state_name", "")) for e in received]
     assert ("StateFailedEvent", "Burner") in summary
     assert ("StateExitedEvent", "Burner") in summary, (
         f"missing StateExitedEvent(Burner) — observer cannot remove the "
@@ -456,8 +492,7 @@ def test_retry_cap_emits_state_exited_for_failed_state() -> None:
     exited_idx = summary.index(("StateExitedEvent", "Burner"))
     entered_idx = summary.index(("StateEnteredEvent", "NeedsHelp"))
     assert exited_idx < entered_idx, (
-        f"StateExitedEvent(Burner) must precede StateEnteredEvent(NeedsHelp); "
-        f"got: {summary!r}"
+        f"StateExitedEvent(Burner) must precede StateEnteredEvent(NeedsHelp); got: {summary!r}"
     )
 
     # And the StateFailedEvent for the cap-trip must come before the
@@ -475,7 +510,10 @@ def test_held_ticket_emits_state_exited_event() -> None:
     ticket = repo.create_ticket(project="p", issue_number=5, now=now)
     repo.hold_ticket(ticket.id, held_by="jeff", reason="paused", now=now)
     instance = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="Classic", sequence=1, now=now,
+        ticket_id=ticket.id,
+        state_name="Classic",
+        sequence=1,
+        now=now,
     )
 
     received: list[Event] = []
@@ -483,8 +521,11 @@ def test_held_ticket_emits_state_exited_event() -> None:
     bus.subscribe(received.append)
     held_ticket = repo.get_ticket(ticket.id)
     ctx = StateContext(
-        ticket=held_ticket, instance=instance, repo=repo,
-        clock=lambda: now, bus=bus,
+        ticket=held_ticket,
+        instance=instance,
+        repo=repo,
+        clock=lambda: now,
+        bus=bus,
     )
     _ClassicState().transition(ctx)
 
@@ -504,14 +545,20 @@ def test_terminal_landing_no_bus_does_not_crash() -> None:
     get created + closed for audit completeness."""
     repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(
-        project="p", issue_number=3, now=dt.datetime(2026, 6, 15),
+        project="p",
+        issue_number=3,
+        now=dt.datetime(2026, 6, 15),
     )
     instance = repo.open_state_instance(
-        ticket_id=ticket.id, state_name="AdvanceToTerminal", sequence=1,
+        ticket_id=ticket.id,
+        state_name="AdvanceToTerminal",
+        sequence=1,
         now=dt.datetime(2026, 6, 15),
     )
     ctx = StateContext(
-        ticket=ticket, instance=instance, repo=repo,
+        ticket=ticket,
+        instance=instance,
+        repo=repo,
         clock=lambda: dt.datetime(2026, 6, 15, 12, 0, 0),
         bus=None,
     )

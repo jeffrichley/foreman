@@ -51,6 +51,7 @@ class ResetPlan:
     are encoded as ``None`` / empty / False so the renderer + executor
     can skip them uniformly.
     """
+
     project: str
     issue_number: int
     spec_pr: int | None
@@ -78,10 +79,12 @@ def _discover(
         impl_pr = None
     else:
         spec_pr = git.find_open_pr_by_head_branch(
-            project=project, branch_name=f"foreman/issue-{issue_number}",
+            project=project,
+            branch_name=f"foreman/issue-{issue_number}",
         )
         impl_pr = git.find_open_pr_by_head_branch(
-            project=project, branch_name=f"foreman/impl-{issue_number}",
+            project=project,
+            branch_name=f"foreman/impl-{issue_number}",
         )
     # Branches: always include both candidates. delete_branch is idempotent
     # on missing, so listing them unconditionally is fine.
@@ -90,12 +93,14 @@ def _discover(
         f"foreman/impl-{issue_number}",
     ]
     labels_on_issue = git.get_issue_labels(
-        project=project, issue_number=issue_number,
+        project=project,
+        issue_number=issue_number,
     )
     strip = {lbl for lbl in labels_on_issue if lbl.startswith("foreman:")}
     try:
         ticket = repo.get_ticket_by_issue(
-            project=project, issue_number=issue_number,
+            project=project,
+            issue_number=issue_number,
         )
         delete_ticket_id = ticket.id
     except TicketNotFoundError:
@@ -128,21 +133,27 @@ def _plan_steps(plan: ResetPlan) -> list[tuple[str, str]]:
     for branch in plan.delete_branches:
         steps.append((f"Delete remote branch {branch}", f"delete_branch:{branch}"))
     if plan.prune_worktrees:
-        steps.append((
-            f"Prune local worktree {plan.project}/issue-{plan.issue_number}/",
-            "prune_worktrees",
-        ))
+        steps.append(
+            (
+                f"Prune local worktree {plan.project}/issue-{plan.issue_number}/",
+                "prune_worktrees",
+            )
+        )
     if plan.strip_labels:
-        steps.append((
-            f"Strip {len(plan.strip_labels)} foreman:* labels "
-            f"({', '.join(sorted(plan.strip_labels))})",
-            "strip_labels",
-        ))
+        steps.append(
+            (
+                f"Strip {len(plan.strip_labels)} foreman:* labels "
+                f"({', '.join(sorted(plan.strip_labels))})",
+                "strip_labels",
+            )
+        )
     if plan.delete_ticket_id is not None:
-        steps.append((
-            f"Delete ticket row id={plan.delete_ticket_id} from the database",
-            "delete_ticket",
-        ))
+        steps.append(
+            (
+                f"Delete ticket row id={plan.delete_ticket_id} from the database",
+                "delete_ticket",
+            )
+        )
     if plan.apply_plan_label:
         steps.append(("Apply foreman:plan label", "apply_plan_label"))
     return steps
@@ -233,19 +244,29 @@ def cmd_reset(
     project: str = typer.Option(..., "--project"),
     issue_number: int = typer.Option(..., "--issue-number", min=1),
     keep_pr: bool = typer.Option(
-        False, "--keep-pr", help="Don't close open spec/impl PRs.",
+        False,
+        "--keep-pr",
+        help="Don't close open spec/impl PRs.",
     ),
     keep_worktree: bool = typer.Option(
-        False, "--keep-worktree", help="Don't rmtree local worktrees.",
+        False,
+        "--keep-worktree",
+        help="Don't rmtree local worktrees.",
     ),
     no_retrigger: bool = typer.Option(
-        False, "--no-retrigger", help="Don't re-apply foreman:plan at end.",
+        False,
+        "--no-retrigger",
+        help="Don't re-apply foreman:plan at end.",
     ),
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="Print plan, exit. No prompt, no execution.",
+        False,
+        "--dry-run",
+        help="Print plan, exit. No prompt, no execution.",
     ),
     yes: bool = typer.Option(
-        False, "--yes", help="Skip the interactive confirmation.",
+        False,
+        "--yes",
+        help="Skip the interactive confirmation.",
     ),
     worktrees_root: str | None = typer.Option(
         None,
@@ -254,9 +275,7 @@ def cmd_reset(
     ),
 ) -> None:
     """Fully reset a foreman ticket: labels + branches + PRs + worktrees + row."""
-    wt_root_path = (
-        Path(worktrees_root) if worktrees_root else _default_worktrees_root()
-    )
+    wt_root_path = Path(worktrees_root) if worktrees_root else _default_worktrees_root()
     repo = ctx.obj.repo
     git = ctx.obj.git
     config = ctx.obj.config
@@ -267,12 +286,12 @@ def cmd_reset(
         typer.echo("reset requires V4Config", err=True)
         raise typer.Exit(code=1)
     project_config = next(
-        (p for p in config.projects if p.name == project), None,
+        (p for p in config.projects if p.name == project),
+        None,
     )
     if project_config is None:
         typer.echo(
-            f"unknown project: {project!r}. "
-            f"Configured: {[p.name for p in config.projects]}",
+            f"unknown project: {project!r}. Configured: {[p.name for p in config.projects]}",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -281,9 +300,12 @@ def cmd_reset(
     clone_path = Path(project_config.local_clone_path)
     wt = WorktreeManager(worktrees_root=wt_root_path)
     plan = _discover(
-        git=git, repo=repo,
-        project=project, issue_number=issue_number,
-        keep_pr=keep_pr, keep_worktree=keep_worktree,
+        git=git,
+        repo=repo,
+        project=project,
+        issue_number=issue_number,
+        keep_pr=keep_pr,
+        keep_worktree=keep_worktree,
         retrigger=not no_retrigger,
     )
     steps = _plan_steps(plan)
@@ -293,7 +315,12 @@ def cmd_reset(
     if not yes and steps:
         typer.confirm("Proceed?", abort=True)
     failures = _execute(
-        plan, steps, git=git, repo=repo, wt=wt, clone_path=clone_path,
+        plan,
+        steps,
+        git=git,
+        repo=repo,
+        wt=wt,
+        clone_path=clone_path,
     )
     total = len(steps)
     if failures:
@@ -302,8 +329,7 @@ def cmd_reset(
         )
         raise typer.Exit(code=1)
     typer.echo(
-        f"\nDone. {project}#{issue_number} reset. "
-        f"Daemon will pick up on next poll.",
+        f"\nDone. {project}#{issue_number} reset. Daemon will pick up on next poll.",
     )
 
 
@@ -353,9 +379,7 @@ def cmd_resume(
     typer.echo(f"ticket {ticket_id} resumed")
 
 
-def _resolve_resume_state(
-    repo: TicketRepository, ticket_id: int
-) -> str | None:
+def _resolve_resume_state(repo: TicketRepository, ticket_id: int) -> str | None:
     """Return the role-state a terminal ticket should resume into.
 
     foreman#414: a ticket parked in ``NeedsHelp``/``Failed`` carries no
@@ -434,9 +458,7 @@ def cmd_retry(
             f"and re-enqueued{suspension_note}"
         )
     else:
-        typer.echo(
-            f"ticket {ticket_id} re-enqueued in {resume_state}{suspension_note}"
-        )
+        typer.echo(f"ticket {ticket_id} re-enqueued in {resume_state}{suspension_note}")
 
 
 def cmd_set_state(
@@ -498,7 +520,10 @@ def cmd_enqueue(
     ctx: typer.Context,
     project: str = typer.Option(..., "--project", help="Project name from V4Config"),
     issue_number: int = typer.Option(
-        ..., "--issue-number", min=1, help="GitHub issue number",
+        ...,
+        "--issue-number",
+        min=1,
+        help="GitHub issue number",
     ),
 ) -> None:
     """Insert a ticket directly into Postgres at state ``Queued``.
@@ -526,8 +551,7 @@ def cmd_enqueue(
     known = [p.name for p in config.projects]
     if project not in known:
         typer.echo(
-            f"unknown project: {project!r}. "
-            f"Configured projects: {known}",
+            f"unknown project: {project!r}. Configured projects: {known}",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -540,7 +564,8 @@ def cmd_enqueue(
         )
     except TicketAlreadyExistsError:
         existing = repo.get_ticket_by_issue(
-            project=project, issue_number=issue_number,
+            project=project,
+            issue_number=issue_number,
         )
         typer.echo(
             f"ticket already exists for {project}#{issue_number}: "

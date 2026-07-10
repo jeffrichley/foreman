@@ -1,4 +1,5 @@
 """Poller — single sweep that turns SQLite + GitHub state into WorkItems."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -15,8 +16,11 @@ _T0 = dt.datetime(2026, 6, 13, 12, 0, 0)
 def _make_poller(repo, git):
     qm = QueueManager(repo=repo, max_in_flight=4)
     poller = Poller(
-        repo=repo, qm=qm, git=git,
-        project="p", trigger_label="foreman:plan",
+        repo=repo,
+        qm=qm,
+        git=git,
+        project="p",
+        trigger_label="foreman:plan",
         clock=lambda: _T0,
     )
     return poller, qm
@@ -26,7 +30,9 @@ def test_new_labeled_issue_creates_ticket_and_enqueues():
     repo = InMemoryTicketRepository()
     git = FakeGitProvider()
     git.set_open_issues_with_label(
-        project="p", label="foreman:plan", issue_numbers={42},
+        project="p",
+        label="foreman:plan",
+        issue_numbers={42},
     )
     poller, qm = _make_poller(repo, git)
     poller.tick()
@@ -42,7 +48,9 @@ def test_existing_ticket_not_duplicated():
     repo.create_ticket(project="p", issue_number=42, now=_T0)
     git = FakeGitProvider()
     git.set_open_issues_with_label(
-        project="p", label="foreman:plan", issue_numbers={42},
+        project="p",
+        label="foreman:plan",
+        issue_numbers={42},
     )
     poller, qm = _make_poller(repo, git)
     poller.tick()
@@ -66,7 +74,9 @@ def test_in_flight_non_blocked_state_re_enqueued_for_advance():
 def test_terminal_states_not_enqueued():
     repo = InMemoryTicketRepository()
     for issue, state in (
-        (101, "Done"), (102, "Failed"), (103, "NeedsHelp"),
+        (101, "Done"),
+        (102, "Failed"),
+        (103, "NeedsHelp"),
     ):
         t = repo.create_ticket(project="p", issue_number=issue, now=_T0)
         repo.set_ticket_state(t.id, state, now=_T0)
@@ -105,8 +115,11 @@ def test_poller_skips_suspended_ticket():
     # First tick: clock is at _T0 (before suspend_until) → no enqueue.
     qm = QueueManager(repo=repo, max_in_flight=4)
     early_poller = Poller(
-        repo=repo, qm=qm, git=git,
-        project="p", trigger_label="foreman:plan",
+        repo=repo,
+        qm=qm,
+        git=git,
+        project="p",
+        trigger_label="foreman:plan",
         clock=lambda: _T0,
     )
     early_poller.tick()
@@ -115,8 +128,11 @@ def test_poller_skips_suspended_ticket():
     # Second tick: clock advanced past suspend_until → enqueued.
     later_qm = QueueManager(repo=repo, max_in_flight=4)
     later_poller = Poller(
-        repo=repo, qm=later_qm, git=git,
-        project="p", trigger_label="foreman:plan",
+        repo=repo,
+        qm=later_qm,
+        git=git,
+        project="p",
+        trigger_label="foreman:plan",
         clock=lambda: suspend_until + dt.timedelta(seconds=1),
     )
     later_poller.tick()

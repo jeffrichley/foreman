@@ -83,15 +83,13 @@ class EscalationComment(BaseModel):
     what_tried: str = Field(
         ...,
         description=(
-            "What I attempted before escalating. Brief bullets in prose "
-            "or a short paragraph."
+            "What I attempted before escalating. Brief bullets in prose or a short paragraph."
         ),
     )
     what_would_unblock: str = Field(
         ...,
         description=(
-            "What an operator (or another role) would need to do for the "
-            "loop to make progress."
+            "What an operator (or another role) would need to do for the loop to make progress."
         ),
     )
     extra_context: str | None = Field(
@@ -109,18 +107,21 @@ class EscalationComment(BaseModel):
 # — they're posted directly — but a defense-in-depth assertion guards
 # against the template ever including them.
 _FORBIDDEN_CLOSING_KEYWORDS = (
-    "close", "closes", "closed",
-    "fix", "fixes", "fixed",
-    "resolve", "resolves", "resolved",
+    "close",
+    "closes",
+    "closed",
+    "fix",
+    "fixes",
+    "fixed",
+    "resolve",
+    "resolves",
+    "resolved",
 )
 
 
 def _begin_marker(*, ticket_ref: str, source: str, key: str) -> str:
     """Render the begin marker carrying the dedup key as substring."""
-    return (
-        f"<!-- foreman:escalation:begin "
-        f"ticket={ticket_ref}:source={source}:key={key} -->"
-    )
+    return f"<!-- foreman:escalation:begin ticket={ticket_ref}:source={source}:key={key} -->"
 
 
 def _matches_source_and_key(comment_body: str, *, source: str, key: str) -> bool:
@@ -133,7 +134,10 @@ def _matches_source_and_key(comment_body: str, *, source: str, key: str) -> bool
 
 
 def already_posted_for_key(
-    comments: list[CommentRef], *, source: str, key: str,
+    comments: list[CommentRef],
+    *,
+    source: str,
+    key: str,
 ) -> bool:
     """Return True iff at least one comment carries our begin marker for ``(source, key)``.
 
@@ -147,7 +151,10 @@ def already_posted_for_key(
 
 
 def any_recent_marker_with_source_prefix(
-    comments: list[CommentRef], *, source_prefix: str, since: dt.datetime,
+    comments: list[CommentRef],
+    *,
+    source_prefix: str,
+    since: dt.datetime,
 ) -> bool:
     """Return True iff any comment carries a begin marker whose ``source=`` starts with ``source_prefix`` AND whose ``posted_at >= since``.
 
@@ -246,12 +253,8 @@ def build_escalation_comment_body(
         # while still passing a payload, prepend it to the why block
         # so the audit log captures the reason for the override.
         if fallback_reason:
-            why = (
-                f"(escalation fallback) — {fallback_reason}\n\n{why}"
-            )
-        extra_context_block = (
-            f"\n{payload.extra_context}\n" if payload.extra_context else ""
-        )
+            why = f"(escalation fallback) — {fallback_reason}\n\n{why}"
+        extra_context_block = f"\n{payload.extra_context}\n" if payload.extra_context else ""
 
     begin = _begin_marker(ticket_ref=ticket_ref, source=source, key=key)
     return (
@@ -315,15 +318,18 @@ def post_escalation_comment(
             "post_escalation_comment: get_issue_comments failed for "
             "%s#%d (source=%s, key=%s); proceeding to post (duplicate "
             "preferable to missing)",
-            repo_slug, issue_number, source, key,
+            repo_slug,
+            issue_number,
+            source,
+            key,
         )
         comments = []
 
     if already_posted_for_key(comments, source=source, key=key):
         logger.debug(
-            "post_escalation_comment: dedup hit for source=%s key=%s; "
-            "skipping post",
-            source, key,
+            "post_escalation_comment: dedup hit for source=%s key=%s; skipping post",
+            source,
+            key,
         )
         return False
 
@@ -344,7 +350,10 @@ def post_escalation_comment(
         logger.exception(
             "post_escalation_comment: post_issue_comment failed for "
             "%s#%d (source=%s, key=%s); returning False",
-            repo_slug, issue_number, source, key,
+            repo_slug,
+            issue_number,
+            source,
+            key,
         )
         return False
     return True
@@ -359,7 +368,9 @@ _EXIT_CODE_RE = re.compile(r"exit(?:ed| code:) (\d+)")
 
 
 def extract_subprocess_failure_signals(
-    *, failure_reason: str | None, log_path: Path | None,
+    *,
+    failure_reason: str | None,
+    log_path: Path | None,
 ) -> tuple[int | None, str | None]:
     """Return ``(exit_code, log_tail)`` for the inline subprocess block.
 

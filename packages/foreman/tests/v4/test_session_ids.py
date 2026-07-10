@@ -18,7 +18,10 @@ from foreman.v4.session_ids import derive_session_id
 
 def test_returns_valid_uuid_string() -> None:
     result = derive_session_id(
-        ticket_id=1, role="planner", target=None, run_key="seq-3",
+        ticket_id=1,
+        role="planner",
+        target=None,
+        run_key="seq-3",
     )
     assert isinstance(result, str)
     # Parses as a valid UUID (raises ValueError otherwise → test fails).

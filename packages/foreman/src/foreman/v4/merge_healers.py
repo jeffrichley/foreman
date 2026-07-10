@@ -36,6 +36,7 @@ registry generically, so no state code changes for a new corner case.
 Order matters: the FIRST applicable healer wins, so place more-specific
 healers before broader ones.
 """
+
 from __future__ import annotations
 
 from enum import Enum, auto
@@ -99,7 +100,12 @@ class MergeHealer(Protocol):
         ...
 
     def heal(
-        self, ctx: _HealContext, *, project: str, pr_number: int, pr: PRState,
+        self,
+        ctx: _HealContext,
+        *,
+        project: str,
+        pr_number: int,
+        pr: PRState,
     ) -> HealResult:
         """Perform the remediation; return what the caller should do next."""
         ...
@@ -123,7 +129,12 @@ class BehindBranchHealer:
         return pr.mergeable_state == "behind"
 
     def heal(
-        self, ctx: _HealContext, *, project: str, pr_number: int, pr: PRState,
+        self,
+        ctx: _HealContext,
+        *,
+        project: str,
+        pr_number: int,
+        pr: PRState,
     ) -> HealResult:
         """Issue GitHub's "Update branch" so the PR's base catches up.
 

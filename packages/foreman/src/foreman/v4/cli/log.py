@@ -21,7 +21,9 @@ def _default_log_path() -> Path:
 def cmd_log(
     ctx: typer.Context,
     log_path: str | None = typer.Option(
-        None, "--log-path", help="Path to the JSON-lines transition log",
+        None,
+        "--log-path",
+        help="Path to the JSON-lines transition log",
     ),
     limit: int = typer.Option(50, "--limit"),
     ticket: int | None = typer.Option(None, "--ticket"),
@@ -46,7 +48,11 @@ def cmd_log(
 
 
 def _read_last(
-    path: Path, limit: int, *, ticket: int | None, state: str | None,
+    path: Path,
+    limit: int,
+    *,
+    ticket: int | None,
+    state: str | None,
 ) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -66,7 +72,10 @@ def _read_last(
 
 
 def _tail(
-    path: Path, *, ticket: int | None, state: str | None,
+    path: Path,
+    *,
+    ticket: int | None,
+    state: str | None,
 ) -> None:
     """Polling-based follow. Cheap on small logs; not optimized for high-volume."""
     import time
@@ -84,8 +93,10 @@ def _tail(
                     current_size = path.stat().st_size
                     if current_size != seen_size:
                         new_rows = _read_last(
-                            path, limit=20,
-                            ticket=ticket, state=state,
+                            path,
+                            limit=20,
+                            ticket=ticket,
+                            state=state,
                         )
                         text = Text("\n".join(json.dumps(r) for r in new_rows))
                         live.update(text)

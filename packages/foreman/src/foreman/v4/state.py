@@ -80,14 +80,16 @@ def _publish(ctx: StateContext, event_type: type, **kwargs: Any) -> None:
     """
     if ctx.bus is None:
         return
-    ctx.bus.publish(event_type(
-        ticket_id=ctx.ticket.id,
-        instance_id=ctx.instance.id,
-        state_name=ctx.instance.state_name,
-        sequence=ctx.instance.sequence,
-        at=ctx.clock(),
-        **kwargs,
-    ))
+    ctx.bus.publish(
+        event_type(
+            ticket_id=ctx.ticket.id,
+            instance_id=ctx.instance.id,
+            state_name=ctx.instance.state_name,
+            sequence=ctx.instance.sequence,
+            at=ctx.clock(),
+            **kwargs,
+        )
+    )
 
 
 #: State names whose transition() returns ``None`` (no further work). The
@@ -131,13 +133,15 @@ def _enter_terminal(ctx: StateContext, terminal: TicketState) -> None:
         now=now,
     )
     if ctx.bus is not None:
-        ctx.bus.publish(StateEnteredEvent(
-            ticket_id=ctx.ticket.id,
-            instance_id=terminal_instance.id,
-            state_name=terminal.state_name,
-            sequence=terminal_instance.sequence,
-            at=now,
-        ))
+        ctx.bus.publish(
+            StateEnteredEvent(
+                ticket_id=ctx.ticket.id,
+                instance_id=terminal_instance.id,
+                state_name=terminal.state_name,
+                sequence=terminal_instance.sequence,
+                at=now,
+            )
+        )
     # Close the row immediately. The ticket has landed; the row exists
     # for journal completeness, not for further dispatch. We deliberately
     # skip StateExitedEvent so the observer keeps the terminal label
@@ -146,7 +150,10 @@ def _enter_terminal(ctx: StateContext, terminal: TicketState) -> None:
 
 
 def escalate_to_needs_help(
-    ctx: StateContext, *, failure_phase: str, failure_reason: str,
+    ctx: StateContext,
+    *,
+    failure_phase: str,
+    failure_reason: str,
 ) -> TicketState:
     """Park ``ctx``'s ticket on NeedsHelp without running any further hooks.
 
@@ -179,12 +186,16 @@ def escalate_to_needs_help(
 
     now = ctx.clock()
     ctx.repo.record_failure(
-        ctx.instance.id, now=now,
-        failure_phase=failure_phase, failure_reason=failure_reason,
+        ctx.instance.id,
+        now=now,
+        failure_phase=failure_phase,
+        failure_reason=failure_reason,
     )
     _publish(
-        ctx, StateFailedEvent,
-        failure_phase=failure_phase, failure_reason=failure_reason,
+        ctx,
+        StateFailedEvent,
+        failure_phase=failure_phase,
+        failure_reason=failure_reason,
     )
     needs_help = NeedsHelpState()
     ctx.repo.set_ticket_state(ctx.ticket.id, needs_help.state_name, now=now)
@@ -285,8 +296,10 @@ class TicketState(ABC):
         """
         if not self.can_run(ctx):
             ctx.repo.record_failure(
-                ctx.instance.id, now=ctx.clock(),
-                failure_phase="can_run", failure_reason="held",
+                ctx.instance.id,
+                now=ctx.clock(),
+                failure_phase="can_run",
+                failure_reason="held",
             )
             _publish(ctx, StateFailedEvent, failure_phase="can_run", failure_reason="held")
             # Phase 8d.15 (F4): the held branch must close the state_instance
@@ -304,7 +317,8 @@ class TicketState(ABC):
         # close the instance. The lifecycle hooks (enter/execute/
         # verify/exit) never run — this attempt IS the failure event.
         consecutive = ctx.repo.count_consecutive_same_state(
-            ticket_id=ctx.ticket.id, state=self.state_name,
+            ticket_id=ctx.ticket.id,
+            state=self.state_name,
         )
         if consecutive >= ctx.max_state_attempts:
             reason = (
@@ -317,15 +331,19 @@ class TicketState(ABC):
             # label) → synthesize the terminal landing (adds
             # foreman:state-needshelp; WorkerPool won't re-enqueue once parked).
             return escalate_to_needs_help(
-                ctx, failure_phase="retry_cap", failure_reason=reason,
+                ctx,
+                failure_phase="retry_cap",
+                failure_reason=reason,
             )
 
         try:
             self.enter(ctx)
         except Exception as exc:
             ctx.repo.record_failure(
-                ctx.instance.id, now=ctx.clock(),
-                failure_phase="enter", failure_reason=repr(exc),
+                ctx.instance.id,
+                now=ctx.clock(),
+                failure_phase="enter",
+                failure_reason=repr(exc),
             )
             _publish(ctx, StateFailedEvent, failure_phase="enter", failure_reason=repr(exc))
             # Skip exit: enter never returned, so no resources to release.
@@ -340,8 +358,10 @@ class TicketState(ABC):
                 outcome = self.execute(ctx)
             except Exception as exc:
                 ctx.repo.record_failure(
-                    ctx.instance.id, now=ctx.clock(),
-                    failure_phase="execute", failure_reason=repr(exc),
+                    ctx.instance.id,
+                    now=ctx.clock(),
+                    failure_phase="execute",
+                    failure_reason=repr(exc),
                 )
                 _publish(ctx, StateFailedEvent, failure_phase="execute", failure_reason=repr(exc))
                 return None
@@ -350,27 +370,33 @@ class TicketState(ABC):
                 self.verify(ctx, outcome)
             except Exception as exc:
                 ctx.repo.record_failure(
-                    ctx.instance.id, now=ctx.clock(),
-                    failure_phase="verify", failure_reason=repr(exc),
+                    ctx.instance.id,
+                    now=ctx.clock(),
+                    failure_phase="verify",
+                    failure_reason=repr(exc),
                 )
                 _publish(ctx, StateFailedEvent, failure_phase="verify", failure_reason=repr(exc))
                 return None
 
             next_ = self.next_state(ctx, outcome)
             ctx.repo.mark_execute_completed(
-                ctx.instance.id, now=ctx.clock(),
+                ctx.instance.id,
+                now=ctx.clock(),
                 outcome_kind=outcome.kind,
                 outcome_payload=outcome.model_dump(mode="json"),
                 next_state=next_.state_name if next_ is not None else "",
             )
             _publish(
-                ctx, ExecuteCompletedEvent,
+                ctx,
+                ExecuteCompletedEvent,
                 outcome=outcome,
                 next_state=next_.state_name if next_ is not None else "",
             )
             if next_ is not None:
                 ctx.repo.set_ticket_state(
-                    ctx.ticket.id, next_.state_name, now=ctx.clock(),
+                    ctx.ticket.id,
+                    next_.state_name,
+                    now=ctx.clock(),
                 )
                 if next_.state_name in _TERMINAL_STATE_NAMES:
                     # WorkerPool won't re-enqueue once parked here, so
@@ -383,8 +409,10 @@ class TicketState(ABC):
                 self.exit(ctx, outcome)
             except Exception as exc:
                 ctx.repo.record_failure(
-                    ctx.instance.id, now=ctx.clock(),
-                    failure_phase="exit", failure_reason=repr(exc),
+                    ctx.instance.id,
+                    now=ctx.clock(),
+                    failure_phase="exit",
+                    failure_reason=repr(exc),
                 )
                 _publish(ctx, StateFailedEvent, failure_phase="exit", failure_reason=repr(exc))
             ctx.repo.close_state_instance(ctx.instance.id, now=ctx.clock())

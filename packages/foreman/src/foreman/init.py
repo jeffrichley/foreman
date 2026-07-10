@@ -429,7 +429,7 @@ def _check_instructions_committed(clone_path: Path) -> str | None:
     if not result.stdout.strip():
         return None
     return (
-        f'git -C {clone_path} add .foreman/INSTRUCTIONS.md && '
+        f"git -C {clone_path} add .foreman/INSTRUCTIONS.md && "
         f'git -C {clone_path} commit -m "chore: commit .foreman/INSTRUCTIONS.md"'
     )
 
@@ -672,9 +672,7 @@ def _write_project_block_to_config(
     if not force:
         # Defense in depth — the orchestrator already raised before we
         # got here, but never trust the caller blindly with a write.
-        raise FileExistsError(
-            f"Project block for {name!r} already exists in {config_path}"
-        )
+        raise FileExistsError(f"Project block for {name!r} already exists in {config_path}")
     replaced = block_re.sub(block_text, existing, count=1)
     config_path.write_text(replaced, encoding="utf-8")
 

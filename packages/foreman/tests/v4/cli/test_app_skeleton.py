@@ -1,4 +1,5 @@
 """Typer app skeleton — root invocation prints help, --version returns string."""
+
 from __future__ import annotations
 
 from typer.testing import CliRunner

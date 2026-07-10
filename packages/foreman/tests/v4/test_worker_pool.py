@@ -1,4 +1,5 @@
 """WorkerPool — ThreadPoolExecutor draining QueueManager."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -30,12 +31,17 @@ def test_tick_processes_one_workitem():
     repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(project="p", issue_number=1, now=dt.datetime(2026, 6, 13))
     qm = QueueManager(repo=repo, max_in_flight=4)
-    dispatcher = FakeRoleDispatcher(responses={
-        ("planner", "p", 1): _canned("clean"),
-    })
+    dispatcher = FakeRoleDispatcher(
+        responses={
+            ("planner", "p", 1): _canned("clean"),
+        }
+    )
     pool = WorkerPool(
-        repo=repo, qm=qm, dispatcher=dispatcher,
-        git=None, bus=None,
+        repo=repo,
+        qm=qm,
+        dispatcher=dispatcher,
+        git=None,
+        bus=None,
         clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
     )
     try:
@@ -87,8 +93,11 @@ def test_worker_crash_parks_ticket_on_needs_help():
     qm = QueueManager(repo=repo, max_in_flight=4)
     dispatcher = FakeRoleDispatcher(responses={("planner", "p", 1): _canned("clean")})
     pool = WorkerPool(
-        repo=repo, qm=qm, dispatcher=dispatcher,
-        git=None, bus=bus,
+        repo=repo,
+        qm=qm,
+        dispatcher=dispatcher,
+        git=None,
+        bus=bus,
         clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
     )
     try:
@@ -98,10 +107,7 @@ def test_worker_crash_parks_ticket_on_needs_help():
         # Parked terminally → Poller stops re-enqueueing.
         assert inner.get_ticket(ticket.id).current_state == "NeedsHelp"
         # Surfaced → LabelObservabilityObserver applies foreman:state-needshelp.
-        assert any(
-            isinstance(e, StateEnteredEvent) and e.state_name == "NeedsHelp"
-            for e in events
-        )
+        assert any(isinstance(e, StateEnteredEvent) and e.state_name == "NeedsHelp" for e in events)
     finally:
         pool.shutdown(wait=True)
 
@@ -116,9 +122,11 @@ def test_worker_crash_before_context_built_still_parks_ticket():
     repo.set_ticket_state(ticket.id, "Planning", now=dt.datetime(2026, 6, 13))
     qm = QueueManager(repo=repo, max_in_flight=4)
     pool = WorkerPool(
-        repo=repo, qm=qm,
+        repo=repo,
+        qm=qm,
         dispatcher=FakeRoleDispatcher(responses={}),
-        git=None, bus=None,
+        git=None,
+        bus=None,
         clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
     )
     try:
@@ -134,9 +142,11 @@ def test_tick_returns_zero_when_queue_empty():
     repo = InMemoryTicketRepository()
     qm = QueueManager(repo=repo, max_in_flight=4)
     pool = WorkerPool(
-        repo=repo, qm=qm,
+        repo=repo,
+        qm=qm,
         dispatcher=FakeRoleDispatcher(responses={}),
-        git=None, bus=None,
+        git=None,
+        bus=None,
         clock=lambda: dt.datetime(2026, 6, 13),
     )
     try:
@@ -155,14 +165,19 @@ def test_three_tickets_dispatch_concurrently():
         tids.append(t.id)
     # max_in_flight=3 sizes BOTH the QM cap and the thread pool — one knob.
     qm = QueueManager(repo=repo, max_in_flight=3)
-    dispatcher = FakeRoleDispatcher(responses={
-        ("planner", "p", 1): _canned("clean"),
-        ("planner", "p", 2): _canned("clean"),
-        ("planner", "p", 3): _canned("clean"),
-    })
+    dispatcher = FakeRoleDispatcher(
+        responses={
+            ("planner", "p", 1): _canned("clean"),
+            ("planner", "p", 2): _canned("clean"),
+            ("planner", "p", 3): _canned("clean"),
+        }
+    )
     pool = WorkerPool(
-        repo=repo, qm=qm, dispatcher=dispatcher,
-        git=None, bus=None,
+        repo=repo,
+        qm=qm,
+        dispatcher=dispatcher,
+        git=None,
+        bus=None,
         clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
     )
     try:
@@ -207,8 +222,11 @@ def test_same_ticket_serialized_across_concurrent_submissions():
 
     dispatcher = BlockingDispatcher()
     pool = WorkerPool(
-        repo=repo, qm=qm, dispatcher=dispatcher,
-        git=None, bus=None,
+        repo=repo,
+        qm=qm,
+        dispatcher=dispatcher,
+        git=None,
+        bus=None,
         clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
     )
     try:

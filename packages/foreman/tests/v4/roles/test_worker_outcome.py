@@ -15,6 +15,7 @@ The Worker is the only role with FOUR outcome paths:
 Worker is NOT target-aware (impl PR is unambiguous from issue
 number), so no ``target`` kwarg.
 """
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch

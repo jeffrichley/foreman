@@ -1,4 +1,5 @@
 """Tests for the Outcome model — the role-to-daemon reporting contract."""
+
 import json
 
 import pytest

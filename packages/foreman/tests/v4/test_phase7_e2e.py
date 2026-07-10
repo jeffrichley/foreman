@@ -15,6 +15,7 @@ wiring. Persistence is Postgres-only (v5 kill-sqlite), so the test runs
 against the session-scoped Postgres testcontainer (``clean_postgres_dsn``)
 and skips gracefully when Docker is unavailable.
 """
+
 from __future__ import annotations
 
 import json
@@ -35,10 +36,7 @@ from .postgres_fixture import (  # noqa: F401  (fixture imports)
 
 def _canned(kind: str, *, pr_number: int | None = None) -> str:
     art = f',"artifacts":{{"pr_number":{pr_number}}}' if pr_number else ""
-    return (
-        f'FOREMAN_OUTCOME:{{"kind":"{kind}","confidence":"high",'
-        f'"summary":"x"{art}}}'
-    )
+    return f'FOREMAN_OUTCOME:{{"kind":"{kind}","confidence":"high","summary":"x"{art}}}'
 
 
 def test_full_boot_from_toml_to_done(tmp_path: Path, monkeypatch, clean_postgres_dsn):  # noqa: F811
@@ -58,23 +56,23 @@ def test_full_boot_from_toml_to_done(tmp_path: Path, monkeypatch, clean_postgres
         # validates the string shape, so fake on-disk paths are fine
         # for this e2e (identity is a MagicMock below).
         f"[apps.planner]\n"
-        f'app_id = 12345\n'
+        f"app_id = 12345\n"
         f'private_key_path = "/tmp/fake-planner.pem"\n'
         f"[apps.reviewer]\n"
-        f'app_id = 12346\n'
+        f"app_id = 12346\n"
         f'private_key_path = "/tmp/fake-reviewer.pem"\n'
         f"[apps.fixer]\n"
-        f'app_id = 12347\n'
+        f"app_id = 12347\n"
         f'private_key_path = "/tmp/fake-fixer.pem"\n'
         f"[apps.worker]\n"
-        f'app_id = 12348\n'
+        f"app_id = 12348\n"
         f'private_key_path = "/tmp/fake-worker.pem"\n'
         # Task 8.4: [orchestrator] is now required too — App
         # installation creds, not env-var PAT. Same fake-on-disk-path
         # treatment as the per-role apps; identity is a MagicMock below
         # so no PEM read ever fires.
         f"[orchestrator]\n"
-        f'app_id = 99999\n'
+        f"app_id = 99999\n"
         f'private_key_path = "/tmp/fake-orchestrator.pem"\n'
         f"[operator.supervisor]\n"
         f'name = "Test Sup"\n'
@@ -95,25 +93,33 @@ def test_full_boot_from_toml_to_done(tmp_path: Path, monkeypatch, clean_postgres
 
     git = FakeGitProvider()
     git.set_open_issues_with_label(
-        project="p", label="foreman:plan", issue_numbers={1},
+        project="p",
+        label="foreman:plan",
+        issue_numbers={1},
     )
     git.set_pr_state(
-        project="p", pr_number=42,
+        project="p",
+        pr_number=42,
         # foreman#357: ``base_ref="main"`` matches the project's default
         # ``dev_base_branch`` (None → DEFAULT_DEV_BASE_BRANCH ("main")
         # per merging.py), so MergingState's base-ref guard passes
         # through and the ticket reaches Done as before.
         state=PRState(
-            merged=False, mergeable=True, ci_passing=True, base_ref="main",
+            merged=False,
+            mergeable=True,
+            ci_passing=True,
+            base_ref="main",
         ),
     )
 
-    dispatcher = FakeRoleDispatcher(responses={
-        ("planner", "p", 1):       _canned("clean", pr_number=42),
-        ("reviewer-spec", "p", 1): _canned("clean", pr_number=42),
-        ("worker", "p", 1):        _canned("clean", pr_number=42),
-        ("reviewer-impl", "p", 1): _canned("clean", pr_number=42),
-    })
+    dispatcher = FakeRoleDispatcher(
+        responses={
+            ("planner", "p", 1): _canned("clean", pr_number=42),
+            ("reviewer-spec", "p", 1): _canned("clean", pr_number=42),
+            ("worker", "p", 1): _canned("clean", pr_number=42),
+            ("reviewer-impl", "p", 1): _canned("clean", pr_number=42),
+        }
+    )
     # Bootstrap unconditionally constructs a SubprocessRoleDispatcher;
     # for the e2e smoke we replace that constructor with one that yields
     # our FakeRoleDispatcher. Everything else (the repository,
@@ -128,7 +134,8 @@ def test_full_boot_from_toml_to_done(tmp_path: Path, monkeypatch, clean_postgres
     identity.get_role_token.return_value = "ghp_TEST"
     try:
         ctx = bootstrap_cli_context(
-            config=config, identity=identity,
+            config=config,
+            identity=identity,
             git_provider_factory=lambda repo: git,
         )
         assert ctx.repo is not None
@@ -150,8 +157,7 @@ def test_full_boot_from_toml_to_done(tmp_path: Path, monkeypatch, clean_postgres
                 break
         else:
             raise AssertionError(
-                f"ticket did not converge after 30 ticks: "
-                f"current_state={ticket.current_state}",
+                f"ticket did not converge after 30 ticks: current_state={ticket.current_state}",
             )
 
         assert ticket.current_state == "Done"
@@ -162,12 +168,10 @@ def test_full_boot_from_toml_to_done(tmp_path: Path, monkeypatch, clean_postgres
         jsonl = log_dir / "transitions.jsonl"
         assert jsonl.exists(), f"expected JSON-lines log at {jsonl}"
         content = jsonl.read_text(encoding="utf-8")
-        state_entered_lines = [
-            json.loads(line) for line in content.splitlines() if line.strip()
-        ]
-        assert any(
-            entry.get("event") == "state_entered" for entry in state_entered_lines
-        ), "no state_entered event landed in the JSON-lines log"
+        state_entered_lines = [json.loads(line) for line in content.splitlines() if line.strip()]
+        assert any(entry.get("event") == "state_entered" for entry in state_entered_lines), (
+            "no state_entered event landed in the JSON-lines log"
+        )
 
         # Events archive populated — proves EventArchiveObserver ran on
         # the same bus the Daemon used. Query through the Postgres pool.
