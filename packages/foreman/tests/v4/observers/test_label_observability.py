@@ -300,6 +300,86 @@ def test_observer_stamps_terminal_state_label_on_state_entered() -> None:
     ]
 
 
+def test_done_entry_scrubs_sibling_terminal_labels() -> None:
+    """StateEntered(Done) removes foreman:state-needshelp + foreman:state-failed.
+
+    Regression for the class of residue found 2026-07-10: tickets that
+    transited through NeedsHelp (and/or Failed) accumulated sibling terminal
+    labels that were never stripped on the Done completion landing."""
+    repo, ticket = _make_repo_and_ticket("Done")
+    writer = _RecordingWriter()
+    obs = LabelObservabilityObserver(writer=writer, repo=repo)
+    obs(
+        StateEnteredEvent(
+            ticket_id=ticket.id,
+            instance_id=99,
+            state_name="Done",
+            sequence=5,
+            at=_T0,
+        )
+    )
+    # Exactly one add_labels call for foreman:state-done.
+    assert writer.add_calls == [("foreman", 42, {"foreman:state-done"})]
+    # remove_labels called with the two sibling terminal labels.
+    remove_label_sets = [labels for _proj, _issue, labels in writer.remove_calls]
+    assert {"foreman:state-needshelp", "foreman:state-failed"} in remove_label_sets
+
+
+def test_needshelp_terminal_does_not_scrub_siblings() -> None:
+    """StateEntered(NeedsHelp) must NOT remove sibling terminal labels.
+
+    NeedsHelp is a holding pen: the label must stay visible for humans and
+    the state-sweep so operators can find and retry the ticket."""
+    repo, ticket = _make_repo_and_ticket("NeedsHelp")
+    writer = _RecordingWriter()
+    obs = LabelObservabilityObserver(writer=writer, repo=repo)
+    obs(
+        StateEnteredEvent(
+            ticket_id=ticket.id,
+            instance_id=99,
+            state_name="NeedsHelp",
+            sequence=4,
+            at=_T0,
+        )
+    )
+    assert writer.add_calls == [("foreman", 42, {"foreman:state-needshelp"})]
+    # No remove call for sibling terminal labels.
+    sibling_scrub_calls = [
+        labels for _proj, _issue, labels in writer.remove_calls
+        if labels & {"foreman:state-needshelp", "foreman:state-failed"}
+    ]
+    assert sibling_scrub_calls == [], (
+        f"NeedsHelp entry must not scrub sibling labels; got: {sibling_scrub_calls!r}"
+    )
+
+
+def test_failed_terminal_does_not_scrub_siblings() -> None:
+    """StateEntered(Failed) must NOT remove sibling terminal labels.
+
+    Failed is a terminal with human-actionable context; the label must stay
+    visible for operators reviewing the issue."""
+    repo, ticket = _make_repo_and_ticket("Failed")
+    writer = _RecordingWriter()
+    obs = LabelObservabilityObserver(writer=writer, repo=repo)
+    obs(
+        StateEnteredEvent(
+            ticket_id=ticket.id,
+            instance_id=99,
+            state_name="Failed",
+            sequence=4,
+            at=_T0,
+        )
+    )
+    assert writer.add_calls == [("foreman", 42, {"foreman:state-failed"})]
+    sibling_scrub_calls = [
+        labels for _proj, _issue, labels in writer.remove_calls
+        if labels & {"foreman:state-needshelp", "foreman:state-failed"}
+    ]
+    assert sibling_scrub_calls == [], (
+        f"Failed entry must not scrub sibling labels; got: {sibling_scrub_calls!r}"
+    )
+
+
 def test_writer_failure_propagates() -> None:
     """Label-write failure propagates — the EventBus owns the firewall,
     not the observer. We assert the exception class so EventBus's

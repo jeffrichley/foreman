@@ -85,6 +85,18 @@ _TRIGGER_LABEL = "foreman:plan"
 #: the label is already gone.
 _FIRST_STATES = frozenset({"Queued", "Planning"})
 
+#: The completion terminal: the only terminal whose entry triggers scrubbing
+#: of sibling terminal state labels.
+_COMPLETION_TERMINAL = "Done"
+
+#: Labels for the two non-completion terminals. These are stripped when the
+#: ticket enters Done so completed issues don't carry misleading residue.
+#: Computed via ``_state_label()`` to stay consistent with the naming helper.
+_SIBLING_TERMINAL_LABELS: set[str] = {
+    _state_label("NeedsHelp"),
+    _state_label("Failed"),
+}
+
 
 class LabelObservabilityObserver:
     """Stamps state-progress labels on the issue without touching others."""
@@ -127,6 +139,12 @@ class LabelObservabilityObserver:
                 project=ticket.project,
                 issue_number=ticket.issue_number,
                 labels={_TRIGGER_LABEL},
+            )
+        if event.state_name == _COMPLETION_TERMINAL:
+            self._writer.remove_labels(
+                project=ticket.project,
+                issue_number=ticket.issue_number,
+                labels=_SIBLING_TERMINAL_LABELS,
             )
 
     def _on_state_exited(self, event: StateExitedEvent) -> None:
