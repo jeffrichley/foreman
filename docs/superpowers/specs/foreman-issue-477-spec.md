@@ -100,28 +100,41 @@ the signal handler itself) avoids network I/O inside a signal context.
 **`_apply_project_reload()` — diff and apply**:
 
 1. Call `self._projects_loader()` to get a fresh `list[ProjectConfig]`.
-2. Build current project name set = `set(self._project_configs.keys())`.
-3. Build new project name set from the loaded list.
-4. **Added** = names in new but not in current, plus names whose `ProjectConfig`
-   fields changed (same name, different values — treat as remove + re-add).
-5. For each added project: call `self._git_provider_factory(pc.repo)` →
-   `GitProvider`; if `self._routing_git is not None`, call
-   `self._routing_git.register_provider(name, provider)`; create a `Poller`
-   (same arguments as in `bootstrap_cli_context`); call `self._with_qm(new_poller)`
-   to wire the shared QueueManager into the poller before appending it; append
-   the wired poller to `self._pollers`;
-   update `self._project_configs[name] = pc`; call
-   `self._clone_refresher.register_project(name, Path(pc.local_clone_path))`.
-6. **Removed** = current names not in the new set **plus** current names whose
-   `ProjectConfig` differs from the loaded version (same remove-then-re-add
-   treatment prescribed in step 4). For each: remove from
-   `self._pollers` (filter by `poller._project != name`); if
+2. Take a **pre-mutation snapshot**: `snapshot = dict(self._project_configs)`.
+3. Build current project name set from `snapshot.keys()`.
+4. Build new project name set from the loaded list.
+5. Compute **both** the Removed and Added sets from `snapshot` **before any
+   mutations are applied**:
+   - **Removed** = names in `snapshot` but not in the new set, **plus** names
+     present in both whose `ProjectConfig` fields differ (treat as remove +
+     re-add).
+   - **Added** = names in the new set but not in `snapshot`, **plus** names whose
+     `ProjectConfig` changed (same remove-then-re-add treatment).
+6. **Process removals first** — for each name in the Removed set: filter
+   `self._pollers` to keep only entries where `poller._project != name`; if
    `self._routing_git is not None`, call
    `self._routing_git.unregister_provider(name)`; delete
    `self._project_configs[name]`; call
    `self._clone_refresher.unregister_project(name)`.
-7. Log a structured INFO entry with added/removed name lists; no-op log
+7. **Then process additions** — for each project in the Added set: call
+   `self._git_provider_factory(pc.repo)` → `GitProvider`; if
+   `self._routing_git is not None`, call
+   `self._routing_git.register_provider(name, provider)`; create a `Poller`
+   (same arguments as in `bootstrap_cli_context`); call `self._with_qm(new_poller)`
+   to wire the shared QueueManager into the poller before appending it; append
+   the wired poller to `self._pollers`; update `self._project_configs[name] = pc`;
+   call `self._clone_refresher.register_project(name, Path(pc.local_clone_path))`.
+8. Log a structured INFO entry with added/removed name lists; no-op log
    (`"config reload: no changes"`) when both lists are empty.
+
+**Ordering constraint**: Removals (step 6) MUST be processed before additions
+(step 7), and both sets MUST be derived from `snapshot` (the pre-mutation copy
+from step 2). Rationale: if adds ran first, a changed project's new poller
+would be appended to `_pollers` and then immediately dropped by the subsequent
+remove-filter (`poller._project != name`), leaving the project absent after
+reload. Computing from the snapshot avoids the self-overwrite where step 7's
+`self._project_configs[name] = new_pc` would make a changed project's config
+appear identical to a later comparison against the live dict.
 
 **`RoutingGitProvider` mutability**: Add `register_provider(name, provider)` and
 `unregister_provider(name)` public methods to `RoutingGitProvider`. The
@@ -290,9 +303,13 @@ and paths that don't supply `daemon=` continue to work unchanged.
 15. Add tests for Daemon reload in a new file
     `packages/foreman/tests/v4/test_daemon_project_reload.py`:
     - `test_apply_project_reload_adds_project` — construct a Daemon with one
-      project; set `_projects_loader` to return two projects; call
-      `request_project_reload()` then `tick_once()`; assert the second project's
-      Poller is now in `self._pollers` and its config is in `self._project_configs`.
+      project, supplying `git_provider_factory=lambda repo: FakeGitProvider()`
+      (a minimal stub implementing the `GitProvider` Protocol) so that
+      `_apply_project_reload()` can create a provider for the new project
+      without raising `TypeError` on the default `None`; set `_projects_loader`
+      to return two projects; call `request_project_reload()` then `tick_once()`;
+      assert the second project's Poller is now in `self._pollers` and its config
+      is in `self._project_configs`.
     - `test_apply_project_reload_removes_project` — construct a Daemon with two
       projects; set loader to return only one; trigger reload; assert the removed
       project is absent from `self._pollers` and `self._project_configs`.
