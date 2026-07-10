@@ -466,6 +466,24 @@ def load_config(path: Path) -> V4Config:
     return V4Config.model_validate(payload)
 
 
+def load_projects(path: Path) -> list[ProjectConfig]:
+    """Parse a standalone ``[[projects]]`` TOML file and return validated entries.
+
+    The file must contain only ``[[projects]]`` array-of-tables; daemon
+    secrets and identity live in the envsubst-rendered config.toml (which
+    ships with zero ``[[projects]]`` tables after issue #477).
+
+    Raises:
+        FileNotFoundError: propagated from ``Path.read_text`` when ``path``
+            does not exist. Operator must create the file before starting
+            the daemon (see ``projects.toml.example`` in the image).
+        pydantic.ValidationError: on missing required fields or extra keys
+            (same loud-fail contract as :func:`load_config`).
+    """
+    raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    return [ProjectConfig.model_validate(entry) for entry in raw.get("projects", [])]
+
+
 def resolve_operator(project: ProjectConfig, config: V4Config) -> OperatorConfig:
     """Resolve the operator identities for ``project``.
 

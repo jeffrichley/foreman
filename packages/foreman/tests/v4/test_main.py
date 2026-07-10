@@ -113,6 +113,16 @@ local_clone_path = "{(tmp_path / "p").as_posix()}"
         encoding="utf-8",
     )
     monkeypatch.setenv("FOREMAN_V4_CONFIG", str(config_path))
+    # issue #477: main() now loads [[projects]] from FOREMAN_PROJECTS_PATH
+    # instead of from config.toml. Write a minimal projects.toml and point
+    # the daemon at it.
+    projects_path = tmp_path / "projects.toml"
+    projects_path.write_text(
+        '[[projects]]\nname = "p"\nrepo = "owner/p"\n'
+        f'local_clone_path = "{(tmp_path / "p").as_posix()}"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FOREMAN_PROJECTS_PATH", str(projects_path))
     monkeypatch.setattr("sys.argv", ["foreman", "--help"])
     with pytest.raises(SystemExit) as excinfo:
         main()

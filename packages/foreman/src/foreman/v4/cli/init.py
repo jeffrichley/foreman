@@ -29,7 +29,7 @@ from foreman.init import (
     _verify_bot_installation,
     _write_instructions_template,
 )
-from foreman.v4.config import load_config
+from foreman.v4.config import load_config, load_projects
 from foreman.v4.identity import V4IdentityRegistry
 
 # Default check-command threaded into the instructions template. Matches
@@ -44,6 +44,10 @@ _DEFAULT_CHECK_COMMAND = "just check"
 # cycle with the top-level ``foreman.v4.cli`` package (which itself
 # imports from this module).
 _DEFAULT_CONFIG = Path.home() / ".foreman" / "v4" / "config.toml"
+
+# Default projects path. Mirrors ``foreman.v4.cli._DEFAULT_PROJECTS_PATH``;
+# duplicated here as a local constant for the same cycle-avoidance reason.
+_DEFAULT_PROJECTS_PATH = Path.home() / ".foreman" / "projects.toml"
 
 
 def cmd_init(
@@ -70,14 +74,24 @@ def cmd_init(
         raise typer.Exit(code=1)
     config = load_config(config_path)
 
+    # issue #477: load the project list from the host-mounted projects file
+    # (``$FOREMAN_PROJECTS_PATH``) instead of from ``config.projects``
+    # (always empty after the template change).
+    projects_path = Path(os.environ.get("FOREMAN_PROJECTS_PATH", str(_DEFAULT_PROJECTS_PATH)))
+    try:
+        all_projects = load_projects(projects_path)
+    except FileNotFoundError:
+        typer.echo(f"projects file not found at {projects_path}", err=True)
+        raise typer.Exit(code=1) from None
+
     project_cfg = next(
-        (p for p in config.projects if p.name == project),
+        (p for p in all_projects if p.name == project),
         None,
     )
     if project_cfg is None:
-        known = [p.name for p in config.projects]
+        known = [p.name for p in all_projects]
         typer.echo(
-            f"project {project!r} not found in V4Config at {config_path}. Known projects: {known}",
+            f"project {project!r} not found in {projects_path}. Known projects: {known}",
             err=True,
         )
         raise typer.Exit(code=1)

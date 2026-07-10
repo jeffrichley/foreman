@@ -54,6 +54,8 @@ def bootstrap_cli_context(
     identity: IdentityProvider,
     git_provider_factory: Callable[[str], GitProvider],
     foreman_cli: list[str] | None = None,
+    projects: list[ProjectConfig] | None = None,
+    projects_loader: Callable[[], list[ProjectConfig]] | None = None,
 ) -> CliContext:
     """Build the full v4 object graph from config.
 
@@ -61,6 +63,15 @@ def bootstrap_cli_context(
     returns a GitProvider for it. Production passes a function that
     constructs PyGithubGitProvider; tests pass a function that returns
     a FakeGitProvider.
+
+    ``projects`` — when supplied, replaces ``config.projects`` as the
+    boot-time project list.  Used by :func:`~foreman.v4.cli.main` after
+    issue #477 so the daemon reads ``[[projects]]`` from the host-mounted
+    ``projects.toml`` rather than from the envsubst-rendered config.
+
+    ``projects_loader`` — a zero-arg callable stored on the Daemon for
+    hot-reload on SIGHUP.  Production passes
+    ``lambda: load_projects(projects_path)``; tests may omit it.
     """
     configure_logging(log_dir=Path(config.log_dir), level=config.log_level)
     repo: TicketRepository
@@ -81,9 +92,13 @@ def bootstrap_cli_context(
         timeout_seconds=config.role_timeout_seconds,  # Phase 5 carryover
     )
 
+    # issue #477: ``projects`` (from the host-mounted projects.toml) wins
+    # over ``config.projects`` (always empty after the template change).
+    active_projects = projects if projects is not None else config.projects
+
     pollers: list[Poller] = []
     per_project_providers: dict[str, GitProvider] = {}
-    for project_config in config.projects:
+    for project_config in active_projects:
         # One GitProvider per project. The factory takes ``owner/name`` and
         # returns a provider locked to that repo (the PyGithub impl is
         # construction-time-bound to its repo_full_name and ignores the
@@ -165,14 +180,14 @@ def bootstrap_cli_context(
     # look up by ticket.project. MergingState reads
     # ``dev_base_branch`` from this map to gate the impl-PR merge on
     # base-ref match.
-    project_configs: dict[str, ProjectConfig] = {pc.name: pc for pc in config.projects}
+    project_configs: dict[str, ProjectConfig] = {pc.name: pc for pc in active_projects}
 
     # foreman#407: per-poll clone refresher. Builds a ``name -> clone path``
     # map from the project configs and refreshes each clone's
     # ``origin/<default>`` ref at most once per ``clone_refresh_seconds``.
     # ``from_projects`` returns a no-op sentinel for zero-project configs.
     clone_refresher = CloneRefresher.from_projects(
-        {pc.name: Path(pc.local_clone_path) for pc in config.projects},
+        {pc.name: Path(pc.local_clone_path) for pc in active_projects},
         interval_seconds=config.clone_refresh_seconds,
         clock=dt.datetime.now,
     )
@@ -201,6 +216,8 @@ def bootstrap_cli_context(
         project_configs=project_configs,
         clone_refresher=clone_refresher,
         backup_scheduler=backup_scheduler,
+        projects_loader=projects_loader,
+        git_provider_factory=git_provider_factory,
     )
 
     return build_cli_context(

@@ -13,6 +13,7 @@ installation lives in the CLI start command, not here.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -34,6 +35,7 @@ from foreman.v4.queue_manager import QueueManager
 from foreman.v4.reconcile import reconcile_on_startup
 from foreman.v4.repository import TicketRepository
 from foreman.v4.role_dispatcher import RoleDispatcher
+from foreman.v4.routing_git_provider import RoutingGitProvider
 from foreman.v4.worker_pool import WorkerPool
 
 # Module-level singletons for the daemon's default kwarg sentinels —
@@ -48,6 +50,8 @@ _DISABLED_BACKUP_SCHEDULER: BackupSchedulerLike = _DisabledBackupScheduler()
 # foreman#407: disabled clone refresher sentinel. Used as the default
 # ``clone_refresher`` kwarg on ``Daemon.__init__``.
 _DISABLED_CLONE_REFRESHER: CloneRefresherLike = _DisabledCloneRefresher()
+
+_log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from foreman.v4.config import ProjectConfig
@@ -95,6 +99,8 @@ class Daemon:
         project_configs: dict[str, ProjectConfig] | None = None,
         clone_refresher: CloneRefresherLike = _DISABLED_CLONE_REFRESHER,
         backup_scheduler: BackupSchedulerLike = _DISABLED_BACKUP_SCHEDULER,
+        projects_loader: Callable[[], list[ProjectConfig]] | None = None,
+        git_provider_factory: Callable[[str], GitProvider] | None = None,
     ) -> None:
         self._repo = repo
         self._git = git
@@ -137,11 +143,109 @@ class Daemon:
         # constructions stay no-ops without specifying ``backup_scheduler=``.
         self._backup_scheduler = backup_scheduler
         self._stop = threading.Event()
+        # issue #477: hot-reload of the project list on SIGHUP.
+        # ``_reload_projects_event`` is set by ``request_project_reload()``
+        # (called from the SIGHUP handler) and checked at the start of each
+        # ``tick_once()`` call.  Doing the work in ``tick_once()`` (not in
+        # the signal handler itself) avoids network I/O inside a signal context.
+        self._reload_projects_event: threading.Event = threading.Event()
+        self._projects_loader = projects_loader
+        self._git_provider_factory = git_provider_factory
+        # Narrowed type for the mutating register/unregister calls in
+        # ``_apply_project_reload()``.  ``_git: GitProvider`` is the public
+        # attribute (Protocol — no register_provider); ``_routing_git`` is
+        # the concrete ``RoutingGitProvider | None`` used only inside
+        # ``_apply_project_reload``.  When the daemon runs a plain stub
+        # GitProvider (tests), ``_routing_git`` is None and provider
+        # registration is silently skipped.
+        self._routing_git: RoutingGitProvider | None = (
+            git if isinstance(git, RoutingGitProvider) else None
+        )
 
     @property
     def qm(self) -> QueueManager:
         """Exposed so the CLI can wire `ctx.obj.qm` to the shared QM."""
         return self._qm
+
+    def request_project_reload(self) -> None:
+        """Signal that ``_apply_project_reload`` should run on the next tick.
+
+        Safe to call from a signal handler — :meth:`threading.Event.set` is
+        async-signal-safe.  The actual reload runs in ``tick_once()`` (not in
+        the signal handler) to avoid network I/O inside a signal context.
+        """
+        self._reload_projects_event.set()
+
+    def _apply_project_reload(self) -> None:
+        """Diff the project list from the loader against the live registry.
+
+        Computes the added and removed sets from a pre-mutation snapshot of
+        ``_project_configs``, then applies removals before additions so a
+        changed project is treated as remove-then-re-add without self-overwrite
+        confusion.  See the Approach section of the issue #477 spec for the
+        ordering rationale.
+
+        No-ops when ``_projects_loader`` is ``None`` (daemon constructed
+        without a loader — test isolation path).
+        """
+        from pathlib import Path  # local import — only needed here
+
+        if self._projects_loader is None:
+            return
+
+        new_projects = self._projects_loader()
+        # Pre-mutation snapshot — both Removed and Added sets are derived
+        # from this so that step-7 additions don't overwrite a step-6
+        # removal of the same changed project.
+        snapshot = dict(self._project_configs)
+        new_by_name = {pc.name: pc for pc in new_projects}
+
+        removed_names: set[str] = set()
+        added_pcs: list[ProjectConfig] = []
+
+        for name, old_pc in snapshot.items():
+            if name not in new_by_name or new_by_name[name] != old_pc:
+                removed_names.add(name)
+
+        for name, new_pc in new_by_name.items():
+            if name not in snapshot or snapshot[name] != new_pc:
+                added_pcs.append(new_pc)
+
+        if not removed_names and not added_pcs:
+            _log.info("config reload: no changes")
+            return
+
+        # Step 6: process removals first.
+        for name in removed_names:
+            self._pollers = [p for p in self._pollers if p._project != name]
+            if self._routing_git is not None:
+                self._routing_git.unregister_provider(name)
+            self._project_configs.pop(name, None)
+            self._clone_refresher.unregister_project(name)
+
+        # Step 7: process additions.
+        for pc in added_pcs:
+            if self._git_provider_factory is not None:
+                provider = self._git_provider_factory(pc.repo)
+                if self._routing_git is not None:
+                    self._routing_git.register_provider(pc.name, provider)
+                new_poller = Poller(
+                    repo=self._repo,
+                    qm=None,
+                    git=provider,
+                    project=pc.name,
+                    trigger_label=pc.trigger_label,
+                    clock=self._clock,
+                )
+                self._pollers.append(self._with_qm(new_poller))
+            self._project_configs[pc.name] = pc
+            self._clone_refresher.register_project(pc.name, Path(pc.local_clone_path))
+
+        _log.info(
+            "config reload: added=%s removed=%s",
+            sorted(pc.name for pc in added_pcs),
+            sorted(removed_names),
+        )
 
     def _with_qm(self, poller: Poller) -> Poller:
         # Pollers can be constructed without a QM at config time; inject
@@ -163,6 +267,15 @@ class Daemon:
         give the pool time to drain naturally; the explicit drain just
         makes tick_once deterministic.
         """
+        # issue #477: apply a pending project-list reload before polling.
+        # The event is set by ``request_project_reload()`` (called from the
+        # SIGHUP handler).  Doing the work here (not in the signal handler)
+        # avoids network I/O inside a signal context.  The check MUST be in
+        # ``tick_once()`` so the reload tests — which call ``tick_once()``
+        # directly — observe the effect immediately.
+        if self._reload_projects_event.is_set():
+            self._reload_projects_event.clear()
+            self._apply_project_reload()
         # foreman#407: refresh each project's clone (throttled) BEFORE
         # polling, so any worktree created off the freshly-enqueued work
         # this tick branches from an up-to-date origin/<default> ref. The
