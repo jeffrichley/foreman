@@ -138,6 +138,36 @@ def test_main_malformed_projects_file_exits_cleanly(
     assert "Traceback" not in err, "must be a clean message, not a raw traceback"
 
 
+def test_main_broken_toml_projects_file_exits_cleanly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """issue #509: a syntactically-broken projects.toml makes main() exit
+    non-zero with a clean 'invalid TOML' message, NOT a raw
+    TOMLDecodeError traceback."""
+    import typer
+
+    from foreman.v4.cli import main
+
+    config_path = _write_valid_config(tmp_path)
+    monkeypatch.setenv("FOREMAN_V4_CONFIG", str(config_path))
+    # A projects file with invalid TOML syntax → tomllib.TOMLDecodeError.
+    broken_projects = tmp_path / "projects.toml"
+    broken_projects.write_text("[[projects\n", encoding="utf-8")  # missing closing bracket
+    monkeypatch.setenv("FOREMAN_PROJECTS_PATH", str(broken_projects))
+    monkeypatch.setattr("sys.argv", ["foreman", "daemon", "start"])
+
+    with pytest.raises(typer.Exit) as excinfo:
+        main()
+
+    assert excinfo.value.exit_code == 1, "startup guard must exit non-zero on broken TOML"
+    err = capsys.readouterr().err
+    assert "invalid toml" in err.lower(), f"expected TOML error text; got: {err!r}"
+    assert str(broken_projects) in err, "error should name the offending path"
+    assert "Traceback" not in err, "must be a clean message, not a raw traceback"
+
+
 def test_main_help_exits_cleanly(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

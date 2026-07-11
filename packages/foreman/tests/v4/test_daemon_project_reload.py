@@ -206,6 +206,33 @@ def test_apply_project_reload_validation_error_keeps_current(
     ), f"Expected warning log; got: {[r.message for r in caplog.records]}"
 
 
+def test_apply_project_reload_toml_decode_error_keeps_current(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A ``tomllib.TOMLDecodeError`` during reload logs a warning and
+    leaves the current project set unchanged — the daemon must NOT crash."""
+    import tomllib
+
+    def _bad_loader() -> list[ProjectConfig]:
+        raise tomllib.TOMLDecodeError("invalid TOML syntax")
+
+    daemon = _make_daemon(_PC1, loader_fn=_bad_loader)
+
+    initial_configs = dict(daemon._project_configs)
+
+    with caplog.at_level(logging.WARNING, logger="foreman.v4.daemon"):
+        daemon.request_project_reload()
+        daemon.tick_once()
+
+    assert daemon._project_configs == initial_configs, (
+        "project_configs changed despite TOMLDecodeError during reload"
+    )
+    assert any(
+        "tomldecoder" in rec.message.lower() or "failed to load" in rec.message.lower()
+        for rec in caplog.records
+    ), f"Expected warning log; got: {[r.message for r in caplog.records]}"
+
+
 # ---------------------------------------------------------------------------
 # FIX 5: RoutingGitProvider register/unregister coverage (issue #503)
 # ---------------------------------------------------------------------------

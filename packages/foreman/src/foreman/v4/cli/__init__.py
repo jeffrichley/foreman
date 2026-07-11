@@ -189,6 +189,8 @@ def main() -> None:
 
     # Local imports keep the typer app importable for tests without
     # requiring PyGithub or any App credentials to be configured.
+    import tomllib
+
     from pydantic import ValidationError
 
     from foreman.v4.bootstrap import bootstrap_cli_context
@@ -219,6 +221,12 @@ def main() -> None:
     except ValidationError as exc:
         typer.echo(
             f"ERROR: projects file at {projects_path} failed validation:\n{exc}",
+            err=True,
+        )
+        raise typer.Exit(code=1) from None
+    except tomllib.TOMLDecodeError as exc:
+        typer.echo(
+            f"ERROR: projects file at {projects_path} contains invalid TOML:\n{exc}",
             err=True,
         )
         raise typer.Exit(code=1) from None
