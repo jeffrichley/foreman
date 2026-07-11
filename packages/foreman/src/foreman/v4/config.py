@@ -433,6 +433,33 @@ class V4Config(BaseModel):
         return v
 
 
+class ProjectRegistry:
+    """Atomic-rebind holder for the live project-config map.
+
+    Shared by the Daemon (writer) and WorkerPool (reader) so that a
+    hot-reload swap is a single reference assignment — not an in-place
+    mutation of a shared dict. The GIL makes that single assignment
+    atomic in CPython, so readers always see either the old dict or the
+    new one; never a half-mutated intermediate.
+
+    Usage::
+
+        # Daemon init
+        registry = ProjectRegistry({pc.name: pc for pc in projects})
+
+        # Hot-reload (Daemon._apply_project_reload)
+        registry.current = {pc.name: pc for pc in new_projects}
+
+        # Reader (StateContext / WorkerPool)
+        pc = registry.current.get(ticket.project)
+    """
+
+    def __init__(self, initial: dict[str, ProjectConfig]) -> None:
+        # ``current`` is a plain dict attribute; assignment is atomic
+        # under the GIL. No lock needed for reads.
+        self.current: dict[str, ProjectConfig] = initial
+
+
 def load_config(path: Path) -> V4Config:
     """Parse the TOML at ``path`` and validate as V4Config.
 
@@ -464,6 +491,24 @@ def load_config(path: Path) -> V4Config:
     if "backup" in raw:
         payload["backup"] = raw["backup"]
     return V4Config.model_validate(payload)
+
+
+def load_projects(path: Path) -> list[ProjectConfig]:
+    """Parse a standalone ``[[projects]]`` TOML file and return validated entries.
+
+    The file must contain only ``[[projects]]`` array-of-tables; daemon
+    secrets and identity live in the envsubst-rendered config.toml (which
+    ships with zero ``[[projects]]`` tables after issue #477).
+
+    Raises:
+        FileNotFoundError: propagated from ``Path.read_text`` when ``path``
+            does not exist. Operator must create the file before starting
+            the daemon (see ``projects.toml.example`` in the image).
+        pydantic.ValidationError: on missing required fields or extra keys
+            (same loud-fail contract as :func:`load_config`).
+    """
+    raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    return [ProjectConfig.model_validate(entry) for entry in raw.get("projects", [])]
 
 
 def resolve_operator(project: ProjectConfig, config: V4Config) -> OperatorConfig:

@@ -126,7 +126,8 @@ COPY docker/entrypoint.sh /entrypoint.sh
 # the env_file to redeclare these.
 ENV FOREMAN_V4_CONFIG=/foreman/state/config.toml \
     FOREMAN_LOG_DIR=/foreman/logs \
-    FOREMAN_STATE_DIR=/foreman/state
+    FOREMAN_STATE_DIR=/foreman/state \
+    FOREMAN_PROJECTS_PATH=/root/.foreman/projects.toml
 # Strip CRLF defensively: .gitattributes locks LF on .sh files going forward,
 # but a developer with an existing working tree (autocrlf=true) may COPY a
 # CRLF-tainted entrypoint into the image. The shebang then reads `#!/bin/bash\r`

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
@@ -31,6 +32,7 @@ from foreman.v4.poller import Poller
 from foreman.v4.repository import TicketRepository
 from foreman.v4.routing_git_provider import RoutingGitProvider
 from foreman.v4.subprocess_dispatcher import SubprocessRoleDispatcher
+from foreman.worktree import ensure_clone
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +56,8 @@ def bootstrap_cli_context(
     identity: IdentityProvider,
     git_provider_factory: Callable[[str], GitProvider],
     foreman_cli: list[str] | None = None,
+    projects: list[ProjectConfig] | None = None,
+    projects_loader: Callable[[], list[ProjectConfig]] | None = None,
 ) -> CliContext:
     """Build the full v4 object graph from config.
 
@@ -61,8 +65,103 @@ def bootstrap_cli_context(
     returns a GitProvider for it. Production passes a function that
     constructs PyGithubGitProvider; tests pass a function that returns
     a FakeGitProvider.
+
+    ``projects`` — when supplied, replaces ``config.projects`` as the
+    boot-time project list.  Used by :func:`~foreman.v4.cli.main` after
+    issue #477 so the daemon reads ``[[projects]]`` from the host-mounted
+    ``projects.toml`` rather than from the envsubst-rendered config.
+
+    ``projects_loader`` — a zero-arg callable stored on the Daemon for
+    hot-reload on SIGHUP.  Production passes
+    ``lambda: load_projects(projects_path)``; tests may omit it.
     """
     configure_logging(log_dir=Path(config.log_dir), level=config.log_level)
+
+    # issue #477: ``projects`` (from the host-mounted projects.toml) wins
+    # over ``config.projects`` (always empty after the template change).
+    # Resolved here — before the clone loop — so the loop iterates the
+    # same list that downstream consumers (pollers, Daemon, etc.) use.
+    active_projects = projects if projects is not None else config.projects
+
+    # Startup auto-clone: ensure each project's local_clone_path exists and
+    # is a valid git clone before any poll or clone-refresh runs.
+    # Uses the orchestrator App installation token (read-only; daemon-level
+    # operation, not tied to any role). Raises RuntimeError if a path exists
+    # but is not a git repo — daemon refuses to start with an actionable
+    # message. Idempotent: an existing valid clone is a no-op.
+    # Transient failures (network, auth, disk) are caught and logged as
+    # warnings so the daemon still starts; corrupt/non-git paths (RuntimeError)
+    # remain fatal with their existing actionable message.
+    if active_projects:
+        orch_token = identity.get_role_token("orchestrator")
+        for pc in active_projects:
+            clone_path = Path(pc.local_clone_path)
+            if (clone_path / ".git").exists():
+                continue  # already a valid clone — skip, no log
+            logger.info(
+                "startup: cloning missing project repo",
+                extra={
+                    "project": pc.name,
+                    "repo": pc.repo,
+                    "clone_path": str(clone_path),
+                },
+            )
+            try:
+                ensure_clone(
+                    repo_url=f"https://github.com/{pc.repo}.git",
+                    clone_path=clone_path,
+                    token=orch_token,
+                )
+            except subprocess.CalledProcessError as exc:
+                # Transient failure (network, auth, disk-full, repo-not-found).
+                # Log as warning and continue — the daemon must still start;
+                # the clone will be retried next restart or via ensure_clone
+                # in WorktreeManager when the first ticket runs.
+                logger.warning(
+                    "startup: transient clone failure — skipping project",
+                    extra={
+                        "project": pc.name,
+                        "repo": pc.repo,
+                        "clone_path": str(clone_path),
+                        "returncode": exc.returncode,
+                    },
+                )
+                continue
+            # Scrub the embedded token from the cloned remote URL so it is
+            # not persisted verbatim in .git/config (mirrors the discipline
+            # used by push_branch to avoid token leakage in git config).
+            # Guard: only run if the clone actually produced a .git directory
+            # (ensure_clone may be stubbed in tests and produce no on-disk
+            # artifact — calling git against a non-existent cwd would crash).
+            if (clone_path / ".git").exists():
+                try:
+                    subprocess.run(
+                        [
+                            "git",
+                            "remote",
+                            "set-url",
+                            "origin",
+                            f"https://github.com/{pc.repo}.git",
+                        ],
+                        cwd=clone_path,
+                        check=True,
+                        capture_output=True,
+                    )
+                except subprocess.CalledProcessError:
+                    # Best-effort: failure to scrub the URL is not fatal.
+                    logger.warning(
+                        "startup: could not scrub token from remote URL",
+                        extra={"project": pc.name, "clone_path": str(clone_path)},
+                    )
+            logger.info(
+                "startup: project repo cloned",
+                extra={
+                    "project": pc.name,
+                    "repo": pc.repo,
+                    "clone_path": str(clone_path),
+                },
+            )
+
     repo: TicketRepository
     from foreman.v4.postgres_repository import PostgresTicketRepository
 
@@ -83,7 +182,7 @@ def bootstrap_cli_context(
 
     pollers: list[Poller] = []
     per_project_providers: dict[str, GitProvider] = {}
-    for project_config in config.projects:
+    for project_config in active_projects:
         # One GitProvider per project. The factory takes ``owner/name`` and
         # returns a provider locked to that repo (the PyGithub impl is
         # construction-time-bound to its repo_full_name and ignores the
@@ -165,14 +264,14 @@ def bootstrap_cli_context(
     # look up by ticket.project. MergingState reads
     # ``dev_base_branch`` from this map to gate the impl-PR merge on
     # base-ref match.
-    project_configs: dict[str, ProjectConfig] = {pc.name: pc for pc in config.projects}
+    project_configs: dict[str, ProjectConfig] = {pc.name: pc for pc in active_projects}
 
     # foreman#407: per-poll clone refresher. Builds a ``name -> clone path``
     # map from the project configs and refreshes each clone's
     # ``origin/<default>`` ref at most once per ``clone_refresh_seconds``.
     # ``from_projects`` returns a no-op sentinel for zero-project configs.
     clone_refresher = CloneRefresher.from_projects(
-        {pc.name: Path(pc.local_clone_path) for pc in config.projects},
+        {pc.name: Path(pc.local_clone_path) for pc in active_projects},
         interval_seconds=config.clone_refresh_seconds,
         clock=dt.datetime.now,
     )
@@ -201,6 +300,8 @@ def bootstrap_cli_context(
         project_configs=project_configs,
         clone_refresher=clone_refresher,
         backup_scheduler=backup_scheduler,
+        projects_loader=projects_loader,
+        git_provider_factory=git_provider_factory,
     )
 
     return build_cli_context(

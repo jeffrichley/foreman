@@ -119,6 +119,11 @@ services:
       # false-positive ("daemon already running") → crash loop. tmpfs is wiped
       # on every container start, so the daemon always boots clean.
       FOREMAN_PID_DIR: /run/foreman
+      # issue #477: host-mounted project list. The [[projects]] tables are no
+      # longer baked into config.toml.template; they live in projects.toml on
+      # the host, hot-reloadable via `foreman daemon reload` (no restart needed).
+      # The ~/.foreman bind-mount (below) makes this path visible in the container.
+      FOREMAN_PROJECTS_PATH: /root/.foreman/projects.toml
 
     # Persistent state volumes. NOT visible from the Windows host — inspect
     # via `docker exec foreman-daemon ls /foreman/...` or `docker cp`.
@@ -133,9 +138,9 @@ services:
       # silently breaks on every redeploy. cmd_daemon_start warns loudly at
       # boot if this mount is missing.
       - foreman-claude-sessions:/root/.claude-container
-      # v5: bind-mount ~/.foreman so the daemon can read v5/config.toml
-      # (V5Config) from the host, and so operator key files remain
-      # accessible at the same paths the secrets block references.
+      # Bind-mount ~/.foreman so the daemon can read v5/config.toml (V5Config),
+      # the host-mounted projects.toml (FOREMAN_PROJECTS_PATH, issue #477), and
+      # operator key files at the same paths the secrets block references.
       # Container path: /root/.foreman (daemon user is root in the image).
       # Windows note: ${HOME} resolves in WSL2/Git-Bash Docker contexts but
       # may not expand on native Windows cmd.exe. On Windows, override with

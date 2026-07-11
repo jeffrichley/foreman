@@ -68,17 +68,9 @@ email = "${FOREMAN_OPERATOR_SUPERVISOR_EMAIL}"
 name = "${FOREMAN_OPERATOR_SIGNER_NAME}"
 email = "${FOREMAN_OPERATOR_SIGNER_EMAIL}"
 
-[[projects]]
-name = "madrigal"
-repo = "jeffrichley/madrigal"
-local_clone_path = "/foreman/repos/madrigal"
-
-[[projects]]
-name = "foreman"
-repo = "jeffrichley/foreman"
-local_clone_path = "/foreman/repos/foreman"
-
-[[projects]]
-name = "agent_core"
-repo = "jeffrichley/agent_core"
-local_clone_path = "/foreman/repos/agent_core"
+# [[projects]] tables are no longer baked into this template.
+# The project list is the sole responsibility of the host-mounted
+# $FOREMAN_PROJECTS_PATH file (default /root/.foreman/projects.toml).
+# Edit that file and run `foreman daemon reload` to add, remove, or
+# rename a tracked repo — no image rebuild or container restart needed.
+# See docker/foreman/projects.toml.example for the file format.

@@ -166,6 +166,7 @@ def cmd_implement(
 
 
 _DEFAULT_CONFIG = Path.home() / ".foreman" / "v4" / "config.toml"
+_DEFAULT_PROJECTS_PATH = Path.home() / ".foreman" / "projects.toml"
 
 
 def main() -> None:
@@ -188,13 +189,39 @@ def main() -> None:
 
     # Local imports keep the typer app importable for tests without
     # requiring PyGithub or any App credentials to be configured.
+    from pydantic import ValidationError
+
     from foreman.v4.bootstrap import bootstrap_cli_context
-    from foreman.v4.config import load_config
+    from foreman.v4.config import load_config, load_projects
     from foreman.v4.identity import V4IdentityRegistry
     from foreman.v4.pygithub_git_provider import PyGithubGitProvider
 
     config_path = Path(os.environ.get("FOREMAN_V4_CONFIG", _DEFAULT_CONFIG))
     config = load_config(config_path)
+
+    # issue #477: load the project list from the host-mounted projects file
+    # instead of from the baked config.toml template (which ships zero
+    # [[projects]] tables after this change).
+    projects_path = Path(os.environ.get("FOREMAN_PROJECTS_PATH", str(_DEFAULT_PROJECTS_PATH)))
+    # issue #503 FIX 2: emit a clean operator-facing error on startup failure
+    # (missing file or malformed TOML/schema) instead of a raw traceback.
+    # Mirrors how cmd_init already handles FileNotFoundError.
+    try:
+        projects = load_projects(projects_path)
+    except FileNotFoundError:
+        typer.echo(
+            f"ERROR: projects file not found at {projects_path}\n"
+            "Create the file with at least one [[projects]] block before "
+            "starting the daemon.",
+            err=True,
+        )
+        raise typer.Exit(code=1) from None
+    except ValidationError as exc:
+        typer.echo(
+            f"ERROR: projects file at {projects_path} failed validation:\n{exc}",
+            err=True,
+        )
+        raise typer.Exit(code=1) from None
 
     # Single-installation-per-role-bot assumption (see
     # ``foreman.v4.identity`` module docstring): the orchestrator's App
@@ -203,16 +230,16 @@ def main() -> None:
     # installation, so any project's repo works; we pick the first
     # project's repo deterministically. A zero-project config can't
     # mint orchestrator tokens, so refuse to start with a clear message.
-    if not config.projects:
+    if not projects:
         raise RuntimeError(
-            "V4Config has no projects — daemon cannot identify which "
-            "repo to use for App installation lookup. Add at least one "
-            "[[projects]] block.",
+            f"No projects found in {projects_path} — daemon cannot identify "
+            "which repo to use for App installation lookup. Add at least one "
+            "[[projects]] block to the projects file.",
         )
     identity = V4IdentityRegistry(
         apps=config.apps,
         orchestrator=config.orchestrator,
-        installation_repo=config.projects[0].repo,
+        installation_repo=projects[0].repo,
     )
 
     def _git_factory(repo: str) -> PyGithubGitProvider:
@@ -232,5 +259,7 @@ def main() -> None:
         config=config,
         identity=identity,
         git_provider_factory=_git_factory,
+        projects=projects,
+        projects_loader=lambda: load_projects(projects_path),
     )
     app(obj=ctx)
