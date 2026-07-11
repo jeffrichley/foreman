@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
@@ -76,15 +77,24 @@ def bootstrap_cli_context(
     """
     configure_logging(log_dir=Path(config.log_dir), level=config.log_level)
 
+    # issue #477: ``projects`` (from the host-mounted projects.toml) wins
+    # over ``config.projects`` (always empty after the template change).
+    # Resolved here — before the clone loop — so the loop iterates the
+    # same list that downstream consumers (pollers, Daemon, etc.) use.
+    active_projects = projects if projects is not None else config.projects
+
     # Startup auto-clone: ensure each project's local_clone_path exists and
     # is a valid git clone before any poll or clone-refresh runs.
     # Uses the orchestrator App installation token (read-only; daemon-level
     # operation, not tied to any role). Raises RuntimeError if a path exists
     # but is not a git repo — daemon refuses to start with an actionable
     # message. Idempotent: an existing valid clone is a no-op.
-    if config.projects:
+    # Transient failures (network, auth, disk) are caught and logged as
+    # warnings so the daemon still starts; corrupt/non-git paths (RuntimeError)
+    # remain fatal with their existing actionable message.
+    if active_projects:
         orch_token = identity.get_role_token("orchestrator")
-        for pc in config.projects:
+        for pc in active_projects:
             clone_path = Path(pc.local_clone_path)
             if (clone_path / ".git").exists():
                 continue  # already a valid clone — skip, no log
@@ -96,11 +106,53 @@ def bootstrap_cli_context(
                     "clone_path": str(clone_path),
                 },
             )
-            ensure_clone(
-                repo_url=f"https://github.com/{pc.repo}.git",
-                clone_path=clone_path,
-                token=orch_token,
-            )
+            try:
+                ensure_clone(
+                    repo_url=f"https://github.com/{pc.repo}.git",
+                    clone_path=clone_path,
+                    token=orch_token,
+                )
+            except subprocess.CalledProcessError as exc:
+                # Transient failure (network, auth, disk-full, repo-not-found).
+                # Log as warning and continue — the daemon must still start;
+                # the clone will be retried next restart or via ensure_clone
+                # in WorktreeManager when the first ticket runs.
+                logger.warning(
+                    "startup: transient clone failure — skipping project",
+                    extra={
+                        "project": pc.name,
+                        "repo": pc.repo,
+                        "clone_path": str(clone_path),
+                        "returncode": exc.returncode,
+                    },
+                )
+                continue
+            # Scrub the embedded token from the cloned remote URL so it is
+            # not persisted verbatim in .git/config (mirrors the discipline
+            # used by push_branch to avoid token leakage in git config).
+            # Guard: only run if the clone actually produced a .git directory
+            # (ensure_clone may be stubbed in tests and produce no on-disk
+            # artifact — calling git against a non-existent cwd would crash).
+            if (clone_path / ".git").exists():
+                try:
+                    subprocess.run(
+                        [
+                            "git",
+                            "remote",
+                            "set-url",
+                            "origin",
+                            f"https://github.com/{pc.repo}.git",
+                        ],
+                        cwd=clone_path,
+                        check=True,
+                        capture_output=True,
+                    )
+                except subprocess.CalledProcessError:
+                    # Best-effort: failure to scrub the URL is not fatal.
+                    logger.warning(
+                        "startup: could not scrub token from remote URL",
+                        extra={"project": pc.name, "clone_path": str(clone_path)},
+                    )
             logger.info(
                 "startup: project repo cloned",
                 extra={
@@ -127,10 +179,6 @@ def bootstrap_cli_context(
         log_dir=Path(config.log_dir),
         timeout_seconds=config.role_timeout_seconds,  # Phase 5 carryover
     )
-
-    # issue #477: ``projects`` (from the host-mounted projects.toml) wins
-    # over ``config.projects`` (always empty after the template change).
-    active_projects = projects if projects is not None else config.projects
 
     pollers: list[Poller] = []
     per_project_providers: dict[str, GitProvider] = {}
