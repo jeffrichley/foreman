@@ -1014,6 +1014,49 @@ def test_bare_force_with_lease_over_url_is_rejected_stale(tmp_path: Path) -> Non
     assert "stale info" in result.stderr
 
 
+def test_push_branch_lease_refuses_when_leased_head_is_stale(tmp_path: Path) -> None:
+    """push_branch must be a genuine LEASE, not a blind force.
+
+    If the head it leased against no longer matches the remote (another writer
+    advanced the branch after the ls-remote read), the push must be refused
+    rather than clobbering. A plain ``--force`` would silently overwrite here —
+    so this test is what distinguishes the explicit lease from a blind force.
+    """
+    branch = "foreman/issue-427"
+    wt, file_url = _seed_remote_branch(tmp_path, branch)  # remote & local at H1
+    stale_head = _git_run(wt, "rev-parse", "HEAD").stdout.strip()
+
+    # Advance the REMOTE past H1 (another writer), leaving stale_head behind.
+    (wt / "spec.md").write_text("remote-advance\n")
+    _git_run(wt, "commit", "-a", "-m", "advance")
+    _git_run(wt, "push", file_url, f"{branch}:{branch}")  # remote now at H2
+    # Rewrite local off H1 so a force push is needed and HEAD != H2 lineage.
+    _git_run(wt, "reset", "--hard", stale_head)
+    (wt / "spec.md").write_text("local-divergent\n")
+    _git_run(wt, "commit", "-a", "--amend", "-m", "divergent")
+
+    real_run = subprocess.run
+
+    def fake_run(cmd, *a, **k):  # type: ignore[no-untyped-def]
+        # Force push_branch to lease against the STALE head (H1) while the real
+        # remote is at H2 — the push must then be rejected by the lease check.
+        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git" and cmd[1] == "ls-remote":
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=f"{stale_head}\trefs/heads/{branch}\n", stderr=""
+            )
+        return real_run(cmd, *a, **k)
+
+    provider = GitHubProvider(identity=_identity(), client=MagicMock())
+    with patch.object(provider, "_push_url", return_value=file_url):
+        with patch("foreman.git_hosts.github.subprocess.run", side_effect=fake_run):
+            with pytest.raises(GitCommandError):
+                provider.push_branch(worktree_path=wt, branch=branch)
+
+    # The stale-lease push must NOT have landed: remote is still at H2.
+    remote_head = _git_run(wt, "ls-remote", file_url, f"refs/heads/{branch}").stdout.split()[0]
+    assert remote_head != _git_run(wt, "rev-parse", "HEAD").stdout.strip()
+
+
 def test_push_branch_creates_absent_branch_over_url(tmp_path: Path) -> None:
     """First push of a branch absent on the remote: plain-create, no lease."""
     remote = tmp_path / "remote.git"

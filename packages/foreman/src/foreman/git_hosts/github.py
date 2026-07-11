@@ -244,6 +244,10 @@ class GitHubProvider(GitHostProvider):
                 refspec,
             )
         else:
+            # First push: branch absent remotely, nothing to lease against.
+            # Deliberately a plain (non-force) push — if a concurrent writer
+            # created the branch since the ls-remote read, this is rejected
+            # rather than clobbering (safe under single-writer ownership).
             self._git(worktree_path, "push", push_url, refspec)
 
     # ------------------------------------------------------------------
