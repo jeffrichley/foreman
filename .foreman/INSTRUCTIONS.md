@@ -17,6 +17,8 @@ Use standard conventional-commit types only:
 For spec PRs (produced by the Planner): use `docs(spec): ...`
 For impl PRs (produced by the Worker): use `<type>(<scope>): ...`
 
+The subject (everything after `type(scope): `) MUST begin with a lowercase letter. The repo's `pr-title-lint` enforces `subjectPattern: ^(?![A-Z]).+$`. When the natural subject would start with a code identifier (class name, acronym, constant), open with a lowercase verb instead: e.g. `rework ImplApproved into a polling state` not `ImplApproved polling state`.
+
 ## Branch naming
 
 Foreman uses `foreman/issue-<N>` for spec branches and `foreman/impl-<N>`

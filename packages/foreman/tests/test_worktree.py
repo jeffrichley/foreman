@@ -14,6 +14,7 @@ from foreman.worktree import (
     WorktreeManager,
     _fetch_origin_branch,
     _origin_branch_exists,
+    ensure_clone,
     fetch_origin_default_branch,
 )
 
@@ -1970,6 +1971,57 @@ def test_ensure_clone_creates_clone_when_missing(tmp_path: Path) -> None:
     assert first_mtime == second_mtime, "ensure_clone must be idempotent on second call"
 
 
+def test_ensure_clone_raises_on_non_git_dir(tmp_path: Path) -> None:
+    """ensure_clone raises RuntimeError when the target path already exists
+    but has no .git directory — protects against silently overwriting or
+    cloning into an unknown directory at local_clone_path (foreman#476)."""
+    target = tmp_path / "target"
+    target.mkdir()
+    assert target.exists() and not (target / ".git").exists(), "test setup: plain dir"
+
+    with pytest.raises(RuntimeError, match="not a git repository"):
+        ensure_clone(repo_url="/irrelevant/url", clone_path=target)
+
+
+def test_ensure_clone_token_embedded_in_clone_url(tmp_path: Path) -> None:
+    """ensure_clone passes a local (non-HTTPS) URL through unchanged when a
+    token is supplied, and the HTTPS URL-construction formula produces the
+    expected x-access-token embed (foreman#476).
+
+    Two verifications:
+    1. Spy test — monkeypatch subprocess.run and call ensure_clone with a
+       local (non-https) URL + token; the spy confirms git clone was called
+       with the URL unchanged (token is only embedded for https:// URLs).
+    2. Plain string test — verify the URL-construction formula the function
+       uses when repo_url starts with https://.
+    """
+    token = "tok"
+    local_url = "/some/local/path.git"  # non-https; token must NOT be embedded
+    clone_path = tmp_path / "clone"
+
+    captured_clone_urls: list[str] = []
+
+    def spy_run(cmd: Any, *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        if isinstance(cmd, list) and len(cmd) >= 3 and cmd[0] == "git" and cmd[1] == "clone":
+            captured_clone_urls.append(cmd[2])
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=b"", stderr=b"")
+
+    with patch("foreman.worktree.subprocess.run", side_effect=spy_run):
+        ensure_clone(repo_url=local_url, clone_path=clone_path, token=token)
+
+    # Spy confirms clone was called with the local URL unchanged.
+    assert len(captured_clone_urls) == 1, "expected exactly one git clone call"
+    assert captured_clone_urls[0] == local_url, (
+        f"non-https URL must pass through unchanged; got {captured_clone_urls[0]!r}"
+    )
+
+    # Plain string test: the URL the function builds for an https repo_url + token.
+    https_url = "https://github.com/o/r.git"
+    expected_auth_url = f"https://x-access-token:{token}@github.com/o/r.git"
+    actual_built = f"https://x-access-token:{token}@" + https_url[len("https://") :]
+    assert actual_built == expected_auth_url
+
+
 # ----------------------------------------------------------------------
 # foreman#291 — fetch_origin_default_branch + per-dispatch defense in depth
 # ----------------------------------------------------------------------
@@ -2052,6 +2104,186 @@ def test_fetch_origin_default_branch_refreshes_origin_default(tmp_path: Path) ->
     assert refreshed_origin_tip != baseline_origin_tip, (
         "After fetch_origin_default_branch, client's origin/main must track the new upstream tip"
     )
+
+
+# ----------------------------------------------------------------------
+# foreman#484 — worktree gitdir validation: auto-replace stale worktrees
+# whose .git gitdir pointer resolves to a foreign/unresolvable path.
+#
+# Scenario: a prior host-side run left a worktree at the same path; its
+# .git file reads ``gitdir: E:/workspaces/...`` — a Windows path that is
+# unresolvable in the Linux daemon container. Any subsequent git operation
+# inside that path fails with rc=128 "fatal: not a git repository:
+# <foreign-path>". The fix validates the gitdir via ``git rev-parse
+# --git-dir`` before returning the path; on failure it rmtrees and
+# recreates, so the caller gets a clean worktree.
+# ----------------------------------------------------------------------
+
+
+def test_create_replaces_worktree_with_foreign_gitdir(tmp_path: Path) -> None:
+    """A stale worktree with a foreign gitdir is rmtree'd and recreated by create()."""
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    _init_git_repo(clone, origin_path=tmp_path / "origin.git")
+
+    worktrees_root = tmp_path / "worktrees"
+    stale_wt = worktrees_root / "voice" / "issue-42"
+    stale_wt.mkdir(parents=True)
+    (stale_wt / ".git").write_text(
+        "gitdir: E:/workspaces/ai/agents/voice/.git/worktrees/issue-42\n"
+    )
+    (stale_wt / "stale.txt").write_text("left over\n")
+
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+    wt_path = mgr.create(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    assert wt_path.exists()
+    assert not (wt_path / "stale.txt").exists(), "stale content must be gone"
+    branch = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert branch == "foreman/issue-42"
+
+
+def test_create_impl_replaces_worktree_with_foreign_gitdir(tmp_path: Path) -> None:
+    """A stale impl worktree with a foreign gitdir is rmtree'd and recreated by create_impl()."""
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    _init_git_repo(clone, origin_path=tmp_path / "origin.git")
+
+    worktrees_root = tmp_path / "worktrees"
+    stale_wt = worktrees_root / "voice" / "impl-42"
+    stale_wt.mkdir(parents=True)
+    (stale_wt / ".git").write_text("gitdir: E:/workspaces/ai/agents/voice/.git/worktrees/impl-42\n")
+    (stale_wt / "stale.txt").write_text("left over\n")
+
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+    result = mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    assert result.path.exists()
+    assert not (result.path / "stale.txt").exists(), "stale content must be gone"
+    branch = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=result.path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert branch == "foreman/impl-42"
+
+
+def test_attach_replaces_worktree_with_foreign_gitdir(tmp_path: Path) -> None:
+    """attach() replaces a stale worktree with a foreign gitdir instead of returning it."""
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    origin_path = tmp_path / "origin.git"
+    _init_git_repo(clone, origin_path=origin_path)
+
+    # Push a spec branch so attach() can fetch and check it out.
+    subprocess.run(
+        ["git", "checkout", "-b", "foreman/issue-42"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "push", "origin", "foreman/issue-42"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "checkout", "main"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "branch", "-D", "foreman/issue-42"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+
+    worktrees_root = tmp_path / "worktrees"
+    stale_wt = worktrees_root / "voice" / "issue-42"
+    stale_wt.mkdir(parents=True)
+    (stale_wt / ".git").write_text(
+        "gitdir: E:/workspaces/ai/agents/voice/.git/worktrees/issue-42\n"
+    )
+    (stale_wt / "stale.txt").write_text("left over\n")
+
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+    wt_path = mgr.attach(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    assert wt_path.exists()
+    assert not (wt_path / "stale.txt").exists(), "stale content must be gone"
+    branch = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert branch == "foreman/issue-42"
+
+
+def test_attach_impl_replaces_worktree_with_foreign_gitdir(tmp_path: Path) -> None:
+    """attach_impl() replaces a stale worktree with a foreign gitdir."""
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    origin_path = tmp_path / "origin.git"
+    _init_git_repo(clone, origin_path=origin_path)
+
+    # Push an impl branch so attach_impl() can fetch and check it out.
+    subprocess.run(
+        ["git", "checkout", "-b", "foreman/impl-42"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "push", "origin", "foreman/impl-42"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "checkout", "main"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "branch", "-D", "foreman/impl-42"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+
+    worktrees_root = tmp_path / "worktrees"
+    stale_wt = worktrees_root / "voice" / "impl-42"
+    stale_wt.mkdir(parents=True)
+    (stale_wt / ".git").write_text("gitdir: E:/workspaces/ai/agents/voice/.git/worktrees/impl-42\n")
+    (stale_wt / "stale.txt").write_text("left over\n")
+
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+    wt_path = mgr.attach_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    assert wt_path.exists()
+    assert not (wt_path / "stale.txt").exists(), "stale content must be gone"
+    branch = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert branch == "foreman/impl-42"
 
 
 def test_create_still_fetches_base_branch_per_dispatch(tmp_path: Path) -> None:

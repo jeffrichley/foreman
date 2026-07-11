@@ -8,6 +8,7 @@ state on the v4 loggers).
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -361,3 +362,168 @@ def test_bootstrap_uses_postgres_when_engine_postgres(monkeypatch, tmp_path: Pat
     from foreman.v4.pg_backup import BackupScheduler
 
     assert isinstance(ctx.daemon._backup_scheduler, BackupScheduler)
+
+
+# ----------------------------------------------------------------------
+# foreman#476 — startup auto-clone loop
+#
+# bootstrap_cli_context now calls ensure_clone for each project whose
+# local_clone_path doesn't exist (or exists but has no .git). The
+# autouse fixture below stubs ensure_clone so the existing tests are
+# not affected by the new startup step (the paths they pass don't exist
+# on disk and would trigger a real clone attempt without the stub).
+# ----------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _stub_ensure_clone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub ``foreman.v4.bootstrap.ensure_clone`` to a no-op MagicMock so
+    existing bootstrap tests are not broken by the startup clone loop added
+    in foreman#476. Tests that need to assert clone behaviour override this
+    fixture with their own ``monkeypatch.setattr`` call."""
+    monkeypatch.setattr("foreman.v4.bootstrap.ensure_clone", MagicMock())
+
+
+def test_bootstrap_clones_missing_project_at_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ensure_clone is called at bootstrap for each project whose
+    local_clone_path doesn't exist on disk, using the orchestrator token
+    and the full HTTPS GitHub URL (foreman#476).
+
+    Production always ships config.projects=[] (issue #477 template change)
+    and passes projects via the ``projects=`` kwarg. The test mirrors that
+    real call path so the assert exercises the ``active_projects`` branch,
+    not the dead ``config.projects`` branch."""
+    mock_ensure_clone = MagicMock()
+    monkeypatch.setattr("foreman.v4.bootstrap.ensure_clone", mock_ensure_clone)
+
+    pc = ProjectConfig(
+        name="voice",
+        repo="owner/voice",
+        local_clone_path=str(tmp_path / "voice"),
+    )
+    # config.projects is EMPTY — mirrors production after #503.
+    config = V4Config(
+        log_dir=str(tmp_path / "logs"),
+        apps=_apps_config(),
+        orchestrator=_orchestrator_config(),
+        operator=_operator_config(),
+        storage=_storage_config(),
+        projects=[],
+    )
+    identity = _stub_identity()
+    bootstrap_cli_context(
+        config=config,
+        identity=identity,
+        git_provider_factory=lambda repo: _stub_git_factory(),
+        # Project supplied via kwarg — the production call path.
+        projects=[pc],
+    )
+
+    mock_ensure_clone.assert_called_once_with(
+        repo_url="https://github.com/owner/voice.git",
+        clone_path=Path(str(tmp_path / "voice")),
+        token="ghp_TOKEN",
+    )
+
+
+def test_bootstrap_skips_clone_for_existing_valid_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ensure_clone is NOT called when local_clone_path already contains a
+    .git directory — the startup loop's idempotency fast-path fires and the
+    orchestrator token is never minted (foreman#476).
+
+    Uses the production call path: config.projects=[], project via ``projects=``
+    kwarg (mirrors issue #477 / #503 template change)."""
+    # Simulate an existing valid clone by creating the .git directory.
+    git_dir = tmp_path / "voice" / ".git"
+    git_dir.mkdir(parents=True)
+
+    mock_ensure_clone = MagicMock()
+    monkeypatch.setattr("foreman.v4.bootstrap.ensure_clone", mock_ensure_clone)
+
+    pc = ProjectConfig(
+        name="voice",
+        repo="owner/voice",
+        local_clone_path=str(tmp_path / "voice"),
+    )
+    # config.projects is EMPTY — mirrors production after #503.
+    config = V4Config(
+        log_dir=str(tmp_path / "logs"),
+        apps=_apps_config(),
+        orchestrator=_orchestrator_config(),
+        operator=_operator_config(),
+        storage=_storage_config(),
+        projects=[],
+    )
+    bootstrap_cli_context(
+        config=config,
+        identity=_stub_identity(),
+        git_provider_factory=lambda repo: _stub_git_factory(),
+        # Project supplied via kwarg — the production call path.
+        projects=[pc],
+    )
+
+    mock_ensure_clone.assert_not_called()
+
+
+def test_bootstrap_survives_transient_clone_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A CalledProcessError from ensure_clone is caught and logged; the daemon
+    still starts (bootstrap_cli_context returns normally) and subsequent
+    projects in the list are still processed (foreman#476 graceful-degrade).
+
+    Scenario: two projects, the first clone fails transiently, the second
+    succeeds. bootstrap_cli_context must:
+    - NOT raise
+    - call ensure_clone for BOTH projects
+    - still return a valid CliContext (daemon can start)."""
+    call_order: list[str] = []
+
+    def fake_ensure_clone(*, repo_url: str, clone_path: Path, token: str) -> None:
+        call_order.append(repo_url)
+        if "owner/failing" in repo_url:
+            raise subprocess.CalledProcessError(128, ["git", "clone"])
+        # second project succeeds — no-op is fine
+
+    monkeypatch.setattr("foreman.v4.bootstrap.ensure_clone", fake_ensure_clone)
+
+    pc_fail = ProjectConfig(
+        name="failing",
+        repo="owner/failing",
+        local_clone_path=str(tmp_path / "failing"),
+    )
+    pc_ok = ProjectConfig(
+        name="ok",
+        repo="owner/ok",
+        local_clone_path=str(tmp_path / "ok"),
+    )
+    # config.projects is EMPTY — mirrors production after #503.
+    config = V4Config(
+        log_dir=str(tmp_path / "logs"),
+        apps=_apps_config(),
+        orchestrator=_orchestrator_config(),
+        operator=_operator_config(),
+        storage=_storage_config(),
+        projects=[],
+    )
+    # Must not raise — daemon starts despite the transient clone failure.
+    # The token-scrub subprocess.run is guarded by (clone_path / ".git").exists(),
+    # which is False here (fake_ensure_clone creates no on-disk artifacts).
+    ctx = bootstrap_cli_context(
+        config=config,
+        identity=_stub_identity(),
+        git_provider_factory=lambda repo: _stub_git_factory(),
+        projects=[pc_fail, pc_ok],
+    )
+
+    # Daemon still starts — a valid CliContext is returned.
+    assert ctx is not None
+    assert ctx.daemon is not None
+
+    # Both projects were attempted — the failure did not short-circuit.
+    assert "https://github.com/owner/failing.git" in call_order
+    assert "https://github.com/owner/ok.git" in call_order
