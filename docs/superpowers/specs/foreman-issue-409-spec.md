@@ -29,7 +29,10 @@ Tracks [foreman#409](https://github.com/jeffrichley/foreman/issues/409).
 - When the issue is open, behaviour is unchanged across all flag combinations.
 - New test covering: (a) closed+no-flag → exit 1 + warning, (b) closed+force-reopen
   → reopened + label applied, (c) open issue → unchanged behaviour, (d) closed +
-  no-retrigger → no error.
+  no-retrigger → no error, (e) closed + no-flag + --dry-run → exit 1 + warning on
+  stderr, no mutations, (f) closed + --force-reopen + --dry-run → exit 0, "Reopen
+  issue" present in stdout, `FakeGitProvider._issue_states` NOT flipped to `"open"`
+  (no actual reopen executed).
 
 ## Approach
 
@@ -105,13 +108,22 @@ because the default is `"open"`.
 4. Add delegation methods for `get_issue_state` and `reopen_issue` to
    `RoutingGitProvider` in `packages/foreman/src/foreman/v4/routing_git_provider.py`.
 5. Update `ResetPlan` to add `issue_is_closed: bool` and `reopen_issue: bool` fields.
-   Update `_discover()` to call `git.get_issue_state()` and accept `force_reopen: bool`.
+   Update `_discover()` to call `git.get_issue_state()` and accept `force_reopen: bool = False`.
    Update `_plan_steps()` to emit a `reopen_issue` step before `apply_plan_label` when
    `plan.reopen_issue` is True. Update `_execute()` to handle the `reopen_issue` kind
    by calling `git.reopen_issue()`. Update `cmd_reset()` to accept `--force-reopen` and
    fire the closed-issue guard. All changes in
    `packages/foreman/src/foreman/v4/cli/mutations.py`.
-6. Add tests in `packages/foreman/tests/v4/cli/test_mutation_commands.py`.
+6. Add tests in `packages/foreman/tests/v4/cli/test_mutation_commands.py` covering:
+   (a) closed + no-flag → exit 1 + warning on stderr,
+   (b) closed + --force-reopen → issue reopened + `foreman:plan` label applied,
+   (c) open issue → unchanged behaviour (no guard fires),
+   (d) closed + --no-retrigger → no error, no reopen, no label,
+   (e) closed + no-flag + --dry-run → exit 1 + warning on stderr, no mutations
+       (guard fires before the `if dry_run: return` early-return),
+   (f) closed + --force-reopen + --dry-run → exit 0, `"Reopen issue"` present in
+       stdout plan output, `FakeGitProvider._issue_states` NOT flipped to `"open"`
+       (i.e. `git.reopen_issue` is NOT called).
 
 ## File-level changes
 
@@ -120,8 +132,8 @@ because the default is `"open"`.
 | `packages/foreman/src/foreman/v4/git_provider.py` | Add `get_issue_state` + `reopen_issue` to `GitProvider` Protocol; add `_issue_states` dict + `seed_issue_state` helper + `get_issue_state` + `reopen_issue` implementations to `FakeGitProvider`; update `FakeGitProvider.close_issue` to also write into `_issue_states`. |
 | `packages/foreman/src/foreman/v4/pygithub_git_provider.py` | Add `get_issue_state` (reads `issue.state`) and `reopen_issue` (calls `issue.edit(state="open")` idempotently). |
 | `packages/foreman/src/foreman/v4/routing_git_provider.py` | Add `get_issue_state` and `reopen_issue` delegation methods following the existing per-method pattern. |
-| `packages/foreman/src/foreman/v4/cli/mutations.py` | Add `issue_is_closed: bool` + `reopen_issue: bool` to `ResetPlan`; add `force_reopen: bool` to `_discover()`; call `git.get_issue_state()` in `_discover()`; add `reopen_issue` step to `_plan_steps()`; add `reopen_issue` executor branch in `_execute()`; add `--force-reopen` option to `cmd_reset()`; add closed-issue guard in `cmd_reset()`. |
-| `packages/foreman/tests/v4/cli/test_mutation_commands.py` | Add four tests: closed+no-flag, closed+force-reopen, open unchanged, closed+no-retrigger. |
+| `packages/foreman/src/foreman/v4/cli/mutations.py` | Add `issue_is_closed: bool` + `reopen_issue: bool` to `ResetPlan`; add `force_reopen: bool = False` to `_discover()`; call `git.get_issue_state()` in `_discover()`; add `reopen_issue` step to `_plan_steps()`; add `reopen_issue` executor branch in `_execute()`; add `--force-reopen` option to `cmd_reset()`; add closed-issue guard in `cmd_reset()`. |
+| `packages/foreman/tests/v4/cli/test_mutation_commands.py` | Add six tests: (a) closed+no-flag, (b) closed+force-reopen, (c) open unchanged, (d) closed+no-retrigger, (e) closed+no-flag+--dry-run, (f) closed+force-reopen+--dry-run. |
 
 ## Alternatives considered
 
