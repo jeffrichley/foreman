@@ -33,6 +33,7 @@ from foreman.v4.logging_config import configure_logging, reset_logging
 
 if TYPE_CHECKING:
     from foreman.v4.config import V4Config
+    from foreman.v4.daemon import Daemon
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +127,10 @@ def warn_if_session_dir_ephemeral() -> bool:
     return False
 
 
-def _build_sighup_handler(config: V4Config) -> Callable[..., None]:
+def _build_sighup_handler(
+    config: V4Config,
+    daemon: Daemon | None = None,
+) -> Callable[..., None]:
     """Build the SIGHUP handler closure used by ``cmd_daemon_start``.
 
     Extracted to module level so tests can exercise the reset +
@@ -134,7 +138,15 @@ def _build_sighup_handler(config: V4Config) -> Callable[..., None]:
     (which would call ``daemon.run_forever()`` and block).
 
     The captured ``log_dir`` + ``log_level`` are the SAME shape the
-    daemon used at start — SIGHUP reloads logging, not config.
+    daemon used at start — SIGHUP reloads logging configuration.
+
+    When ``daemon`` is provided (production: always), the handler also
+    calls ``daemon.request_project_reload()`` so the daemon's next
+    ``tick_once()`` re-reads ``$FOREMAN_PROJECTS_PATH`` and diffs the
+    result against the live project registry (issue #477).
+
+    Backward-compatible: callers that don't pass ``daemon=`` (e.g.
+    older tests) get the original logging-only handler.
     """
     log_dir = Path(config.log_dir)
     log_level = config.log_level
@@ -142,6 +154,8 @@ def _build_sighup_handler(config: V4Config) -> Callable[..., None]:
     def _reload_logging(*_args: object) -> None:
         reset_logging()
         configure_logging(log_dir=log_dir, level=log_level)
+        if daemon is not None:
+            daemon.request_project_reload()
 
     return _reload_logging
 
@@ -187,14 +201,16 @@ def cmd_daemon_start(ctx: typer.Context) -> None:
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda *_args: daemon.stop())
 
-        # SIGHUP (POSIX only) → reset + reconfigure logging. We use
-        # the V4Config threaded through ctx.obj so the handler reloads
-        # logging with the same log_dir + log_level that the daemon
-        # started with. Tests / minimal wiring that don't supply a
-        # config skip the install (no handler stacking to prevent
-        # because there's no real logging surface).
+        # SIGHUP (POSIX only) → reset + reconfigure logging AND trigger a
+        # project-list reload (issue #477).  We pass ``daemon=ctx.obj.daemon``
+        # so the handler calls ``daemon.request_project_reload()`` after
+        # resetting logging; the actual reload runs in the next ``tick_once()``
+        # to avoid network I/O inside a signal context.
         if _SIGHUP is not None and ctx.obj.config is not None:
-            signal.signal(_SIGHUP, _build_sighup_handler(ctx.obj.config))
+            signal.signal(
+                _SIGHUP,
+                _build_sighup_handler(ctx.obj.config, daemon=ctx.obj.daemon),
+            )
 
         daemon.run_forever()
     finally:
