@@ -506,6 +506,9 @@ def load_projects(path: Path) -> list[ProjectConfig]:
             the daemon (see ``projects.toml.example`` in the image).
         pydantic.ValidationError: on missing required fields or extra keys
             (same loud-fail contract as :func:`load_config`).
+        tomllib.TOMLDecodeError: when the TOML file contains a syntax error
+            (e.g. a malformed table header). Callers should catch this
+            alongside ``FileNotFoundError`` and ``ValidationError``.
     """
     raw = tomllib.loads(path.read_text(encoding="utf-8"))
     return [ProjectConfig.model_validate(entry) for entry in raw.get("projects", [])]

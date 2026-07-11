@@ -221,6 +221,7 @@ class Daemon:
         No-ops when ``_projects_loader`` is ``None`` (daemon constructed
         without a loader — test isolation path).
         """
+        import tomllib  # local import — only needed here
         from pathlib import Path  # local import — only needed here
 
         from pydantic import ValidationError
@@ -231,7 +232,7 @@ class Daemon:
         # FIX 3: graceful degradation — bad file keeps the current set.
         try:
             new_projects = self._projects_loader()
-        except (FileNotFoundError, ValidationError) as exc:
+        except (FileNotFoundError, ValidationError, tomllib.TOMLDecodeError) as exc:
             _log.warning(
                 "config reload: failed to load projects file (%s: %s); "
                 "keeping current project set unchanged",
