@@ -2106,6 +2106,186 @@ def test_fetch_origin_default_branch_refreshes_origin_default(tmp_path: Path) ->
     )
 
 
+# ----------------------------------------------------------------------
+# foreman#484 — worktree gitdir validation: auto-replace stale worktrees
+# whose .git gitdir pointer resolves to a foreign/unresolvable path.
+#
+# Scenario: a prior host-side run left a worktree at the same path; its
+# .git file reads ``gitdir: E:/workspaces/...`` — a Windows path that is
+# unresolvable in the Linux daemon container. Any subsequent git operation
+# inside that path fails with rc=128 "fatal: not a git repository:
+# <foreign-path>". The fix validates the gitdir via ``git rev-parse
+# --git-dir`` before returning the path; on failure it rmtrees and
+# recreates, so the caller gets a clean worktree.
+# ----------------------------------------------------------------------
+
+
+def test_create_replaces_worktree_with_foreign_gitdir(tmp_path: Path) -> None:
+    """A stale worktree with a foreign gitdir is rmtree'd and recreated by create()."""
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    _init_git_repo(clone, origin_path=tmp_path / "origin.git")
+
+    worktrees_root = tmp_path / "worktrees"
+    stale_wt = worktrees_root / "voice" / "issue-42"
+    stale_wt.mkdir(parents=True)
+    (stale_wt / ".git").write_text(
+        "gitdir: E:/workspaces/ai/agents/voice/.git/worktrees/issue-42\n"
+    )
+    (stale_wt / "stale.txt").write_text("left over\n")
+
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+    wt_path = mgr.create(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    assert wt_path.exists()
+    assert not (wt_path / "stale.txt").exists(), "stale content must be gone"
+    branch = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert branch == "foreman/issue-42"
+
+
+def test_create_impl_replaces_worktree_with_foreign_gitdir(tmp_path: Path) -> None:
+    """A stale impl worktree with a foreign gitdir is rmtree'd and recreated by create_impl()."""
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    _init_git_repo(clone, origin_path=tmp_path / "origin.git")
+
+    worktrees_root = tmp_path / "worktrees"
+    stale_wt = worktrees_root / "voice" / "impl-42"
+    stale_wt.mkdir(parents=True)
+    (stale_wt / ".git").write_text("gitdir: E:/workspaces/ai/agents/voice/.git/worktrees/impl-42\n")
+    (stale_wt / "stale.txt").write_text("left over\n")
+
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+    result = mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    assert result.path.exists()
+    assert not (result.path / "stale.txt").exists(), "stale content must be gone"
+    branch = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=result.path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert branch == "foreman/impl-42"
+
+
+def test_attach_replaces_worktree_with_foreign_gitdir(tmp_path: Path) -> None:
+    """attach() replaces a stale worktree with a foreign gitdir instead of returning it."""
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    origin_path = tmp_path / "origin.git"
+    _init_git_repo(clone, origin_path=origin_path)
+
+    # Push a spec branch so attach() can fetch and check it out.
+    subprocess.run(
+        ["git", "checkout", "-b", "foreman/issue-42"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "push", "origin", "foreman/issue-42"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "checkout", "main"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "branch", "-D", "foreman/issue-42"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+
+    worktrees_root = tmp_path / "worktrees"
+    stale_wt = worktrees_root / "voice" / "issue-42"
+    stale_wt.mkdir(parents=True)
+    (stale_wt / ".git").write_text(
+        "gitdir: E:/workspaces/ai/agents/voice/.git/worktrees/issue-42\n"
+    )
+    (stale_wt / "stale.txt").write_text("left over\n")
+
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+    wt_path = mgr.attach(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    assert wt_path.exists()
+    assert not (wt_path / "stale.txt").exists(), "stale content must be gone"
+    branch = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert branch == "foreman/issue-42"
+
+
+def test_attach_impl_replaces_worktree_with_foreign_gitdir(tmp_path: Path) -> None:
+    """attach_impl() replaces a stale worktree with a foreign gitdir."""
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    origin_path = tmp_path / "origin.git"
+    _init_git_repo(clone, origin_path=origin_path)
+
+    # Push an impl branch so attach_impl() can fetch and check it out.
+    subprocess.run(
+        ["git", "checkout", "-b", "foreman/impl-42"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "push", "origin", "foreman/impl-42"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "checkout", "main"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "branch", "-D", "foreman/impl-42"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+    )
+
+    worktrees_root = tmp_path / "worktrees"
+    stale_wt = worktrees_root / "voice" / "impl-42"
+    stale_wt.mkdir(parents=True)
+    (stale_wt / ".git").write_text("gitdir: E:/workspaces/ai/agents/voice/.git/worktrees/impl-42\n")
+    (stale_wt / "stale.txt").write_text("left over\n")
+
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+    wt_path = mgr.attach_impl(clone_path=clone, repo_slug="voice", ticket_id=42)
+
+    assert wt_path.exists()
+    assert not (wt_path / "stale.txt").exists(), "stale content must be gone"
+    branch = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert branch == "foreman/impl-42"
+
+
 def test_create_still_fetches_base_branch_per_dispatch(tmp_path: Path) -> None:
     """foreman#291 defense in depth: the per-dispatch fetch in
     ``WorktreeManager.create`` must still fire regardless of whether

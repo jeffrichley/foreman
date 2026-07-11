@@ -52,15 +52,14 @@ def _operator_config() -> OperatorConfig:
 def _v4_config_toml(tmp_path: Path, projects: list[ProjectConfig]) -> Path:
     """Build a V4Config TOML file at ``tmp_path/config.toml``.
 
-    The minimum required shape — daemon + apps + orchestrator + a list
-    of projects. Used by tests that need a real V4Config on disk.
+    The minimum required shape — daemon + apps + orchestrator.
+    Since issue #477, [[projects]] tables are no longer read from config.toml
+    at runtime (they come from FOREMAN_PROJECTS_PATH / projects.toml).
+    The ``projects`` arg is kept for backward-compat of the call sites but
+    the entries are NO LONGER written into the config.toml — call
+    ``_projects_toml`` to write the companion projects file.
     """
     log_dir = tmp_path / "logs"
-    project_blocks = "\n".join(
-        f'[[projects]]\nname = "{p.name}"\nrepo = "{p.repo}"\n'
-        f'local_clone_path = "{Path(p.local_clone_path).as_posix()}"\n'
-        for p in projects
-    )
     toml = f"""\
 [daemon]
 log_dir = "{log_dir.as_posix()}"
@@ -96,12 +95,28 @@ email = "sup@example.com"
 [operator.signer]
 name = "Test Signer"
 email = "sign@example.com"
-
-{project_blocks}
 """
     cfg_path = tmp_path / "config.toml"
     cfg_path.write_text(toml, encoding="utf-8")
     return cfg_path
+
+
+def _projects_toml(tmp_path: Path, projects: list[ProjectConfig]) -> Path:
+    """Write a standalone projects.toml at ``tmp_path/projects.toml``.
+
+    issue #477: cmd_init now loads the project list from
+    ``$FOREMAN_PROJECTS_PATH`` (not from config.toml). Tests call this
+    alongside ``_v4_config_toml`` and point ``FOREMAN_PROJECTS_PATH`` at
+    the returned path.
+    """
+    project_blocks = "\n".join(
+        f'[[projects]]\nname = "{p.name}"\nrepo = "{p.repo}"\n'
+        f'local_clone_path = "{Path(p.local_clone_path).as_posix()}"\n'
+        for p in projects
+    )
+    proj_path = tmp_path / "projects.toml"
+    proj_path.write_text(project_blocks, encoding="utf-8")
+    return proj_path
 
 
 def _stub_helpers(monkeypatch, *, calls: dict[str, Any]) -> None:
@@ -194,23 +209,23 @@ def test_init_missing_config_file_raises(tmp_path: Path, monkeypatch):
 
 
 def test_init_unknown_project_raises(tmp_path: Path, monkeypatch):
-    """Project name not in V4Config.projects → exit code 1 + known-names list."""
-    cfg_path = _v4_config_toml(
-        tmp_path,
-        projects=[
-            ProjectConfig(
-                name="voice",
-                repo="owner/voice",
-                local_clone_path=str(tmp_path / "voice"),
-            ),
-            ProjectConfig(
-                name="madrigal",
-                repo="owner/madrigal",
-                local_clone_path=str(tmp_path / "madrigal"),
-            ),
-        ],
-    )
+    """Project name not in projects.toml → exit code 1 + known-names list."""
+    known_projects = [
+        ProjectConfig(
+            name="voice",
+            repo="owner/voice",
+            local_clone_path=str(tmp_path / "voice"),
+        ),
+        ProjectConfig(
+            name="madrigal",
+            repo="owner/madrigal",
+            local_clone_path=str(tmp_path / "madrigal"),
+        ),
+    ]
+    cfg_path = _v4_config_toml(tmp_path, projects=known_projects)
+    proj_path = _projects_toml(tmp_path, projects=known_projects)
     monkeypatch.setenv("FOREMAN_V4_CONFIG", str(cfg_path))
+    monkeypatch.setenv("FOREMAN_PROJECTS_PATH", str(proj_path))
     result = CliRunner().invoke(app, ["init", "algokit"])
     assert result.exit_code == 1
     assert "'algokit' not found" in result.output
@@ -228,7 +243,9 @@ def test_init_calls_helpers_in_order(tmp_path: Path, monkeypatch):
         local_clone_path=str(tmp_path / "algokit"),
     )
     cfg_path = _v4_config_toml(tmp_path, projects=[project_cfg])
+    proj_path = _projects_toml(tmp_path, projects=[project_cfg])
     monkeypatch.setenv("FOREMAN_V4_CONFIG", str(cfg_path))
+    monkeypatch.setenv("FOREMAN_PROJECTS_PATH", str(proj_path))
 
     calls: dict[str, Any] = {}
     _stub_helpers(monkeypatch, calls=calls)
@@ -279,17 +296,17 @@ def test_init_calls_helpers_in_order(tmp_path: Path, monkeypatch):
 
 def test_init_clone_validation_failure_exits_cleanly(tmp_path: Path, monkeypatch):
     """``_validate_clone_path`` raising ValueError → exit code 1 + msg."""
-    cfg_path = _v4_config_toml(
-        tmp_path,
-        projects=[
-            ProjectConfig(
-                name="algokit",
-                repo="jeffrichley/algokit",
-                local_clone_path=str(tmp_path / "algokit"),
-            ),
-        ],
-    )
+    projects = [
+        ProjectConfig(
+            name="algokit",
+            repo="jeffrichley/algokit",
+            local_clone_path=str(tmp_path / "algokit"),
+        ),
+    ]
+    cfg_path = _v4_config_toml(tmp_path, projects=projects)
+    proj_path = _projects_toml(tmp_path, projects=projects)
     monkeypatch.setenv("FOREMAN_V4_CONFIG", str(cfg_path))
+    monkeypatch.setenv("FOREMAN_PROJECTS_PATH", str(proj_path))
 
     def fake_validate_clone(clone_path, expected_repo):
         raise ValueError(f"Clone path does not exist: {clone_path}")

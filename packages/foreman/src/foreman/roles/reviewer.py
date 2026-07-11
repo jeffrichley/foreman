@@ -697,6 +697,7 @@ import asyncio  # noqa: E402
 
 from foreman.providers import make_provider  # noqa: E402
 from foreman.v4.config import load_config as load_v4_config  # noqa: E402
+from foreman.v4.config import load_projects as load_v4_projects  # noqa: E402
 from foreman.v4.emit import emit_outcome  # noqa: E402
 from foreman.v4.outcome import Finding as V4Finding  # noqa: E402
 from foreman.v4.outcome import (  # noqa: E402
@@ -707,6 +708,7 @@ from foreman.v4.outcome import (  # noqa: E402
 )
 
 _DEFAULT_V4_CONFIG = Path.home() / ".foreman" / "v4" / "config.toml"
+_DEFAULT_PROJECTS_PATH = Path.home() / ".foreman" / "projects.toml"
 
 # v4 RoleDispatcher uses "spec" / "impl"; the legacy Reviewer internals
 # (branch parsing, label triples, prompt loader) speak "spec_pr" /
@@ -773,12 +775,27 @@ def _run_reviewer_for_v4(*, project: str, issue_number: int, target: str) -> _V4
     """
     cfg_path = Path(os.environ.get("FOREMAN_V4_CONFIG", _DEFAULT_V4_CONFIG))
     cfg = load_v4_config(cfg_path)
-    project_cfg = next((p for p in cfg.projects if p.name == project), None)
+    # issue #477: projects now live in the host-mounted projects file.
+    # Only fall back to the projects file when cfg.projects is empty —
+    # tests that mock load_v4_config to return a cfg with projects
+    # already populated take the cfg.projects path.
+    if cfg.projects:
+        all_projects = cfg.projects
+    else:
+        projects_path = Path(os.environ.get("FOREMAN_PROJECTS_PATH", str(_DEFAULT_PROJECTS_PATH)))
+        all_projects = load_v4_projects(projects_path) if projects_path.exists() else []
+    project_cfg = next((p for p in all_projects if p.name == project), None)
     if project_cfg is None:
-        known = [p.name for p in cfg.projects]
+        known = [p.name for p in all_projects]
         raise ValueError(
             f"project {project!r} not found in V4Config at {cfg_path}. Known projects: {known}"
         )
+
+    # Patch the config's projects list so _run_reviewer_core's lookup
+    # (which reads config.projects) finds the project even when cfg was
+    # loaded from a config.toml that has zero [[projects]] tables.
+    if not cfg.projects:
+        cfg = cfg.model_copy(update={"projects": all_projects})
 
     # Locate the open PR for this issue. The Reviewer's legacy entry-
     # point takes a PR URL — v4's SubprocessRoleDispatcher only knows
