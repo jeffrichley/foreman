@@ -1,0 +1,19 @@
+# Foreman managed projects.
+#
+# Edit this file and run `foreman daemon reload` to add, remove, or rename
+# a tracked repo. No image rebuild or daemon restart needed.
+#
+# Mount path (docker-compose.yml): ${HOME}/.foreman:/root/.foreman
+# Container reads: /root/.foreman/projects.toml  (FOREMAN_PROJECTS_PATH)
+#
+# Copy this file to ~/.foreman/projects.toml and fill in your repos.
+
+[[projects]]
+name = "myrepo"
+repo = "owner/myrepo"
+local_clone_path = "/foreman/repos/myrepo"
+
+[[projects]]
+name = "anotherone"
+repo = "owner/anotherone"
+local_clone_path = "/foreman/repos/anotherone"

@@ -56,9 +56,22 @@ class _DisabledCloneRefresher:
     daemon's call site stays unconditional (``self._clone_refresher.tick()``).
     Stateless, so one instance can serve as the default kwarg on
     ``Daemon.__init__`` and as the construction-time default in tests.
+
+    ``register_project`` and ``unregister_project`` are no-ops here so
+    :meth:`~foreman.v4.daemon.Daemon._apply_project_reload` does not need
+    a type branch when the daemon started with zero projects and thus
+    received this sentinel.  (Note: a daemon that booted with zero projects
+    is unsupported — it refuses to start — so this path exists only for
+    test isolation; see issue #477 spec Approach section.)
     """
 
     def tick(self) -> None:
+        return None
+
+    def register_project(self, name: str, path: Path) -> None:
+        return None
+
+    def unregister_project(self, name: str) -> None:
         return None
 
 
@@ -150,6 +163,29 @@ class CloneRefresher:
                 )
                 continue
             self._last_refresh_at[project] = now
+
+    def register_project(self, name: str, path: Path) -> None:
+        """Register a new project clone path for throttled refresh.
+
+        Called by :meth:`~foreman.v4.daemon.Daemon._apply_project_reload`
+        when a project is added (or re-added after a config change).
+        Adding a name that already exists overwrites its path — a changed
+        ``local_clone_path`` is handled by the remove + re-add treatment
+        in ``_apply_project_reload``, so this is always called with a new
+        or changed project.
+        """
+        self._clone_paths[name] = path
+
+    def unregister_project(self, name: str) -> None:
+        """Remove a project from the refresh registry.
+
+        Called by :meth:`~foreman.v4.daemon.Daemon._apply_project_reload`
+        when a project is dropped. Silently no-ops if ``name`` is unknown
+        (safe: if the project was never registered, there is nothing to
+        remove from the throttle clock either).
+        """
+        self._clone_paths.pop(name, None)
+        self._last_refresh_at.pop(name, None)
 
 
 # Type alias for "the daemon's clone-refresher attribute" — either a real

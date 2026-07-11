@@ -19,6 +19,125 @@ from foreman.auth import InstallationToken
 from foreman.v4.repository import InMemoryTicketRepository
 
 
+def _write_valid_config(tmp_path: Path) -> Path:
+    """Write a minimal-valid config.toml (no ``[[projects]]``) + dummy PEMs.
+
+    Post-#477 the ``[[projects]]`` tables live in the host-mounted projects
+    file, so this config carries every required identity/operator/storage
+    block but zero projects — the shape the startup-guard tests need so
+    ``main()`` reaches ``load_projects`` (rather than failing earlier in
+    ``load_config``). Returns the config.toml path.
+    """
+    log_dir = tmp_path / "logs"
+    for role in ("planner", "reviewer", "fixer", "worker", "orchestrator"):
+        (tmp_path / f"{role}.pem").write_text("dummy")
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f"""
+[daemon]
+log_dir = "{log_dir.as_posix()}"
+
+[storage]
+engine = "postgres"
+dsn = "postgresql://test/test"
+
+[apps.planner]
+app_id = 12345
+private_key_path = "{(tmp_path / "planner.pem").as_posix()}"
+
+[apps.reviewer]
+app_id = 12346
+private_key_path = "{(tmp_path / "reviewer.pem").as_posix()}"
+
+[apps.fixer]
+app_id = 12347
+private_key_path = "{(tmp_path / "fixer.pem").as_posix()}"
+
+[apps.worker]
+app_id = 12348
+private_key_path = "{(tmp_path / "worker.pem").as_posix()}"
+
+[orchestrator]
+app_id = 12349
+private_key_path = "{(tmp_path / "orchestrator.pem").as_posix()}"
+
+[operator.supervisor]
+name = "Test Sup"
+email = "sup@example.com"
+
+[operator.signer]
+name = "Test Sign"
+email = "sign@example.com"
+""",
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def test_main_missing_projects_file_exits_cleanly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """issue #503 FIX 2: a missing projects file makes ``main()`` exit
+    non-zero with a clean operator-facing message, NOT a raw
+    ``FileNotFoundError`` traceback."""
+    import typer
+
+    from foreman.v4.cli import main
+
+    config_path = _write_valid_config(tmp_path)
+    monkeypatch.setenv("FOREMAN_V4_CONFIG", str(config_path))
+    # Point at a projects file that deliberately does NOT exist.
+    missing = tmp_path / "does-not-exist-projects.toml"
+    monkeypatch.setenv("FOREMAN_PROJECTS_PATH", str(missing))
+    monkeypatch.setattr("sys.argv", ["foreman", "daemon", "start"])
+
+    # main() raises typer.Exit directly (before the typer app runs), so the
+    # guard surfaces as typer.Exit(code=1), not SystemExit.
+    with pytest.raises(typer.Exit) as excinfo:
+        main()
+
+    assert excinfo.value.exit_code == 1, "startup guard must exit non-zero on missing projects file"
+    err = capsys.readouterr().err
+    assert "projects file not found" in err, f"expected clean error text; got: {err!r}"
+    assert str(missing) in err, "error should name the offending path"
+    assert "Traceback" not in err, "must be a clean message, not a raw traceback"
+
+
+def test_main_malformed_projects_file_exits_cleanly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """issue #503 FIX 2: a projects file that fails schema validation makes
+    ``main()`` exit non-zero with a clean ``failed validation`` message,
+    NOT a raw ``ValidationError`` traceback."""
+    import typer
+
+    from foreman.v4.cli import main
+
+    config_path = _write_valid_config(tmp_path)
+    monkeypatch.setenv("FOREMAN_V4_CONFIG", str(config_path))
+    # A projects entry missing the required ``repo`` + ``local_clone_path``
+    # fields → pydantic ValidationError at load_projects time.
+    bad_projects = tmp_path / "projects.toml"
+    bad_projects.write_text('[[projects]]\nname = "p"\n', encoding="utf-8")
+    monkeypatch.setenv("FOREMAN_PROJECTS_PATH", str(bad_projects))
+    monkeypatch.setattr("sys.argv", ["foreman", "daemon", "start"])
+
+    with pytest.raises(typer.Exit) as excinfo:
+        main()
+
+    assert excinfo.value.exit_code == 1, (
+        "startup guard must exit non-zero on malformed projects file"
+    )
+    err = capsys.readouterr().err
+    assert "failed validation" in err, f"expected clean validation error text; got: {err!r}"
+    assert str(bad_projects) in err, "error should name the offending path"
+    assert "Traceback" not in err, "must be a clean message, not a raw traceback"
+
+
 def test_main_help_exits_cleanly(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -113,6 +232,16 @@ local_clone_path = "{(tmp_path / "p").as_posix()}"
         encoding="utf-8",
     )
     monkeypatch.setenv("FOREMAN_V4_CONFIG", str(config_path))
+    # issue #477: main() now loads [[projects]] from FOREMAN_PROJECTS_PATH
+    # instead of from config.toml. Write a minimal projects.toml and point
+    # the daemon at it.
+    projects_path = tmp_path / "projects.toml"
+    projects_path.write_text(
+        '[[projects]]\nname = "p"\nrepo = "owner/p"\n'
+        f'local_clone_path = "{(tmp_path / "p").as_posix()}"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FOREMAN_PROJECTS_PATH", str(projects_path))
     monkeypatch.setattr("sys.argv", ["foreman", "--help"])
     with pytest.raises(SystemExit) as excinfo:
         main()

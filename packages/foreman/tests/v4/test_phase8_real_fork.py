@@ -137,12 +137,15 @@ def test_role_subcommand_real_fork_emits_parseable_outcome(
     assert outcome.summary == "dry-run", f"expected dry-run summary, got {outcome.summary!r}"
 
 
-def _build_v4_only_env(*, v4_cfg_path: Path) -> dict[str, str]:
+def _build_v4_only_env(*, v4_cfg_path: Path, projects_path: Path) -> dict[str, str]:
     """Env for a real fork that exercises the v4-config-load seam.
 
     Sets ``FOREMAN_V4_CONFIG`` (so the role CLI finds the v4 TOML the
-    test wrote) and DELIBERATELY OMITS ``FOREMAN_DRY_RUN``, ``FOREMAN_CONFIG``,
-    and ``FOREMAN_CONFIG_PATH``. The legacy v3-config-load path inside
+    test wrote) and ``FOREMAN_PROJECTS_PATH`` (so ``main()`` loads
+    projects from the test-written file instead of the operator default
+    ``~/.foreman/projects.toml`` which may not exist on CI).
+    DELIBERATELY OMITS ``FOREMAN_DRY_RUN``, ``FOREMAN_CONFIG``, and
+    ``FOREMAN_CONFIG_PATH``. The legacy v3-config-load path inside
     ``_run_<role>_for_v4`` (Phase 8b.3 removed it) would have read those
     env vars and fallen back to ``~/.foreman/config.toml`` — proving its
     absence requires forcing the subprocess to use ONLY the v4 path.
@@ -150,7 +153,10 @@ def _build_v4_only_env(*, v4_cfg_path: Path) -> dict[str, str]:
     Same Windows-bring-up keys as ``_build_dry_run_env`` so
     ``Path.home()`` resolves and the interpreter starts.
     """
-    env: dict[str, str] = {"FOREMAN_V4_CONFIG": str(v4_cfg_path)}
+    env: dict[str, str] = {
+        "FOREMAN_V4_CONFIG": str(v4_cfg_path),
+        "FOREMAN_PROJECTS_PATH": str(projects_path),
+    }
     for key in (
         "PATH",
         "PYTHONPATH",
@@ -167,10 +173,13 @@ def _build_v4_only_env(*, v4_cfg_path: Path) -> dict[str, str]:
     return env
 
 
-def _write_v4_config_toml(
-    *, cfg_path: Path, project_name: str, repo: str, storage_dsn: str
-) -> None:
+def _write_v4_config_toml(*, cfg_path: Path, storage_dsn: str) -> None:
     """Write a minimum-valid V4Config TOML at ``cfg_path``.
+
+    After issue #477 the ``[[projects]]`` tables live in the host-mounted
+    projects file (``FOREMAN_PROJECTS_PATH``), not in config.toml, so
+    this helper no longer embeds them.  Use ``_write_projects_toml`` to
+    create the companion projects file.
 
     Uses fake App credentials — the test deliberately expects the
     downstream PyGithub token-mint to fail, because the test exists to
@@ -216,7 +225,21 @@ email = "sup@example.com"
 [operator.signer]
 name = "Test Sign"
 email = "sign@example.com"
+""",
+        encoding="utf-8",
+    )
 
+
+def _write_projects_toml(*, projects_path: Path, project_name: str, repo: str) -> None:
+    """Write a minimal projects.toml at ``projects_path``.
+
+    Issue #477: ``[[projects]]`` tables moved out of config.toml into
+    the host-mounted projects file.  Tests that exercise the full
+    ``main()`` bootstrap path must write this file and point
+    ``FOREMAN_PROJECTS_PATH`` at it.
+    """
+    projects_path.write_text(
+        f"""\
 [[projects]]
 name = "{project_name}"
 repo = "{repo}"
@@ -258,9 +281,15 @@ def test_planner_real_fork_loads_v4_config_without_v3_config_present(
     cfg_path = tmp_path / "v4-config.toml"
     _write_v4_config_toml(
         cfg_path=cfg_path,
+        storage_dsn=clean_postgres_dsn,
+    )
+    # issue #477: projects now live in a separate host-mounted file;
+    # write it and thread its path into the subprocess env.
+    projects_path = tmp_path / "projects.toml"
+    _write_projects_toml(
+        projects_path=projects_path,
         project_name="algokit",
         repo="jeffrichley/algokit",
-        storage_dsn=clean_postgres_dsn,
     )
 
     cmd = [
@@ -289,7 +318,7 @@ def test_planner_real_fork_loads_v4_config_without_v3_config_present(
         # the locale-encoded bytes are lossy.
         encoding="utf-8",
         errors="replace",
-        env=_build_v4_only_env(v4_cfg_path=cfg_path),
+        env=_build_v4_only_env(v4_cfg_path=cfg_path, projects_path=projects_path),
         timeout=_SUBPROCESS_TIMEOUT_SECONDS,
         cwd=tmp_path,
     )
