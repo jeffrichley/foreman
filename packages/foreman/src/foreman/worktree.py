@@ -41,6 +41,19 @@ from foreman._env_filter import filtered_subprocess_env
 from foreman.branches import impl_branch, spec_branch
 
 
+class ImplWorktreeRebaseConflictError(Exception):
+    """Raised when ``git rebase`` exits non-zero in :meth:`WorktreeManager.rebase_impl_onto_origin`.
+
+    The rebase is aborted before this exception is raised, leaving the
+    worktree in a clean state. Callers that catch this exception can
+    safely inspect the worktree — there is no in-progress rebase to
+    clean up.
+
+    The message includes the ``base_branch`` name and the first 500
+    characters of the ``git rebase`` stderr to aid human diagnosis.
+    """
+
+
 def ensure_clone(*, repo_url: str, clone_path: Path, token: str | None = None) -> None:
     """Ensure ``clone_path`` is a valid git clone of ``repo_url``.
 
@@ -580,6 +593,66 @@ class WorktreeManager:
         _maybe_sync_worktree_deps(wt_path, role_token=self._role_token)
         return wt_path
 
+    def rebase_impl_onto_origin(
+        self,
+        *,
+        clone_path: Path,
+        wt_path: Path,
+        base_branch: str,
+    ) -> None:
+        """Rebase the impl worktree's branch onto current ``origin/<base_branch>``.
+
+        Fetches ``origin/<base_branch>`` first so the local origin ref is
+        current, then runs ``git rebase origin/<base_branch>`` in ``wt_path``.
+
+        On a non-zero rebase exit (conflict or other failure), runs
+        ``git rebase --abort`` to restore the worktree to a clean state and
+        raises :class:`ImplWorktreeRebaseConflictError`. The message includes
+        ``base_branch`` and the first 500 characters of stderr.
+
+        On a no-op rebase (impl branch already at ``origin/<base_branch>``
+        tip), the call returns cleanly without modifying HEAD.
+
+        foreman#427: called on every Worker dispatch before the baseline
+        preflight and LLM dispatch, but only when the impl branch is
+        local-only (``origin_branch_exists`` returns ``False``). This
+        ensures any fixes that landed on main after the impl branch was cut
+        are visible during ``check_command``.
+
+        Args:
+            clone_path: The local clone whose ``origin/<base_branch>`` ref
+                is fetched to refresh the local cache.
+            wt_path: The impl worktree directory where ``git rebase`` runs.
+            base_branch: The branch name to rebase onto (e.g. ``"main"``).
+
+        Raises:
+            ImplWorktreeRebaseConflictError: if ``git rebase`` exits non-zero.
+        """
+        _fetch_origin_branch(clone_path, base_branch, role_token=self._role_token)
+        result = subprocess.run(
+            ["git", "rebase", f"origin/{base_branch}"],
+            cwd=wt_path,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=self._env(),
+        )
+        if result.returncode != 0:
+            # Abort the rebase to restore the worktree to a clean state
+            # before surfacing the error to the caller.
+            subprocess.run(
+                ["git", "rebase", "--abort"],
+                cwd=wt_path,
+                check=False,
+                capture_output=True,
+                text=True,
+                env=self._env(),
+            )
+            raise ImplWorktreeRebaseConflictError(
+                f"rebase onto origin/{base_branch} conflicted or failed; aborted. "
+                f"stderr: {(result.stderr or '')[:500]}"
+            )
+
     def prune(
         self,
         *,
@@ -817,6 +890,29 @@ def resolve_default_branch(
     can resolve the fallback base ref without importing a private name.
     """
     return _resolve_default_branch(clone_path, role_token=role_token)
+
+
+def origin_branch_exists(
+    clone_path: Path,
+    branch: str,
+    *,
+    role_token: str | None = None,
+) -> bool:
+    """Return True if ``origin/<branch>`` resolves as a remote-tracking ref.
+
+    Public wrapper around :func:`_origin_branch_exists`. Added in foreman#427
+    so :func:`foreman.roles.worker._run_worker_core` can probe whether the
+    impl branch is already on the remote without importing a private name.
+
+    Follows the same pattern as :func:`fetch_origin_branch` and
+    :func:`resolve_default_branch` — public entry points for shared private
+    helpers so callers avoid coupling to module-private names.
+
+    Uses a purely local ref probe (no network); callers that need a current
+    answer should call :func:`fetch_origin_branch` first to refresh the
+    local origin ref.
+    """
+    return _origin_branch_exists(clone_path, branch, role_token=role_token)
 
 
 def _local_branch_exists(clone_path: Path, branch: str, *, role_token: str | None = None) -> bool:

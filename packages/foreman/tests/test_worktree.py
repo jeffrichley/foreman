@@ -151,6 +151,49 @@ def test_fetch_origin_branch_prunes_stale_ref_when_remote_branch_is_gone(
     assert _origin_branch_exists(clone, branch) is False
 
 
+def test_fetch_origin_branch_populates_ref_for_branch_pushed_out_of_band(
+    tmp_path: Path,
+) -> None:
+    """foreman#427 (review fix): ``origin_branch_exists`` is a purely LOCAL
+    probe. The Worker pushes the impl branch via a token-URL ``push_branch``
+    that does NOT update ``refs/remotes/origin/<branch>`` in the clone, so on a
+    BLOCKED-retry the probe reports ``False`` for a branch that IS on origin —
+    wrongly triggering a rebase that can conflict and spuriously escalate. The
+    Worker now calls ``fetch_origin_branch`` before the probe to make it
+    authoritative. This is the stale-FALSE inverse of the prune test above.
+    """
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    origin_path = tmp_path / "origin.git"
+    _init_git_repo(clone, origin_path=origin_path)
+
+    branch = "foreman/impl-427"
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    # Create the impl branch directly on the bare origin, pointing at a commit
+    # object origin already has (the pushed seed). This simulates a push that
+    # landed on origin WITHOUT updating this clone's remote-tracking ref —
+    # exactly what the token-URL push_branch does.
+    subprocess.run(
+        ["git", "update-ref", f"refs/heads/{branch}", head],
+        cwd=origin_path,
+        check=True,
+        capture_output=True,
+    )
+
+    # Precondition (the bug): the clone's local probe can't see the branch.
+    assert _origin_branch_exists(clone, branch) is False
+
+    # The fix: fetch first, then the probe reads the truth.
+    _fetch_origin_branch(clone, branch)
+    assert _origin_branch_exists(clone, branch) is True
+
+
 def test_create_worktree_creates_dir_with_branch(tmp_path: Path) -> None:
     clone = tmp_path / "clone"
     clone.mkdir()
@@ -2284,6 +2327,267 @@ def test_attach_impl_replaces_worktree_with_foreign_gitdir(tmp_path: Path) -> No
         text=True,
     ).stdout.strip()
     assert branch == "foreman/impl-42"
+
+
+# ----------------------------------------------------------------------
+# foreman#427 — rebase_impl_onto_origin
+#
+# Before the Worker runs check_command, it must rebase the impl worktree
+# onto current origin/<base_branch> so any fixes that landed on main after
+# the impl branch was cut are visible during the check.
+# ----------------------------------------------------------------------
+
+
+def _setup_clone_with_impl_worktree(
+    tmp_path: Path, *, ticket_id: int = 42
+) -> tuple[Path, Path, Path, WorktreeManager]:
+    """Set up a clone with an impl worktree at T0.
+
+    Returns (clone_path, origin_path, impl_wt_path, mgr).
+    The impl worktree is branched off origin/main at T0.
+    """
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    origin_path = tmp_path / "origin.git"
+    _init_git_repo(clone, origin_path=origin_path)
+
+    worktrees_root = tmp_path / "worktrees"
+    mgr = WorktreeManager(worktrees_root=worktrees_root)
+    result = mgr.create_impl(clone_path=clone, repo_slug="voice", ticket_id=ticket_id)
+    return clone, origin_path, result.path, mgr
+
+
+def test_rebase_impl_onto_origin_is_noop_when_already_current(tmp_path: Path) -> None:
+    """When the impl branch is already at the origin/<base_branch> tip,
+    rebase_impl_onto_origin is a no-op: HEAD SHA is unchanged and no
+    new commits exist.
+    """
+    from foreman.worktree import ImplWorktreeRebaseConflictError  # noqa: F401
+
+    clone, _origin_path, wt_path, mgr = _setup_clone_with_impl_worktree(tmp_path)
+
+    head_before = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    # No new commits on origin/main — rebase is a no-op
+    mgr.rebase_impl_onto_origin(clone_path=clone, wt_path=wt_path, base_branch="main")
+
+    head_after = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    assert head_before == head_after, (
+        f"No-op rebase must not change HEAD; before={head_before!r}, after={head_after!r}"
+    )
+
+
+def test_rebase_impl_onto_origin_picks_up_post_cut_commit(tmp_path: Path) -> None:
+    """impl branch based on T0 of origin/main; after a T1 commit is pushed
+    to origin/main, rebase_impl_onto_origin makes the T1 file visible in
+    the worktree.
+    """
+    clone, origin_path, wt_path, mgr = _setup_clone_with_impl_worktree(tmp_path)
+
+    # Land commit T1 on origin via a side checkout (simulates a fix merged to main
+    # after the impl branch was cut)
+    side = tmp_path / "side"
+    subprocess.run(
+        ["git", "clone", str(origin_path), str(side)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "side@example.com"],
+        cwd=side,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Side"],
+        cwd=side,
+        check=True,
+        capture_output=True,
+    )
+    (side / "fix_from_main.txt").write_text("fix that landed on main after impl branch cut\n")
+    subprocess.run(["git", "add", "fix_from_main.txt"], cwd=side, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "fix: post-cut fix on main"],
+        cwd=side,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "push", "origin", "main"], cwd=side, check=True, capture_output=True)
+
+    # Precondition: the fix is NOT yet visible in the impl worktree
+    assert not (wt_path / "fix_from_main.txt").exists(), (
+        "precondition: T1 file must not exist in the worktree before rebase"
+    )
+
+    mgr.rebase_impl_onto_origin(clone_path=clone, wt_path=wt_path, base_branch="main")
+
+    # Postcondition: the T1 fix IS visible after rebase
+    assert (wt_path / "fix_from_main.txt").exists(), (
+        "After rebase_impl_onto_origin, the post-cut commit's file must be present in the worktree"
+    )
+
+
+def test_rebase_impl_onto_origin_raises_on_conflict(tmp_path: Path) -> None:
+    """When main and the impl branch both modify the same file with
+    incompatible content, rebase_impl_onto_origin raises
+    ImplWorktreeRebaseConflictError.
+    """
+    from foreman.worktree import ImplWorktreeRebaseConflictError
+
+    clone, origin_path, wt_path, mgr = _setup_clone_with_impl_worktree(tmp_path)
+
+    # Impl branch adds conflict.txt with its own content
+    (wt_path / "conflict.txt").write_text("impl version\n")
+    subprocess.run(["git", "add", "conflict.txt"], cwd=wt_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "impl: add conflict.txt"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+    )
+
+    # origin/main adds conflict.txt with different content
+    side = tmp_path / "side"
+    subprocess.run(
+        ["git", "clone", str(origin_path), str(side)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "side@example.com"],
+        cwd=side,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Side"],
+        cwd=side,
+        check=True,
+        capture_output=True,
+    )
+    (side / "conflict.txt").write_text("origin version\n")
+    subprocess.run(["git", "add", "conflict.txt"], cwd=side, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "fix: conflicting change on main"],
+        cwd=side,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "push", "origin", "main"], cwd=side, check=True, capture_output=True)
+
+    with pytest.raises(ImplWorktreeRebaseConflictError):
+        mgr.rebase_impl_onto_origin(clone_path=clone, wt_path=wt_path, base_branch="main")
+
+
+def test_rebase_impl_onto_origin_aborts_cleanly_on_conflict(tmp_path: Path) -> None:
+    """On conflict, the rebase is properly aborted — REBASE_HEAD must not
+    exist in the worktree's git directory after the exception is raised.
+    """
+    from foreman.worktree import ImplWorktreeRebaseConflictError
+
+    clone, origin_path, wt_path, mgr = _setup_clone_with_impl_worktree(tmp_path)
+
+    # Same conflict setup as the raises-on-conflict test
+    (wt_path / "conflict.txt").write_text("impl version\n")
+    subprocess.run(["git", "add", "conflict.txt"], cwd=wt_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "impl: add conflict.txt"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+    )
+
+    side = tmp_path / "side"
+    subprocess.run(
+        ["git", "clone", str(origin_path), str(side)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "side@example.com"],
+        cwd=side,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Side"],
+        cwd=side,
+        check=True,
+        capture_output=True,
+    )
+    (side / "conflict.txt").write_text("origin version\n")
+    subprocess.run(["git", "add", "conflict.txt"], cwd=side, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "fix: conflicting change on main"],
+        cwd=side,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "push", "origin", "main"], cwd=side, check=True, capture_output=True)
+
+    with pytest.raises(ImplWorktreeRebaseConflictError):
+        mgr.rebase_impl_onto_origin(clone_path=clone, wt_path=wt_path, base_branch="main")
+
+    # After the exception, the worktree must be clean (no REBASE_HEAD).
+    # For a linked worktree, we need the actual git-dir path (not wt_path/.git
+    # which is a pointer file, not a directory).
+    git_dir_str = subprocess.run(
+        ["git", "rev-parse", "--git-dir"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    git_dir = Path(git_dir_str) if Path(git_dir_str).is_absolute() else wt_path / git_dir_str
+    assert not (git_dir / "REBASE_HEAD").exists(), (
+        "After ImplWorktreeRebaseConflictError, REBASE_HEAD must not exist — "
+        "rebase must have been properly aborted via git rebase --abort"
+    )
+
+
+def test_rebase_impl_onto_origin_uses_env_filter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """All subprocess calls inside rebase_impl_onto_origin must receive the
+    env filter: VIRTUAL_ENV must NOT leak into any git subprocess env.
+    """
+    clone, _origin_path, wt_path, mgr = _setup_clone_with_impl_worktree(tmp_path)
+
+    monkeypatch.setenv("VIRTUAL_ENV", "sentinel-do-not-leak")
+
+    real_run = subprocess.run
+    captured_envs: list[dict[str, str] | None] = []
+
+    def recording_run(cmd: Any, *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if isinstance(cmd, list) and cmd and cmd[0] == "git":
+            captured_envs.append(kwargs.get("env"))
+        return real_run(cmd, *args, **kwargs)
+
+    with patch("foreman.worktree.subprocess.run", side_effect=recording_run):
+        mgr.rebase_impl_onto_origin(clone_path=clone, wt_path=wt_path, base_branch="main")
+
+    assert captured_envs, "expected at least one git subprocess call from rebase_impl_onto_origin"
+    for env in captured_envs:
+        assert env is not None, (
+            "every git call in rebase_impl_onto_origin must pass "
+            "env=filtered_subprocess_env(); default env=None would inherit VIRTUAL_ENV"
+        )
+        assert "VIRTUAL_ENV" not in env, (
+            "VIRTUAL_ENV leaked into a git subprocess inside rebase_impl_onto_origin"
+        )
 
 
 def test_create_still_fetches_base_branch_per_dispatch(tmp_path: Path) -> None:
