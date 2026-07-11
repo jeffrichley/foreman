@@ -249,7 +249,12 @@ class WorktreeManager:
 
         wt_path = self.worktrees_root / repo_slug / f"issue-{ticket_id}"
         if wt_path.exists():
-            return wt_path
+            if _worktree_gitdir_is_valid(wt_path, role_token=self._role_token):
+                return wt_path
+            # Foreign/unresolvable gitdir from a prior environment (e.g. a
+            # Windows host path inside a Linux container). Tear down so the
+            # creation block below starts from a clean slate.
+            shutil.rmtree(wt_path)
         wt_path.parent.mkdir(parents=True, exist_ok=True)
         branch = spec_branch(ticket_id)
         base_branch = dev_base_branch or _resolve_default_branch(
@@ -344,11 +349,16 @@ class WorktreeManager:
 
         wt_path = self.worktrees_root / repo_slug / f"impl-{ticket_id}"
         if wt_path.exists():
-            # Idempotent re-call: recompute base_branch from the same
-            # input as a fresh call (``dev_base_branch`` arg or default
-            # branch resolution). No probing of the spec branch — the
-            # impl PR's base is determined entirely by project config.
-            return ImplWorktreeResult(path=wt_path, base_branch=base_branch)
+            if _worktree_gitdir_is_valid(wt_path, role_token=self._role_token):
+                # Idempotent re-call: recompute base_branch from the same
+                # input as a fresh call (``dev_base_branch`` arg or default
+                # branch resolution). No probing of the spec branch — the
+                # impl PR's base is determined entirely by project config.
+                return ImplWorktreeResult(path=wt_path, base_branch=base_branch)
+            # Foreign/unresolvable gitdir from a prior environment (e.g. a
+            # Windows host path inside a Linux container). Tear down so the
+            # creation block below starts from a clean slate.
+            shutil.rmtree(wt_path)
 
         wt_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -451,7 +461,12 @@ class WorktreeManager:
 
         wt_path = self.worktrees_root / repo_slug / f"issue-{ticket_id}"
         if wt_path.exists():
-            return wt_path
+            if _worktree_gitdir_is_valid(wt_path, role_token=self._role_token):
+                return wt_path
+            # Foreign/unresolvable gitdir from a prior environment (e.g. a
+            # Windows host path inside a Linux container). Tear down so the
+            # attach block below starts from a clean slate.
+            shutil.rmtree(wt_path)
         wt_path.parent.mkdir(parents=True, exist_ok=True)
         branch = spec_branch(ticket_id)
         if not _local_branch_exists(clone_path, branch, role_token=self._role_token):
@@ -515,7 +530,12 @@ class WorktreeManager:
 
         wt_path = self.worktrees_root / repo_slug / f"impl-{ticket_id}"
         if wt_path.exists():
-            return wt_path
+            if _worktree_gitdir_is_valid(wt_path, role_token=self._role_token):
+                return wt_path
+            # Foreign/unresolvable gitdir from a prior environment (e.g. a
+            # Windows host path inside a Linux container). Tear down so the
+            # attach block below starts from a clean slate.
+            shutil.rmtree(wt_path)
         wt_path.parent.mkdir(parents=True, exist_ok=True)
         branch = impl_branch(ticket_id)
         if not _local_branch_exists(clone_path, branch, role_token=self._role_token):
@@ -795,6 +815,25 @@ def _local_branch_exists(clone_path: Path, branch: str, *, role_token: str | Non
     result = subprocess.run(
         ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
         cwd=clone_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=filtered_subprocess_env(role_token=role_token),
+    )
+    return result.returncode == 0
+
+
+def _worktree_gitdir_is_valid(worktree_path: Path, *, role_token: str | None = None) -> bool:
+    """Return True iff ``git rev-parse --git-dir`` exits 0 inside the worktree.
+
+    A worktree whose .git gitdir pointer resolves to a foreign/unresolvable
+    path (e.g., a Windows host path inside a Linux container) causes rc=128
+    ``fatal: not a git repository: <path>`` on any subsequent git operation.
+    This probe detects that state before returning the worktree to the caller.
+    """
+    result = subprocess.run(
+        ["git", "rev-parse", "--git-dir"],
+        cwd=worktree_path,
         check=False,
         capture_output=True,
         text=True,

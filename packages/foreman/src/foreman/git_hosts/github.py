@@ -213,7 +213,31 @@ class GitHubProvider(GitHostProvider):
         remote_url = self._git(worktree_path, "config", "--get", "remote.origin.url").stdout.strip()
         repo_slug = _extract_repo_slug(remote_url)
         push_url = f"https://x-access-token:{self._identity.token}@github.com/{repo_slug}.git"
-        self._git(worktree_path, "push", "--force-with-lease", push_url, f"{branch}:{branch}")
+        try:
+            self._git(worktree_path, "push", "--force-with-lease", push_url, f"{branch}:{branch}")
+        except GitCommandError as exc:
+            if (
+                exc.returncode == 1
+                and "[rejected]" in exc.stderr
+                and (
+                    "fetch first" in exc.stderr
+                    or "non-fast-forward" in exc.stderr
+                    or "stale info" in exc.stderr
+                )
+            ):
+                # Remote branch has divergent history from a prior run, or the
+                # local remote-tracking ref is stale (--force-with-lease used the
+                # cached ref which another agent already advanced).  Refresh the
+                # tracking ref first, then retry; without the fetch the lease
+                # expectation is still stale and the retry fails identically.
+                # Foreman owns the foreman/issue-N and foreman/impl-N namespaces;
+                # force-refresh is safe and self-correcting.
+                self._git(worktree_path, "fetch", "origin", branch)
+                self._git(
+                    worktree_path, "push", "--force-with-lease", push_url, f"{branch}:{branch}"
+                )
+            else:
+                raise
 
     # ------------------------------------------------------------------
     # PR + label API operations
