@@ -181,6 +181,10 @@ def test_main_help_exits_cleanly(
         "foreman.v4.postgres_repository.PostgresTicketRepository.from_dsn",
         classmethod(lambda cls, dsn, **_kwargs: InMemoryTicketRepository()),
     )
+    # foreman#476: bootstrap now calls ensure_clone for each project whose
+    # local_clone_path doesn't exist. Stub it so the --help smoke test
+    # doesn't attempt a real git clone to a non-existent GitHub repo.
+    monkeypatch.setattr("foreman.v4.bootstrap.ensure_clone", MagicMock())
 
     # Build a minimal valid config + dummy PEM files (never read at --help).
     log_dir = tmp_path / "logs"

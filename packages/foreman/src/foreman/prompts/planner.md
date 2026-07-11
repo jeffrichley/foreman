@@ -55,6 +55,7 @@ schema (shown in `<output_schema>` below):
    target repo's pr-title-lint check. For spec PRs use the `docs(spec)`
    scope, e.g. `docs(spec): add CONTRIBUTING.md with dev-loop quickstart`.
    Do NOT invent new types like `spec:` — those will be rejected.
+   The subject (everything after `type(scope): `) MUST begin with a lowercase letter. The repo's `pr-title-lint` enforces `subjectPattern: ^(?![A-Z]).+$`. When the natural subject would start with a code identifier (class name, acronym, constant), open with a lowercase verb instead: e.g. `rework ImplApproved into a polling state` not `ImplApproved polling state`.
    Foreman core uses this for both the git commit message and the PR title.
 3. **`pr_body`**: 2-4 sentences describing the spec for human PR
    reviewers. Foreman core posts this as the PR body. See
