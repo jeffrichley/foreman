@@ -977,3 +977,66 @@ def test_project_config_max_in_flight_positive_accepted():
     """A positive cap is valid and stored as-is."""
     p = ProjectConfig(name="p", repo="o/r", local_clone_path="/tmp/r", max_in_flight=2)
     assert p.max_in_flight == 2
+
+
+# ---------------------------------------------------------------------------
+# issue #477: load_projects — standalone TOML file for [[projects]]
+# ---------------------------------------------------------------------------
+
+from foreman.v4.config import load_projects  # noqa: E402
+
+
+def test_load_projects_round_trip(tmp_path: Path):
+    """load_projects parses a two-project standalone TOML file correctly."""
+    projects_path = tmp_path / "projects.toml"
+    projects_path.write_text(
+        "[[projects]]\n"
+        'name = "alpha"\n'
+        'repo = "owner/alpha"\n'
+        'local_clone_path = "/foreman/repos/alpha"\n'
+        "\n[[projects]]\n"
+        'name = "beta"\n'
+        'repo = "owner/beta"\n'
+        'local_clone_path = "/foreman/repos/beta"\n'
+    )
+    result = load_projects(projects_path)
+    assert len(result) == 2
+    assert result[0].name == "alpha"
+    assert result[0].repo == "owner/alpha"
+    assert result[0].local_clone_path == "/foreman/repos/alpha"
+    assert result[1].name == "beta"
+    assert result[1].repo == "owner/beta"
+
+
+def test_load_projects_empty(tmp_path: Path):
+    """load_projects returns an empty list for a TOML file with no [[projects]]."""
+    projects_path = tmp_path / "projects.toml"
+    projects_path.write_text("# no projects defined yet\n")
+    result = load_projects(projects_path)
+    assert result == []
+
+
+def test_load_projects_missing_required_field_raises(tmp_path: Path):
+    """load_projects raises ValidationError when a required field (name) is absent."""
+    projects_path = tmp_path / "projects.toml"
+    projects_path.write_text(
+        "[[projects]]\n"
+        'repo = "owner/missing-name"\n'
+        'local_clone_path = "/foreman/repos/missing-name"\n'
+    )
+    with pytest.raises(ValidationError):
+        load_projects(projects_path)
+
+
+def test_load_projects_extra_field_raises(tmp_path: Path):
+    """load_projects raises ValidationError for an unrecognised key (extra='forbid')."""
+    projects_path = tmp_path / "projects.toml"
+    projects_path.write_text(
+        "[[projects]]\n"
+        'name = "gamma"\n'
+        'repo = "owner/gamma"\n'
+        'local_clone_path = "/foreman/repos/gamma"\n'
+        'unknown_key = "surprise"\n'
+    )
+    with pytest.raises(ValidationError):
+        load_projects(projects_path)

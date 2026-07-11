@@ -218,3 +218,30 @@ class RoutingGitProvider:
             issue_number=issue_number,
             body=body,
         )
+
+    def register_provider(self, name: str, provider: GitProvider) -> None:
+        """Add or replace the :class:`GitProvider` for ``name``.
+
+        Called by :meth:`~foreman.v4.daemon.Daemon._apply_project_reload`
+        when a new project is added (or an existing project's config
+        changes — treated as a remove + re-add). Thread safety: this
+        method runs on the Daemon's main tick thread; WorkerPool threads
+        only read via :meth:`_resolve`, never write, so no lock is needed.
+        """
+        self._providers[name] = provider
+
+    def unregister_provider(self, name: str) -> None:
+        """Remove the :class:`GitProvider` for ``name``.
+
+        Raises :class:`UnknownProjectError` if ``name`` is not registered,
+        matching the error already raised by :meth:`_resolve` for consistency.
+        Called by :meth:`~foreman.v4.daemon.Daemon._apply_project_reload`
+        when a project is dropped. Thread safety: same as
+        :meth:`register_provider`.
+        """
+        if name not in self._providers:
+            known = ", ".join(sorted(self._providers)) or "<none>"
+            raise UnknownProjectError(
+                f"No GitProvider registered for project {name!r}. Known: {known}.",
+            )
+        del self._providers[name]
