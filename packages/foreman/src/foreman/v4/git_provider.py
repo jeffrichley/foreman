@@ -168,6 +168,26 @@ class GitProvider(Protocol):
         """
         ...
 
+    def get_issue_state(self, *, project: str, issue_number: int) -> str:
+        """Return the issue's current state: ``'open'`` or ``'closed'``.
+
+        Used by ``foreman reset`` discovery to detect closed issues before
+        applying the ``foreman:plan`` re-trigger label — the Poller only
+        scans open issues, so applying the label to a closed issue is a
+        silent no-op.
+        """
+        ...
+
+    def reopen_issue(self, *, project: str, issue_number: int) -> None:
+        """Reopen the GitHub issue.
+
+        Idempotent: no-op if the issue is already open (mirrors
+        ``close_issue``'s already-closed idempotency). Called by
+        ``foreman reset --force-reopen`` to reopen a closed issue before
+        applying ``foreman:plan`` so the Poller picks it up.
+        """
+        ...
+
     def delete_branch(
         self,
         *,
@@ -280,6 +300,11 @@ class FakeGitProvider:
         # merged-externally + just-merged branches and did NOT happen
         # on the BLOCKED branch. Set semantics give idempotency for free.
         self.closed_issues: set[tuple[str, int]] = set()
+        # Current issue state per (project, issue_number). seed_issue_state
+        # populates; close_issue writes "closed"; reopen_issue writes "open";
+        # get_issue_state reads (defaulting to "open"). Existing tests are
+        # unaffected because the default is "open".
+        self._issue_states: dict[tuple[str, int], str] = {}
         # Recorder for delete_branch calls (mirrors closed_issues shape).
         self.deleted_branches: set[tuple[str, str]] = set()
         # Current branches per project. seed_branch populates; delete_branch
@@ -417,9 +442,38 @@ class FakeGitProvider:
         """Record that the issue was closed.
 
         Set-add is naturally idempotent, mirroring the real REST API's
-        already-closed-is-no-op behavior.
+        already-closed-is-no-op behavior. Also writes into ``_issue_states``
+        so ``get_issue_state`` returns ``"closed"`` for the same key.
         """
         self.closed_issues.add((project, issue_number))
+        self._issue_states[(project, issue_number)] = "closed"
+
+    def seed_issue_state(
+        self,
+        *,
+        project: str,
+        issue_number: int,
+        state: str,
+    ) -> None:
+        """Test helper: seed the issue's current state (``'open'`` or ``'closed'``).
+
+        Used by ``foreman reset`` tests that exercise the closed-issue guard.
+        Existing tests that never call this see the default ``"open"`` from
+        ``get_issue_state``.
+        """
+        self._issue_states[(project, issue_number)] = state
+
+    def get_issue_state(self, *, project: str, issue_number: int) -> str:
+        """Return the seeded issue state, defaulting to ``'open'``."""
+        return self._issue_states.get((project, issue_number), "open")
+
+    def reopen_issue(self, *, project: str, issue_number: int) -> None:
+        """Mark the issue as open in ``_issue_states``.
+
+        Idempotent: calling on an already-open issue is a no-op (the
+        dict write is the same value). Mirrors ``close_issue``'s semantics.
+        """
+        self._issue_states[(project, issue_number)] = "open"
 
     def seed_branch(self, *, project: str, branch_name: str) -> None:
         """Test helper: seed a branch into the fake's branch set."""

@@ -681,3 +681,172 @@ def test_reset_partial_failure_continues_and_exits_nonzero(tmp_path, monkeypatch
     # But the branch / worktree / row / label steps still ran.
     assert ("agent_core", "foreman/issue-180") in git.deleted_branches
     assert not (wt_root / "agent_core" / "issue-180").exists()
+
+
+# ---------------------------------------------------------------------------
+# foreman#409 — closed-issue guard on foreman reset
+# ---------------------------------------------------------------------------
+
+
+def test_reset_closed_issue_no_flag_exits_nonzero(tmp_path):
+    """(a) closed + no --force-reopen → exit 1 with a message naming the issue
+    is closed and that --force-reopen is required. Guard fires regardless of
+    --dry-run; this test exercises the execute path (--yes).
+    """
+    ctx, repo, git, wt_root = _full_reset_ctx(tmp_path)
+    git.seed_issue_state(project="agent_core", issue_number=180, state="closed")
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "reset",
+            "--project",
+            "agent_core",
+            "--issue-number",
+            "180",
+            "--yes",
+            "--worktrees-root",
+            str(wt_root),
+        ],
+        obj=ctx,
+    )
+    assert result.exit_code == 1
+    assert "closed" in result.output.lower()
+    assert "force-reopen" in result.output.lower()
+
+
+def test_reset_closed_issue_force_reopen_reopens_and_applies_label(tmp_path):
+    """(b) closed + --force-reopen → issue reopened AND foreman:plan label
+    applied so the Poller picks it up on the next tick.
+    """
+    ctx, repo, git, wt_root = _full_reset_ctx(tmp_path)
+    git.seed_issue_state(project="agent_core", issue_number=180, state="closed")
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "reset",
+            "--project",
+            "agent_core",
+            "--issue-number",
+            "180",
+            "--yes",
+            "--force-reopen",
+            "--worktrees-root",
+            str(wt_root),
+        ],
+        obj=ctx,
+    )
+    assert result.exit_code == 0, result.output
+    assert git.get_issue_state(project="agent_core", issue_number=180) == "open"
+    assert "foreman:plan" in git.get_issue_labels(project="agent_core", issue_number=180)
+
+
+def test_reset_open_issue_unchanged_by_guard(tmp_path):
+    """(c) open issue → guard does not fire, behaviour is unchanged across all
+    flag combinations (tested with --yes, no --force-reopen).
+    """
+    ctx, repo, git, wt_root = _full_reset_ctx(tmp_path)
+    # Default FakeGitProvider returns "open" for unseen issues — no seed needed.
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "reset",
+            "--project",
+            "agent_core",
+            "--issue-number",
+            "180",
+            "--yes",
+            "--worktrees-root",
+            str(wt_root),
+        ],
+        obj=ctx,
+    )
+    assert result.exit_code == 0, result.output
+    assert "foreman:plan" in git.get_issue_labels(project="agent_core", issue_number=180)
+
+
+def test_reset_closed_no_retrigger_no_guard_no_reopen(tmp_path):
+    """(d) closed + --no-retrigger → guard does not fire (apply_plan_label is
+    False), no reopen, no foreman:plan label applied.
+    """
+    ctx, repo, git, wt_root = _full_reset_ctx(tmp_path)
+    git.seed_issue_state(project="agent_core", issue_number=180, state="closed")
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "reset",
+            "--project",
+            "agent_core",
+            "--issue-number",
+            "180",
+            "--yes",
+            "--no-retrigger",
+            "--worktrees-root",
+            str(wt_root),
+        ],
+        obj=ctx,
+    )
+    assert result.exit_code == 0, result.output
+    # Issue state unchanged (still closed — reopen was not called).
+    assert git.get_issue_state(project="agent_core", issue_number=180) == "closed"
+    # No foreman:plan label was applied.
+    assert "foreman:plan" not in git.get_issue_labels(project="agent_core", issue_number=180)
+
+
+def test_reset_closed_dry_run_no_flag_exits_nonzero_no_mutations(tmp_path):
+    """(e) closed + no --force-reopen + --dry-run → exit 1 + warning, guard fires
+    BEFORE the dry-run early-return so no mutations occur.
+    """
+    ctx, repo, git, wt_root = _full_reset_ctx(tmp_path)
+    git.seed_issue_state(project="agent_core", issue_number=180, state="closed")
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "reset",
+            "--project",
+            "agent_core",
+            "--issue-number",
+            "180",
+            "--dry-run",
+            "--worktrees-root",
+            str(wt_root),
+        ],
+        obj=ctx,
+    )
+    assert result.exit_code == 1
+    assert "closed" in result.output.lower()
+    # No mutations despite dry-run — guard fires before any execution.
+    assert git.closed_prs == set()
+    assert git.deleted_branches == set()
+
+
+def test_reset_closed_force_reopen_dry_run_shows_reopen_step_no_mutation(tmp_path):
+    """(f) closed + --force-reopen + --dry-run → exit 0, 'Reopen issue' present
+    in stdout plan output, issue state NOT flipped (reopen_issue not executed).
+    """
+    ctx, repo, git, wt_root = _full_reset_ctx(tmp_path)
+    git.seed_issue_state(project="agent_core", issue_number=180, state="closed")
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "reset",
+            "--project",
+            "agent_core",
+            "--issue-number",
+            "180",
+            "--dry-run",
+            "--force-reopen",
+            "--worktrees-root",
+            str(wt_root),
+        ],
+        obj=ctx,
+    )
+    assert result.exit_code == 0, result.output
+    assert "Reopen issue" in result.output
+    # Dry-run: reopen_issue was NOT called — state is still "closed".
+    assert git.get_issue_state(project="agent_core", issue_number=180) == "closed"

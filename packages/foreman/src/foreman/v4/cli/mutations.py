@@ -61,6 +61,13 @@ class ResetPlan:
     strip_labels: set[str]
     delete_ticket_id: int | None
     apply_plan_label: bool
+    # foreman#409: closed-issue guard.
+    # ``issue_is_closed`` is always populated by _discover() so the guard
+    # in cmd_reset() can fire without a second GitHub call.
+    # ``reopen_issue`` is True only when issue_is_closed AND retrigger AND
+    # force_reopen — it drives both _plan_steps() and _execute().
+    issue_is_closed: bool = False
+    reopen_issue: bool = False
 
 
 def _discover(
@@ -72,6 +79,7 @@ def _discover(
     keep_pr: bool,
     keep_worktree: bool,
     retrigger: bool,
+    force_reopen: bool = False,
 ) -> ResetPlan:
     """Read-only scan of current state. No mutations."""
     if keep_pr:
@@ -105,6 +113,17 @@ def _discover(
         delete_ticket_id = ticket.id
     except TicketNotFoundError:
         delete_ticket_id = None
+    # foreman#409: read issue state once so the guard + reopen step can
+    # use it without a second GitHub call. ``reopen_issue`` is True only
+    # when the issue is closed AND retrigger AND force_reopen.
+    issue_is_closed = (
+        git.get_issue_state(
+            project=project,
+            issue_number=issue_number,
+        )
+        == "closed"
+    )
+    reopen_issue = issue_is_closed and retrigger and force_reopen
     return ResetPlan(
         project=project,
         issue_number=issue_number,
@@ -115,6 +134,8 @@ def _discover(
         strip_labels=strip,
         delete_ticket_id=delete_ticket_id,
         apply_plan_label=retrigger,
+        issue_is_closed=issue_is_closed,
+        reopen_issue=reopen_issue,
     )
 
 
@@ -152,6 +173,13 @@ def _plan_steps(plan: ResetPlan) -> list[tuple[str, str]]:
             (
                 f"Delete ticket row id={plan.delete_ticket_id} from the database",
                 "delete_ticket",
+            )
+        )
+    if plan.reopen_issue:
+        steps.append(
+            (
+                f"Reopen issue #{plan.issue_number}",
+                "reopen_issue",
             )
         )
     if plan.apply_plan_label:
@@ -217,6 +245,11 @@ def _execute(
             elif kind == "delete_ticket":
                 assert plan.delete_ticket_id is not None
                 repo.delete_ticket(plan.delete_ticket_id)
+            elif kind == "reopen_issue":
+                git.reopen_issue(
+                    project=plan.project,
+                    issue_number=plan.issue_number,
+                )
             elif kind == "apply_plan_label":
                 git.add_labels(
                     project=plan.project,
@@ -257,6 +290,16 @@ def cmd_reset(
         False,
         "--no-retrigger",
         help="Don't re-apply foreman:plan at end.",
+    ),
+    force_reopen: bool = typer.Option(
+        False,
+        "--force-reopen",
+        help=(
+            "Reopen the issue if it is closed before re-applying foreman:plan. "
+            "Required when resetting a closed issue with re-triggering enabled "
+            "(the default). Without this flag, reset refuses on closed issues "
+            "to avoid silently resurrecting already-completed tickets."
+        ),
     ),
     dry_run: bool = typer.Option(
         False,
@@ -307,8 +350,22 @@ def cmd_reset(
         keep_pr=keep_pr,
         keep_worktree=keep_worktree,
         retrigger=not no_retrigger,
+        force_reopen=force_reopen,
     )
     steps = _plan_steps(plan)
+    # foreman#409: refuse when the issue is closed and re-triggering is
+    # enabled but --force-reopen was not passed. The Poller only scans
+    # open issues, so applying foreman:plan to a closed issue would
+    # silently never re-trigger the pipeline. Fire the guard before the
+    # dry-run early-return so --dry-run also exits 1 with the warning.
+    if plan.issue_is_closed and plan.apply_plan_label and not plan.reopen_issue:
+        typer.echo(
+            f"issue #{issue_number} is closed (it may already be complete — "
+            f"check for a merged PR before re-triggering); "
+            f"pass --force-reopen to reset and reopen anyway.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
     typer.echo(_render_plan(plan, steps))
     if dry_run:
         return
