@@ -88,7 +88,12 @@ from foreman.stats import log_worker_run
 from foreman.v4.config import OperatorConfig, V4Config, resolve_operator
 from foreman.v4.identity import V4IdentityRegistry
 from foreman.v4.pygithub_git_provider import CI_PASSING_MERGEABLE_STATES
-from foreman.worktree import ImplWorktreeRebaseConflictError, WorktreeManager, origin_branch_exists
+from foreman.worktree import (
+    ImplWorktreeRebaseConflictError,
+    WorktreeManager,
+    fetch_origin_branch,
+    origin_branch_exists,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -969,6 +974,15 @@ async def _run_worker_core(
         # Skipped when the branch is already on the remote (BLOCKED-retry
         # path — the impl PR exists; rebasing would rewrite pushed SHAs and
         # require a force-push, which is out of scope per issue #342).
+        #
+        # origin_branch_exists is a purely LOCAL probe, and the Worker's push
+        # goes through a token-URL push_branch that never updates
+        # refs/remotes/origin/<impl>. Without refreshing first, the probe
+        # reports False for a branch that IS on origin (BLOCKED-retry), wrongly
+        # triggering a rebase that can conflict and spuriously escalate. Fetch
+        # the impl branch first (best-effort; prunes a stale ref if the branch
+        # was deleted) so the probe reads the truth, not a stale cache.
+        fetch_origin_branch(Path(project.local_clone_path), impl_branch_name)
         if not origin_branch_exists(Path(project.local_clone_path), impl_branch_name):
             try:
                 wt_mgr.rebase_impl_onto_origin(

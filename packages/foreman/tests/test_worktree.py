@@ -151,6 +151,49 @@ def test_fetch_origin_branch_prunes_stale_ref_when_remote_branch_is_gone(
     assert _origin_branch_exists(clone, branch) is False
 
 
+def test_fetch_origin_branch_populates_ref_for_branch_pushed_out_of_band(
+    tmp_path: Path,
+) -> None:
+    """foreman#427 (review fix): ``origin_branch_exists`` is a purely LOCAL
+    probe. The Worker pushes the impl branch via a token-URL ``push_branch``
+    that does NOT update ``refs/remotes/origin/<branch>`` in the clone, so on a
+    BLOCKED-retry the probe reports ``False`` for a branch that IS on origin —
+    wrongly triggering a rebase that can conflict and spuriously escalate. The
+    Worker now calls ``fetch_origin_branch`` before the probe to make it
+    authoritative. This is the stale-FALSE inverse of the prune test above.
+    """
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    origin_path = tmp_path / "origin.git"
+    _init_git_repo(clone, origin_path=origin_path)
+
+    branch = "foreman/impl-427"
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    # Create the impl branch directly on the bare origin, pointing at a commit
+    # object origin already has (the pushed seed). This simulates a push that
+    # landed on origin WITHOUT updating this clone's remote-tracking ref —
+    # exactly what the token-URL push_branch does.
+    subprocess.run(
+        ["git", "update-ref", f"refs/heads/{branch}", head],
+        cwd=origin_path,
+        check=True,
+        capture_output=True,
+    )
+
+    # Precondition (the bug): the clone's local probe can't see the branch.
+    assert _origin_branch_exists(clone, branch) is False
+
+    # The fix: fetch first, then the probe reads the truth.
+    _fetch_origin_branch(clone, branch)
+    assert _origin_branch_exists(clone, branch) is True
+
+
 def test_create_worktree_creates_dir_with_branch(tmp_path: Path) -> None:
     clone = tmp_path / "clone"
     clone.mkdir()
