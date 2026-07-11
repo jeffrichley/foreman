@@ -136,6 +136,32 @@ def test_dispatches_close_issue_to_correct_provider() -> None:
     assert ("foo", 7) not in foo.closed_issues
 
 
+def test_dispatches_get_issue_state_to_correct_provider() -> None:
+    """foreman#409: ``get_issue_state`` routes to the project's provider so the
+    reset guard reads the right repo's issue in a multi-project daemon."""
+    foo, bar, router = _two_provider_router()
+    bar.seed_issue_state(project="bar", issue_number=7, state="closed")
+    foo.seed_issue_state(project="foo", issue_number=7, state="open")
+
+    # Routed to bar → returns bar's state, not foo's.
+    assert router.get_issue_state(project="bar", issue_number=7) == "closed"
+    assert router.get_issue_state(project="foo", issue_number=7) == "open"
+
+
+def test_dispatches_reopen_issue_to_correct_provider() -> None:
+    """foreman#409: ``reopen_issue`` routes to the project's provider —
+    mis-routing would reopen the wrong repo's issue in a no-undo space."""
+    foo, bar, router = _two_provider_router()
+    bar.seed_issue_state(project="bar", issue_number=7, state="closed")
+    foo.seed_issue_state(project="foo", issue_number=7, state="closed")
+
+    router.reopen_issue(project="bar", issue_number=7)
+
+    # Target reopened; non-target untouched (router did not broadcast).
+    assert bar.get_issue_state(project="bar", issue_number=7) == "open"
+    assert foo.get_issue_state(project="foo", issue_number=7) == "closed"
+
+
 def test_dispatches_list_open_issues_with_label_to_correct_provider() -> None:
     foo, bar, router = _two_provider_router()
     foo.set_open_issues_with_label(

@@ -150,6 +150,20 @@ class RoutingGitProvider:
             issue_number=issue_number,
         )
 
+    def get_issue_state(self, *, project: str, issue_number: int) -> str:
+        """Route to ``project``'s provider to fetch the issue's current state."""
+        return self._resolve(project).get_issue_state(
+            project=project,
+            issue_number=issue_number,
+        )
+
+    def reopen_issue(self, *, project: str, issue_number: int) -> None:
+        """Route to ``project``'s provider to reopen the issue."""
+        self._resolve(project).reopen_issue(
+            project=project,
+            issue_number=issue_number,
+        )
+
     def delete_branch(
         self,
         *,

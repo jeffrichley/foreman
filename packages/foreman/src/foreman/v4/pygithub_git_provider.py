@@ -298,6 +298,27 @@ class PyGithubGitProvider:
         if issue.state != "closed":
             issue.edit(state="closed")
 
+    def get_issue_state(self, *, project: str, issue_number: int) -> str:
+        """Return the issue's current state: ``'open'`` or ``'closed'``.
+
+        Reads ``issue.state`` directly from GitHub. ``project`` accepted
+        for Protocol-shape symmetry but unused — provider is locked to
+        one repo at construction (same pattern as ``close_issue``).
+        """
+        issue = self._repo.get_issue(issue_number)
+        return issue.state
+
+    def reopen_issue(self, *, project: str, issue_number: int) -> None:
+        """Reopen the GitHub issue, idempotently.
+
+        The ``state == "open"`` guard sidesteps a redundant PATCH on an
+        already-open issue, mirroring the ``close_issue`` pattern.
+        ``project`` accepted for Protocol-shape symmetry but unused.
+        """
+        issue = self._repo.get_issue(issue_number)
+        if issue.state != "open":
+            issue.edit(state="open")
+
     def remove_labels(
         self,
         *,

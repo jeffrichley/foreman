@@ -280,6 +280,53 @@ def test_close_issue_skips_edit_when_already_closed(mock_github, mock_repo, mock
     mock_issue.edit.assert_not_called()
 
 
+def test_get_issue_state_returns_current_state(mock_github, mock_repo, mock_identity):
+    """foreman#409: ``get_issue_state`` reads ``issue.state`` from GitHub so the
+    reset guard can detect a closed issue before re-arming ``foreman:plan``."""
+    mock_issue = MagicMock()
+    mock_issue.state = "closed"
+    mock_repo.get_issue.return_value = mock_issue
+    provider = PyGithubGitProvider(
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
+    )
+    assert provider.get_issue_state(project="p", issue_number=23) == "closed"
+    mock_repo.get_issue.assert_called_once_with(23)
+
+
+def test_reopen_issue_calls_edit_when_closed(mock_github, mock_repo, mock_identity):
+    """foreman#409: on a closed issue, ``reopen_issue`` calls
+    ``issue.edit(state="open")`` so ``--force-reopen`` reopens before reset."""
+    mock_issue = MagicMock()
+    mock_issue.state = "closed"
+    mock_repo.get_issue.return_value = mock_issue
+    provider = PyGithubGitProvider(
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
+    )
+    provider.reopen_issue(project="p", issue_number=23)
+    mock_repo.get_issue.assert_called_once_with(23)
+    mock_issue.edit.assert_called_once_with(state="open")
+
+
+def test_reopen_issue_skips_edit_when_already_open(mock_github, mock_repo, mock_identity):
+    """foreman#409: on an already-open issue, ``reopen_issue`` does NOT call
+    ``edit`` — the idempotency guard mirrors ``close_issue``."""
+    mock_issue = MagicMock()
+    mock_issue.state = "open"
+    mock_repo.get_issue.return_value = mock_issue
+    provider = PyGithubGitProvider(
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
+    )
+    provider.reopen_issue(project="p", issue_number=23)
+    mock_repo.get_issue.assert_called_once_with(23)
+    mock_issue.edit.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Token-refresh behavior
 #
