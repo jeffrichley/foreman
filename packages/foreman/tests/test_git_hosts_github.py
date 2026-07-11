@@ -28,6 +28,11 @@ def _identity(token: str = "ghs_test_token") -> BotIdentity:
     return BotIdentity(slug="foreman-planner", user_id=12345, token=token)
 
 
+def _git_run(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run a real ``git`` subprocess in ``cwd`` (for end-to-end remote tests)."""
+    return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+
 # ----------------------------------------------------------------------
 # URL parsing helpers
 # ----------------------------------------------------------------------
@@ -482,7 +487,9 @@ def test_commit_files_to_worktree_is_idempotent_when_content_matches_head(
 
 
 def test_push_branch_uses_installation_token_url(tmp_path: Path) -> None:
-    """Push must use an HTTPS URL embedding ``x-access-token:<token>``."""
+    """Both the ls-remote lease read and the push must use an HTTPS URL
+    embedding ``x-access-token:<token>``, and the push must carry an explicit
+    ``--force-with-lease=<branch>:<remote-head>``."""
     wt = _init_worktree(tmp_path)
     # Wire a fake remote so the `git config --get remote.origin.url` call has
     # something to return.
@@ -495,15 +502,20 @@ def test_push_branch_uses_installation_token_url(tmp_path: Path) -> None:
 
     real_run = subprocess.run
 
+    ls_remote_calls: list[list[str]] = []
     push_calls: list[list[str]] = []
+    remote_head = "a" * 40
 
     def fake_run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git" and cmd[1] == "push":
-            push_calls.append(cmd)
-            completed: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(
-                cmd, 0, stdout="", stderr=""
-            )
-            return completed
+        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git":
+            if cmd[1] == "ls-remote":
+                ls_remote_calls.append(cmd)
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout=f"{remote_head}\trefs/heads/foreman/issue-7\n", stderr=""
+                )
+            if cmd[1] == "push":
+                push_calls.append(cmd)
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         return real_run(cmd, *args, **kwargs)
 
     provider = GitHubProvider(identity=_identity("ghs_abc"), client=MagicMock())
@@ -511,14 +523,18 @@ def test_push_branch_uses_installation_token_url(tmp_path: Path) -> None:
     with patch("foreman.git_hosts.github.subprocess.run", side_effect=fake_run):
         provider.push_branch(worktree_path=wt, branch="foreman/issue-7")
 
+    token_url = "https://x-access-token:ghs_abc@github.com/owner/name.git"
+    # The remote head is read via ls-remote over the same token URL.
+    assert len(ls_remote_calls) == 1
+    assert ls_remote_calls[0] == ["git", "ls-remote", token_url, "refs/heads/foreman/issue-7"]
     assert len(push_calls) == 1
     pushed = push_calls[0]
     assert pushed[0:2] == ["git", "push"]
-    assert pushed[2] == "--force-with-lease"
-    url = pushed[3]
-    assert url == "https://x-access-token:ghs_abc@github.com/owner/name.git"
-    # refspec is branch:branch; --force-with-lease guards against unexpected
-    # remote movement without silently overwriting concurrent writes.
+    # Explicit lease against the head we just read — a bare --force-with-lease
+    # has no tracking ref over a URL and git rejects it as "stale info".
+    assert pushed[2] == f"--force-with-lease=foreman/issue-7:{remote_head}"
+    assert pushed[3] == token_url
+    # refspec is branch:branch.
     assert pushed[4] == "foreman/issue-7:foreman/issue-7"
 
 
@@ -548,8 +564,13 @@ def test_git_failure_surfaces_stderr_message_on_push_branch(tmp_path: Path) -> N
     )
 
     def fake_run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git" and cmd[1] == "push":
-            raise _make_called_process_error(cmd, stderr_msg)
+        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git":
+            if cmd[1] == "ls-remote":
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout=f"{'a' * 40}\trefs/heads/foreman/issue-7\n", stderr=""
+                )
+            if cmd[1] == "push":
+                raise _make_called_process_error(cmd, stderr_msg)
         return real_run(cmd, *args, **kwargs)
 
     provider = GitHubProvider(identity=_identity("ghs_abc"), client=MagicMock())
@@ -612,16 +633,21 @@ def test_push_branch_failure_redacts_token_from_every_surface(tmp_path: Path) ->
     real_run = subprocess.run
 
     def fake_run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git" and cmd[1] == "push":
-            # stderr also references the URL — git often echoes the remote on
-            # failure. Make sure redaction covers stderr too.
-            raise _make_called_process_error(
-                cmd,
-                stderr=(
-                    f"remote: error pushing to "
-                    f"https://x-access-token:{LIVE_TOKEN}@github.com/owner/name.git"
-                ),
-            )
+        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git":
+            if cmd[1] == "ls-remote":
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout=f"{'a' * 40}\trefs/heads/foreman/issue-7\n", stderr=""
+                )
+            if cmd[1] == "push":
+                # stderr also references the URL — git often echoes the remote on
+                # failure. Make sure redaction covers stderr too.
+                raise _make_called_process_error(
+                    cmd,
+                    stderr=(
+                        f"remote: error pushing to "
+                        f"https://x-access-token:{LIVE_TOKEN}@github.com/owner/name.git"
+                    ),
+                )
         return real_run(cmd, *args, **kwargs)
 
     provider = GitHubProvider(identity=_identity(LIVE_TOKEN), client=MagicMock())
@@ -711,9 +737,16 @@ def _capture_push_run(
     real_run = subprocess.run
 
     def fake_run(cmd: Any, *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git" and cmd[1] == "push":
-            env_capture["env"] = kwargs.get("env")
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git":
+            if cmd[1] == "ls-remote":
+                # Canned remote head so push_branch takes the force-with-lease
+                # path and issues a `git push` we can capture the env from.
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout=f"{'0' * 40}\trefs/heads/x\n", stderr=""
+                )
+            if cmd[1] == "push":
+                env_capture["env"] = kwargs.get("env")
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         return real_run(cmd, *args, **kwargs)
 
     return fake_run
@@ -879,9 +912,14 @@ def test_push_branch_uses_force_with_lease(tmp_path: Path) -> None:
     push_calls: list[list[str]] = []
 
     def fake_run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git" and cmd[1] == "push":
-            push_calls.append(cmd)
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git":
+            if cmd[1] == "ls-remote":
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout=f"{'a' * 40}\trefs/heads/foreman/impl-494\n", stderr=""
+                )
+            if cmd[1] == "push":
+                push_calls.append(cmd)
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         return real_run(cmd, *args, **kwargs)
 
     provider = GitHubProvider(identity=_identity("ghs_abc"), client=MagicMock())
@@ -890,156 +928,187 @@ def test_push_branch_uses_force_with_lease(tmp_path: Path) -> None:
         provider.push_branch(worktree_path=wt, branch="foreman/impl-494")
 
     assert len(push_calls) == 1
-    assert "--force-with-lease" in push_calls[0], (
-        "push_branch must use --force-with-lease so Fixer rebases survive "
-        "(foreman#494: plain push was rejected non-fast-forward after rebase)"
+    assert any(arg.startswith("--force-with-lease=") for arg in push_calls[0]), (
+        "push_branch must force-push (explicit --force-with-lease=<branch>:<sha>) so "
+        "Fixer rebases survive (foreman#494: plain push rejected non-fast-forward after rebase)"
     )
 
 
 # ----------------------------------------------------------------------
-# foreman#484 — push_branch retry on non-fast-forward rejection
+# foreman#509/#427/#409 — force-push over a URL remote, exercised for REAL
 #
-# When a foreman/issue-N or foreman/impl-N remote branch has divergent
-# history from a prior run, a plain push is rejected with
-# "! [rejected] ... (fetch first)" or "(non-fast-forward)". Foreman
-# owns these branch namespaces, so a force-refresh is safe. The fix
-# adds a try/except around the initial push: on rejection it retries
-# with --force-with-lease; all other errors re-raise immediately.
+# push_branch pushes to an explicit token URL, not a named remote. A bare
+# --force-with-lease has no remote-tracking ref to lease against over a URL,
+# so git rejects EVERY non-fast-forward push (and even fast-forwards) as
+# "(stale info)" — and no preceding `git fetch` helps (PR #501's fix could
+# not work). The fix reads the branch's remote head via `git ls-remote` and
+# leases against it explicitly. These tests run real git against a local
+# bare repo — the end-to-end coverage PR #501 lacked (it stubbed the retry
+# to "succeed" and so never ran a real stale-info push).
 # ----------------------------------------------------------------------
 
 
-def test_push_branch_retries_with_force_on_non_fast_forward(tmp_path: Path) -> None:
-    """push_branch() fetches then retries with --force-with-lease on non-fast-forward rejection.
+def _seed_remote_branch(tmp_path: Path, branch: str) -> tuple[Path, str]:
+    """Create a bare remote + a worktree whose ``branch`` was pushed to it.
 
-    foreman#484: before the retry, ``git fetch origin <branch>`` must refresh
-    the remote-tracking ref so the --force-with-lease expectation is current.
+    Returns ``(worktree, file_url)``. The worktree's ``branch`` head equals the
+    remote's after this helper; callers then rewrite history to force a push.
     """
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True, capture_output=True)
+    file_url = f"file://{remote.as_posix()}"
     wt = _init_worktree(tmp_path)
-    subprocess.run(
-        ["git", "remote", "add", "origin", "https://github.com/owner/name.git"],
-        cwd=wt,
-        check=True,
-        capture_output=True,
-    )
-
-    real_run = subprocess.run
-    push_calls: list[list[str]] = []
-    fetch_calls: list[list[str]] = []
-
-    def fake_run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git":
-            if cmd[1] == "push":
-                push_calls.append(list(cmd))
-                if len(push_calls) == 1:
-                    raise subprocess.CalledProcessError(
-                        1,
-                        cmd,
-                        output="",
-                        stderr="! [rejected] foreman/issue-7 -> foreman/issue-7 (fetch first)\n",
-                    )
-                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-            if cmd[1] == "fetch":
-                fetch_calls.append(list(cmd))
-                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-        return real_run(cmd, *args, **kwargs)
-
-    provider = GitHubProvider(identity=_identity("ghs_abc"), client=MagicMock())
-
-    with patch("foreman.git_hosts.github.subprocess.run", side_effect=fake_run):
-        provider.push_branch(worktree_path=wt, branch="foreman/issue-7")
-
-    assert len(push_calls) == 2, "expected initial push + force-with-lease retry"
-    assert "--force-with-lease" in push_calls[1], "retry must use --force-with-lease"
-    assert len(fetch_calls) == 1, "expected one git fetch before the retry"
-    assert fetch_calls[0] == ["git", "fetch", "origin", "foreman/issue-7"], (
-        "fetch must target origin/<branch> to refresh the remote-tracking ref"
-    )
+    _git_run(wt, "checkout", "-b", branch)
+    (wt / "spec.md").write_text("v1\n")
+    _git_run(wt, "add", "spec.md")
+    _git_run(wt, "commit", "-m", "spec v1")
+    _git_run(wt, "push", file_url, f"{branch}:{branch}")
+    return wt, file_url
 
 
-def test_push_branch_retries_after_fetch_on_stale_info(tmp_path: Path) -> None:
-    """push_branch() fetches then retries when --force-with-lease is rejected as stale.
+def test_push_branch_force_pushes_rewritten_history_over_url(tmp_path: Path) -> None:
+    """Regression for #509/#427/#409, against a REAL remote.
 
-    foreman#484 production bug: tickets #509, #427, #409 died with
-    ``! [rejected] ... (stale info)`` because the local remote-tracking ref was
-    behind the real remote tip (another agent pushed meanwhile).  The original
-    retry re-ran --force-with-lease WITHOUT a fetch, so the tracking ref was
-    still stale and the retry failed identically.
-
-    Fix: catch ``"stale info"`` in addition to ``"fetch first"`` /
-    ``"non-fast-forward"``, run ``git fetch origin <branch>`` first, then retry.
-    This test asserts both halves of that fix.
+    push_branch must land a history-rewriting (non-fast-forward) push over a
+    URL remote — the exact shape that died in production as ``(stale info)``
+    under a bare --force-with-lease and that PR #501 could not fix. Patches
+    ``_push_url`` to a local bare repo so the ls-remote + explicit-lease git
+    logic runs for real (URL construction is covered separately).
     """
-    wt = _init_worktree(tmp_path)
-    subprocess.run(
-        ["git", "remote", "add", "origin", "https://github.com/owner/name.git"],
+    branch = "foreman/issue-427"
+    wt, file_url = _seed_remote_branch(tmp_path, branch)
+
+    # Rewrite history so the next push is non-fast-forward (Fixer rebase shape).
+    (wt / "spec.md").write_text("v2\n")
+    _git_run(wt, "commit", "-a", "--amend", "-m", "spec v2")
+    local_head = _git_run(wt, "rev-parse", "HEAD").stdout.strip()
+
+    provider = GitHubProvider(identity=_identity(), client=MagicMock())
+    with patch.object(provider, "_push_url", return_value=file_url):
+        provider.push_branch(worktree_path=wt, branch=branch)
+
+    remote_head = _git_run(wt, "ls-remote", file_url, f"refs/heads/{branch}").stdout.split()[0]
+    assert remote_head == local_head, "explicit-lease force push must land rewritten history"
+
+
+def test_bare_force_with_lease_over_url_is_rejected_stale(tmp_path: Path) -> None:
+    """Pins the git behaviour push_branch works around.
+
+    A BARE --force-with-lease over a URL remote is rejected ``(stale info)``
+    even for a legitimate force push. If a future refactor reverts push_branch
+    to the bare form, this fails loudly — documenting WHY the remote head is
+    read explicitly.
+    """
+    branch = "foreman/issue-427"
+    wt, file_url = _seed_remote_branch(tmp_path, branch)
+    (wt / "spec.md").write_text("v2\n")
+    _git_run(wt, "commit", "-a", "--amend", "-m", "spec v2")
+
+    result = subprocess.run(
+        ["git", "push", "--force-with-lease", file_url, f"{branch}:{branch}"],
         cwd=wt,
-        check=True,
         capture_output=True,
+        text=True,
     )
+    assert result.returncode != 0, "bare --force-with-lease over a URL should be rejected"
+    assert "stale info" in result.stderr
+
+
+def test_push_branch_lease_refuses_when_leased_head_is_stale(tmp_path: Path) -> None:
+    """push_branch must be a genuine LEASE, not a blind force.
+
+    If the head it leased against no longer matches the remote (another writer
+    advanced the branch after the ls-remote read), the push must be refused
+    rather than clobbering. A plain ``--force`` would silently overwrite here —
+    so this test is what distinguishes the explicit lease from a blind force.
+    """
+    branch = "foreman/issue-427"
+    wt, file_url = _seed_remote_branch(tmp_path, branch)  # remote & local at H1
+    stale_head = _git_run(wt, "rev-parse", "HEAD").stdout.strip()
+
+    # Advance the REMOTE past H1 (another writer), leaving stale_head behind.
+    (wt / "spec.md").write_text("remote-advance\n")
+    _git_run(wt, "commit", "-a", "-m", "advance")
+    _git_run(wt, "push", file_url, f"{branch}:{branch}")  # remote now at H2
+    # Rewrite local off H1 so a force push is needed and HEAD != H2 lineage.
+    _git_run(wt, "reset", "--hard", stale_head)
+    (wt / "spec.md").write_text("local-divergent\n")
+    _git_run(wt, "commit", "-a", "--amend", "-m", "divergent")
 
     real_run = subprocess.run
-    push_calls: list[list[str]] = []
-    fetch_calls: list[list[str]] = []
 
-    def fake_run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git":
-            if cmd[1] == "push":
-                push_calls.append(list(cmd))
-                if len(push_calls) == 1:
-                    # Exact stderr shape from the three production failures
-                    raise subprocess.CalledProcessError(
-                        1,
-                        cmd,
-                        output="",
-                        stderr=(
-                            "! [rejected]  foreman/issue-427 -> foreman/issue-427"
-                            " (stale info)\nerror: failed to push some refs\n"
-                        ),
-                    )
-                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-            if cmd[1] == "fetch":
-                fetch_calls.append(list(cmd))
-                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-        return real_run(cmd, *args, **kwargs)
-
-    provider = GitHubProvider(identity=_identity("ghs_abc"), client=MagicMock())
-
-    with patch("foreman.git_hosts.github.subprocess.run", side_effect=fake_run):
-        provider.push_branch(worktree_path=wt, branch="foreman/issue-7")
-
-    # fetch must happen BEFORE the retry push
-    assert len(fetch_calls) == 1, (
-        "expected exactly one git fetch to refresh the remote-tracking ref before retry"
-    )
-    assert fetch_calls[0] == ["git", "fetch", "origin", "foreman/issue-7"], (
-        "fetch must be 'git fetch origin <branch>' — not a full fetch"
-    )
-    assert len(push_calls) == 2, "expected initial push + retry"
-    assert "--force-with-lease" in push_calls[1], "retry must use --force-with-lease"
-
-
-def test_push_branch_does_not_retry_on_non_rejection_error(tmp_path: Path) -> None:
-    """A push failure that is NOT a non-fast-forward rejection must not trigger retry."""
-    wt = _init_worktree(tmp_path)
-    subprocess.run(
-        ["git", "remote", "add", "origin", "https://github.com/owner/name.git"],
-        cwd=wt,
-        check=True,
-        capture_output=True,
-    )
-
-    real_run = subprocess.run
-    push_calls: list[list[str]] = []
-
-    def fake_run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git" and cmd[1] == "push":
-            push_calls.append(list(cmd))
-            raise subprocess.CalledProcessError(
-                1,
-                cmd,
-                output="",
-                stderr="refusing to allow a GitHub App to create or update workflow without workflows permission",
+    def fake_run(cmd, *a, **k):  # type: ignore[no-untyped-def]
+        # Force push_branch to lease against the STALE head (H1) while the real
+        # remote is at H2 — the push must then be rejected by the lease check.
+        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git" and cmd[1] == "ls-remote":
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=f"{stale_head}\trefs/heads/{branch}\n", stderr=""
             )
+        return real_run(cmd, *a, **k)
+
+    provider = GitHubProvider(identity=_identity(), client=MagicMock())
+    with patch.object(provider, "_push_url", return_value=file_url):
+        with patch("foreman.git_hosts.github.subprocess.run", side_effect=fake_run):
+            with pytest.raises(GitCommandError):
+                provider.push_branch(worktree_path=wt, branch=branch)
+
+    # The stale-lease push must NOT have landed: remote is still at H2.
+    remote_head = _git_run(wt, "ls-remote", file_url, f"refs/heads/{branch}").stdout.split()[0]
+    assert remote_head != _git_run(wt, "rev-parse", "HEAD").stdout.strip()
+
+
+def test_push_branch_creates_absent_branch_over_url(tmp_path: Path) -> None:
+    """First push of a branch absent on the remote: plain-create, no lease."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True, capture_output=True)
+    file_url = f"file://{remote.as_posix()}"
+    branch = "foreman/issue-999"
+    wt = _init_worktree(tmp_path)
+    _git_run(wt, "checkout", "-b", branch)
+    (wt / "spec.md").write_text("v1\n")
+    _git_run(wt, "add", "spec.md")
+    _git_run(wt, "commit", "-m", "spec v1")
+    local_head = _git_run(wt, "rev-parse", "HEAD").stdout.strip()
+
+    provider = GitHubProvider(identity=_identity(), client=MagicMock())
+    with patch.object(provider, "_push_url", return_value=file_url):
+        provider.push_branch(worktree_path=wt, branch=branch)
+
+    remote_head = _git_run(wt, "ls-remote", file_url, f"refs/heads/{branch}").stdout.split()[0]
+    assert remote_head == local_head, "absent branch must be created on the remote"
+
+
+def test_push_branch_surfaces_push_failure(tmp_path: Path) -> None:
+    """A push failure surfaces as GitCommandError with git's stderr intact.
+
+    There is no retry loop: the explicit-lease push is issued once, and any
+    failure (e.g. a workflows-permission rejection) propagates directly.
+    """
+    wt = _init_worktree(tmp_path)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/owner/name.git"],
+        cwd=wt,
+        check=True,
+        capture_output=True,
+    )
+
+    real_run = subprocess.run
+    push_calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git":
+            if cmd[1] == "ls-remote":
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout=f"{'a' * 40}\trefs/heads/foreman/issue-7\n", stderr=""
+                )
+            if cmd[1] == "push":
+                push_calls.append(list(cmd))
+                raise subprocess.CalledProcessError(
+                    1,
+                    cmd,
+                    output="",
+                    stderr="refusing to allow a GitHub App to create or update workflow without workflows permission",
+                )
         return real_run(cmd, *args, **kwargs)
 
     provider = GitHubProvider(identity=_identity("ghs_abc"), client=MagicMock())
@@ -1048,7 +1117,7 @@ def test_push_branch_does_not_retry_on_non_rejection_error(tmp_path: Path) -> No
         with pytest.raises(GitCommandError) as excinfo:
             provider.push_branch(worktree_path=wt, branch="foreman/issue-7")
 
-    assert len(push_calls) == 1, "only one push attempt, no retry"
+    assert len(push_calls) == 1, "single push attempt, no retry loop"
     assert "workflows permission" in excinfo.value.stderr
 
 
