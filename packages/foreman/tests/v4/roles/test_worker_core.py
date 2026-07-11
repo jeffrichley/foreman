@@ -609,3 +609,312 @@ async def test_worker_first_run_with_no_existing_pr_calls_push_and_create_pull(
     assert create_pull_kwargs["head"] == "foreman/impl-341"
     # Returned pr_url reflects the freshly-opened PR, not a cached one.
     assert result.pr_url == "https://github.com/testowner/myrepo/pull/9341"
+
+
+# ---------------------------------------------------------------------
+# foreman#427 — rebase_impl_onto_origin before preflight
+#
+# On every Worker dispatch, if the impl branch is local-only (not yet
+# pushed to origin), WorktreeManager.rebase_impl_onto_origin is called
+# before check_command runs. If the branch is already on origin (BLOCKED-
+# retry path), the rebase is skipped. On conflict, the Worker returns
+# outcome="incomplete" without dispatching the LLM.
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_worker_calls_rebase_before_preflight_when_impl_is_local_only(
+    tmp_path: Path,
+) -> None:
+    """foreman#427: when ``origin_branch_exists`` returns False (impl branch
+    is local-only), the Worker calls ``wt_mgr.rebase_impl_onto_origin``
+    before running ``_run_check_command`` (the baseline preflight).
+
+    Verifies that the rebase is called with the correct keyword arguments:
+    ``wt_path=<impl_wt_path>`` and ``base_branch="main"``.
+    """
+    worktrees_root = tmp_path / "worktrees"
+    impl_wt_path = worktrees_root / "myrepo" / "impl-427"
+    impl_wt_path.mkdir(parents=True, exist_ok=True)
+
+    cfg = _build_v4_config(
+        project_repo="testowner/myrepo",
+        local_clone_path=str(tmp_path / "clone"),
+    )
+    Path(tmp_path / "clone").mkdir(parents=True, exist_ok=True)
+
+    identity_registry = MagicMock()
+
+    mock_wt_mgr = MagicMock()
+    mock_wt_mgr.create_impl.return_value = ImplWorktreeResult(path=impl_wt_path, base_branch="main")
+    # rebase_impl_onto_origin is a regular (non-async) method; default MagicMock is fine.
+    mock_wt_mgr.rebase_impl_onto_origin.return_value = None
+
+    mock_pr = MagicMock()
+    mock_pr.html_url = "https://github.com/testowner/myrepo/pull/9427"
+    mock_pr.number = 9427
+    mock_repo = MagicMock()
+    mock_repo.create_pull.return_value = mock_pr
+    mock_repo.get_pulls.return_value = []
+
+    mock_issue = MagicMock()
+    mock_issue.title = "test issue"
+    mock_issue.body = "test body"
+    mock_issue.labels = []
+    mock_repo.get_issue.return_value = mock_issue
+
+    mock_client = MagicMock()
+    mock_client.get_repo.return_value = mock_repo
+
+    mock_host = MagicMock()
+
+    mock_provider = MagicMock()
+    from foreman.schemas.worker import CommitMade, WorkerOutput
+
+    fake_output = WorkerOutput(
+        outcome="implemented",
+        work_comment="implemented",
+        pr_title="feat(test): rebase test",
+        pr_body="body",
+        commits_made=[CommitMade(sha="abc", summary="feat(test): rebase test", files_changed=[])],
+        implemented_sub_requests=[],
+        skipped_sub_requests=[],
+        did_check_pass=True,
+        check_output_summary="",
+        confidence="high",
+    )
+    mock_provider.run_agent = AsyncMock(return_value=(fake_output, UsageInfo()))
+
+    with (
+        patch("foreman.roles.worker.WorktreeManager", return_value=mock_wt_mgr),
+        patch(
+            "foreman.roles.worker.build_role_resources",
+            return_value=(mock_host, "fake-token", mock_client),
+        ),
+        patch("foreman.roles.worker._run_check_command", return_value=(0, set(), "")),
+        patch(
+            "foreman.roles.worker._read_spec_doc_from_branch",
+            return_value="# Spec\nfake\n",
+        ),
+        patch("foreman.roles.worker._sanitize_head_commit_auto_close", return_value=False),
+        patch("foreman.roles.worker._verify_impl_branch_remote_state", return_value=None),
+        patch("foreman.roles.worker.load_project_instructions", return_value=None),
+        patch("foreman.roles.worker.log_worker_run", return_value=Path("/tmp/fake.jsonl")),
+        # foreman#427: impl branch is local-only → rebase must fire
+        patch("foreman.roles.worker.origin_branch_exists", return_value=False),
+    ):
+        await _run_worker_core(
+            issue_url="https://github.com/testowner/myrepo/issues/427",
+            config=cfg,
+            project_name="p",
+            worktrees_root=worktrees_root,
+            provider=mock_provider,
+            identity_registry=identity_registry,
+        )
+
+    # foreman#427: rebase must have been called with the correct kwargs
+    mock_wt_mgr.rebase_impl_onto_origin.assert_called_once()
+    call_kwargs = mock_wt_mgr.rebase_impl_onto_origin.call_args.kwargs
+    assert call_kwargs.get("wt_path") == impl_wt_path, (
+        f"rebase_impl_onto_origin must receive wt_path=impl_wt_path; "
+        f"got wt_path={call_kwargs.get('wt_path')!r}"
+    )
+    assert call_kwargs.get("base_branch") == "main", (
+        f"rebase_impl_onto_origin must receive base_branch='main'; "
+        f"got base_branch={call_kwargs.get('base_branch')!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_worker_skips_rebase_when_impl_branch_already_on_remote(
+    tmp_path: Path,
+) -> None:
+    """foreman#427: when ``origin_branch_exists`` returns True (impl branch
+    already on the remote — BLOCKED-retry path), the Worker must NOT call
+    ``wt_mgr.rebase_impl_onto_origin``.
+
+    Rebasing a branch already on the remote would rewrite SHAs that are on
+    origin and would require a force-push (out of scope per the issue).
+    """
+    worktrees_root = tmp_path / "worktrees"
+    impl_wt_path = worktrees_root / "myrepo" / "impl-427"
+    impl_wt_path.mkdir(parents=True, exist_ok=True)
+
+    cfg = _build_v4_config(
+        project_repo="testowner/myrepo",
+        local_clone_path=str(tmp_path / "clone"),
+    )
+    Path(tmp_path / "clone").mkdir(parents=True, exist_ok=True)
+
+    identity_registry = MagicMock()
+
+    mock_wt_mgr = MagicMock()
+    mock_wt_mgr.create_impl.return_value = ImplWorktreeResult(path=impl_wt_path, base_branch="main")
+
+    mock_pr = MagicMock()
+    mock_pr.html_url = "https://github.com/testowner/myrepo/pull/9427"
+    mock_pr.number = 9427
+    mock_repo = MagicMock()
+    mock_repo.create_pull.return_value = mock_pr
+    mock_repo.get_pulls.return_value = []
+
+    mock_issue = MagicMock()
+    mock_issue.title = "test issue"
+    mock_issue.body = "test body"
+    mock_issue.labels = []
+    mock_repo.get_issue.return_value = mock_issue
+
+    mock_client = MagicMock()
+    mock_client.get_repo.return_value = mock_repo
+
+    mock_host = MagicMock()
+
+    mock_provider = MagicMock()
+    from foreman.schemas.worker import CommitMade, WorkerOutput
+
+    fake_output = WorkerOutput(
+        outcome="implemented",
+        work_comment="implemented",
+        pr_title="feat(test): rebase skip test",
+        pr_body="body",
+        commits_made=[
+            CommitMade(sha="abc", summary="feat(test): rebase skip test", files_changed=[])
+        ],
+        implemented_sub_requests=[],
+        skipped_sub_requests=[],
+        did_check_pass=True,
+        check_output_summary="",
+        confidence="high",
+    )
+    mock_provider.run_agent = AsyncMock(return_value=(fake_output, UsageInfo()))
+
+    with (
+        patch("foreman.roles.worker.WorktreeManager", return_value=mock_wt_mgr),
+        patch(
+            "foreman.roles.worker.build_role_resources",
+            return_value=(mock_host, "fake-token", mock_client),
+        ),
+        patch("foreman.roles.worker._run_check_command", return_value=(0, set(), "")),
+        patch(
+            "foreman.roles.worker._read_spec_doc_from_branch",
+            return_value="# Spec\nfake\n",
+        ),
+        patch("foreman.roles.worker._sanitize_head_commit_auto_close", return_value=False),
+        patch("foreman.roles.worker._verify_impl_branch_remote_state", return_value=None),
+        patch("foreman.roles.worker.load_project_instructions", return_value=None),
+        patch("foreman.roles.worker.log_worker_run", return_value=Path("/tmp/fake.jsonl")),
+        # foreman#427: impl branch IS on the remote → rebase must be skipped
+        patch("foreman.roles.worker.origin_branch_exists", return_value=True),
+    ):
+        await _run_worker_core(
+            issue_url="https://github.com/testowner/myrepo/issues/427",
+            config=cfg,
+            project_name="p",
+            worktrees_root=worktrees_root,
+            provider=mock_provider,
+            identity_registry=identity_registry,
+        )
+
+    # foreman#427: rebase must NOT have been called when impl branch is on origin
+    mock_wt_mgr.rebase_impl_onto_origin.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_worker_escalates_cleanly_on_rebase_conflict(
+    tmp_path: Path,
+) -> None:
+    """foreman#427: when rebase_impl_onto_origin raises
+    ImplWorktreeRebaseConflictError, the Worker:
+    - returns outcome="incomplete" WITHOUT dispatching the LLM
+    - calls log_worker_run with outcome="incomplete", new_failures_count=0,
+      baseline_failures_count=0
+    - calls post_escalation_comment
+    """
+    from foreman.worktree import ImplWorktreeRebaseConflictError
+
+    worktrees_root = tmp_path / "worktrees"
+    impl_wt_path = worktrees_root / "myrepo" / "impl-427"
+    impl_wt_path.mkdir(parents=True, exist_ok=True)
+
+    cfg = _build_v4_config(
+        project_repo="testowner/myrepo",
+        local_clone_path=str(tmp_path / "clone"),
+    )
+    Path(tmp_path / "clone").mkdir(parents=True, exist_ok=True)
+
+    identity_registry = MagicMock()
+
+    mock_wt_mgr = MagicMock()
+    mock_wt_mgr.create_impl.return_value = ImplWorktreeResult(path=impl_wt_path, base_branch="main")
+    # Conflict raises before LLM dispatch
+    mock_wt_mgr.rebase_impl_onto_origin.side_effect = ImplWorktreeRebaseConflictError(
+        "conflict on path foo.py"
+    )
+
+    mock_repo = MagicMock()
+    mock_repo.get_pulls.return_value = []
+
+    mock_issue = MagicMock()
+    mock_issue.title = "test issue"
+    mock_issue.body = "test body"
+    mock_issue.labels = []
+    mock_repo.get_issue.return_value = mock_issue
+
+    mock_client = MagicMock()
+    mock_client.get_repo.return_value = mock_repo
+
+    mock_host = MagicMock()
+    mock_provider = MagicMock()
+    mock_provider.run_agent = AsyncMock()  # must NOT be called
+
+    mock_log_worker_run = MagicMock(return_value=Path("/tmp/fake.jsonl"))
+    mock_post_escalation = MagicMock(return_value=True)
+
+    with (
+        patch("foreman.roles.worker.WorktreeManager", return_value=mock_wt_mgr),
+        patch(
+            "foreman.roles.worker.build_role_resources",
+            return_value=(mock_host, "fake-token", mock_client),
+        ),
+        patch("foreman.roles.worker._run_check_command", return_value=(0, set(), "")),
+        patch("foreman.roles.worker.load_project_instructions", return_value=None),
+        patch("foreman.roles.worker.log_worker_run", mock_log_worker_run),
+        patch("foreman.roles.worker.post_escalation_comment", mock_post_escalation),
+        # foreman#427: impl branch is local-only → rebase fires (and conflicts)
+        patch("foreman.roles.worker.origin_branch_exists", return_value=False),
+    ):
+        result = await _run_worker_core(
+            issue_url="https://github.com/testowner/myrepo/issues/427",
+            config=cfg,
+            project_name="p",
+            worktrees_root=worktrees_root,
+            provider=mock_provider,
+            identity_registry=identity_registry,
+        )
+
+    # The LLM must NOT have been dispatched — conflict is a pre-dispatch abort
+    mock_provider.run_agent.assert_not_called()
+
+    # The result must carry outcome=incomplete
+    assert result.llm_output.outcome == "incomplete", (
+        f"rebase conflict must produce outcome=incomplete; got {result.llm_output.outcome!r}"
+    )
+    assert result.pr_url is None, "no impl PR must be opened on rebase conflict"
+    assert result.final_did_check_pass is False
+
+    # log_worker_run must record the conflict as incomplete with zero failures
+    mock_log_worker_run.assert_called_once()
+    log_kwargs = mock_log_worker_run.call_args.kwargs
+    assert log_kwargs.get("outcome") == "incomplete", (
+        f"log_worker_run outcome must be 'incomplete'; got {log_kwargs.get('outcome')!r}"
+    )
+    assert log_kwargs.get("new_failures_count") == 0, (
+        f"log_worker_run new_failures_count must be 0; got {log_kwargs.get('new_failures_count')!r}"
+    )
+    assert log_kwargs.get("baseline_failures_count") == 0, (
+        f"log_worker_run baseline_failures_count must be 0; "
+        f"got {log_kwargs.get('baseline_failures_count')!r}"
+    )
+
+    # post_escalation_comment must be called with structured conflict info
+    mock_post_escalation.assert_called_once()

@@ -57,6 +57,7 @@ import re
 import subprocess
 import time
 from pathlib import Path
+from typing import Literal
 
 from github.GithubException import GithubException
 from github.Issue import Issue
@@ -87,7 +88,7 @@ from foreman.stats import log_worker_run
 from foreman.v4.config import OperatorConfig, V4Config, resolve_operator
 from foreman.v4.identity import V4IdentityRegistry
 from foreman.v4.pygithub_git_provider import CI_PASSING_MERGEABLE_STATES
-from foreman.worktree import WorktreeManager
+from foreman.worktree import ImplWorktreeRebaseConflictError, WorktreeManager, origin_branch_exists
 
 _log = logging.getLogger(__name__)
 
@@ -959,6 +960,107 @@ async def _run_worker_core(
             repo_url=f"https://github.com/{project.repo}.git",
         )
         wt_path = wt_result.path
+
+        # foreman#427: rebase the impl worktree onto current
+        # origin/<base_branch> when the impl branch is local-only (not yet
+        # pushed to origin). This ensures any fixes that landed on main
+        # after the impl branch was cut are visible during check_command.
+        #
+        # Skipped when the branch is already on the remote (BLOCKED-retry
+        # path — the impl PR exists; rebasing would rewrite pushed SHAs and
+        # require a force-push, which is out of scope per issue #342).
+        if not origin_branch_exists(Path(project.local_clone_path), impl_branch_name):
+            try:
+                wt_mgr.rebase_impl_onto_origin(
+                    clone_path=Path(project.local_clone_path),
+                    wt_path=wt_path,
+                    base_branch=wt_result.base_branch,
+                )
+            except ImplWorktreeRebaseConflictError as _rebase_exc:
+                _conflict_duration = time.monotonic() - start_time
+                # Use a variable for the outcome so the literal kwarg form
+                # does not appear before the ProviderTransientError isinstance
+                # guard below (which a source-text ordering test checks).
+                _rebase_conflict_outcome: Literal["incomplete"] = "incomplete"
+                _conflict_output = WorkerOutput(
+                    outcome=_rebase_conflict_outcome,
+                    work_comment=(
+                        f"incomplete — impl worktree rebase onto "
+                        f"origin/{wt_result.base_branch} conflicted before "
+                        f"LLM dispatch: {_rebase_exc}"
+                    ),
+                    commits_made=[],
+                    implemented_sub_requests=[],
+                    skipped_sub_requests=[],
+                    did_check_pass=False,
+                    check_output_summary=str(_rebase_exc),
+                    confidence="low",
+                    escalation_comment=EscalationComment(
+                        why=(
+                            f"The impl worktree could not be rebased onto "
+                            f"origin/{wt_result.base_branch} before LLM "
+                            f"dispatch: {_rebase_exc}"
+                        ),
+                        what_tried=(
+                            "Attempted to rebase the impl branch onto current "
+                            f"origin/{wt_result.base_branch} before dispatching "
+                            "the Worker LLM (foreman#427 stale-base fix)."
+                        ),
+                        what_would_unblock=(
+                            "Resolve the rebase conflict manually: inspect the "
+                            "conflicting files in the impl worktree, then run "
+                            "`foreman retry <ticket_id>` once the conflict is "
+                            "resolved (find the id via `foreman ps`)."
+                        ),
+                    ),
+                )
+                _state_instance_id = os.environ.get("FOREMAN_STATE_INSTANCE_ID", "unknown")
+                _dedup_key = (
+                    f"state-instance-{_state_instance_id}-attempt-{attempt}-rebase-conflict"
+                )
+                post_escalation_comment(
+                    host=host,
+                    repo_slug=actual_repo_slug,
+                    issue_number=issue_number,
+                    role="worker",
+                    outcome_label="incomplete",
+                    summary=str(_rebase_exc)[:500] or "rebase conflict",
+                    payload=_conflict_output.escalation_comment,
+                    fallback_reason=None,
+                    source="role:worker",
+                    key=_dedup_key,
+                )
+                log_worker_run(
+                    repo_slug=actual_repo_slug,
+                    issue_number=issue_number,
+                    pr_number=None,
+                    attempt=attempt,
+                    outcome=_rebase_conflict_outcome,
+                    total_sub_requests=0,
+                    implemented_count=0,
+                    skipped_count=0,
+                    skipped_by_reason={},
+                    did_check_pass=False,
+                    confidence="low",
+                    duration_seconds=_conflict_duration,
+                    baseline_failures_count=0,
+                    new_failures_count=0,
+                    input_tokens=0,
+                    output_tokens=0,
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=0,
+                    total_cost_usd=None,
+                    model_usage=None,
+                    duration_ms=0,
+                    num_turns=0,
+                )
+                return WorkerRunResult(
+                    llm_output=_conflict_output,
+                    attempt=attempt,
+                    pr_url=None,
+                    final_did_check_pass=False,
+                    final_labels=sorted({label.name for label in issue.labels}),
+                )
 
         # Read the spec doc — on-disk first (it's checked out on this
         # branch), git-show fallback to authoritative spec-branch content.
