@@ -484,7 +484,11 @@ Pydantic model — you cannot produce an invalid shape. Semantic rules:
   sentence per skipped sub-request.
 - `pr_title` and `pr_body` are REQUIRED when `outcome: implemented`
   and MUST be None for `incomplete` / `spec_invalid`. The Pydantic
-  validator enforces this.
+  validator enforces this. The subject (after `type(scope): `) MUST
+  begin with a lowercase letter — same `pr-title-lint` rule the commit
+  discipline enforces. When the natural subject opens with a code
+  identifier, open with a lowercase verb: `rework ImplApproved into ...`
+  not `ImplApproved ...`.
 - `spec_invalid_reason` is REQUIRED when `outcome: spec_invalid`
   and MUST be None for the other two outcomes.
 - `commits_made` is empty only when `outcome: spec_invalid` (no
