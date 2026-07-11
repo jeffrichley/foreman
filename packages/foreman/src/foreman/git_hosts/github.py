@@ -195,49 +195,56 @@ class GitHubProvider(GitHostProvider):
         result = self._git(worktree_path, "rev-parse", "HEAD")
         return result.stdout.strip()
 
-    def push_branch(self, worktree_path: Path, branch: str) -> None:
-        """Push ``branch`` to origin, authenticating via an installation-token URL.
-
-        Uses ``--force-with-lease`` so the push succeeds after a history-rewriting
-        rebase or amend (e.g. the Fixer rebasing its impl branch onto origin/main).
-        The flag is safe on bot-owned single-writer branches (``foreman/issue-*`` /
-        ``foreman/impl-*``) and refuses to overwrite if the remote moved unexpectedly
-        (unlike bare ``--force``).
+    def _push_url(self, worktree_path: Path) -> str:
+        """Build the installation-token push URL for this worktree's ``origin``.
 
         Reads the existing ``remote.origin.url`` to recover the owner/repo slug,
-        then constructs an ``https://x-access-token:<token>@...`` push URL rather
-        than using ``-c http.extraheader`` — the latter would leak the token into
-        persistent git config, whereas the URL form scopes it to this one subprocess
-        call.
+        then constructs an ``https://x-access-token:<token>@github.com/<slug>.git``
+        URL rather than using ``-c http.extraheader`` — the latter would leak the
+        token into the worktree's shared ``.git/config``, whereas the URL form
+        scopes it to the single subprocess call it is passed to.
         """
         remote_url = self._git(worktree_path, "config", "--get", "remote.origin.url").stdout.strip()
         repo_slug = _extract_repo_slug(remote_url)
-        push_url = f"https://x-access-token:{self._identity.token}@github.com/{repo_slug}.git"
-        try:
-            self._git(worktree_path, "push", "--force-with-lease", push_url, f"{branch}:{branch}")
-        except GitCommandError as exc:
-            if (
-                exc.returncode == 1
-                and "[rejected]" in exc.stderr
-                and (
-                    "fetch first" in exc.stderr
-                    or "non-fast-forward" in exc.stderr
-                    or "stale info" in exc.stderr
-                )
-            ):
-                # Remote branch has divergent history from a prior run, or the
-                # local remote-tracking ref is stale (--force-with-lease used the
-                # cached ref which another agent already advanced).  Refresh the
-                # tracking ref first, then retry; without the fetch the lease
-                # expectation is still stale and the retry fails identically.
-                # Foreman owns the foreman/issue-N and foreman/impl-N namespaces;
-                # force-refresh is safe and self-correcting.
-                self._git(worktree_path, "fetch", "origin", branch)
-                self._git(
-                    worktree_path, "push", "--force-with-lease", push_url, f"{branch}:{branch}"
-                )
-            else:
-                raise
+        return f"https://x-access-token:{self._identity.token}@github.com/{repo_slug}.git"
+
+    def push_branch(self, worktree_path: Path, branch: str) -> None:
+        """Push ``branch`` to origin over an installation-token URL, force-safely.
+
+        Force-pushes with an **explicit** ``--force-with-lease=<branch>:<sha>``
+        where ``<sha>`` is the branch's current head on the remote, read directly
+        via ``git ls-remote``. This lets a history-rewriting rebase or amend land
+        (e.g. the Fixer rebasing its impl branch onto ``origin/main``) while still
+        refusing to clobber if another writer advanced the branch since we looked.
+
+        A *bare* ``--force-with-lease`` (no explicit value) cannot be used here:
+        it derives its lease from the branch's remote-tracking ref, which does not
+        exist when pushing to an explicit URL rather than a named remote. Git then
+        rejects **every** non-fast-forward push — and even fast-forwards — as
+        ``! [rejected] ... (stale info)``, regardless of any preceding
+        ``git fetch`` — the earlier fetch-then-retry fix (PR #501) could not
+        work because the URL push never consults the fetched tracking ref.
+        Reading the remote head directly sidesteps the missing tracking ref.
+
+        When the branch does not yet exist on the remote (first push) there is
+        nothing to lease against, so a plain push creates it.
+        """
+        push_url = self._push_url(worktree_path)
+        refspec = f"{branch}:{branch}"
+        # Read the branch's current head on the remote to lease against. Empty
+        # stdout => the branch does not exist remotely yet (first push).
+        ls_remote = self._git(worktree_path, "ls-remote", push_url, f"refs/heads/{branch}")
+        remote_head = ls_remote.stdout.split()[0] if ls_remote.stdout.strip() else ""
+        if remote_head:
+            self._git(
+                worktree_path,
+                "push",
+                f"--force-with-lease={branch}:{remote_head}",
+                push_url,
+                refspec,
+            )
+        else:
+            self._git(worktree_path, "push", push_url, refspec)
 
     # ------------------------------------------------------------------
     # PR + label API operations
