@@ -163,7 +163,7 @@ def test_apply_project_reload_toml_decode_error_keeps_current(
     import tomllib
 
     def _bad_loader() -> list[ProjectConfig]:
-        raise tomllib.TOMLDecodeError("invalid TOML syntax", doc="", pos=0)
+        raise tomllib.TOMLDecodeError("invalid TOML syntax")
 
     daemon = _make_daemon(_PC1, loader_fn=_bad_loader)
 
@@ -181,8 +181,6 @@ def test_apply_project_reload_toml_decode_error_keeps_current(
         for rec in caplog.records
     ), f"Expected warning log; got: {[r.message for r in caplog.records]}"
 ```
-
-> **Worker note on `TOMLDecodeError` constructor**: `tomllib.TOMLDecodeError.__init__` takes `(msg, doc, pos)` — all three positional. Use `tomllib.TOMLDecodeError("invalid TOML syntax", doc="", pos=0)` to construct a real exception instance rather than `MagicMock`, keeping the test free of mocking.
 
 ## Alternatives considered
 
