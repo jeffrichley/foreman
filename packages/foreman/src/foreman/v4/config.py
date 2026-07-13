@@ -365,6 +365,19 @@ class V4Config(BaseModel):
     tick_seconds: float = 30.0
     max_in_flight: int = 1
     role_timeout_seconds: int = 600
+    role_inactivity_timeout_seconds: int = Field(default=300, ge=0)
+    """foreman#483: stdout/stderr inactivity watchdog for role subprocesses.
+
+    A healthy role streams output continuously (tool calls, log lines); a
+    hung one — the intermittent post-startup stall where the first agent
+    turn blocks on I/O and emits nothing — is detectable in minutes. When
+    a dispatched role produces no output on either stream for this many
+    seconds, the dispatcher kills and re-dispatches it rather than waiting
+    out the full ``role_timeout_seconds`` wall-clock ceiling (which only
+    lengthens each silent burn before the retry that actually recovers).
+    ``role_timeout_seconds`` remains the absolute backstop. Default 300
+    (5 min). Set 0 to disable the watchdog and fall back to the flat
+    wall-clock timeout alone."""
     clone_refresh_seconds: int = Field(default=300, ge=0)
     """foreman#407: minimum wall-clock interval between per-poll
     ``origin/<default-branch>`` refreshes of each project's local clone.
