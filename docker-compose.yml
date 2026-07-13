@@ -131,6 +131,14 @@ services:
       - foreman-repos:/foreman/repos
       - foreman-state:/foreman/state
       - foreman-logs:/foreman/logs
+      # foreman#517: persist the uv package cache across container recreates.
+      # Without this it lives on the ephemeral writable layer and is wiped on
+      # every Watchtower redeploy, forcing a cold ~5.8G re-sync (torch + CUDA)
+      # on the first ticket of each new container. That cold sync is silent and
+      # was eating the role no-output watchdog window (now disabled), and it
+      # still wastes minutes per redeploy. Named volume survives recreate +
+      # `down` (only wiped by `down -v`), so heavy-dep syncs stay warm.
+      - foreman-uv-cache:/root/.cache/uv
       # Crash-recovery resume arm: persist the Claude session dir
       # (CLAUDE_CONFIG_DIR=/root/.claude-container) so role session
       # transcripts survive a container recreate (Watchtower redeploy).
@@ -218,6 +226,10 @@ volumes:
   # Persists across container recreate so a redeploy mid-work can resume the
   # interrupted role's session instead of re-running it from scratch.
   foreman-claude-sessions:
+  # foreman#517: uv package cache — persists across recreate so heavy-dep
+  # syncs (torch + CUDA, ~5.8G) stay warm and don't cold re-sync on every
+  # redeploy. Only wiped by `docker compose down -v`.
+  foreman-uv-cache:
 
 # Secrets sourced from the host's protected user directory.
 secrets:

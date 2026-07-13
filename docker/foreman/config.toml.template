@@ -20,6 +20,16 @@ log_level = "INFO"
 tick_seconds = 30.0
 max_in_flight = 1
 role_timeout_seconds = 1800
+# foreman#483 no-output inactivity watchdog: DISABLED (0) 2026-07-13.
+# It false-killed legitimate long *silent* role phases — cold uv syncs and,
+# decisively, the Worker's pre-model ``just check`` baseline test run, which on
+# a heavy repo (agent_core's pytest suite) runs well past the old 300s window
+# with zero stdout. The wall-clock ``role_timeout_seconds`` above (30 min) is
+# the real hang backstop; a second output-based timer only produced false
+# positives. 0 disables the watchdog (``if self._inactivity_timeout > 0`` guard
+# in subprocess_dispatcher). Re-enable with a value in seconds if a genuine
+# silent-hang class ever needs a tighter-than-wall-clock trip.
+role_inactivity_timeout_seconds = 0
 max_state_attempts = 3
 
 # Persistence is Postgres-only (kill-sqlite). ``engine`` is fixed to
