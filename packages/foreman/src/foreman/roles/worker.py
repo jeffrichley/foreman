@@ -1129,6 +1129,22 @@ async def _run_worker_core(
         _session_id = os.environ.get("FOREMAN_SESSION_ID")
         _resume_id = os.environ.get("FOREMAN_RESUME_SESSION_ID")
         _resume = bool(_resume_id) and _resume_id == _session_id
+        # foreman#483: bracket the Worker's agent turn with explicit
+        # checkpoints. The observed hang is a silent stall AT this call —
+        # the log dead-ended at ``uv sync`` and the root cause could only
+        # be inferred. This "dispatching" line is the last thing on disk
+        # when the turn hangs, so the dispatcher's inactivity watchdog
+        # kill can be attributed to the agent call rather than guessed.
+        # The "returned in Xs" line confirms the turn completed and how
+        # long it took.
+        _log.info(
+            "[worker] dispatching agent turn (issue=%s attempt=%s session=%s resume=%s)",
+            issue_number,
+            attempt,
+            _session_id or "new",
+            _resume,
+        )
+        _agent_turn_start = time.monotonic()
         try:
             llm_output, run_usage = await provider.run_agent(
                 system_prompt=system_prompt,
@@ -1154,6 +1170,10 @@ async def _run_worker_core(
                 },
             )
             usage = run_usage
+            _log.info(
+                "[worker] agent turn returned in %.1fs",
+                time.monotonic() - _agent_turn_start,
+            )
         except ProviderError as exc:
             # foreman#361 CRITICAL: re-raise transient subclass past
             # this swallow so the outer ``except ProviderError`` at
