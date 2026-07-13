@@ -178,6 +178,10 @@ def bootstrap_cli_context(
         identity=identity,
         log_dir=Path(config.log_dir),
         timeout_seconds=config.role_timeout_seconds,  # Phase 5 carryover
+        # foreman#483: no-output watchdog — kill+re-dispatch a role that
+        # streams nothing for this long, rather than burning the full
+        # role_timeout_seconds on a silent hang.
+        inactivity_timeout_seconds=config.role_inactivity_timeout_seconds,
     )
 
     pollers: list[Poller] = []

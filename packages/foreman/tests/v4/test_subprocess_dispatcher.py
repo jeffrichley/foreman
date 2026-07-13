@@ -401,6 +401,106 @@ def test_dispatch_timeout_writes_marker_and_raises(tmp_path: Path):
     assert "--- TIMEOUT after 1s ---" in log_text
 
 
+def test_inactivity_watchdog_kills_silent_subprocess(tmp_path: Path):
+    """foreman#483: a subprocess that emits nothing for longer than the
+    inactivity window is killed + re-raised as RoleSubprocessError,
+    WITHOUT waiting out the (much larger) absolute timeout."""
+    # Prints one line, then goes silent for 30s. The absolute timeout is
+    # 60s — so if the watchdog didn't fire, this test would hang ~60s.
+    script = textwrap.dedent("""
+        import time
+        print("started", flush=True)
+        time.sleep(30)
+    """)
+    dispatcher = SubprocessRoleDispatcher(
+        foreman_cli=_python_script_cli(script),
+        identity=_stub_identity(),
+        log_dir=tmp_path,
+        timeout_seconds=60,
+        inactivity_timeout_seconds=1,
+    )
+    start = time.monotonic()
+    with pytest.raises(RoleSubprocessError) as exc:
+        dispatcher.dispatch(role="worker", project="p", issue_number=1, ticket_id=1)
+    elapsed = time.monotonic() - start
+    assert "no output" in str(exc.value).lower()
+    assert "inactivity watchdog" in str(exc.value).lower()
+    # Fired on the ~1s inactivity window, not the 60s absolute ceiling.
+    assert elapsed < 30
+    log_text = next((tmp_path / "worker").glob("*.log")).read_text(encoding="utf-8")
+    assert "started" in log_text  # partial output preserved
+    assert "inactivity watchdog" in log_text
+
+
+def test_inactivity_watchdog_spares_continuously_streaming_subprocess(
+    tmp_path: Path,
+):
+    """foreman#483: a subprocess that keeps streaming — each line
+    resetting the activity clock — is NOT killed by the watchdog, even
+    though its total runtime exceeds the inactivity window."""
+    # A line every 0.2s for ~2s; no single gap exceeds the 1s window,
+    # though the total run does. Then the outcome marker + clean exit.
+    script = textwrap.dedent(f"""
+        import time
+        for i in range(10):
+            print("tick", i, flush=True)
+            time.sleep(0.2)
+        print({_HAPPY_OUTCOME!r}, flush=True)
+    """)
+    dispatcher = SubprocessRoleDispatcher(
+        foreman_cli=_python_script_cli(script),
+        identity=_stub_identity(),
+        log_dir=tmp_path,
+        timeout_seconds=60,
+        inactivity_timeout_seconds=1,
+    )
+    stdout = dispatcher.dispatch(role="worker", project="p", issue_number=1, ticket_id=1)
+    assert "FOREMAN_OUTCOME:" in stdout
+    log_text = next((tmp_path / "worker").glob("*.log")).read_text(encoding="utf-8")
+    assert "inactivity watchdog" not in log_text  # never fired
+    assert "--- exit code: 0 ---" in log_text
+
+
+def test_inactivity_watchdog_disabled_by_default_tolerates_silence(
+    tmp_path: Path,
+):
+    """foreman#483: with the watchdog left at its default (0 = disabled),
+    a silent gap that WOULD trip a 1s watchdog does not kill the process
+    — only the absolute timeout applies. Guards back-compat."""
+    script = textwrap.dedent(f"""
+        import time
+        time.sleep(2)
+        print({_HAPPY_OUTCOME!r}, flush=True)
+    """)
+    dispatcher = SubprocessRoleDispatcher(
+        foreman_cli=_python_script_cli(script),
+        identity=_stub_identity(),
+        log_dir=tmp_path,
+        timeout_seconds=60,
+    )
+    stdout = dispatcher.dispatch(role="worker", project="p", issue_number=1, ticket_id=1)
+    assert "FOREMAN_OUTCOME:" in stdout
+
+
+def test_pythonunbuffered_injected_into_child_env(tmp_path: Path):
+    """foreman#483: the dispatcher forces ``PYTHONUNBUFFERED=1`` in the
+    child env so a Python role flushes line-by-line into our pipes
+    instead of block-buffering — the guarantee that makes the inactivity
+    watchdog's 'no output' signal trustworthy."""
+    script = textwrap.dedent(f"""
+        import os
+        print("PYTHONUNBUFFERED=" + repr(os.environ.get("PYTHONUNBUFFERED")), flush=True)
+        print({_HAPPY_OUTCOME!r}, flush=True)
+    """)
+    dispatcher = SubprocessRoleDispatcher(
+        foreman_cli=_python_script_cli(script),
+        identity=_stub_identity(),
+        log_dir=tmp_path,
+    )
+    stdout = dispatcher.dispatch(role="planner", project="p", issue_number=1, ticket_id=1)
+    assert "PYTHONUNBUFFERED='1'" in stdout
+
+
 def test_dispatch_target_aware_role_lands_in_base_role_dir(tmp_path: Path):
     """``reviewer-spec`` and ``reviewer-impl`` both write into
     ``<log_dir>/reviewer/``, not separate subdirs. Same for fixer."""

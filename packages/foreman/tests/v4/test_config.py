@@ -209,6 +209,35 @@ def test_role_timeout_seconds_override(tmp_path: Path):
     assert config.role_timeout_seconds == 1200
 
 
+def test_role_inactivity_timeout_seconds_default_300(tmp_path: Path):
+    """foreman#483: the no-output watchdog window defaults to 300s (5 min)."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[daemon]\n"
+        'log_dir = "/tmp/foreman-logs"\n' + _APPS_TOML + "[[projects]]\n"
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+    )
+    config = load_config(config_path)
+    assert config.role_inactivity_timeout_seconds == 300
+
+
+def test_role_inactivity_timeout_seconds_override(tmp_path: Path):
+    """foreman#483: the watchdog window is operator-tunable; 0 disables it."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[daemon]\n"
+        'log_dir = "/tmp/foreman-logs"\n'
+        "role_inactivity_timeout_seconds = 0\n" + _APPS_TOML + "[[projects]]\n"
+        'name = "voice"\n'
+        'repo = "jeffrichley/voice"\n'
+        'local_clone_path = "/tmp/voice"\n'
+    )
+    config = load_config(config_path)
+    assert config.role_inactivity_timeout_seconds == 0
+
+
 def test_max_state_attempts_default_3(tmp_path: Path):
     """Phase 8c.2 retry cap defaults to 3 — matches max_fix_attempts /
     max_impl_attempts shape and is the smallest cap that still allows

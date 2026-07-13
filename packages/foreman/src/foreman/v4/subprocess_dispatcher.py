@@ -41,6 +41,7 @@ import logging
 import os
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -59,6 +60,16 @@ _STDERR_PREFIX = "[stderr] "
 # enough that a stuck reader thread doesn't wedge a daemon worker
 # forever — we log a warning and proceed.
 _READER_JOIN_TIMEOUT_SECONDS = 30.0
+
+# foreman#483: how often the inactivity watchdog wakes to compare
+# now-vs-last-output. Bounded to 1s so the absolute timeout and the
+# inactivity timeout are both honored within ~1s of their deadline;
+# floored well below any real timeout so sub-second test timeouts still
+# fire promptly. ``proc.wait`` returns immediately when the child exits,
+# so this only bounds the latency of NOTICING a timeout, never the
+# happy-path exit.
+_WATCHDOG_POLL_CEILING_SECONDS = 1.0
+_WATCHDOG_POLL_FLOOR_SECONDS = 0.05
 
 
 class IdentityProvider(Protocol):
@@ -164,6 +175,7 @@ def _stream_to_log(
     *,
     prefix: str,
     capture: list[str] | None,
+    last_activity: list[float],
 ) -> None:
     """Reader-thread body: drain ``stream`` line-by-line into ``log_file``.
 
@@ -173,6 +185,16 @@ def _stream_to_log(
     list (when provided) buffers stdout text for the state-machine
     contract — the return value of ``dispatch()`` must remain the
     subprocess's stdout, byte-for-byte (sans prefix).
+
+    ``last_activity`` is a single-element list holding the monotonic
+    timestamp of the most recent line received on EITHER stream
+    (foreman#483). Every received line stamps it — before the write
+    attempt, so a broken log writer still counts inbound bytes as "the
+    child is alive". The inactivity watchdog in ``_run_and_stream`` reads
+    it to decide whether a silent child has hung. A single-element list
+    is a deliberately simple cross-thread channel: the store is one
+    atomic ``STORE_SUBSCR`` bytecode and the watchdog only ever reads a
+    float, so no lock is needed for a monotonically-advancing timestamp.
 
     Failure semantics: if ``log_file.write`` or ``log_file.flush`` raises
     (closed file, disk full, etc.), the reader does NOT die silently.
@@ -185,6 +207,10 @@ def _stream_to_log(
     write_broken = False
     try:
         for line in stream:
+            # Stamp activity for EVERY inbound line, before the write
+            # attempt — receiving bytes proves the child is alive even
+            # if the log writer is broken (foreman#483).
+            last_activity[0] = time.monotonic()
             if not write_broken:
                 try:
                     with log_lock:
@@ -232,11 +258,17 @@ class SubprocessRoleDispatcher:
         identity: IdentityProvider,
         log_dir: Path,
         timeout_seconds: int = 600,
+        inactivity_timeout_seconds: int = 0,
     ) -> None:
         self._foreman_cli = foreman_cli
         self._identity = identity
         self._log_dir = log_dir
         self._timeout = timeout_seconds
+        # foreman#483: no-output watchdog. 0 disables it (the dispatcher
+        # falls back to the flat ``timeout_seconds`` wall-clock alone,
+        # preserving pre-#483 behavior for direct-CLI / test callers).
+        # Production wires this from ``V4Config.role_inactivity_timeout_seconds``.
+        self._inactivity_timeout = inactivity_timeout_seconds
 
     def dispatch(
         self,
@@ -279,6 +311,16 @@ class SubprocessRoleDispatcher:
 
         env = dict(os.environ)
         env["GH_TOKEN"] = self._identity.get_role_token(role)
+        # foreman#483: force the child's own stdout/stderr unbuffered so
+        # a Python role flushes line-by-line into our pipes instead of
+        # block-buffering ~8KB (the default when stdout is a pipe, not a
+        # TTY). Without this, "the parent saw no output" is ambiguous —
+        # the child may have produced output that's stuck in its buffer —
+        # which would let a working-but-buffering role trip the
+        # inactivity watchdog, and let a hung role's last buffered line
+        # mask the silence. Unbuffered output makes the watchdog signal
+        # trustworthy. No effect on non-Python children.
+        env["PYTHONUNBUFFERED"] = "1"
         # foreman#367: thread the current state-instance id into the
         # subprocess so the role-core dedup-key construction
         # (`state-instance-<id>`) is stable across retries on the same
@@ -423,7 +465,15 @@ class SubprocessRoleDispatcher:
         t_out: threading.Thread | None = None
         t_err: threading.Thread | None = None
         timed_out = False
+        # foreman#483: which timeout fired, so the marker + operator
+        # message name the actual failure mode. "" until one fires.
+        timeout_kind = ""
         returncode: int | None = None
+        # foreman#483: single-element list holding the monotonic time of
+        # the most recent line on either stream. Seeded at spawn so a
+        # child that emits nothing is measured from process start, not
+        # from an implicit "now" the first poll happens to observe.
+        last_activity = [time.monotonic()]
         try:
             # PIPE guarantees both streams are not-None; the cast keeps
             # mypy happy without an `assert` that python -O would strip.
@@ -433,29 +483,65 @@ class SubprocessRoleDispatcher:
             t_out = threading.Thread(
                 target=_stream_to_log,
                 args=(proc_stdout, log_file, log_lock, writer_failed),
-                kwargs={"prefix": "", "capture": stdout_chunks},
+                kwargs={
+                    "prefix": "",
+                    "capture": stdout_chunks,
+                    "last_activity": last_activity,
+                },
                 name=f"role-stream-stdout-{role}",
                 daemon=True,
             )
             t_err = threading.Thread(
                 target=_stream_to_log,
                 args=(proc_stderr, log_file, log_lock, writer_failed),
-                kwargs={"prefix": _STDERR_PREFIX, "capture": None},
+                kwargs={
+                    "prefix": _STDERR_PREFIX,
+                    "capture": None,
+                    "last_activity": last_activity,
+                },
                 name=f"role-stream-stderr-{role}",
                 daemon=True,
             )
             t_out.start()
             t_err.start()
 
-            try:
-                returncode = proc.wait(timeout=self._timeout)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                # proc.kill() + explicit wait happens in the finally
-                # block below so the cleanup path is single-sourced.
-                raise RoleSubprocessError(
-                    f"role={role} exceeded timeout {self._timeout}s; see log at {log_path}"
-                ) from None
+            # foreman#483: poll for exit on a short interval instead of a
+            # single blocking ``wait(timeout=self._timeout)``. Each wake
+            # checks two independent deadlines — the inactivity watchdog
+            # (kill fast when a hung child goes silent) and the absolute
+            # wall-clock ceiling (unchanged backstop). ``proc.kill()`` +
+            # reap for BOTH still happens once, in the finally block, so
+            # the cleanup path stays single-sourced.
+            poll = _WATCHDOG_POLL_CEILING_SECONDS
+            if self._timeout > 0:
+                poll = min(poll, float(self._timeout))
+            if self._inactivity_timeout > 0:
+                poll = min(poll, float(self._inactivity_timeout))
+            poll = max(poll, _WATCHDOG_POLL_FLOOR_SECONDS)
+            absolute_deadline = time.monotonic() + self._timeout
+            while True:
+                try:
+                    returncode = proc.wait(timeout=poll)
+                    break
+                except subprocess.TimeoutExpired:
+                    now = time.monotonic()
+                    if (
+                        self._inactivity_timeout > 0
+                        and now - last_activity[0] > self._inactivity_timeout
+                    ):
+                        timed_out = True
+                        timeout_kind = "inactivity"
+                        raise RoleSubprocessError(
+                            f"role={role} produced no output for "
+                            f"{self._inactivity_timeout}s (inactivity "
+                            f"watchdog); see log at {log_path}"
+                        ) from None
+                    if now >= absolute_deadline:
+                        timed_out = True
+                        timeout_kind = "absolute"
+                        raise RoleSubprocessError(
+                            f"role={role} exceeded timeout {self._timeout}s; see log at {log_path}"
+                        ) from None
         finally:
             # Resource cleanup runs on EVERY exit path: happy success,
             # TimeoutExpired-then-raise, RoleSubprocessError-from-below,
@@ -508,9 +594,16 @@ class SubprocessRoleDispatcher:
             # footer is written below this finally so it can include
             # the actual returncode.
             if timed_out:
+                if timeout_kind == "inactivity":
+                    marker = (
+                        f"--- TIMEOUT: no output for "
+                        f"{self._inactivity_timeout}s (inactivity watchdog) ---\n"
+                    )
+                else:
+                    marker = f"--- TIMEOUT after {self._timeout}s ---\n"
                 try:
                     with log_lock:
-                        log_file.write(f"--- TIMEOUT after {self._timeout}s ---\n")
+                        log_file.write(marker)
                         log_file.flush()
                 except Exception:
                     # If the log file is broken we can't do anything
