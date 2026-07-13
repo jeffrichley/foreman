@@ -607,6 +607,19 @@ class AnthropicSDKProvider(ProviderFacade):
         post_success_envelopes: list[str] = []
 
         async for message in query(prompt=user_prompt, options=options):
+            # foreman#519: forward a one-line progress marker for every SDK
+            # envelope to stdout the moment it arrives. The daemon's no-output
+            # inactivity watchdog (foreman#483) keys off role-subprocess stdout;
+            # without this the whole model turn is silent (we only printed the
+            # terminal FOREMAN_OUTCOME), so a legitimately long turn on a large
+            # repo blew past the 300s window and was false-killed as "hung".
+            # These envelopes already stream through this loop — we just stopped
+            # discarding them. ``flush=True`` so the watchdog reads them live;
+            # the ``[role]`` prefix keeps them clear of the FOREMAN_OUTCOME
+            # parser (which only matches its own line-prefix). Doubles as live
+            # role progress in the captured role log.
+            print(f"[role] {_describe_envelope(message)}", flush=True)
+
             if captured_success is not None:
                 post_success_envelopes.append(_describe_envelope(message))
 

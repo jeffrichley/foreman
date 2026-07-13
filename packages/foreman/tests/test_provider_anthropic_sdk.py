@@ -151,6 +151,55 @@ async def test_run_agent_returns_validated_pydantic_instance(
 
 
 # ----------------------------------------------------------------------
+# foreman#519: stream every SDK envelope to stdout (watchdog liveness)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_agent_forwards_every_envelope_to_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Every SDK envelope is forwarded to stdout as a ``[role]`` progress
+    line the moment it streams through.
+
+    The daemon's no-output inactivity watchdog (foreman#483) keys off role
+    stdout; before foreman#519 the intermediate envelopes were discarded and
+    the whole turn was silent, so a long turn on a large repo was false-killed
+    as "hung". This asserts the intermediate (non-Result) envelopes reach
+    stdout, not just the terminal one.
+    """
+
+    class _Envelope:
+        """Stand-in for a mid-turn SDK message (assistant text / tool use)."""
+
+    messages = [
+        _Envelope(),
+        _Envelope(),
+        _make_result(subtype="success", structured_output={"name": "ok", "count": 1}),
+    ]
+    _patch_query(monkeypatch, messages)
+
+    provider = AnthropicSDKProvider()
+    await provider.run_agent(
+        system_prompt="sys",
+        user_prompt="usr",
+        allowed_tools=["Read"],
+        output_model=_DemoOutput,
+        cwd=tmp_path,
+    )
+
+    out_lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("[role] ")]
+    # One progress line per streamed envelope — including the two mid-turn
+    # ones that were previously dropped (the silence that tripped the watchdog).
+    assert len(out_lines) == len(messages)
+    assert out_lines[0] == "[role] _Envelope"
+    assert out_lines[1] == "[role] _Envelope"
+    assert out_lines[2].startswith("[role] ResultMessage(subtype=success")
+
+
+# ----------------------------------------------------------------------
 # Crash-recovery resume arm: session_id + resume forwarding
 # ----------------------------------------------------------------------
 #
