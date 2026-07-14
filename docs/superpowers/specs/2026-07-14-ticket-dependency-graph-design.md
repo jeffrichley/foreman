@@ -39,9 +39,11 @@ already exists), PyGithub + raw `requester`/GraphQL for the dependencies API.
    confirmed HTTP 200 / GA / readable by the daemon identity 2026-07-14). Sub-issues API
    is *not* used.
 
-3. **`depends_on` stays the storage.** The existing `tickets.depends_on` JSONB list of
-   issue numbers is the store. It gains a **cross-project** key form so a dependency can
-   span repos (see Model). No new `ticket_edges` table for v1 — YAGNI at current dep volume.
+3. **`depends_on` stays the storage — unchanged shape.** The existing `tickets.depends_on`
+   `list[int]` (JSONB) holds **same-project** issue numbers. No shape change for v1:
+   cross-project keying and a per-entry `source` tag are **deferred** (see Non-goals) —
+   there is no manual-dep or cross-repo workflow today, so nothing to key or protect. No
+   new `ticket_edges` table.
 
 4. **Dependency "met" = the dep issue is CLOSED-as-COMPLETED.** Not "foreman ran it to
    Done" — GitHub issue state is the source of truth, so deps satisfied by a human, other
@@ -61,39 +63,31 @@ already exists), PyGithub + raw `requester`/GraphQL for the dependencies API.
    human removes one relation. (Only detectable when both ends are tracked; an untracked end
    just holds per #5.)
 
-7. **Source-scoped reconciliation.** Each `depends_on` entry is tagged with its origin
-   (`github` vs `manual`). The GitHub reconciler only converges `github`-sourced entries; a
-   `manual` entry (set via `foreman set-deps`) is never removed by the reconciler. Prevents
-   "converge to GitHub" from stomping a hand-set dependency.
+7. **Reconciler owns `depends_on` (full-replace convergence).** Since there is no manual-dep
+   workflow, the GitHub reconciler owns the whole `depends_on` list: each poll it replaces
+   it with the current `blocked_by` set from GitHub. Add *and* remove are inherent in a
+   full replace — no diff/merge logic, no source tag needed. (When a manual-dep workflow is
+   introduced later, re-add per-entry `source` scoping so manual edges survive — deferred.)
 
 ## Model
 
-Storage stays the existing `tickets.depends_on` JSONB. Two shape changes:
+Storage stays the existing `tickets.depends_on` `list[int]` (JSONB), unchanged — no new
+columns, no entry-shape change. Entries are same-project issue numbers. `depends_on`
+remains the enforced frontier input; only the *population* (reconciler) and the *"met"
+resolution* (`list_unmet_dependencies`) change.
 
-- **Cross-project entries.** An entry is `{ "project": "agent_core", "issue": 290, "source": "github" }`
-  rather than a bare int, so a dependency can target another repo. A migration/shim keeps
-  backward-compat with any existing bare-int lists (treat bare int as
-  `{project: <same>, issue: N, source: manual}`).
-- **`source` tag** per entry: `github` | `manual`.
+## Reconciler (level-triggered, full-replace)
 
-`depends_on` remains the *derived, enforced* frontier input — `list_unmet_dependencies`
-reads it unchanged in spirit (it just resolves "met" via GitHub closed-completed now, and
-handles untracked targets).
+Runs in the existing poll cycle (`Poller._enqueue_open_tickets`, `poller.py`), per tracked
+non-terminal ticket, before it is enqueued:
 
-## Reconciler (level-triggered)
+1. `desired ← GitProvider.read_blocked_by(project, issue)` — the ticket's native `blocked_by`
+   issue numbers from GitHub.
+2. `set_ticket_dependencies(ticket.id, desired)` — full replace.
 
-Runs in the existing poll cycle, per tracked ticket:
-
-1. `desired ← GitProvider.read_blocked_by(project, issue)` — the ticket's native
-   `blocked_by` set from GitHub, tagged `source=github`.
-2. `actual ← [e for e in ticket.depends_on if e.source == "github"]`.
-3. Converge the **github-sourced** slice: add `desired − actual`, **delete `actual − desired`**.
-   `manual` entries are untouched.
-4. Persist the merged `depends_on`.
-
-This is where the mislabel→unlabel case self-heals: a wrongly-added relation appears in
-`desired` (edge added) → later removed in GitHub → next poll it's in `actual` but not
-`desired` → deleted.
+Convergence is automatic: because step 2 overwrites the whole list, an added relation
+appears next poll and a removed one disappears next poll. The mislabel→unlabel case
+self-heals with zero diff logic.
 
 ## Frontier / scheduling (mostly existing)
 
@@ -114,8 +108,11 @@ tickets are moved to needs-help with the cycle reason (decision #6).
 - `read_blocked_by(project, issue) -> list[DepRef]` — native issue-dependencies read
   (REST `dependencies/blocked_by`, or GraphQL if cleaner). Added to the Protocol + Fake +
   PyGithub impl + routing provider.
-- `get_issue_state(project, issue) -> (state, state_reason)` — for the closed-completed
-  resolution (may already exist; reuse if so).
+- `get_issue_state(project, issue) -> str` **already exists** (returns `open`/`closed`), but
+  does **not** expose `state_reason`. Extend the provider so the closed-**completed** vs
+  closed-**not_planned** distinction is readable — either widen `get_issue_state` to return
+  the reason too, or add a sibling `get_issue_state_reason(...)`. Decide in the plan
+  (minimal blast radius; `get_issue_state` has existing call sites).
 - **Write path (verify at plan time):** an `add_blocked_by(project, issue, blocked_by_issue)`
   so dependent tickets can be authored via API when filed. If no native write endpoint is
   readable by the daemon identity, fall back to authoring in the GitHub UI (read path is
@@ -135,29 +132,31 @@ tickets are moved to needs-help with the cycle reason (decision #6).
 - A **migration** of existing epics' task-list checkboxes — the fleet adopts native
   dependencies going forward; there are effectively zero today.
 - A separate `ticket_edges` table — revisit only if the dependency graph gets dense.
+- **Cross-project dependencies** (a dep targeting another repo) — deferred; v1 resolves deps
+  against the ticket's own project. Re-add `(project, issue)` keying when a cross-repo dep
+  is actually needed.
+- **Per-entry `source` tag / manual-dep protection** — deferred; the reconciler owns
+  `depends_on` (full-replace) because no manual-dep workflow exists. Re-add when one does.
 
 ## Acceptance criteria
 
-- A tracked ticket's native `blocked_by` relations are read from GitHub and reflected in
-  `depends_on` (source=github), idempotently across polls (re-scan adds/removes nothing on
-  no change).
-- **Convergence:** add a native `blocked_by` → assert it appears in `depends_on`; remove it
+- A tracked ticket's native `blocked_by` relations are read from GitHub and written to
+  `depends_on` each poll (full-replace), idempotently (no-change poll leaves it identical).
+- **Convergence:** add a native `blocked_by` → poll → assert it's in `depends_on`; remove it
   → poll → assert it's gone. No manual cleanup. (The headline test.)
-- **Source scoping:** a `manual` dep survives GitHub reconciliation untouched.
-- **Met semantics:** a ticket whose dep issue is open, or closed-as-not-planned, stays
+- **Met semantics:** a ticket whose dep issue is open, or closed-as-**not-planned**, stays
   held; when the dep closes-**completed**, it dispatches on the next poll.
 - **Untracked:** ticket #2 depending on untracked #1 holds and renders `relies on #1
   (untracked)`; dispatches once #1 closes-completed; #1 is never auto-planned.
-- **Cycle:** two mutually-blocking tracked tickets both land in needs-help with the cycle
+- **Cycle:** two mutually-blocking tracked tickets both land held/needs-help with the cycle
   reason; neither runs; removing one relation releases both.
-- **Cross-project:** a dependency targeting another repo resolves against that repo's issue
-  state.
 - Unit + integration tests cover every bullet above, using the Fake GitProvider for the
-  dependency reads.
+  dependency + issue-state reads.
 
 ## Open items for the plan
 
-- Confirm the native dependencies **write** endpoint (decision on API vs UI authoring).
-- Exact integration points: `list_unmet_dependencies` call site in the frontier/queue; the
-  poll-cycle hook for the reconciler; `foreman show`/`ps` formatters; the `depends_on`
-  entry-shape migration/shim.
+- Confirm the native dependencies **write** endpoint (decision on API vs UI authoring) — read
+  path is load-bearing; write is a convenience.
+- `get_issue_state` extension shape (widen return vs sibling method) — pick minimal-blast.
+- Cycle handling mechanism: `hold_ticket(reason=...)` (reversible pause, self-heals on
+  resume) vs a NeedsHelp terminal state — pick in the plan (leaning `hold_ticket`).
