@@ -138,7 +138,11 @@ def test_dep_blocked_ticket_is_skipped_until_upstream_done(repo):
     assert first is not None and first.ticket_id == upstream
     assert qm.dequeue() is None  # downstream blocked by deps
     qm.mark_done(first)
-    repo.set_ticket_state(upstream, "Done", now=dt.datetime(2026, 6, 13))
+    # foreman#524: depends_on now holds only *currently-unmet* deps and is owned
+    # by the poll-time reconciler (which clears a dep once its upstream issue is
+    # closed-as-completed). The queue gate itself checks depends_on emptiness, not
+    # upstream ticket state — so simulate the reconciler clearing the resolved dep.
+    repo.set_ticket_dependencies(downstream, deps=[])
     second = qm.dequeue()
     assert second is not None and second.ticket_id == downstream
 
@@ -186,8 +190,10 @@ def test_held_and_dep_blocked_stays_in_heap_until_both_clear(repo):
     # Release hold — still dep-blocked
     repo.resume_ticket(target, now=dt.datetime(2026, 6, 13))
     assert qm.dequeue() is None
-    # Resolve dep — now eligible
-    repo.set_ticket_state(upstream, "Done", now=dt.datetime(2026, 6, 13))
+    # Resolve dep — now eligible. foreman#524: depends_on is the reconciler-owned
+    # unmet set; the queue gate checks its emptiness, not upstream ticket state, so
+    # simulate the reconciler clearing the resolved dep.
+    repo.set_ticket_dependencies(target, deps=[])
     second = qm.dequeue()
     assert second is not None and second.ticket_id == target
 
