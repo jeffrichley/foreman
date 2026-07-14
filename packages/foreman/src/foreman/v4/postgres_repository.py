@@ -627,19 +627,11 @@ class PostgresTicketRepository:
         return list(self.get_ticket(ticket_id).depends_on)
 
     def list_unmet_dependencies(self, ticket_id: int) -> list[int]:
-        """Return the subset of the ticket's dependencies not yet Done.
+        """Return the stored ``depends_on`` list verbatim.
 
-        Issues one ``get_ticket`` round trip per dependency rather than a
-        single batched query — acceptable given tickets typically list a
-        handful of dependencies at most.
-
-        Raises:
-            TicketNotFoundError: any recorded dependency id is not a
-                tracked ticket.
+        The reconciler guarantees ``depends_on`` holds only currently-unmet
+        dep issue numbers, so no Done-state filtering is needed here.
+        Returning the stored list directly also avoids crashing when
+        ``depends_on`` contains issue numbers of untracked GitHub issues.
         """
-        deps = self.get_ticket_dependencies(ticket_id)
-        unmet: list[int] = []
-        for dep in deps:
-            if self.get_ticket(dep).current_state != "Done":
-                unmet.append(dep)
-        return unmet
+        return list(self.get_ticket(ticket_id).depends_on)
