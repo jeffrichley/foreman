@@ -151,15 +151,26 @@ class Poller:
         }
 
         cycles = find_cycles(edges)
+
+        # Collect the ticket ids of every ticket that is part of any cycle this tick.
+        cycle_ticket_ids: set[int] = set()
+        for cycle in cycles:
+            for issue_number in cycle:
+                cycle_ticket_ids.add(issue_to_ticket_id[issue_number])
+
+        # Apply cycle holds — but ONLY to tickets not already held.
+        # Skipping already-held tickets preserves operator holds (Bug 2) and
+        # keeps idempotency (a ticket already cycle-held is already held, so
+        # held_at is not re-stamped on repeated ticks).
         for cycle in cycles:
             reason = "dependency cycle: " + " ↔ ".join(f"#{n}" for n in cycle)
             for issue_number in cycle:
                 ticket_id = issue_to_ticket_id[issue_number]
                 current = self._repo.get_ticket(ticket_id)
-                # Idempotency guard: skip if already held for the same cycle reason.
-                if current.held_reason is not None and current.held_reason.startswith(
-                    "dependency cycle"
-                ):
+                if current.is_held:
+                    # Already held (either by the orchestrator for a prior cycle
+                    # detection, or by an operator for an unrelated reason).
+                    # Do NOT overwrite the existing hold.
                     continue
                 self._repo.hold_ticket(
                     ticket_id,
@@ -167,6 +178,17 @@ class Poller:
                     reason=reason,
                     now=now,
                 )
+
+        # Self-heal (Bug 1): resume any ticket that the orchestrator cycle-held
+        # in a prior tick but is no longer part of any cycle this tick.
+        # Only auto-resume cycle-owned holds — never touch operator holds.
+        for ticket in open_tickets:
+            if (
+                ticket.id not in cycle_ticket_ids
+                and ticket.held_reason is not None
+                and ticket.held_reason.startswith("dependency cycle")
+            ):
+                self._repo.resume_ticket(ticket.id, now=now)
 
         # -- Pass 3: enqueue eligible tickets. --
         # Held tickets are filtered by the QueueManager (ticket.is_held check at
