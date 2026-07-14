@@ -366,3 +366,21 @@ def test_posted_comments_empty_by_default() -> None:
     """The recorder starts empty so tests can assert no comments were posted."""
     fake = FakeGitProvider()
     assert fake.posted_comments == []
+
+
+# ---------------------------------------------------------------------------
+# get_issue_state_reason (foreman#524)
+# ---------------------------------------------------------------------------
+
+
+def test_get_issue_state_reason_defaults_none() -> None:
+    """An unseeded issue has no state_reason — returns None."""
+    p = FakeGitProvider()
+    assert p.get_issue_state_reason(project="agent_core", issue_number=1) is None
+
+
+def test_get_issue_state_reason_readback() -> None:
+    """set_issue_state_reason seeds the value; get_issue_state_reason reads it back."""
+    p = FakeGitProvider()
+    p.set_issue_state_reason(project="agent_core", issue_number=1, reason="completed")
+    assert p.get_issue_state_reason(project="agent_core", issue_number=1) == "completed"

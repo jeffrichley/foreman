@@ -178,6 +178,18 @@ class GitProvider(Protocol):
         """
         ...
 
+    def get_issue_state_reason(self, *, project: str, issue_number: int) -> str | None:
+        """Return GitHub's ``state_reason`` for the issue, or ``None``.
+
+        Possible values: ``"completed"``, ``"not_planned"``, ``"reopened"``,
+        or ``None`` (open issues or issues closed before GitHub introduced
+        ``state_reason``). Used by the dependency reconciler (foreman#524)
+        to distinguish closed-as-completed (dep satisfied) from
+        closed-as-not-planned (dep still blocking) — a dep is met iff this
+        returns ``"completed"``.
+        """
+        ...
+
     def reopen_issue(self, *, project: str, issue_number: int) -> None:
         """Reopen the GitHub issue.
 
@@ -305,6 +317,10 @@ class FakeGitProvider:
         # get_issue_state reads (defaulting to "open"). Existing tests are
         # unaffected because the default is "open".
         self._issue_states: dict[tuple[str, int], str] = {}
+        # foreman#524: GitHub state_reason per (project, issue_number).
+        # set_issue_state_reason seeds; get_issue_state_reason reads
+        # (defaulting to None — matches open issues on GitHub).
+        self._state_reasons: dict[tuple[str, int], str] = {}
         # Recorder for delete_branch calls (mirrors closed_issues shape).
         self.deleted_branches: set[tuple[str, str]] = set()
         # Current branches per project. seed_branch populates; delete_branch
@@ -466,6 +482,32 @@ class FakeGitProvider:
     def get_issue_state(self, *, project: str, issue_number: int) -> str:
         """Return the seeded issue state, defaulting to ``'open'``."""
         return self._issue_states.get((project, issue_number), "open")
+
+    def set_issue_state_reason(
+        self,
+        *,
+        project: str,
+        issue_number: int,
+        reason: str,
+    ) -> None:
+        """Test helper: seed the ``state_reason`` returned by ``get_issue_state_reason``.
+
+        Used by dependency-reconciler tests (foreman#524) to prime the "met"
+        signal for a dep issue. Pass ``reason="completed"`` to mark the dep
+        satisfied; any other value (``"not_planned"``, ``"reopened"``) leaves
+        the dependency unmet.
+        """
+        self._state_reasons[(project, issue_number)] = reason
+
+    def get_issue_state_reason(self, *, project: str, issue_number: int) -> str | None:
+        """Return the seeded ``state_reason``, defaulting to ``None``.
+
+        Mirrors GitHub: open issues have ``state_reason=None``; closed issues
+        carry one of ``"completed"``, ``"not_planned"``, ``"reopened"``. Tests
+        that never call ``set_issue_state_reason`` see ``None`` by default,
+        matching open-issue semantics without any seeding ceremony.
+        """
+        return self._state_reasons.get((project, issue_number))
 
     def reopen_issue(self, *, project: str, issue_number: int) -> None:
         """Mark the issue as open in ``_issue_states``.

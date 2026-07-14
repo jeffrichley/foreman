@@ -753,3 +753,40 @@ def test_post_issue_comment_calls_create_comment(mock_github, mock_repo, mock_id
 
     mock_repo.get_issue.assert_called_once_with(99)
     fake_issue.create_comment.assert_called_once_with("test body")
+
+
+# ---------------------------------------------------------------------------
+# get_issue_state_reason (foreman#524)
+# ---------------------------------------------------------------------------
+
+
+def test_get_issue_state_reason_reads_state_reason(mock_github, mock_repo, mock_identity):
+    """foreman#524: ``get_issue_state_reason`` reads ``issue.state_reason`` from
+    GitHub so the dependency reconciler can distinguish closed-as-completed from
+    closed-as-not-planned (only the former satisfies a dependency)."""
+    mock_issue = MagicMock()
+    mock_issue.state_reason = "completed"
+    mock_repo.get_issue.return_value = mock_issue
+    provider = PyGithubGitProvider(
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
+    )
+    assert provider.get_issue_state_reason(project="p", issue_number=42) == "completed"
+    mock_repo.get_issue.assert_called_once_with(42)
+
+
+def test_get_issue_state_reason_returns_none_when_github_returns_none(
+    mock_github, mock_repo, mock_identity
+):
+    """An open issue has ``state_reason=None`` on GitHub; the provider passes it
+    through so callers can treat None as "not completed"."""
+    mock_issue = MagicMock()
+    mock_issue.state_reason = None
+    mock_repo.get_issue.return_value = mock_issue
+    provider = PyGithubGitProvider(
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
+    )
+    assert provider.get_issue_state_reason(project="p", issue_number=7) is None
