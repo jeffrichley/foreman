@@ -64,9 +64,7 @@ def cmd_show(
         )
     unmet = repo.list_unmet_dependencies(ticket.id)
     if unmet:
-        formatted = ", ".join(
-            _format_dep(repo, ticket.project, n) for n in unmet
-        )
+        formatted = ", ".join(_format_dep(repo, ticket.project, n) for n in unmet)
         tree.add(f"relies on {formatted}")
     for inst in instances:
         outcome = inst.outcome_kind.value if inst.outcome_kind else "in-flight"

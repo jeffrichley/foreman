@@ -472,9 +472,7 @@ class RepositoryContract:
         t = repo.create_ticket(project="p", issue_number=1, now=_now())
         assert repo.get_ticket_dependencies(t.id) == []
 
-    def test_list_unmet_dependencies_returns_stored_deps_verbatim(
-        self, repo: TicketRepository
-    ):
+    def test_list_unmet_dependencies_returns_stored_deps_verbatim(self, repo: TicketRepository):
         """list_unmet_dependencies returns the stored depends_on list verbatim.
 
         The reconciler (Task 4) guarantees depends_on holds only currently-unmet
@@ -496,9 +494,7 @@ class RepositoryContract:
         repo.set_ticket_dependencies(c.id, deps=[])
         assert repo.list_unmet_dependencies(c.id) == []
 
-    def test_list_unmet_dependencies_with_untracked_issue_number(
-        self, repo: TicketRepository
-    ):
+    def test_list_unmet_dependencies_with_untracked_issue_number(self, repo: TicketRepository):
         """list_unmet_dependencies must not raise for untracked dep issue numbers.
 
         The reconciler may write issue numbers from GitHub that are not

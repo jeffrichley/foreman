@@ -48,8 +48,7 @@ def cmd_ps(
                 t.next_action_at.isoformat() if t.next_action_at is not None else ""
             ),
             "blocked_by": ", ".join(
-                _format_dep(repo, t.project, n)
-                for n in repo.list_unmet_dependencies(t.id)
+                _format_dep(repo, t.project, n) for n in repo.list_unmet_dependencies(t.id)
             ),
         }
         for t in tickets

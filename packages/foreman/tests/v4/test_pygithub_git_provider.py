@@ -818,9 +818,7 @@ def test_read_blocked_by_maps_response_to_issue_numbers(mock_github, mock_repo, 
     )
 
 
-def test_read_blocked_by_returns_empty_list_when_no_blockers(
-    mock_github, mock_repo, mock_identity
-):
+def test_read_blocked_by_returns_empty_list_when_no_blockers(mock_github, mock_repo, mock_identity):
     """An issue with no blockers returns an empty list from the endpoint."""
     mock_repo.url = "https://api.github.com/repos/owner/p"
     mock_repo.requester.requestJsonAndCheck.return_value = ({}, [])
