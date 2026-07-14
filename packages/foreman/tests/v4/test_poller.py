@@ -183,3 +183,83 @@ def test_blocked_ticket_dep_reconciled_and_gated():
     item = qm.dequeue()
     assert item is not None
     assert item.ticket_id == ticket_291.id
+
+
+def test_mutual_cycle_holds_both_tickets_and_gates_dispatch():
+    """Task 6: two tickets mutually blocked → both held with dependency cycle reason, neither dequeued.
+
+    Setup: #1 is blocked_by #2, #2 is blocked_by #1. Both are tracked (in the plan label set).
+    After a tick, both should be held with held_reason starting with "dependency cycle",
+    and neither should be dequeued.
+    """
+    repo = InMemoryTicketRepository()
+    git = FakeGitProvider()
+
+    # Both tickets labeled and tracked.
+    git.set_open_issues_with_label(project="p", label="foreman:plan", issue_numbers={1, 2})
+    # Mutual block: #1 blocked_by #2, #2 blocked_by #1.
+    git.set_blocked_by(project="p", issue_number=1, blocked_by=[2])
+    git.set_blocked_by(project="p", issue_number=2, blocked_by=[1])
+
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    poller = Poller(
+        repo=repo,
+        qm=qm,
+        git=git,
+        project="p",
+        trigger_label="foreman:plan",
+        clock=lambda: _T0,
+    )
+
+    poller.tick()
+
+    t1 = repo.get_ticket_by_issue(project="p", issue_number=1)
+    t2 = repo.get_ticket_by_issue(project="p", issue_number=2)
+
+    # Both tickets must be held.
+    assert t1.is_held, "ticket #1 should be held due to dependency cycle"
+    assert t2.is_held, "ticket #2 should be held due to dependency cycle"
+
+    # held_reason must reference dependency cycle.
+    assert t1.held_reason is not None and t1.held_reason.startswith("dependency cycle")
+    assert t2.held_reason is not None and t2.held_reason.startswith("dependency cycle")
+
+    # Neither ticket dequeued.
+    assert qm.dequeue() is None, "no ticket should be dispatched when both are cycle-held"
+
+
+def test_cycle_hold_is_idempotent_across_ticks():
+    """Task 6: a second tick does NOT re-hold an already cycle-held ticket.
+
+    After tick 1 both tickets are held. Tick 2 must not change held_reason
+    (no redundant hold_ticket call that would overwrite with a new timestamp).
+    """
+    repo = InMemoryTicketRepository()
+    git = FakeGitProvider()
+
+    git.set_open_issues_with_label(project="p", label="foreman:plan", issue_numbers={1, 2})
+    git.set_blocked_by(project="p", issue_number=1, blocked_by=[2])
+    git.set_blocked_by(project="p", issue_number=2, blocked_by=[1])
+
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    poller = Poller(
+        repo=repo,
+        qm=qm,
+        git=git,
+        project="p",
+        trigger_label="foreman:plan",
+        clock=lambda: _T0,
+    )
+
+    poller.tick()
+
+    t1_after_tick1 = repo.get_ticket_by_issue(project="p", issue_number=1)
+    held_at_tick1 = t1_after_tick1.held_at
+
+    poller.tick()
+
+    t1_after_tick2 = repo.get_ticket_by_issue(project="p", issue_number=1)
+    # held_at should not have changed (no redundant hold).
+    assert t1_after_tick2.held_at == held_at_tick1, (
+        "hold_ticket must not be called again when reason already starts with 'dependency cycle'"
+    )
