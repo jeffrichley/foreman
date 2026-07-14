@@ -22,6 +22,7 @@ from __future__ import annotations
 import datetime as dt
 from collections.abc import Callable
 
+from foreman.v4.dependency_reconciler import compute_unmet_dependencies
 from foreman.v4.git_provider import GitProvider
 from foreman.v4.queue_manager import QueueManager
 from foreman.v4.repository import TicketAlreadyExistsError, TicketRepository
@@ -120,6 +121,18 @@ class Poller:
             # picks up the same suspension window from the repository.
             if ticket.next_action_at is not None and ticket.next_action_at > now:
                 continue
+            # Task 4 (foreman#524): reconcile blocked_by → depends_on each poll.
+            # compute_unmet_dependencies reads GitHub's native blocked_by list and
+            # filters to deps not yet closed-as-completed. Full-replacing depends_on
+            # every tick converges to truth without a separate "clear" step. The
+            # QueueManager's gate (list_unmet_dependencies → depends_on verbatim)
+            # then skips tickets whose deps are non-empty.
+            unmet = compute_unmet_dependencies(
+                project=ticket.project,
+                issue_number=ticket.issue_number,
+                provider=self._git,
+            )
+            self._repo.set_ticket_dependencies(ticket.id, deps=unmet)
             self._qm.enqueue(
                 WorkItem(
                     ticket_id=ticket.id,

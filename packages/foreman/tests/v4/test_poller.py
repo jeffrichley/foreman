@@ -137,3 +137,49 @@ def test_poller_skips_suspended_ticket():
     )
     later_poller.tick()
     assert later_qm.dequeue() == WorkItem(ticket_id=t.id, state_name="Planning", project="p")
+
+
+def test_blocked_ticket_dep_reconciled_and_gated():
+    """Task 4: reconcile blocked_by into depends_on each poll.
+
+    Tick 1: #291 is blocked by #290 (open) → depends_on=[290], not enqueued.
+    Tick 2: #290 completed → depends_on=[], #291 IS enqueued.
+    """
+    repo = InMemoryTicketRepository()
+    git = FakeGitProvider()
+
+    # Seed the open ticket we track (issue #291).
+    git.set_open_issues_with_label(project="p", label="foreman:plan", issue_numbers={291})
+    # Issue #290 is a blocker that is currently open (no state_reason).
+    git.set_blocked_by(project="p", issue_number=291, blocked_by=[290])
+    # #290 has no state_reason → still open → unmet dep.
+
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    poller = Poller(
+        repo=repo,
+        qm=qm,
+        git=git,
+        project="p",
+        trigger_label="foreman:plan",
+        clock=lambda: _T0,
+    )
+
+    # Tick 1: adopt #291 + reconcile deps.
+    poller.tick()
+
+    ticket_291 = repo.get_ticket_by_issue(project="p", issue_number=291)
+    # Dep must have been written.
+    assert repo.get_ticket_dependencies(ticket_291.id) == [290]
+    # Queue gate blocks dispatch while dep is unmet.
+    assert qm.dequeue() is None
+
+    # Now mark #290 closed-as-completed.
+    git.set_issue_state_reason(project="p", issue_number=290, reason="completed")
+
+    # Tick 2: reconciler clears depends_on; gate lifts.
+    poller.tick()
+
+    assert repo.get_ticket_dependencies(ticket_291.id) == []
+    item = qm.dequeue()
+    assert item is not None
+    assert item.ticket_id == ticket_291.id
