@@ -190,6 +190,17 @@ class GitProvider(Protocol):
         """
         ...
 
+    def read_blocked_by(self, *, project: str, issue_number: int) -> list[int]:
+        """Return the issue numbers that this issue is blocked by (native GitHub dependencies).
+
+        Queries GitHub's ``GET /repos/{owner}/{repo}/issues/{n}/dependencies/blocked_by``
+        endpoint and returns the list of blocking issue numbers. Returns an empty list
+        when the issue has no blockers or the endpoint returns an empty response.
+        Used by the dependency reconciler (foreman#524) to determine which issues
+        are currently preventing this one from being dispatched.
+        """
+        ...
+
     def reopen_issue(self, *, project: str, issue_number: int) -> None:
         """Reopen the GitHub issue.
 
@@ -321,6 +332,10 @@ class FakeGitProvider:
         # set_issue_state_reason seeds; get_issue_state_reason reads
         # (defaulting to None — matches open issues on GitHub).
         self._state_reasons: dict[tuple[str, int], str] = {}
+        # foreman#524: blocked_by list per (project, issue_number).
+        # set_blocked_by seeds; read_blocked_by reads (defaulting to [] —
+        # matches an issue with no GitHub-native blockers).
+        self._blocked_by: dict[tuple[str, int], list[int]] = {}
         # Recorder for delete_branch calls (mirrors closed_issues shape).
         self.deleted_branches: set[tuple[str, str]] = set()
         # Current branches per project. seed_branch populates; delete_branch
@@ -508,6 +523,30 @@ class FakeGitProvider:
         matching open-issue semantics without any seeding ceremony.
         """
         return self._state_reasons.get((project, issue_number))
+
+    def set_blocked_by(
+        self,
+        *,
+        project: str,
+        issue_number: int,
+        blocked_by: list[int],
+    ) -> None:
+        """Test helper: seed the blocked_by list returned by ``read_blocked_by``.
+
+        Used by dependency-reconciler tests (foreman#524) to prime the blocking
+        issue numbers for a given issue. Pass an empty list to explicitly clear
+        any existing seeded blockers.
+        """
+        self._blocked_by[(project, issue_number)] = list(blocked_by)
+
+    def read_blocked_by(self, *, project: str, issue_number: int) -> list[int]:
+        """Return the seeded blocked_by list, defaulting to ``[]``.
+
+        Mirrors GitHub's ``dependencies/blocked_by`` endpoint: issues with no
+        blockers return an empty list. Tests that never call ``set_blocked_by``
+        see ``[]`` by default, matching the no-blockers case without seeding.
+        """
+        return list(self._blocked_by.get((project, issue_number), []))
 
     def reopen_issue(self, *, project: str, issue_number: int) -> None:
         """Mark the issue as open in ``_issue_states``.

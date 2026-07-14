@@ -790,3 +790,44 @@ def test_get_issue_state_reason_returns_none_when_github_returns_none(
         repo_full_name="owner/p",
     )
     assert provider.get_issue_state_reason(project="p", issue_number=7) is None
+
+
+# ---------------------------------------------------------------------------
+# read_blocked_by (foreman#524)
+# ---------------------------------------------------------------------------
+
+
+def test_read_blocked_by_maps_response_to_issue_numbers(mock_github, mock_repo, mock_identity):
+    """foreman#524: ``read_blocked_by`` calls the native dependencies endpoint via the
+    PyGithub requester and maps the returned issue objects to a list of issue numbers."""
+    mock_repo.url = "https://api.github.com/repos/owner/p"
+    mock_repo.requester.requestJsonAndCheck.return_value = (
+        {},
+        [{"number": 290, "title": "some dep"}, {"number": 285, "title": "another dep"}],
+    )
+    provider = PyGithubGitProvider(
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
+    )
+    result = provider.read_blocked_by(project="p", issue_number=291)
+    assert result == [290, 285]
+    mock_repo.requester.requestJsonAndCheck.assert_called_once_with(
+        "GET",
+        "https://api.github.com/repos/owner/p/dependencies/blocked_by",
+    )
+
+
+def test_read_blocked_by_returns_empty_list_when_no_blockers(
+    mock_github, mock_repo, mock_identity
+):
+    """An issue with no blockers returns an empty list from the endpoint."""
+    mock_repo.url = "https://api.github.com/repos/owner/p"
+    mock_repo.requester.requestJsonAndCheck.return_value = ({}, [])
+    provider = PyGithubGitProvider(
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
+    )
+    result = provider.read_blocked_by(project="p", issue_number=1)
+    assert result == []

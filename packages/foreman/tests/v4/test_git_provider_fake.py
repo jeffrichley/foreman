@@ -384,3 +384,21 @@ def test_get_issue_state_reason_readback() -> None:
     p = FakeGitProvider()
     p.set_issue_state_reason(project="agent_core", issue_number=1, reason="completed")
     assert p.get_issue_state_reason(project="agent_core", issue_number=1) == "completed"
+
+
+# ---------------------------------------------------------------------------
+# read_blocked_by (foreman#524)
+# ---------------------------------------------------------------------------
+
+
+def test_read_blocked_by_defaults_empty() -> None:
+    """An unseeded issue has no blocked_by — returns empty list."""
+    p = FakeGitProvider()
+    assert p.read_blocked_by(project="agent_core", issue_number=291) == []
+
+
+def test_read_blocked_by_readback() -> None:
+    """set_blocked_by seeds the list; read_blocked_by reads it back."""
+    p = FakeGitProvider()
+    p.set_blocked_by(project="agent_core", issue_number=291, blocked_by=[290])
+    assert p.read_blocked_by(project="agent_core", issue_number=291) == [290]

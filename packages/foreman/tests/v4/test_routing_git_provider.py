@@ -384,3 +384,26 @@ def test_get_issue_state_reason_unknown_project_raises() -> None:
     router = RoutingGitProvider(providers={"a": FakeGitProvider()})
     with pytest.raises(UnknownProjectError):
         router.get_issue_state_reason(project="nope", issue_number=1)
+
+
+# ---------------------------------------------------------------------------
+# read_blocked_by routing (foreman#524)
+# ---------------------------------------------------------------------------
+
+
+def test_read_blocked_by_dispatches_to_correct_provider() -> None:
+    """read_blocked_by routes by project — only the named provider is queried."""
+    foo, bar, router = _two_provider_router()
+    bar.set_blocked_by(project="bar", issue_number=291, blocked_by=[290])
+    foo.set_blocked_by(project="foo", issue_number=291, blocked_by=[100, 101])
+
+    # Routed to bar → returns bar's blockers, not foo's.
+    assert router.read_blocked_by(project="bar", issue_number=291) == [290]
+    # Routed to foo → returns foo's blockers.
+    assert router.read_blocked_by(project="foo", issue_number=291) == [100, 101]
+
+
+def test_read_blocked_by_unknown_project_raises() -> None:
+    router = RoutingGitProvider(providers={"a": FakeGitProvider()})
+    with pytest.raises(UnknownProjectError):
+        router.read_blocked_by(project="nope", issue_number=1)
