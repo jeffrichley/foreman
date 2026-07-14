@@ -292,14 +292,17 @@ class TicketRepository(Protocol):
         ...
 
     def list_unmet_dependencies(self, ticket_id: int) -> list[int]:
-        """Return the subset of a ticket's dependencies not yet in the Done state.
+        """Return the stored ``depends_on`` list verbatim.
 
-        Used by the QueueManager to hold back a ticket until every
-        dependency it lists has completed.
+        The reconciler (Task 4) guarantees that ``depends_on`` holds only
+        currently-unmet dep issue numbers before this method is called.
+        This method does **no** Done-state filtering — it simply returns
+        what is stored so the QueueManager gate works purely on the
+        reconciler-maintained unmet-dep set.
 
-        Raises:
-            TicketNotFoundError: any recorded dependency id is not a
-                tracked ticket.
+        Unlike the old implementation, this does **not** call
+        ``get_ticket(dep)`` for each dep, so it is safe when ``depends_on``
+        contains issue numbers of untracked GitHub issues.
         """
         ...
 
@@ -679,11 +682,11 @@ class InMemoryTicketRepository:
         return list(self.get_ticket(ticket_id).depends_on)
 
     def list_unmet_dependencies(self, ticket_id: int) -> list[int]:
-        """Return the subset of the ticket's dependencies not yet Done.
+        """Return the stored ``depends_on`` list verbatim.
 
-        Raises:
-            TicketNotFoundError: any recorded dependency id is not a
-                tracked ticket.
+        The reconciler guarantees ``depends_on`` holds only currently-unmet
+        dep issue numbers, so no Done-state filtering is needed here.
+        Returning the stored list directly also avoids crashing when
+        ``depends_on`` contains issue numbers of untracked GitHub issues.
         """
-        deps = self.get_ticket_dependencies(ticket_id)
-        return [d for d in deps if self.get_ticket(d).current_state != "Done"]
+        return list(self.get_ticket(ticket_id).depends_on)

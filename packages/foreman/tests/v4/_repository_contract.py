@@ -472,37 +472,45 @@ class RepositoryContract:
         t = repo.create_ticket(project="p", issue_number=1, now=_now())
         assert repo.get_ticket_dependencies(t.id) == []
 
-    def test_list_unmet_dependencies_excludes_done_tickets(self, repo: TicketRepository):
+    def test_list_unmet_dependencies_returns_stored_deps_verbatim(self, repo: TicketRepository):
+        """list_unmet_dependencies returns the stored depends_on list verbatim.
+
+        The reconciler (Task 4) guarantees depends_on holds only currently-unmet
+        dep issue numbers before this method is ever called in production.
+        The method itself does NO Done-state filtering — it simply returns the
+        stored list so the QueueManager gate works purely on stored unmet deps.
+        """
         a = repo.create_ticket(project="p", issue_number=1, now=_now())
         b = repo.create_ticket(project="p", issue_number=2, now=_now())
         c = repo.create_ticket(project="p", issue_number=3, now=_now())
         repo.set_ticket_dependencies(c.id, deps=[a.id, b.id])
-        # Both deps still in flight → both unmet
+        # Both deps stored → both returned regardless of their state.
         assert sorted(repo.list_unmet_dependencies(c.id)) == sorted([a.id, b.id])
-        # Move A to Done → only B unmet
+        # Moving A to Done does NOT change what list_unmet_dependencies returns —
+        # the reconciler owns that filtering; we only read what is stored.
         repo.set_ticket_state(a.id, "Done", now=_now())
-        assert repo.list_unmet_dependencies(c.id) == [b.id]
-        # Move B to Done → all met
-        repo.set_ticket_state(b.id, "Done", now=_now())
+        assert sorted(repo.list_unmet_dependencies(c.id)) == sorted([a.id, b.id])
+        # Empty deps → empty result.
+        repo.set_ticket_dependencies(c.id, deps=[])
         assert repo.list_unmet_dependencies(c.id) == []
 
-    def test_list_unmet_does_not_count_failed_or_needs_help(self, repo: TicketRepository):
-        """Only Done satisfies a dep — Failed/NeedsHelp stays blocked."""
-        a = repo.create_ticket(project="p", issue_number=1, now=_now())
-        b = repo.create_ticket(project="p", issue_number=2, now=_now())
-        repo.set_ticket_dependencies(b.id, deps=[a.id])
-        repo.set_ticket_state(a.id, "Failed", now=_now())
-        assert repo.list_unmet_dependencies(b.id) == [a.id]
+    def test_list_unmet_dependencies_with_untracked_issue_number(self, repo: TicketRepository):
+        """list_unmet_dependencies must not raise for untracked dep issue numbers.
+
+        The reconciler may write issue numbers from GitHub that are not
+        (yet) tracked tickets in the repo. The old impl called get_ticket(dep)
+        per dep and crashed with TicketNotFoundError when a dep was untracked.
+        The new impl returns depends_on verbatim, so 999 (no ticket row) is
+        returned as-is without raising.
+        """
+        t = repo.create_ticket(project="p", issue_number=1, now=_now())
+        repo.set_ticket_dependencies(t.id, deps=[999])
+        # Must not raise TicketNotFoundError — 999 is untracked but still returned.
+        assert repo.list_unmet_dependencies(t.id) == [999]
 
     def test_set_ticket_dependencies_raises_for_missing_ticket(self, repo: TicketRepository):
         with pytest.raises(TicketNotFoundError):
             repo.set_ticket_dependencies(9999, deps=[1, 2])
-
-    def test_list_unmet_dependencies_raises_for_ghost_dependency(self, repo: TicketRepository):
-        t = repo.create_ticket(project="p", issue_number=1, now=_now())
-        repo.set_ticket_dependencies(t.id, deps=[9999])
-        with pytest.raises(TicketNotFoundError):
-            repo.list_unmet_dependencies(t.id)
 
     def test_list_all_tickets_includes_terminal(self, repo: TicketRepository):
         now = _now()

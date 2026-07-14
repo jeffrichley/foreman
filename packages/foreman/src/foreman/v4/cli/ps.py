@@ -11,6 +11,7 @@ from __future__ import annotations
 import typer
 
 from foreman.v4.cli.formatters import get_formatter
+from foreman.v4.cli.show import _format_dep
 
 
 def cmd_ps(
@@ -45,6 +46,9 @@ def cmd_ps(
             # column rather than a literal "None").
             "next_action_at": (
                 t.next_action_at.isoformat() if t.next_action_at is not None else ""
+            ),
+            "blocked_by": ", ".join(
+                _format_dep(repo, t.project, n) for n in repo.list_unmet_dependencies(t.id)
             ),
         }
         for t in tickets

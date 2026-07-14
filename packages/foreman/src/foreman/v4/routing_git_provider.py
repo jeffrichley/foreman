@@ -157,6 +157,20 @@ class RoutingGitProvider:
             issue_number=issue_number,
         )
 
+    def get_issue_state_reason(self, *, project: str, issue_number: int) -> str | None:
+        """Route to ``project``'s provider to fetch the issue's state_reason."""
+        return self._resolve(project).get_issue_state_reason(
+            project=project,
+            issue_number=issue_number,
+        )
+
+    def read_blocked_by(self, *, project: str, issue_number: int) -> list[int]:
+        """Route to ``project``'s provider to read GitHub-native blocked_by dependencies."""
+        return self._resolve(project).read_blocked_by(
+            project=project,
+            issue_number=issue_number,
+        )
+
     def reopen_issue(self, *, project: str, issue_number: int) -> None:
         """Route to ``project``'s provider to reopen the issue."""
         self._resolve(project).reopen_issue(

@@ -308,6 +308,37 @@ class PyGithubGitProvider:
         issue = self._repo.get_issue(issue_number)
         return issue.state
 
+    def get_issue_state_reason(self, *, project: str, issue_number: int) -> str | None:
+        """Return GitHub's ``state_reason`` for the issue, or ``None``.
+
+        Reads ``issue.state_reason`` directly from GitHub (foreman#524).
+        Open issues return ``None``; closed issues carry one of
+        ``"completed"``, ``"not_planned"``, or ``"reopened"``. The
+        dependency reconciler uses this to distinguish a dep that is
+        closed-as-completed (met) from one that is closed-as-not-planned
+        (still blocking). ``project`` accepted for Protocol-shape symmetry
+        but unused — provider is locked to one repo at construction.
+        """
+        issue = self._repo.get_issue(issue_number)
+        return issue.state_reason
+
+    def read_blocked_by(self, *, project: str, issue_number: int) -> list[int]:
+        """Return the issue numbers this issue is blocked by via GitHub's native dependencies API.
+
+        Calls ``GET /repos/{owner}/{repo}/issues/{n}/dependencies/blocked_by`` via the
+        PyGithub requester (``repo.requester.requestJsonAndCheck``). The endpoint returns
+        a list of issue objects; this method maps to ``[item["number"] for item in data]``.
+        Returns an empty list when the issue has no blockers or the response list is empty.
+        ``project`` accepted for Protocol-shape symmetry but unused — provider is locked
+        to one repo at construction (same pattern as ``get_issue_state_reason``).
+        """
+        repo = self._repo
+        url = f"{repo.url}/dependencies/blocked_by"
+        _, data = repo.requester.requestJsonAndCheck("GET", url)
+        if not data:
+            return []
+        return [item["number"] for item in data]
+
     def reopen_issue(self, *, project: str, issue_number: int) -> None:
         """Reopen the GitHub issue, idempotently.
 

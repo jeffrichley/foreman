@@ -97,6 +97,113 @@ def test_show_unknown_ticket_returns_nonzero():
     assert result.exit_code != 0
 
 
+def test_show_renders_tracked_dep_without_untracked_tag() -> None:
+    """show: dep issue IS a tracked ticket → renders 'relies on #290' (no untracked tag)."""
+    repo = InMemoryTicketRepository()
+    now = dt.datetime(2026, 6, 13, 12, 0, 0)
+    # ticket under test: project "p", issue 291
+    ticket = repo.create_ticket(project="p", issue_number=291, now=now)
+    # dep ticket 290 IS tracked
+    repo.create_ticket(project="p", issue_number=290, now=now)
+    repo.set_ticket_dependencies(ticket.id, deps=[290])
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["show", str(ticket.id)],
+        obj=build_cli_context(repo=repo),
+    )
+    assert result.exit_code == 0
+    assert "relies on #290" in result.output
+    assert "(untracked)" not in result.output
+
+
+def test_show_renders_untracked_dep_with_untracked_tag() -> None:
+    """show: dep issue is NOT a tracked ticket → renders 'relies on #290 (untracked)'."""
+    repo = InMemoryTicketRepository()
+    now = dt.datetime(2026, 6, 13, 12, 0, 0)
+    ticket = repo.create_ticket(project="p", issue_number=291, now=now)
+    # dep 290 is NOT tracked (no create_ticket for it)
+    repo.set_ticket_dependencies(ticket.id, deps=[290])
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["show", str(ticket.id)],
+        obj=build_cli_context(repo=repo),
+    )
+    assert result.exit_code == 0
+    assert "#290 (untracked)" in result.output
+
+
+def test_show_no_deps_renders_no_relies_on_line() -> None:
+    """show: no unmet deps → 'relies on' line is absent."""
+    repo = InMemoryTicketRepository()
+    now = dt.datetime(2026, 6, 13, 12, 0, 0)
+    ticket = repo.create_ticket(project="p", issue_number=291, now=now)
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["show", str(ticket.id)],
+        obj=build_cli_context(repo=repo),
+    )
+    assert result.exit_code == 0
+    assert "relies on" not in result.output
+
+
+def test_ps_blocked_by_column_tracked_dep() -> None:
+    """ps: ticket with tracked dep → blocked_by column contains '#290' (no untracked tag)."""
+    repo = InMemoryTicketRepository()
+    now = dt.datetime(2026, 6, 13, 12, 0, 0)
+    ticket = repo.create_ticket(project="p", issue_number=291, now=now)
+    repo.create_ticket(project="p", issue_number=290, now=now)
+    repo.set_ticket_dependencies(ticket.id, deps=[290])
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["ps", "--format", "json"],
+        obj=build_cli_context(repo=repo),
+    )
+    assert result.exit_code == 0
+    rows = json.loads(result.output)
+    blocked_rows = [r for r in rows if r["issue"] == 291]
+    assert len(blocked_rows) == 1
+    assert blocked_rows[0]["blocked_by"] == "#290"
+    assert "(untracked)" not in blocked_rows[0]["blocked_by"]
+
+
+def test_ps_blocked_by_column_untracked_dep() -> None:
+    """ps: ticket with untracked dep → blocked_by column contains '#290 (untracked)'."""
+    repo = InMemoryTicketRepository()
+    now = dt.datetime(2026, 6, 13, 12, 0, 0)
+    ticket = repo.create_ticket(project="p", issue_number=291, now=now)
+    repo.set_ticket_dependencies(ticket.id, deps=[290])
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["ps", "--format", "json"],
+        obj=build_cli_context(repo=repo),
+    )
+    assert result.exit_code == 0
+    rows = json.loads(result.output)
+    blocked_rows = [r for r in rows if r["issue"] == 291]
+    assert len(blocked_rows) == 1
+    assert blocked_rows[0]["blocked_by"] == "#290 (untracked)"
+
+
+def test_ps_blocked_by_column_empty_when_no_deps() -> None:
+    """ps: ticket with no deps → blocked_by column is empty string."""
+    repo = _setup_repo_with_two_tickets()
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["ps", "--format", "json"],
+        obj=build_cli_context(repo=repo),
+    )
+    assert result.exit_code == 0
+    rows = json.loads(result.output)
+    for row in rows:
+        assert row["blocked_by"] == ""
+
+
 def test_queue_reports_depth_and_in_flight():
     repo = _setup_repo_with_two_tickets()
     qm = QueueManager(repo=repo, max_in_flight=4)

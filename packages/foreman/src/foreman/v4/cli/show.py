@@ -14,7 +14,20 @@ import typer
 from rich.console import Console
 from rich.tree import Tree
 
-from foreman.v4.repository import TicketNotFoundError
+from foreman.v4.repository import TicketNotFoundError, TicketRepository
+
+
+def _format_dep(repo: TicketRepository, project: str, issue_number: int) -> str:
+    """Format one dep issue number, tagging untracked ones.
+
+    Returns ``"#<n>"`` when a ticket for ``(project, issue_number)`` exists in
+    ``repo``, otherwise ``"#<n> (untracked)"``.
+    """
+    try:
+        repo.get_ticket_by_issue(project=project, issue_number=issue_number)
+    except TicketNotFoundError:
+        return f"#{issue_number} (untracked)"
+    return f"#{issue_number}"
 
 
 def cmd_show(
@@ -49,6 +62,10 @@ def cmd_show(
             f"[yellow]suspended until {ticket.next_action_at.isoformat()} "
             f"(provider-throttled, attempt {attempt}/4)[/yellow]"
         )
+    unmet = repo.list_unmet_dependencies(ticket.id)
+    if unmet:
+        formatted = ", ".join(_format_dep(repo, ticket.project, n) for n in unmet)
+        tree.add(f"relies on {formatted}")
     for inst in instances:
         outcome = inst.outcome_kind.value if inst.outcome_kind else "in-flight"
         next_state = inst.next_state or "—"
