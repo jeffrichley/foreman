@@ -812,9 +812,12 @@ def test_read_blocked_by_maps_response_to_issue_numbers(mock_github, mock_repo, 
     )
     result = provider.read_blocked_by(project="p", issue_number=291)
     assert result == [290, 285]
+    # The endpoint is issue-scoped: /repos/{owner}/{repo}/issues/{n}/dependencies/blocked_by.
+    # A repo-scoped URL (missing the /issues/{n} segment) 404s for every ticket and
+    # crash-loops the daemon (regression guard — that shipped once).
     mock_repo.requester.requestJsonAndCheck.assert_called_once_with(
         "GET",
-        "https://api.github.com/repos/owner/p/dependencies/blocked_by",
+        "https://api.github.com/repos/owner/p/issues/291/dependencies/blocked_by",
     )
 
 
@@ -828,4 +831,23 @@ def test_read_blocked_by_returns_empty_list_when_no_blockers(mock_github, mock_r
         repo_full_name="owner/p",
     )
     result = provider.read_blocked_by(project="p", issue_number=1)
+    assert result == []
+
+
+def test_read_blocked_by_returns_empty_list_on_404(mock_github, mock_repo, mock_identity):
+    """A 404 from the dependencies endpoint (unavailable for the repo, or issue not
+    found) must degrade to an empty list — a data-plane read must never propagate and
+    crash the poller/daemon. Regression guard for the crash-loop this caused."""
+    from github import UnknownObjectException
+
+    mock_repo.url = "https://api.github.com/repos/owner/p"
+    mock_repo.requester.requestJsonAndCheck.side_effect = UnknownObjectException(
+        status=404, data={"message": "Not Found"}, headers={}
+    )
+    provider = PyGithubGitProvider(
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
+    )
+    result = provider.read_blocked_by(project="p", issue_number=291)
     assert result == []

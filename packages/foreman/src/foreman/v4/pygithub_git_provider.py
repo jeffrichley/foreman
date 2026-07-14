@@ -328,13 +328,23 @@ class PyGithubGitProvider:
         Calls ``GET /repos/{owner}/{repo}/issues/{n}/dependencies/blocked_by`` via the
         PyGithub requester (``repo.requester.requestJsonAndCheck``). The endpoint returns
         a list of issue objects; this method maps to ``[item["number"] for item in data]``.
-        Returns an empty list when the issue has no blockers or the response list is empty.
+        Returns an empty list when the issue has no blockers, the response list is
+        empty, or the endpoint returns 404 (dependencies API unavailable for the repo,
+        or issue not found) — a data-plane read must never crash the poller/daemon.
         ``project`` accepted for Protocol-shape symmetry but unused — provider is locked
         to one repo at construction (same pattern as ``get_issue_state_reason``).
         """
+        from github import UnknownObjectException
+
         repo = self._repo
-        url = f"{repo.url}/dependencies/blocked_by"
-        _, data = repo.requester.requestJsonAndCheck("GET", url)
+        url = f"{repo.url}/issues/{issue_number}/dependencies/blocked_by"
+        try:
+            _, data = repo.requester.requestJsonAndCheck("GET", url)
+        except UnknownObjectException:
+            # 404: dependencies endpoint unavailable for this repo, or the issue
+            # was not found. Degrade to "no declared blockers" rather than letting
+            # the exception propagate and take down the whole daemon.
+            return []
         if not data:
             return []
         return [item["number"] for item in data]
