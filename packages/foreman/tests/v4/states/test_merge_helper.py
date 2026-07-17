@@ -441,3 +441,33 @@ def test_timed_out_escalates_after_max_reruns():
     assert outcome.kind == OutcomeKind.NEEDS_HELP
     # Bound tripped BEFORE acting -- no further rerun issued.
     assert git.rerun_failed_checks_calls == []
+
+
+# ---------------------------------------------------------------------------
+# End-to-end regression (foreman#317 Task 4): the exact agent_core#390
+# incident this issue closes — a blocked PR with a FAILED required check
+# must reach ImplFix, not loop BLOCKED forever.
+# ---------------------------------------------------------------------------
+
+
+def test_ci_failed_pr_reaches_impl_fix_not_infinite_blocked():
+    """REGRESSION (agent_core#390 / foreman#317): before the classifier
+    (Task 2) and the Merging->ImplFix edge (Task 3) landed, attempt_merge
+    collapsed every not-yet-mergeable PR into a blanket BLOCKED and
+    ``MergingState.next_state`` self-looped BLOCKED back into Merging — so
+    a genuinely CI-failed PR polled BLOCKED forever. This drives the full
+    composed path: the classifier's NEEDS_FIX outcome feeds
+    ``MergingState.next_state`` and must land on a concrete
+    ``ImplFixState``, not another Merging self-loop.
+    """
+    from foreman.v4.states.impl_fix import ImplFixState
+    from foreman.v4.states.merging import MergingState
+
+    git = FakeGitProvider()
+    _seed_pr(git, mergeable=False, ci_passing=False, mergeable_state="blocked")
+    git.seed_check_state("p", 99, RequiredCheckState.FAILED)
+    ctx = _ctx(git=git)
+    outcome = attempt_merge(ctx, pr_number=99, on_merge_success=lambda: None)
+    assert outcome.kind == OutcomeKind.NEEDS_FIX
+    next_state = MergingState().next_state(ctx, outcome)
+    assert isinstance(next_state, ImplFixState)  # #390 would have looped BLOCKED here
