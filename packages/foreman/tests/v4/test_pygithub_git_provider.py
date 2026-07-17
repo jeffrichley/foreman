@@ -973,3 +973,45 @@ def test_pygithub_required_check_state_classifies(
     assert provider.required_check_state(project="o/r", pr_number=7) == expected
     mock_repo.get_pull.assert_called_once_with(7)
     mock_repo.get_commit.assert_called_once_with("deadbeef")
+
+
+# ---------------------------------------------------------------------------
+# rerun_failed_checks (foreman#317)
+# ---------------------------------------------------------------------------
+
+
+def test_rerun_failed_checks_reruns_every_workflow_run_at_head_sha(
+    mock_github, mock_repo, mock_identity
+):
+    """``rerun_failed_checks`` fans out to every workflow run PyGithub
+    reports at the PR's head SHA -- a single head commit can trigger more
+    than one workflow file, so this must not assume exactly one run."""
+    mock_pr = MagicMock()
+    mock_pr.head.sha = "deadbeef"
+    mock_repo.get_pull.return_value = mock_pr
+    run1, run2 = MagicMock(), MagicMock()
+    mock_repo.get_workflow_runs.return_value = [run1, run2]
+    provider = PyGithubGitProvider(
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
+    )
+    provider.rerun_failed_checks(project="p", pr_number=7)
+    mock_repo.get_pull.assert_called_once_with(7)
+    mock_repo.get_workflow_runs.assert_called_once_with(head_sha="deadbeef")
+    run1.rerun_failed_jobs.assert_called_once_with()
+    run2.rerun_failed_jobs.assert_called_once_with()
+
+
+def test_rerun_failed_checks_no_workflow_runs_is_noop(mock_github, mock_repo, mock_identity):
+    """No workflow runs registered at the head SHA yet -- a no-op, not an error."""
+    mock_pr = MagicMock()
+    mock_pr.head.sha = "deadbeef"
+    mock_repo.get_pull.return_value = mock_pr
+    mock_repo.get_workflow_runs.return_value = []
+    provider = PyGithubGitProvider(
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
+    )
+    provider.rerun_failed_checks(project="p", pr_number=7)

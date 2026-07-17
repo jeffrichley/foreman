@@ -137,6 +137,17 @@ class GitProvider(Protocol):
         """Classify the check-runs on the PR's head SHA. See RequiredCheckState."""
         ...
 
+    def rerun_failed_checks(self, *, project: str, pr_number: int) -> None:
+        """Re-run the PR's failed/timed-out/cancelled check-runs at its head SHA.
+
+        foreman#317: called once by the merge classifier's re-run-then-
+        escalate bound (``_rerun_or_escalate`` in
+        ``foreman.v4.states.merge_helper``) when ``required_check_state``
+        reports ``TIMED_OUT_OR_CANCELLED`` — Decision T treats that as a
+        likely infra flake worth one retry before asking a human.
+        """
+        ...
+
     def merge_pr(self, *, project: str, pr_number: int) -> None:
         """Merge the PR using whichever merge method the target repo allows."""
         ...
@@ -326,6 +337,11 @@ class FakeGitProvider:
         # to PENDING — mirrors reality where C-CI guarantees CI exists, so
         # an unseeded PR reads "still running" rather than a silent PASSED).
         self._check_states: dict[tuple[str, int], RequiredCheckState] = {}
+        # foreman#317: recorder for rerun_failed_checks calls. A LIST
+        # (mirrors update_branch_calls) so tests can assert exact call
+        # counts against the bounded re-run-then-escalate cycle in
+        # ``_rerun_or_escalate``.
+        self.rerun_failed_checks_calls: list[tuple[str, int]] = []
         # Recorder for merge_pr calls. Tests assert on this set instead
         # of (or in addition to) the PRState transition, since the
         # CLEAN-when-merged-externally case must NOT call merge_pr at all.
@@ -415,6 +431,14 @@ class FakeGitProvider:
     def required_check_state(self, *, project: str, pr_number: int) -> RequiredCheckState:
         """Return the seeded RequiredCheckState, defaulting to PENDING."""
         return self._check_states.get((project, pr_number), RequiredCheckState.PENDING)
+
+    def rerun_failed_checks(self, *, project: str, pr_number: int) -> None:
+        """No-op that records the call so tests can assert it fired.
+
+        Mirrors ``update_branch``'s recorder pattern — the sole observable
+        side effect from the state machine's vantage.
+        """
+        self.rerun_failed_checks_calls.append((project, pr_number))
 
     def merge_pr(self, *, project: str, pr_number: int) -> None:
         """Mark the PR merged + record the call for test assertions.

@@ -240,6 +240,21 @@ class PyGithubGitProvider:
             return RequiredCheckState.PENDING
         return RequiredCheckState.PASSED
 
+    def rerun_failed_checks(self, *, project: str, pr_number: int) -> None:
+        """Re-run failed jobs on every workflow run at the PR's head SHA.
+
+        foreman#317: maps to ``POST .../actions/runs/{run_id}/rerun-failed-
+        jobs`` for each workflow run PyGithub reports at ``pr.head.sha`` —
+        a single head commit can trigger more than one workflow file, so
+        this fans out to all of them rather than assuming exactly one.
+        ``project`` is accepted for Protocol-shape symmetry but unused —
+        this provider is locked to one repo at construction (same pattern
+        as ``update_branch``).
+        """
+        pr = self._repo.get_pull(pr_number)
+        for run in self._repo.get_workflow_runs(head_sha=pr.head.sha):
+            run.rerun_failed_jobs()
+
     def merge_pr(self, *, project: str, pr_number: int) -> None:
         """Merge the PR via GitHub's REST API.
 

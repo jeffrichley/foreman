@@ -421,3 +421,24 @@ def test_fake_required_check_state_defaults_pending_when_unseeded():
     # (C-CI guarantees CI exists), never a silent PASSED.
     p = FakeGitProvider()
     assert p.required_check_state(project="proj", pr_number=9) == RequiredCheckState.PENDING
+
+
+# ---------------------------------------------------------------------------
+# rerun_failed_checks (foreman#317)
+# ---------------------------------------------------------------------------
+
+
+def test_fake_rerun_failed_checks_records_call():
+    p = FakeGitProvider()
+    assert p.rerun_failed_checks_calls == []
+    p.rerun_failed_checks(project="proj", pr_number=7)
+    assert p.rerun_failed_checks_calls == [("proj", 7)]
+
+
+def test_fake_rerun_failed_checks_records_repeated_calls_as_list():
+    # A LIST (mirrors update_branch_calls), not a set -- the classifier's
+    # re-run-then-escalate bound cares about the exact call count.
+    p = FakeGitProvider()
+    p.rerun_failed_checks(project="proj", pr_number=7)
+    p.rerun_failed_checks(project="proj", pr_number=7)
+    assert p.rerun_failed_checks_calls == [("proj", 7), ("proj", 7)]
