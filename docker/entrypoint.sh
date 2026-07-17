@@ -79,6 +79,13 @@ mkdir -p "$(dirname "$FOREMAN_V4_CONFIG")"
 : "${FOREMAN_PG_DSN:=}"
 export FOREMAN_STORAGE_ENGINE FOREMAN_PG_DSN
 
+# Global concurrency cap (total tickets in flight across all repos). envsubst
+# has no default-value syntax, so an unset ${FOREMAN_MAX_IN_FLIGHT} would render
+# `max_in_flight = ` — invalid TOML. Default to 4 here (each repo stays serial
+# via the per-repo cap, so this is just the cross-repo ceiling). Override in .env.
+: "${FOREMAN_MAX_IN_FLIGHT:=4}"
+export FOREMAN_MAX_IN_FLIGHT
+
 envsubst < "$FOREMAN_CONFIG_TEMPLATE" > "$FOREMAN_V4_CONFIG"
 export FOREMAN_V4_CONFIG
 

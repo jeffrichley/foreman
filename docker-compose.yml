@@ -124,6 +124,12 @@ services:
       # the host, hot-reloadable via `foreman daemon reload` (no restart needed).
       # The ~/.foreman bind-mount (below) makes this path visible in the container.
       FOREMAN_PROJECTS_PATH: /root/.foreman/projects.toml
+      # Global concurrency cap: total tickets in flight across ALL repos. The
+      # entrypoint renders it into config.toml via envsubst. Default 4 lets
+      # different repos run in parallel (one foreman + one agent_core ticket at
+      # once) while each repo stays serial via the per-repo cap (pinned to 1).
+      # Bump FOREMAN_MAX_IN_FLIGHT in .env + `up -d daemon` to scale — no rebuild.
+      FOREMAN_MAX_IN_FLIGHT: ${FOREMAN_MAX_IN_FLIGHT:-4}
 
     # Persistent state volumes. NOT visible from the Windows host — inspect
     # via `docker exec foreman-daemon ls /foreman/...` or `docker cp`.

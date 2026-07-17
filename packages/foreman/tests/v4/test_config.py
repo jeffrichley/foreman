@@ -90,28 +90,28 @@ def test_daemon_defaults(tmp_path: Path):
     assert config.max_in_flight > 0
 
 
-def test_max_in_flight_above_one_rejected(tmp_path: Path):
-    """foreman#316 guard (arch-review independent-I4): ``max_in_flight > 1``
-    is unsafe until the PR auto-rebase-on-BEHIND work lands, so the loader
-    rejects it loudly at boot rather than silently running an unsafe
-    concurrency level. The implicit ``=1`` correctness dependency was
-    comment-only (``states/merging.py``); this makes it enforced."""
+def test_max_in_flight_above_one_accepted(tmp_path: Path):
+    """Global ``max_in_flight > 1`` is now valid: it parallelises DIFFERENT
+    repos (one foreman + one agent_core ticket at once) while each repo
+    stays serial via the per-repo cap (pinned to 1). The old foreman#316
+    global ``== 1`` pin moved to the per-repo grain where the merge race
+    actually is (self-heal arch-review, 2026-07-17)."""
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
         'log_dir = "/tmp/foreman-logs"\n'
-        "max_in_flight = 2\n" + _APPS_TOML + "[[projects]]\n"
+        "max_in_flight = 4\n" + _APPS_TOML + "[[projects]]\n"
         'name = "voice"\n'
         'repo = "jeffrichley/voice"\n'
         'local_clone_path = "/tmp/voice"\n'
     )
-    with pytest.raises(ValidationError, match="316"):
-        load_config(config_path)
+    config = load_config(config_path)
+    assert config.max_in_flight == 4
 
 
 def test_max_in_flight_zero_rejected(tmp_path: Path):
     """0 would size the ThreadPoolExecutor at zero workers — no ticket ever
-    runs. The same one-value guard rejects it."""
+    runs. ``ge=1`` rejects it at load time."""
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "[daemon]\n"
@@ -990,22 +990,33 @@ def test_backup_block_extras_forbidden(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_project_config_max_in_flight_defaults_to_none():
-    """No per-project cap set → max_in_flight defaults to None (unbounded)."""
+def test_project_config_max_in_flight_defaults_to_one():
+    """No per-repo cap set → defaults to 1 (the same-repo serial invariant).
+    Every repo is capped whether or not projects.toml mentions it — this is
+    what makes a global cap > 1 safe (self-heal arch-review, 2026-07-17)."""
     p = ProjectConfig(name="p", repo="o/r", local_clone_path="/tmp/r")
-    assert p.max_in_flight is None
+    assert p.max_in_flight == 1
 
 
 def test_project_config_max_in_flight_zero_rejected():
-    """A cap of 0 would block all tickets — reject at validation time."""
+    """A cap of 0 would block all tickets — reject at validation time (ge=1)."""
     with pytest.raises(ValidationError):
         ProjectConfig(name="p", repo="o/r", local_clone_path="/tmp/r", max_in_flight=0)
 
 
-def test_project_config_max_in_flight_positive_accepted():
-    """A positive cap is valid and stored as-is."""
-    p = ProjectConfig(name="p", repo="o/r", local_clone_path="/tmp/r", max_in_flight=2)
-    assert p.max_in_flight == 2
+def test_project_config_max_in_flight_one_accepted():
+    """1 is the pinned per-repo cap — accepted and stored."""
+    p = ProjectConfig(name="p", repo="o/r", local_clone_path="/tmp/r", max_in_flight=1)
+    assert p.max_in_flight == 1
+
+
+def test_project_config_max_in_flight_above_one_rejected():
+    """A per-repo cap > 1 is unsafe until the merge coordinator (foreman#316 /
+    self-heal review ADR-0) makes intra-repo concurrency safe. ``le=1`` fails
+    loud at boot rather than silently running an unsafe intra-repo concurrency
+    level — the same-repo merge-race guard, now at the per-repo grain."""
+    with pytest.raises(ValidationError):
+        ProjectConfig(name="p", repo="o/r", local_clone_path="/tmp/r", max_in_flight=2)
 
 
 # ---------------------------------------------------------------------------
