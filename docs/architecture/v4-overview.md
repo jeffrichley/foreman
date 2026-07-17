@@ -74,9 +74,12 @@ the substrate.
   picks up at its persisted `current_state`.
 - **`QueueManager`** — priority heap with filters (in-flight / held / dependency
   blocked). Hands out at most `max_in_flight` items at a time.
-- **`WorkerPool`** — a `ThreadPoolExecutor` sized to `max_in_flight`. Each slot
-  runs one `TicketState.transition()`. **`max_in_flight = 1` today** — serial by
-  design (see §7).
+- **`WorkerPool`** — a `ThreadPoolExecutor` sized to `max_in_flight` (the
+  GLOBAL cap, total tickets in flight across all repos). Each slot runs one
+  `TicketState.transition()`. **Serial *per repo*** — every repo is pinned to a
+  per-repo cap of 1 (`ProjectConfig.max_in_flight`), so DIFFERENT repos run in
+  parallel (one foreman + one agent_core ticket at once) while each repo stays
+  serial (see §8).
 
 ## 4. The state machine
 
@@ -145,11 +148,16 @@ rather than re-running fresh.
 
 ## 8. Known tradeoffs (current, deliberate)
 
-- **`max_in_flight = 1`** — fully serial across all projects. Buys correctness
-  and simplicity (no concurrent-ticket races, no merge/rebase race); costs
-  throughput and cross-project fairness. The concurrency machinery exists but is
-  exercised only at 1. Raising it needs a per-project cap and the merge-race
-  guard (foreman#316) first.
+- **Serial per repo, parallel across repos** — the GLOBAL `max_in_flight`
+  (default 4) is a total-across-repos ceiling; the per-repo cap
+  (`ProjectConfig.max_in_flight`, pinned to 1) keeps each repo serial. This
+  buys the correctness the old global `= 1` pin bought — no *same-repo*
+  concurrent-ticket or merge/rebase race — while recovering cross-project
+  throughput (foreman and agent_core advance simultaneously). The remaining
+  limit is *intra*-repo: >1 ticket in the SAME repo is still unsafe (a second
+  merge could leave the first PR BEHIND its base mid-flight). Lifting the
+  per-repo cap above 1 needs the merge-coordinator work (foreman#316 / the
+  self-heal review's ADR-0) — a per-repo FIFO merge queue — first.
 - **Synchronous event bus** — deterministic observer order; a slow observer (one
   doing a GitHub round-trip) runs inline on the transition hot path. Fine at
   current label volume.

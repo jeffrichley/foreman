@@ -18,7 +18,14 @@
 log_dir = "/foreman/logs"
 log_level = "INFO"
 tick_seconds = 30.0
-max_in_flight = 1
+# GLOBAL concurrency cap: total tickets in flight across ALL repos. Host-tunable
+# via ${FOREMAN_MAX_IN_FLIGHT} (docker-compose passes it; entrypoint.sh defaults
+# it to 4 so an unset var never renders `max_in_flight = ` and breaks the TOML).
+# Bumping it in .env + `docker compose up -d daemon` scales throughput WITHOUT an
+# image rebuild. Each repo still runs serially — the per-repo cap
+# (ProjectConfig.max_in_flight, pinned to 1) holds the same-repo merge-race
+# invariant, so a value > 1 here safely parallelises DIFFERENT repos only.
+max_in_flight = ${FOREMAN_MAX_IN_FLIGHT}
 role_timeout_seconds = 7200
 # foreman#483 no-output inactivity watchdog: DISABLED (0) 2026-07-13.
 # It false-killed legitimate long *silent* role phases — cold uv syncs and,

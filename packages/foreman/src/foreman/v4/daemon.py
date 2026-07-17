@@ -124,7 +124,12 @@ class Daemon:
         self._registry: ProjectRegistry = ProjectRegistry(project_configs or {})
         # issue #472: extract per-project caps and pass to QueueManager so it
         # can enforce per-project concurrency limits in its dequeue filter.
-        project_caps = {name: pc.max_in_flight for name, pc in self._registry.current.items()}
+        # ProjectConfig.max_in_flight is pinned to 1 (per-repo serial), but
+        # QueueManager stays general — it accepts int | None (None = unbounded)
+        # so the annotation widens to match its signature.
+        project_caps: dict[str, int | None] = {
+            name: pc.max_in_flight for name, pc in self._registry.current.items()
+        }
         self._qm = QueueManager(
             repo=repo,
             max_in_flight=config.max_in_flight,
