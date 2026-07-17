@@ -177,3 +177,127 @@ def test_worker_ci_passing_also_populates_details(capsys):
     assert outcome.kind == OutcomeKind.CLEAN
     assert outcome.details["did_check_pass"] is True
     assert outcome.details["commits_made"][0]["sha"] == "abc123"
+
+
+# --- issue #536: route on impl-PR existence, not the LLM self-report ---
+
+from foreman.roles.worker import _worker_status_for_pr  # noqa: E402
+
+
+def test_status_for_pr_open_and_check_passed_is_ci_passing():
+    """An open impl PR whose check passed advances to ImplReview (CLEAN)."""
+    assert _worker_status_for_pr(pr_url="https://x/pull/7", check_passed=True) == "ci_passing"
+
+
+def test_status_for_pr_open_and_check_in_flight_is_ci_in_flight():
+    """An open impl PR whose check hasn't passed self-loops (BLOCKED), not give_up."""
+    assert _worker_status_for_pr(pr_url="https://x/pull/7", check_passed=False) == "ci_in_flight"
+
+
+def test_status_for_pr_absent_is_give_up():
+    """No impl PR at all → give_up (NEEDS_HELP)."""
+    assert _worker_status_for_pr(pr_url=None, check_passed=False) == "give_up"
+
+
+def test_status_for_pr_does_not_depend_on_llm_outcome():
+    """#536 core: an existing impl PR advances regardless of the LLM's outcome.
+
+    Before the fix, routing gated on ``llm.outcome == "implemented"``, so a
+    dispatch that adopted a green existing PR but self-reported ``incomplete``
+    (or was flipped by the D4 override) was wrongly routed to give_up →
+    NeedsHelp. The helper has no ``llm_outcome`` parameter by design — PR
+    existence is the sole signal.
+    """
+    # A green PR present → advance, whatever the outcome was.
+    assert _worker_status_for_pr(pr_url="https://x/pull/9", check_passed=True) == "ci_passing"
+
+
+# --- issue #536: salvage an existing impl PR instead of NeedsHelp ---
+
+from foreman.roles.worker import _maybe_adopt_existing_impl_pr  # noqa: E402
+
+
+def _fake_pr(number=7, html_url="https://x/pull/7", mergeable_state="clean"):
+    pr = MagicMock()
+    pr.number = number
+    pr.html_url = html_url
+    pr.mergeable_state = mergeable_state
+    return pr
+
+
+def test_adopt_noop_when_pr_created_this_run():
+    """A PR opened this run → no salvage; probe not even called."""
+    with patch("foreman.roles.worker.find_open_pr_by_head_branch") as probe:
+        result = _maybe_adopt_existing_impl_pr(
+            MagicMock(),
+            owner="o",
+            branch="b",
+            current_pr_url="https://x/pull/1",
+            current_check_pass=True,
+            final_outcome="incomplete",
+        )
+    assert result == ("https://x/pull/1", True, False)
+    probe.assert_not_called()
+
+
+def test_adopt_noop_when_outcome_not_incomplete():
+    """spec_invalid is never salvaged (spec must be re-fixed first)."""
+    with patch("foreman.roles.worker.find_open_pr_by_head_branch") as probe:
+        result = _maybe_adopt_existing_impl_pr(
+            MagicMock(),
+            owner="o",
+            branch="b",
+            current_pr_url=None,
+            current_check_pass=False,
+            final_outcome="spec_invalid",
+        )
+    assert result == (None, False, False)
+    probe.assert_not_called()
+
+
+def test_adopt_noop_when_no_existing_pr():
+    """incomplete + no PR anywhere → give_up (no salvage)."""
+    with patch("foreman.roles.worker.find_open_pr_by_head_branch", return_value=None):
+        result = _maybe_adopt_existing_impl_pr(
+            MagicMock(),
+            owner="o",
+            branch="b",
+            current_pr_url=None,
+            current_check_pass=False,
+            final_outcome="incomplete",
+        )
+    assert result == (None, False, False)
+
+
+def test_adopt_existing_green_pr():
+    """incomplete this run but a green impl PR exists → adopt it, check passed."""
+    with patch(
+        "foreman.roles.worker.find_open_pr_by_head_branch",
+        return_value=_fake_pr(mergeable_state="clean"),
+    ):
+        pr_url, check_passed, salvaged = _maybe_adopt_existing_impl_pr(
+            MagicMock(),
+            owner="o",
+            branch="b",
+            current_pr_url=None,
+            current_check_pass=False,
+            final_outcome="incomplete",
+        )
+    assert (pr_url, check_passed, salvaged) == ("https://x/pull/7", True, True)
+
+
+def test_adopt_existing_pr_ci_still_running():
+    """Adopted PR whose mergeable_state isn't green → check_passed False (ci_in_flight)."""
+    with patch(
+        "foreman.roles.worker.find_open_pr_by_head_branch",
+        return_value=_fake_pr(mergeable_state="blocked"),
+    ):
+        pr_url, check_passed, salvaged = _maybe_adopt_existing_impl_pr(
+            MagicMock(),
+            owner="o",
+            branch="b",
+            current_pr_url=None,
+            current_check_pass=False,
+            final_outcome="incomplete",
+        )
+    assert (pr_url, check_passed, salvaged) == ("https://x/pull/7", False, True)
