@@ -21,7 +21,11 @@ import pytest
 
 from foreman.git_host import BotIdentity
 from foreman.git_hosts._errors import GitCommandError, sanitize_cmd
-from foreman.git_hosts.github import GitHubProvider, _extract_repo_slug
+from foreman.git_hosts.github import (
+    GitHubProvider,
+    _extract_repo_slug,
+    _normalize_conventional_title,
+)
 
 
 def _identity(token: str = "ghs_test_token") -> BotIdentity:
@@ -198,6 +202,70 @@ def test_open_pull_request_returns_pr_ref_from_pygithub() -> None:
     assert ref.base_branch == "main"
     fake_repo.create_pull.assert_called_once_with(
         title="spec: x", body="body", base="main", head="foreman/issue-7"
+    )
+
+
+# --- pr-title-lint casing normalization (foreman#317 companion) -------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # subject initial uppercase → lowercased (the common LLM slip)
+        ("feat(v4): Add the thing", "feat(v4): add the thing"),
+        # only the FIRST subject char changes — identifiers/acronyms survive
+        (
+            "fix(v4): Swallow bare GithubException 404",
+            "fix(v4): swallow bare GithubException 404",
+        ),
+        # a capitalized type is lowercased too
+        ("Feat: Add x", "feat: add x"),
+        # breaking-change bang preserved
+        ("feat(api)!: Drop v1", "feat(api)!: drop v1"),
+        # scope preserved
+        ("docs(spec): Add the plan", "docs(spec): add the plan"),
+        # already compliant → unchanged
+        ("feat: add x", "feat: add x"),
+        # non-conventional shape (no ``type: `` prefix) → unchanged, not mangled
+        ("Just a plain title", "Just a plain title"),
+        # subject starting with a non-letter is untouched
+        ("chore: 2026 cleanup", "chore: 2026 cleanup"),
+    ],
+)
+def test_normalize_conventional_title(raw: str, expected: str) -> None:
+    assert _normalize_conventional_title(raw) == expected
+
+
+def test_normalize_conventional_title_is_idempotent() -> None:
+    once = _normalize_conventional_title("Feat(v4): Add the thing")
+    assert once == "feat(v4): add the thing"
+    assert _normalize_conventional_title(once) == once
+
+
+def test_open_pull_request_normalizes_title_before_create() -> None:
+    """The pr-title-lint casing failure is prevented at the create seam:
+    open_pull_request lowercases the subject initial before create_pull, so the
+    ``^(?![A-Z]).+$`` subjectPattern gate can never fail on a foreman PR."""
+    fake_pr = MagicMock()
+    fake_pr.number = 7
+    fake_pr.html_url = "https://github.com/o/r/pull/7"
+    fake_pr.title = "feat(v4): add the thing"
+    fake_pr.body = "body"
+    fake_repo = MagicMock()
+    fake_repo.create_pull.return_value = fake_pr
+    fake_client = MagicMock()
+    fake_client.get_repo.return_value = fake_repo
+
+    provider = GitHubProvider(identity=_identity(), client=fake_client)
+    provider.open_pull_request(
+        repo_slug="o/r",
+        title="feat(v4): Add the thing",  # capitalized subject
+        body="body",
+        base="main",
+        head="foreman/issue-7",
+    )
+    fake_repo.create_pull.assert_called_once_with(
+        title="feat(v4): add the thing", body="body", base="main", head="foreman/issue-7"
     )
 
 
