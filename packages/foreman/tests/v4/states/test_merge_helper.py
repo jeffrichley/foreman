@@ -392,6 +392,19 @@ def test_dirty_routes_to_needs_fix_conflict():
     assert outcome.details["fix_reason"] == "merge_conflict"
 
 
+def test_draft_routes_to_needs_help():
+    """draft -> NEEDS_HELP (spec routing table). A foreman impl PR being a
+    draft is anomalous — no healer applies (only BehindBranchHealer, keyed
+    on "behind"), so without this branch the classifier fell through to
+    the check-state branches and could loop BLOCKED on this one
+    pre-check-runs ``mergeable_state`` the ``dirty`` branch doesn't cover."""
+    git = FakeGitProvider()
+    _seed_pr(git, mergeable=False, ci_passing=False, mergeable_state="draft")
+    ctx = _ctx(git=git)
+    outcome = attempt_merge(ctx, pr_number=99, on_merge_success=lambda: None)
+    assert outcome.kind == OutcomeKind.NEEDS_HELP
+
+
 def test_action_required_routes_to_needs_help():
     """blocked + required ACTION_REQUIRED -> NEEDS_HELP (a human gate;
     ImplFix cannot act on it)."""

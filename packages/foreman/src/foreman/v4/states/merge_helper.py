@@ -29,6 +29,10 @@ table (``docs/superpowers/specs/foreman-issue-317-spec.md``):
 - ``mergeable_state == "dirty"`` (textual merge conflict) → NEEDS_FIX,
   ``details={"fix_reason": "merge_conflict"}`` — only a Fixer can resolve
   a real conflict (Decision D).
+- ``mergeable_state == "draft"`` → NEEDS_HELP — a foreman-managed impl PR
+  should never be a draft; this is the other pre-check-runs
+  ``mergeable_state`` special-case (alongside ``dirty``) so it can't fall
+  through to the check-state branches below.
 - required check ``FAILED`` → NEEDS_FIX, ``details={"fix_reason":
   "ci_failed"}`` — the C1 fix.
 - required check ``ACTION_REQUIRED`` → NEEDS_HELP — a human gate ImplFix
@@ -342,6 +346,18 @@ def attempt_merge(
             summary="merge conflict with base — routing to ImplFix to resolve",
             artifacts=OutcomeArtifacts(pr_number=pr_number),
             details={"fix_reason": "merge_conflict"},
+        )
+    # "draft" is the other pre-check-runs mergeable_state (alongside
+    # "dirty"): a foreman-managed impl PR should never be a draft, so
+    # falling through to the check-state branches below would classify on
+    # a signal that doesn't apply yet and could loop BLOCKED on this one
+    # state — a human should look, per the spec routing table.
+    if state.mergeable_state == "draft":
+        return Outcome(
+            kind=OutcomeKind.NEEDS_HELP,
+            confidence=OutcomeConfidence.HIGH,
+            summary="PR is a draft — anomalous for a foreman-managed impl PR; escalating",
+            artifacts=OutcomeArtifacts(pr_number=pr_number),
         )
     check = ctx.git.required_check_state(project=ctx.ticket.project, pr_number=pr_number)
     if check == RequiredCheckState.FAILED:
