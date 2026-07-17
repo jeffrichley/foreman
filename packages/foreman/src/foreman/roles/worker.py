@@ -1469,6 +1469,20 @@ async def _run_worker_core(
                     llm_output.spec_invalid_reason,
                 )
 
+        # Issue #536: if this dispatch opened no impl PR but the outcome is
+        # `incomplete` and a PRIOR dispatch already opened one on origin, adopt
+        # it so the ticket advances to ImplReview instead of NeedsHelp. Called
+        # unconditionally; the helper no-ops (returns the inputs unchanged)
+        # unless the salvage actually applies. See _maybe_adopt_existing_impl_pr.
+        pr_url, final_did_check_pass, salvaged_existing_pr = _maybe_adopt_existing_impl_pr(
+            repo,
+            owner=owner,
+            branch=impl_branch_name,
+            current_pr_url=pr_url,
+            current_check_pass=final_did_check_pass,
+            final_outcome=final_outcome,
+        )
+
         # The Worker does not mutate labels. Under v4,
         # ``LabelObservabilityObserver`` owns every ``foreman:*`` write
         # off state-machine transitions; ``final_labels`` here is just
@@ -1500,7 +1514,7 @@ async def _run_worker_core(
         # helper catches host.post_issue_comment failures and returns
         # False; we do not branch on the return because the
         # success-path telemetry write must proceed unconditionally.
-        if final_outcome in ("incomplete", "spec_invalid"):
+        if final_outcome in ("incomplete", "spec_invalid") and not salvaged_existing_pr:
             state_instance_id = os.environ.get(
                 "FOREMAN_STATE_INSTANCE_ID",
                 "unknown",
@@ -1668,6 +1682,64 @@ class _V4WorkerResult:
         self.details: dict[str, object] = details if details is not None else {}
 
 
+def _maybe_adopt_existing_impl_pr(
+    repo: Repository,
+    *,
+    owner: str,
+    branch: str,
+    current_pr_url: str | None,
+    current_check_pass: bool,
+    final_outcome: str,
+) -> tuple[str | None, bool, bool]:
+    """Adopt an already-open impl PR when this dispatch opened none (issue #536).
+
+    Returns ``(pr_url, check_passed, salvaged)``. Salvage applies only when
+    this dispatch produced no PR (``current_pr_url is None``) and the outcome
+    was ``incomplete`` (self-reported or forced by the D4 override, so the
+    ``implemented`` branch was skipped) yet a PRIOR dispatch already opened an
+    open impl PR for ``branch`` on origin. In that case the ticket must advance
+    to ImplReview on that PR rather than escalate to NeedsHelp, so we return
+    its ``html_url`` and derive ``check_passed`` from the PR's GitHub
+    ``mergeable_state`` (``clean``/``unstable`` = CI green). ``spec_invalid`` is
+    deliberately NOT salvaged — the spec must be re-fixed first, so any existing
+    impl PR is stale. When salvage does not apply the inputs are returned
+    unchanged with ``salvaged=False``. Mirrors the issue #342 idempotency path.
+    """
+    if current_pr_url is not None or final_outcome != "incomplete":
+        return current_pr_url, current_check_pass, False
+    existing = find_open_pr_by_head_branch(repo, owner=owner, branch=branch)
+    if existing is None:
+        return current_pr_url, current_check_pass, False
+    _log.info(
+        "Issue #536: no PR opened this run, but open impl PR #%d exists for "
+        "%r; adopting it so the ticket advances to ImplReview instead of "
+        "NeedsHelp.",
+        existing.number,
+        branch,
+    )
+    check_passed = existing.mergeable_state in CI_PASSING_MERGEABLE_STATES
+    return existing.html_url, check_passed, True
+
+
+def _worker_status_for_pr(*, pr_url: str | None, check_passed: bool) -> str:
+    """Map a Worker dispatch's result to its v4 status string (issue #536).
+
+    Routing keys off the impl PR's **existence**, not the LLM's self-reported
+    outcome. A dispatch that ends with an open impl PR — freshly created OR
+    adopted from a prior run via the salvage path in ``_run_worker_core`` —
+    must advance: ``"ci_passing"`` (→ CLEAN → ImplReview) when its required
+    check passed, else ``"ci_in_flight"`` (→ BLOCKED → self-loop while CI
+    runs). Only a dispatch with no impl PR at all escalates via ``"give_up"``
+    (→ NEEDS_HELP). Previously this gated on ``llm.outcome == "implemented"``,
+    so a ticket whose outcome flipped to ``incomplete`` (self-reported or via
+    the D4 override) but still had a green impl PR was wrongly parked in
+    NeedsHelp instead of advancing to ImplReview.
+    """
+    if pr_url is None:
+        return "give_up"
+    return "ci_passing" if check_passed else "ci_in_flight"
+
+
 def _run_worker_for_v4(*, project: str, issue_number: int) -> _V4WorkerResult:
     """Run the worker end-to-end for a v4 caller.
 
@@ -1752,15 +1824,14 @@ def _run_worker_for_v4(*, project: str, issue_number: int) -> _V4WorkerResult:
         except ValueError:
             pr_number = None
 
-    if llm.outcome == "implemented" and pr_url is not None:
-        if core_result.final_did_check_pass:
-            status = "ci_passing"
-            summary = "impl PR open, check passed"
-        else:
-            status = "ci_in_flight"
-            summary = "impl PR open, check still in flight"
+    # Issue #536: route on the impl PR's EXISTENCE, not the LLM's self-report
+    # (see _worker_status_for_pr).
+    status = _worker_status_for_pr(pr_url=pr_url, check_passed=core_result.final_did_check_pass)
+    if status == "ci_passing":
+        summary = "impl PR open, check passed"
+    elif status == "ci_in_flight":
+        summary = "impl PR open, check still in flight"
     else:
-        status = "give_up"
         summary = f"{llm.outcome} (attempt {core_result.attempt})"
 
     # Phase 8d.17 / foreman#315: preserve WorkerOutput's diagnostic
