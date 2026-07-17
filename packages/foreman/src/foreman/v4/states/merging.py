@@ -181,9 +181,17 @@ class MergingState(TicketState):
         # from the new test names.
         if outcome.kind == OutcomeKind.NEEDS_HELP:
             return NeedsHelpState()
-        # Defensive fall-through: execute() only ever returns CLEAN,
-        # BLOCKED, or NEEDS_HELP today, but any other outcome kind from
-        # a future refactor (or a misbehaving subclass) should route to
-        # NeedsHelp so an operator can sort it out — never silently
-        # land on Failed.
+        # foreman#317 (C1): attempt_merge emits NEEDS_FIX for a CI-failed
+        # or dirty (merge-conflict) impl PR — routes to the Fixer instead
+        # of looping BLOCKED forever or landing an operator in NeedsHelp
+        # for something the Fixer can resolve on its own.
+        if outcome.kind == OutcomeKind.NEEDS_FIX:
+            from foreman.v4.states.impl_fix import ImplFixState
+
+            return ImplFixState()
+        # Defensive fall-through: CLEAN, BLOCKED, NEEDS_HELP, and
+        # NEEDS_FIX all have explicit branches above; any other outcome
+        # kind from a future refactor (or a misbehaving subclass) should
+        # route to NeedsHelp so an operator can sort it out — never
+        # silently land on Failed.
         return NeedsHelpState()
