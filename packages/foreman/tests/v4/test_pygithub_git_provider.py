@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from foreman.git_host import CommentRef
-from foreman.v4.git_provider import PRNotFoundError, PRState
+from foreman.v4.git_provider import PRNotFoundError, PRState, RequiredCheckState
 from foreman.v4.pygithub_git_provider import PyGithubGitProvider, _resolve_merge_method
 
 
@@ -900,3 +900,69 @@ def test_read_blocked_by_returns_empty_list_on_404(mock_github, mock_repo, mock_
     )
     result = provider.read_blocked_by(project="p", issue_number=291)
     assert result == []
+
+
+# ---------------------------------------------------------------------------
+# required_check_state (foreman#317)
+# ---------------------------------------------------------------------------
+
+
+def _run(status: str, conclusion: str | None = None) -> MagicMock:
+    """Build a MagicMock standing in for a PyGithub CheckRun."""
+    r = MagicMock()
+    r.status = status
+    r.conclusion = conclusion
+    return r
+
+
+def _make_provider_with_check_runs(
+    mock_repo: MagicMock,
+    mock_identity: MagicMock,
+    runs: list[MagicMock],
+) -> PyGithubGitProvider:
+    """Stub repo.get_pull().head.sha → repo.get_commit().get_check_runs() to return runs."""
+    mock_pr = MagicMock()
+    mock_pr.head.sha = "deadbeef"
+    mock_repo.get_pull.return_value = mock_pr
+    mock_commit = MagicMock()
+    mock_commit.get_check_runs.return_value = runs
+    mock_repo.get_commit.return_value = mock_commit
+    return PyGithubGitProvider(
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
+    )
+
+
+@pytest.mark.parametrize(
+    "runs, expected",
+    [
+        ([_run("completed", "success")], RequiredCheckState.PASSED),
+        (
+            [_run("completed", "success"), _run("completed", "neutral")],
+            RequiredCheckState.PASSED,
+        ),
+        ([_run("in_progress")], RequiredCheckState.PENDING),
+        ([_run("completed", "failure")], RequiredCheckState.FAILED),
+        # fail-fast: failure wins over a still-pending sibling
+        (
+            [_run("completed", "failure"), _run("queued")],
+            RequiredCheckState.FAILED,
+        ),
+        ([_run("completed", "timed_out")], RequiredCheckState.TIMED_OUT_OR_CANCELLED),
+        (
+            [_run("completed", "action_required"), _run("queued")],
+            RequiredCheckState.ACTION_REQUIRED,
+        ),
+        ([], RequiredCheckState.PENDING),  # no checks registered yet (C-CI)
+    ],
+)
+def test_pygithub_required_check_state_classifies(
+    mock_github, mock_repo, mock_identity, runs, expected
+):
+    """``required_check_state`` classifies check-runs per the precedence order:
+    FAILED > ACTION_REQUIRED > TIMED_OUT_OR_CANCELLED > PENDING > PASSED."""
+    provider = _make_provider_with_check_runs(mock_repo, mock_identity, runs)
+    assert provider.required_check_state(project="o/r", pr_number=7) == expected
+    mock_repo.get_pull.assert_called_once_with(7)
+    mock_repo.get_commit.assert_called_once_with("deadbeef")

@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 from github import Github, GithubException
 
 from foreman.git_host import CommentRef
-from foreman.v4.git_provider import PRNotFoundError, PRState
+from foreman.v4.git_provider import PRNotFoundError, PRState, RequiredCheckState
 from foreman.v4.identity import V4IdentityRegistry
 
 if TYPE_CHECKING:
@@ -201,6 +201,41 @@ class PyGithubGitProvider:
             # merged=True and closed=True; callers must check merged first.
             closed=(pr.state == "closed"),
         )
+
+    def required_check_state(self, *, project: str, pr_number: int) -> RequiredCheckState:
+        """Classify the check-runs on the PR's head SHA.
+
+        foreman#317: fetches every check-run on ``pr.head.sha`` (not just
+        GitHub-required ones — see the module docstring rationale in the
+        merge-routing plan: a non-required failing/pending check already
+        surfaces via ``mergeable_state == "unstable"``, so under
+        ``"blocked"`` any failing/pending check is effectively gating) and
+        classifies them by precedence: FAILED > ACTION_REQUIRED >
+        TIMED_OUT_OR_CANCELLED > PENDING > PASSED. An empty check-run list
+        (CI hasn't registered yet) reads PENDING, never a silent PASSED.
+        """
+        pr = self._repo.get_pull(pr_number)
+        runs = list(self._repo.get_commit(pr.head.sha).get_check_runs())
+        pending = failed = timed = action = False
+        for run in runs:
+            if run.status != "completed":
+                pending = True
+            elif run.conclusion in ("failure", "startup_failure"):
+                failed = True
+            elif run.conclusion in ("timed_out", "cancelled"):
+                timed = True
+            elif run.conclusion == "action_required":
+                action = True
+            # success / neutral / skipped / stale -> non-gating
+        if failed:
+            return RequiredCheckState.FAILED
+        if action:
+            return RequiredCheckState.ACTION_REQUIRED
+        if timed:
+            return RequiredCheckState.TIMED_OUT_OR_CANCELLED
+        if pending or not runs:
+            return RequiredCheckState.PENDING
+        return RequiredCheckState.PASSED
 
     def merge_pr(self, *, project: str, pr_number: int) -> None:
         """Merge the PR via GitHub's REST API.
