@@ -225,6 +225,55 @@ def test_remove_labels_swallows_unknown_object_exception(mock_github, mock_repo,
     assert mock_issue.remove_from_labels.call_count == 2
 
 
+def test_remove_labels_swallows_github_exception_404(mock_github, mock_repo, mock_identity):
+    """Removing a label not on the issue can surface as a bare
+    GithubException(status=404) ("Label does not exist") instead of
+    UnknownObjectException, depending on PyGithub's internal path. That
+    404 must also be swallowed — otherwise it crashes the observer that
+    strips the trigger label on state entry and fails the ticket."""
+    from github import GithubException  # type: ignore[import-not-found]
+
+    mock_issue = MagicMock()
+    mock_repo.get_issue.return_value = mock_issue
+    # First call raises a generic 404 (label not on issue), second succeeds.
+    mock_issue.remove_from_labels.side_effect = [
+        GithubException(status=404, data={"message": "Label does not exist"}, headers={}),
+        None,
+    ]
+    provider = PyGithubGitProvider(
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
+    )
+    # Must not raise — the generic 404 is idempotent-no-op like UnknownObjectException.
+    provider.remove_labels(
+        project="p",
+        issue_number=42,
+        labels={"missing", "present"},
+    )
+    # Both labels were attempted; the 404 didn't short-circuit the loop.
+    assert mock_issue.remove_from_labels.call_count == 2
+
+
+def test_remove_labels_reraises_non_404_github_exception(mock_github, mock_repo, mock_identity):
+    """A non-404 GithubException (e.g. 500) is a real failure and must
+    propagate — only the label-not-on-issue 404 is swallowed."""
+    from github import GithubException  # type: ignore[import-not-found]
+
+    mock_issue = MagicMock()
+    mock_repo.get_issue.return_value = mock_issue
+    mock_issue.remove_from_labels.side_effect = GithubException(
+        status=500, data={"message": "Server Error"}, headers={}
+    )
+    provider = PyGithubGitProvider(
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
+    )
+    with pytest.raises(GithubException):
+        provider.remove_labels(project="p", issue_number=42, labels={"boom"})
+
+
 def test_remove_labels_empty_set_is_no_op(mock_github, mock_repo, mock_identity):
     """Empty set short-circuits before the get_issue API call."""
     mock_issue = MagicMock()
