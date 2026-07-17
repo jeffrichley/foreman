@@ -30,6 +30,10 @@ BLOCKED   → SpecMerging (self-loop; Poller re-polls — heal-then-wait or
             and the heal-action bound in ``attempt_merge`` catches
             pathological base-churn.
 NEEDS_HELP → NeedsHelp (a healer escalated, or the heal bound tripped).
+NEEDS_FIX  → NeedsHelp (foreman#317: a dirty/CI-failed spec PR). Unlike
+            MergingState, this does NOT route to a Fixer — there is no
+            SpecFix role yet, so it escalates to a human. The symmetric
+            SpecMerging→SpecFix option is tracked in foreman#548.
 
 Not terminal — it transitions onward, so it is deliberately NOT in
 ``state._TERMINAL_STATE_NAMES`` / ``poller._TERMINAL_STATES``; it keeps
@@ -92,6 +96,16 @@ class SpecMerging(TicketState):
         if outcome.kind == OutcomeKind.BLOCKED:
             return SpecMerging()
         if outcome.kind == OutcomeKind.NEEDS_HELP:
+            return NeedsHelpState()
+        # foreman#317: attempt_merge can now emit NEEDS_FIX for a dirty
+        # (merge-conflict) or CI-failed spec PR. Unlike MergingState (impl
+        # PRs), spec PRs don't route NEEDS_FIX to a Fixer — there is no
+        # SpecFix role yet, so this escalates to a human rather than
+        # attempting an auto-fix. The symmetric SpecMerging→SpecFix option
+        # is tracked in foreman#548. Made explicit (not left to the
+        # defensive fall-through below) so this is a deliberate choice, not
+        # an accident of an unhandled outcome kind.
+        if outcome.kind == OutcomeKind.NEEDS_FIX:
             return NeedsHelpState()
         # Defensive fall-through (mirrors MergingState): any other outcome
         # routes to NeedsHelp so an operator sorts it out — never silently

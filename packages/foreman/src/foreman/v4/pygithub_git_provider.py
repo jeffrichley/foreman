@@ -250,6 +250,14 @@ class PyGithubGitProvider:
         ``project`` is accepted for Protocol-shape symmetry but unused —
         this provider is locked to one repo at construction (same pattern
         as ``update_branch``).
+
+        ``rerun_failed_jobs`` only re-runs jobs GitHub recorded as
+        *failed*; a run that is wholly ``cancelled`` (no job reached a
+        failed conclusion) may not re-run via this path. That's
+        acceptable here: the caller (``_rerun_or_escalate`` for
+        TIMED_OUT_OR_CANCELLED) bounds this to one attempt before
+        escalating to NEEDS_HELP, so a no-op rerun still degrades
+        gracefully to a human rather than looping.
         """
         pr = self._repo.get_pull(pr_number)
         for run in self._repo.get_workflow_runs(head_sha=pr.head.sha):
