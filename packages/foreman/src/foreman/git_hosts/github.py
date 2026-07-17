@@ -30,6 +30,7 @@ Both conventions are verified end-to-end in
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -263,7 +264,9 @@ class GitHubProvider(GitHostProvider):
     ) -> PRRef:
         """Create the pull request via PyGithub and wrap the response in a :class:`PRRef`."""
         repo = self._client.get_repo(repo_slug)
-        pr = repo.create_pull(title=title, body=body, base=base, head=head)
+        pr = repo.create_pull(
+            title=_normalize_conventional_title(title), body=body, base=base, head=head
+        )
         return PRRef(
             number=pr.number,
             url=pr.html_url,
@@ -343,6 +346,41 @@ class GitHubProvider(GitHostProvider):
                 cmd=exc.cmd if isinstance(exc.cmd, list) else [str(exc.cmd)],
                 stderr=exc.stderr or "",
             ) from None
+
+
+#: Conventional-commit PR title shape: ``type(scope)!: subject``. The
+#: ``.github/workflows/pr-title-lint.yml`` gate
+#: (amannn/action-semantic-pull-request) requires a subject that does NOT
+#: start with an uppercase letter (``subjectPattern: ^(?![A-Z]).+$``) and a
+#: conventional ``type``. LLM-authored titles routinely capitalize the
+#: subject's first word (and occasionally the type), which fails that gate and
+#: leaves the PR blocked. Normalizing at PR creation prevents the failure at
+#: its source rather than routing it reactively (foreman#317 companion).
+_CONVENTIONAL_TITLE_RE = re.compile(
+    r"^(?P<type>[A-Za-z]+)(?P<scope>\([^)]*\))?(?P<bang>!)?: (?P<subject>.+)$"
+)
+
+
+def _normalize_conventional_title(title: str) -> str:
+    """Normalize a conventional-commit PR title to pass the pr-title-lint gate.
+
+    Lowercases the type token and the subject's initial letter. Only the
+    *type* and the *first character of the subject* are touched; the
+    rest of the subject is preserved verbatim, so identifiers and acronyms
+    (e.g. ``GithubException``) survive. A title that is not a recognizable
+    ``type: subject`` shape is returned unchanged rather than mangled — that
+    is a different, non-casing failure to surface, not silently rewrite.
+    """
+    match = _CONVENTIONAL_TITLE_RE.match(title)
+    if match is None:
+        return title
+    subject = match.group("subject")
+    subject = subject[0].lower() + subject[1:]
+    return (
+        f"{match.group('type').lower()}"
+        f"{match.group('scope') or ''}"
+        f"{match.group('bang') or ''}: {subject}"
+    )
 
 
 def _extract_repo_slug(remote_url: str) -> str:
