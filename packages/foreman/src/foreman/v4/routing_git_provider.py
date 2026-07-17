@@ -37,7 +37,7 @@ from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 
 from foreman.git_host import CommentRef
-from foreman.v4.git_provider import GitProvider, PRState
+from foreman.v4.git_provider import GitProvider, PRState, RequiredCheckState
 
 
 class UnknownProjectError(LookupError):
@@ -111,6 +111,31 @@ class RoutingGitProvider:
     def update_branch(self, *, project: str, pr_number: int) -> None:
         """Route to ``project``'s provider to update the PR's branch from base."""
         self._resolve(project).update_branch(
+            project=project,
+            pr_number=pr_number,
+        )
+
+    def required_check_state(self, *, project: str, pr_number: int) -> RequiredCheckState:
+        """Route to ``project``'s provider to classify the PR's check-runs.
+
+        foreman#317: added alongside ``rerun_failed_checks`` below to close
+        a gap left when ``required_check_state`` first landed on the
+        ``GitProvider`` Protocol (Task 1) without a matching dispatch here
+        — the Daemon's state machine (``attempt_merge``'s classifier)
+        reaches GitHub exclusively through this router, so a missing
+        method here is a live ``AttributeError`` in production despite
+        passing scoped mypy runs (only full-project mypy catches the
+        Protocol-conformance break at the ``bootstrap.py`` assignment
+        site).
+        """
+        return self._resolve(project).required_check_state(
+            project=project,
+            pr_number=pr_number,
+        )
+
+    def rerun_failed_checks(self, *, project: str, pr_number: int) -> None:
+        """Route to ``project``'s provider to re-run the PR's failed checks."""
+        self._resolve(project).rerun_failed_checks(
             project=project,
             pr_number=pr_number,
         )
