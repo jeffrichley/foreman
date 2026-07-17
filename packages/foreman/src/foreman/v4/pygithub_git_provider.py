@@ -213,6 +213,9 @@ class PyGithubGitProvider:
         classifies them by precedence: FAILED > ACTION_REQUIRED >
         TIMED_OUT_OR_CANCELLED > PENDING > PASSED. An empty check-run list
         (CI hasn't registered yet) reads PENDING, never a silent PASSED.
+
+        ``project`` is accepted for Protocol-shape symmetry but unused —
+        this provider is locked to one repo at construction.
         """
         pr = self._repo.get_pull(pr_number)
         runs = list(self._repo.get_commit(pr.head.sha).get_check_runs())

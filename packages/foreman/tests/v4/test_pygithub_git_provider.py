@@ -950,10 +950,17 @@ def _make_provider_with_check_runs(
             RequiredCheckState.FAILED,
         ),
         ([_run("completed", "timed_out")], RequiredCheckState.TIMED_OUT_OR_CANCELLED),
+        ([_run("completed", "cancelled")], RequiredCheckState.TIMED_OUT_OR_CANCELLED),
+        # fail-fast: timed_out/cancelled wins over a still-pending sibling
+        (
+            [_run("completed", "timed_out"), _run("queued")],
+            RequiredCheckState.TIMED_OUT_OR_CANCELLED,
+        ),
         (
             [_run("completed", "action_required"), _run("queued")],
             RequiredCheckState.ACTION_REQUIRED,
         ),
+        ([_run("completed", "startup_failure")], RequiredCheckState.FAILED),
         ([], RequiredCheckState.PENDING),  # no checks registered yet (C-CI)
     ],
 )
