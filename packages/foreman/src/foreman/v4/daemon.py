@@ -343,9 +343,27 @@ class Daemon:
         # per-project failures, so this call is cheap on most ticks and
         # cannot crash the loop.
         self._clone_refresher.tick()
+        # foreman I1 (self-heal arch-review, 2026-07-17): fault isolation.
+        # A poller.tick() runs a synchronous GitHub sweep; an unhandled error
+        # there (API blip, GithubException, a bug) must NOT propagate out of
+        # the tick and kill run_forever — which, under Docker
+        # ``restart: unless-stopped``, becomes a crash loop that takes down
+        # EVERY project, not just the one that failed. Isolate per poller so
+        # one project's failure can't starve the others, and log loudly (with
+        # traceback) so the failure is still surfaced. Mirrors the way the
+        # clone-refresher and backup-scheduler ticks already self-defend.
         for poller in self._pollers:
-            poller.tick()
-        self._pool.tick()
+            try:
+                poller.tick()
+            except Exception:
+                _log.exception(
+                    "poller tick failed for project %r; isolating and continuing",
+                    getattr(poller, "_project", "?"),
+                )
+        try:
+            self._pool.tick()
+        except Exception:
+            _log.exception("worker-pool tick failed; continuing to next tick")
         # foreman#434: take a pg_dump snapshot if the interval has elapsed.
         # Placed after pool submission and before bounded-drain — symmetric
         # with the ordering of other side-effectful daemon work. The
@@ -372,7 +390,17 @@ class Daemon:
         self._reconcile_startup()
         try:
             while not self._stop.is_set():
-                self.tick_once()
+                # foreman I1: outer fault boundary. Even with the per-component
+                # guards in tick_once, run_forever must NEVER die from a tick
+                # exception — a dead loop cannot self-heal, and Docker restart
+                # turns a deterministic tick error into a crash loop. Log +
+                # continue; the next tick retries. ``except Exception`` does not
+                # catch KeyboardInterrupt / SystemExit (BaseException), so the
+                # stop() signal path still exits cleanly.
+                try:
+                    self.tick_once()
+                except Exception:
+                    _log.exception("daemon tick failed; continuing to next tick")
                 self._stop.wait(self._config.tick_seconds)
         finally:
             self.shutdown(wait=True)

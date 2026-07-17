@@ -305,3 +305,97 @@ def test_tick_once_uses_disabled_scheduler_by_default():
         clock=lambda: dt.datetime(2026, 6, 27, 12, 0, 0),
     )
     daemon.tick_once()  # must not raise
+
+
+# --- foreman I1 (self-heal arch-review 2026-07-17): tick fault isolation ---
+#
+# Before this, an unhandled error in a synchronous tick step (a poller's
+# GitHub sweep, the pool submission) propagated out of ``tick_once`` and
+# ``run_forever`` and killed the daemon. Under Docker ``restart:
+# unless-stopped`` a deterministic error became a crash loop that took down
+# EVERY project. These assert the boundaries that keep one failure local.
+
+
+def test_tick_once_isolates_a_failing_poller():
+    """One poller raising must not abort the tick: the other projects' pollers
+    still run and ``tick_once`` does not propagate."""
+    repo = InMemoryTicketRepository()
+    bad = MagicMock()
+    bad._project = "bad"
+    bad._qm = None
+    bad.tick.side_effect = RuntimeError("gh sweep boom")
+    good = MagicMock()
+    good._project = "good"
+    good._qm = None
+    good.tick.return_value = None
+    daemon = Daemon(
+        repo=repo,
+        git=FakeGitProvider(),
+        dispatcher=FakeRoleDispatcher(responses={}),
+        pollers=[bad, good],
+        config=DaemonConfig(tick_seconds=0, max_in_flight=4),
+        clock=lambda: dt.datetime(2026, 7, 17, 12, 0, 0),
+    )
+    daemon.tick_once()  # must not raise despite bad.tick() raising
+    bad.tick.assert_called_once()
+    good.tick.assert_called_once()  # isolation: good still ran
+
+
+def test_tick_once_isolates_a_failing_pool_tick():
+    """An error in the WorkerPool submission tick is logged, not propagated."""
+    repo = InMemoryTicketRepository()
+    poller = Poller(
+        repo=repo,
+        qm=None,
+        git=FakeGitProvider(),
+        project="p",
+        trigger_label="foreman:plan",
+        clock=lambda: dt.datetime(2026, 7, 17, 12, 0, 0),
+    )
+    daemon = Daemon(
+        repo=repo,
+        git=FakeGitProvider(),
+        dispatcher=FakeRoleDispatcher(responses={}),
+        pollers=[poller],
+        config=DaemonConfig(tick_seconds=0, max_in_flight=4),
+        clock=lambda: dt.datetime(2026, 7, 17, 12, 0, 0),
+    )
+    boom = MagicMock(side_effect=RuntimeError("pool boom"))
+    daemon._pool.tick = boom  # type: ignore[method-assign]
+    daemon.tick_once()  # must not raise
+    boom.assert_called_once()
+
+
+def test_run_forever_survives_a_tick_error_and_continues():
+    """run_forever must never die from a tick exception: a raising tick is
+    logged and the loop proceeds. A tick_once that raises once then stops the
+    loop on its second call proves the first error was caught, not propagated
+    (reaching call 2 is only possible if call 1 did not escape the loop)."""
+    repo = InMemoryTicketRepository()
+    poller = Poller(
+        repo=repo,
+        qm=None,
+        git=FakeGitProvider(),
+        project="p",
+        trigger_label="foreman:plan",
+        clock=lambda: dt.datetime(2026, 7, 17, 12, 0, 0),
+    )
+    daemon = Daemon(
+        repo=repo,
+        git=FakeGitProvider(),
+        dispatcher=FakeRoleDispatcher(responses={}),
+        pollers=[poller],
+        config=DaemonConfig(tick_seconds=0, max_in_flight=4),
+        clock=lambda: dt.datetime(2026, 7, 17, 12, 0, 0),
+    )
+    calls = {"n": 0}
+
+    def flaky_tick() -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("tick boom")
+        daemon.stop()  # survived the error → end the loop
+
+    daemon.tick_once = flaky_tick  # type: ignore[method-assign]
+    daemon.run_forever()  # must return, not raise
+    assert calls["n"] == 2  # reached a 2nd tick ⇒ first error was isolated
