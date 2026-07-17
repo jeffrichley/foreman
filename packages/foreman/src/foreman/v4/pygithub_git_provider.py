@@ -370,11 +370,14 @@ class PyGithubGitProvider:
         """Remove the given labels from the issue, swallowing 404s.
 
         PyGithub exposes ``remove_from_labels`` per-label (the REST API
-        has no bulk-remove endpoint). When the label isn't on the
-        issue, the DELETE returns 404 and PyGithub raises
-        :class:`UnknownObjectException`. The Protocol contract is
-        idempotent on missing labels, so we swallow that exception and
-        continue with the rest. Sort for deterministic call ordering.
+        has no bulk-remove endpoint). When the label isn't on the issue,
+        the DELETE returns 404 — but PyGithub surfaces this **either** as
+        :class:`UnknownObjectException` **or** as a bare
+        :class:`GithubException` with ``status == 404`` (message
+        "Label does not exist"), depending on the internal code path. We
+        must swallow both. The Protocol contract is idempotent on missing
+        labels, so we swallow the 404 and continue with the rest. Sort
+        for deterministic call ordering.
         """
         if not labels:
             return
@@ -389,6 +392,13 @@ class PyGithubGitProvider:
             except UnknownObjectException:
                 # Label not on the issue — idempotent no-op.
                 continue
+            except GithubException as exc:
+                # PyGithub raises a generic 404 here (not
+                # UnknownObjectException) when the label isn't on the
+                # issue — idempotent no-op. Re-raise anything else.
+                if getattr(exc, "status", None) == 404:
+                    continue
+                raise
 
     def delete_branch(
         self,
