@@ -22,12 +22,14 @@ from __future__ import annotations
 import datetime as dt
 
 from foreman.v4.event_bus import EventBus
-from foreman.v4.events import StateEnteredEvent
+from foreman.v4.events import Event, StateEnteredEvent, StateExitedEvent
 from foreman.v4.git_provider import FakeGitProvider, PRState, RequiredCheckState
 from foreman.v4.merge_coordinator import MergeCoordinator
 from foreman.v4.queue_manager import QueueManager
 from foreman.v4.records import TicketRecord
 from foreman.v4.repository import InMemoryTicketRepository, MergeQueueEntry
+from foreman.v4.state import StateContext
+from foreman.v4.states.merging import MergingState
 from foreman.v4.work import WorkItem
 
 _NOW = dt.datetime(2026, 7, 17, tzinfo=dt.UTC)
@@ -737,3 +739,325 @@ def test_reconcile_isolates_a_failing_entry_and_still_recovers_the_rest():
     assert repo.head_merge_entry("p2") is None
     assert ("p2", 2) in git.closed_issues  # (project, issue_number), not pr_number
     assert count == 2
+
+
+# ---------------------------------------------------------------------------
+# MergeQueued label-stamp fix -- exit-side (StateExitedEvent on drain)
+# ---------------------------------------------------------------------------
+#
+# foreman:state-merge-queued was never stamped: StateEnteredEvent(MergeQueued)
+# never fired (fixed in test_transition_events.py, entry side) AND nothing
+# ever fired StateExitedEvent(MergeQueued) when the coordinator routed a
+# ticket out of MergeQueued, so even after the entry fix the label would
+# linger forever alongside the ticket's real next-state label. These tests
+# pin the exit half: every ``_route`` branch (terminal + non-terminal, normal
+# tick + crash-recovery reconcile) must publish StateExitedEvent(MergeQueued).
+
+
+def test_route_publishes_state_exited_event_for_merge_queued_on_clean_drain():
+    """CLEAN impl merge -> Done (terminal). The exit event must precede
+    the terminal's own StateEnteredEvent(Done) so there is no window
+    where the issue shows both foreman:state-merge-queued and
+    foreman:state-done."""
+    repo, git = _fake()
+    ticket = _seed_ticket_in_merge_queue(
+        repo, git, issue_number=1, pr=10, kind="impl", mergeable=True, ci_passing=True
+    )
+    bus = EventBus()
+    events: list[Event] = []
+    bus.subscribe(events.append)
+    _coordinator(repo, git, bus=bus).tick()
+
+    exited = [
+        e for e in events if isinstance(e, StateExitedEvent) and e.state_name == "MergeQueued"
+    ]
+    entered_done = [
+        e for e in events if isinstance(e, StateEnteredEvent) and e.state_name == "Done"
+    ]
+    assert len(exited) == 1
+    assert exited[0].ticket_id == ticket.id
+    assert len(entered_done) == 1
+    assert events.index(exited[0]) < events.index(entered_done[0])
+
+
+def test_route_publishes_state_exited_event_for_merge_queued_on_impl_fix_drain():
+    """NEEDS_FIX (dirty PR) -> ImplFix. Non-terminal drain must still
+    remove the merge-queued label so it doesn't linger next to
+    ImplFix's own label once the WorkerPool later picks the ticket up."""
+    repo, git = _fake()
+    ticket = _seed_ticket_in_merge_queue(
+        repo, git, issue_number=1, pr=10, kind="impl", mergeable_state="dirty"
+    )
+    bus = EventBus()
+    events: list[Event] = []
+    bus.subscribe(events.append)
+    _coordinator(repo, git, bus=bus).tick()
+
+    exited = [
+        e for e in events if isinstance(e, StateExitedEvent) and e.state_name == "MergeQueued"
+    ]
+    assert len(exited) == 1
+    assert exited[0].ticket_id == ticket.id
+    assert repo.get_ticket(ticket.id).current_state == "ImplFix"
+
+
+def test_route_publishes_state_exited_event_for_merge_queued_on_spec_implementing_drain():
+    """CLEAN spec merge -> Implementing. Spec variant of the non-terminal
+    drain -- same exit-event requirement as the impl variant."""
+    repo, git = _fake()
+    ticket = _seed_ticket_in_merge_queue(
+        repo, git, issue_number=1, pr=10, kind="spec", mergeable=True, ci_passing=True
+    )
+    bus = EventBus()
+    events: list[Event] = []
+    bus.subscribe(events.append)
+    _coordinator(repo, git, bus=bus).tick()
+
+    exited = [
+        e for e in events if isinstance(e, StateExitedEvent) and e.state_name == "MergeQueued"
+    ]
+    assert len(exited) == 1
+    assert repo.get_ticket(ticket.id).current_state == "Implementing"
+
+
+def test_route_publishes_state_exited_event_for_merge_queued_on_needs_help_drain():
+    """NEEDS_HELP (draft PR) -> NeedsHelp (terminal). Exit event must
+    precede the terminal's StateEnteredEvent(NeedsHelp), mirroring the
+    Done case above."""
+    repo, git = _fake()
+    ticket = _seed_ticket_in_merge_queue(
+        repo, git, issue_number=1, pr=10, kind="impl", mergeable_state="draft"
+    )
+    bus = EventBus()
+    events: list[Event] = []
+    bus.subscribe(events.append)
+    _coordinator(repo, git, bus=bus).tick()
+
+    exited = [
+        e for e in events if isinstance(e, StateExitedEvent) and e.state_name == "MergeQueued"
+    ]
+    entered_needs_help = [
+        e for e in events if isinstance(e, StateEnteredEvent) and e.state_name == "NeedsHelp"
+    ]
+    assert len(exited) == 1
+    assert exited[0].ticket_id == ticket.id
+    assert len(entered_needs_help) == 1
+    assert events.index(exited[0]) < events.index(entered_needs_help[0])
+
+
+def test_blocked_still_queued_does_not_publish_state_exited_for_merge_queued():
+    """A BLOCKED (still-queued) tick must NOT fire StateExitedEvent(MergeQueued)
+    -- the ticket hasn't left MergeQueued, so the label must stay put."""
+    repo, git = _fake()
+    _seed_ticket_in_merge_queue(
+        repo,
+        git,
+        issue_number=1,
+        pr=10,
+        kind="impl",
+        mergeable_state="blocked",
+        ci=RequiredCheckState.PENDING,
+    )
+    bus = EventBus()
+    events: list[Event] = []
+    bus.subscribe(events.append)
+    _coordinator(repo, git, bus=bus).tick()
+
+    exited = [
+        e for e in events if isinstance(e, StateExitedEvent) and e.state_name == "MergeQueued"
+    ]
+    assert exited == []
+
+
+def test_route_closes_the_real_merge_queued_row_and_reuses_its_id():
+    """Instance-handling: drives ``MergingState.transition()`` for REAL
+    (unlike every other test in this file, which seeds a ticket directly
+    into MergeQueued via ``_seed_ticket_in_merge_queue`` -- a shortcut
+    that bypasses ``state.py`` entirely) so ``state._enter_merge_queued``
+    opens a genuine, in-flight ``MergeQueued`` state_instance row. Then
+    drains it via the coordinator and asserts ``_route`` finds THAT row,
+    closes it, and the published ``StateExitedEvent`` carries its real
+    ``instance_id``/``sequence`` -- not a synthetic placeholder."""
+    repo, git = _fake()
+    ticket = repo.create_ticket(project="p", issue_number=1, now=_NOW)
+    repo.set_ticket_state(ticket.id, "Merging", now=_NOW)
+    merging_instance = repo.open_state_instance(
+        ticket_id=ticket.id, state_name="Merging", sequence=1, now=_NOW
+    )
+    git.set_pr_state(
+        project="p",
+        pr_number=10,
+        state=PRState(merged=False, mergeable=True, ci_passing=True, base_ref="main"),
+    )
+    bus = EventBus()
+    events: list[Event] = []
+    bus.subscribe(events.append)
+    ctx = StateContext(
+        ticket=repo.get_ticket(ticket.id),
+        instance=merging_instance,
+        repo=repo,
+        clock=_clock,
+        bus=bus,
+        git=git,
+    )
+    merging_state = MergingState()
+    merging_state._pr_number_for = lambda _ctx: 10  # type: ignore[method-assign]
+    result = merging_state.transition(ctx)
+    assert result is not None
+    assert result.state_name == "MergeQueued"
+
+    merge_queued_row = repo.list_state_instances_for_ticket(ticket.id)[-1]
+    assert merge_queued_row.state_name == "MergeQueued"
+    assert (
+        merge_queued_row.is_in_flight
+    )  # entry-side leaves it open (see test_transition_events.py)
+
+    # Drain it -- the impl PR is mergeable + CI-passing, so one tick merges
+    # it and routes to Done.
+    _coordinator(repo, git, bus=bus).tick()
+
+    closed_row = repo.get_state_instance(merge_queued_row.id)
+    assert not closed_row.is_in_flight, "coordinator drain must close the real MergeQueued row"
+
+    exited = [
+        e for e in events if isinstance(e, StateExitedEvent) and e.state_name == "MergeQueued"
+    ]
+    assert len(exited) == 1
+    assert exited[0].instance_id == merge_queued_row.id
+    assert exited[0].sequence == merge_queued_row.sequence
+    assert repo.get_ticket(ticket.id).current_state == "Done"
+
+
+def test_exit_merge_queued_falls_back_when_real_row_already_closed():
+    """Minor finding from the 08d5aab review: an anticipated-but-untested
+    branch in ``_exit_merge_queued``'s row scan.
+
+    Unlike ``test_route_falls_back_to_synthetic_instance_when_no_real_row_was_opened``
+    (empty ``list_state_instances_for_ticket`` -- no row was ever opened),
+    this pins the case where a real row EXISTS (a non-empty list) but is
+    already closed by the time ``_route`` runs -- e.g. a generic startup
+    reconcile closed it as a crash orphan before this coordinator's own
+    reconcile got to it. The scan's ``row.is_in_flight`` guard must skip
+    that closed row rather than re-closing it, and fall through to the
+    ``ctx.instance`` synthetic fallback so the exit event -- and the
+    label removal it drives -- still fires."""
+    repo, git = _fake()
+    ticket = repo.create_ticket(project="p", issue_number=1, now=_NOW)
+    repo.set_ticket_state(ticket.id, "Merging", now=_NOW)
+    merging_instance = repo.open_state_instance(
+        ticket_id=ticket.id, state_name="Merging", sequence=1, now=_NOW
+    )
+    git.set_pr_state(
+        project="p",
+        pr_number=10,
+        state=PRState(merged=False, mergeable=True, ci_passing=True, base_ref="main"),
+    )
+    bus = EventBus()
+    events: list[Event] = []
+    bus.subscribe(events.append)
+    ctx = StateContext(
+        ticket=repo.get_ticket(ticket.id),
+        instance=merging_instance,
+        repo=repo,
+        clock=_clock,
+        bus=bus,
+        git=git,
+    )
+    merging_state = MergingState()
+    merging_state._pr_number_for = lambda _ctx: 10  # type: ignore[method-assign]
+    result = merging_state.transition(ctx)
+    assert result is not None
+    assert result.state_name == "MergeQueued"
+
+    merge_queued_row = repo.list_state_instances_for_ticket(ticket.id)[-1]
+    assert merge_queued_row.state_name == "MergeQueued"
+    assert merge_queued_row.is_in_flight
+
+    # Simulate a generic startup reconcile closing the row as a crash
+    # orphan before this coordinator's own reconcile/tick runs.
+    repo.close_state_instance(merge_queued_row.id, now=_NOW)
+    events.clear()  # drop the entry-side StateEnteredEvent -- only exit matters here
+
+    # Drain -- mergeable + CI-passing, so one tick merges and routes to Done.
+    _coordinator(repo, git, bus=bus).tick()
+
+    exited = [
+        e for e in events if isinstance(e, StateExitedEvent) and e.state_name == "MergeQueued"
+    ]
+    assert len(exited) == 1, (
+        "exit must still fire (and the label still get removed) even when the real row was "
+        "already closed"
+    )
+    assert exited[0].instance_id != merge_queued_row.id, (
+        "an already-closed row must not be reused or re-closed -- exit must fall back to the "
+        "synthetic per-tick instance"
+    )
+    assert repo.get_ticket(ticket.id).current_state == "Done"
+
+    # Closing it again must be a safe no-op: the row is exactly as closed
+    # as it was before ``_route`` ran, not double-closed or errored.
+    still_closed = repo.get_state_instance(merge_queued_row.id)
+    assert not still_closed.is_in_flight
+
+
+def test_route_falls_back_to_synthetic_instance_when_no_real_row_was_opened():
+    """Every other test in this file (and any operator/CLI path that
+    parks a ticket in MergeQueued without going through
+    ``state._enter_merge_queued`` -- e.g. a generic crash-recovery pass
+    that already closed the row) leaves no real journaled row for
+    ``_route`` to find. The exit event must still fire (using a
+    synthetic instance) rather than being skipped or raising -- label
+    removal must not depend on a journal row existing."""
+    repo, git = _fake()
+    ticket = _seed_ticket_in_merge_queue(
+        repo, git, issue_number=1, pr=10, kind="impl", mergeable=True, ci_passing=True
+    )
+    assert repo.list_state_instances_for_ticket(ticket.id) == []  # sanity: no real row
+
+    bus = EventBus()
+    events: list[Event] = []
+    bus.subscribe(events.append)
+    _coordinator(repo, git, bus=bus).tick()
+
+    exited = [
+        e for e in events if isinstance(e, StateExitedEvent) and e.state_name == "MergeQueued"
+    ]
+    assert len(exited) == 1
+    assert exited[0].ticket_id == ticket.id
+
+
+def test_reconcile_entry_drain_publishes_state_exited_event_for_merge_queued():
+    """Criterion 4: crash-recovery drain (``_reconcile_entry`` ->
+    ``_route``) must behave exactly like a normal ``tick()`` drain for
+    the merge-queued label -- it already shares ``_route``, so this pins
+    that sharing actually covers the label-exit event too."""
+    repo, git = _fake()
+    ticket = _seed_ticket_in_merge_queue(
+        repo, git, issue_number=7, pr=10, kind="impl", mergeable=True, ci_passing=True
+    )
+    entry = repo.head_merge_entry("p")
+    assert entry is not None
+    repo.mark_merge_active(entry.id)
+    git.set_pr_state(
+        project="p",
+        pr_number=10,
+        state=PRState(
+            merged=True,
+            mergeable=True,
+            ci_passing=True,
+            base_ref="main",
+            mergeable_state="clean",
+        ),
+    )
+
+    bus = EventBus()
+    events: list[Event] = []
+    bus.subscribe(events.append)
+    _coordinator(repo, git, bus=bus).reconcile_on_startup()
+
+    exited = [
+        e for e in events if isinstance(e, StateExitedEvent) and e.state_name == "MergeQueued"
+    ]
+    assert len(exited) == 1
+    assert exited[0].ticket_id == ticket.id
+    assert repo.get_ticket(ticket.id).current_state == "Done"

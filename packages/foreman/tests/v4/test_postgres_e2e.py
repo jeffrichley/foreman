@@ -83,9 +83,13 @@ def test_happy_path_queued_to_done_on_postgres(clean_postgres_dsn):  # noqa: F81
         # foreman#416: spec-PR merge moved into the dedicated SpecMerging
         # state (out of SpecReviewState.verify) for the self-heal framework.
         "SpecMerging",
+        # label-stamp fix: state._enter_merge_queued now journals a real
+        # row each time Merging/SpecMerging hand off to the coordinator.
+        "MergeQueued",
         "Implementing",
         "ImplReview",
         "Merging",
+        "MergeQueued",
         "Done",
     ]
 

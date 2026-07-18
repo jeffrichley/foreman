@@ -80,7 +80,7 @@ def test_observer_adds_state_label_on_state_entered() -> None:
             at=_T0,
         )
     )
-    assert writer.add_calls == [("foreman", 42, {"foreman:state-specreview"})]
+    assert writer.add_calls == [("foreman", 42, {"foreman:state-spec-review"})]
     assert writer.remove_calls == []
 
 
@@ -103,8 +103,8 @@ def test_observer_removes_state_label_on_state_exited() -> None:
     assert writer.add_calls == []
 
 
-def test_state_label_lowercases_state_name() -> None:
-    """SpecReview → foreman:state-specreview (lowercase). Same shape on
+def test_state_label_kebab_cases_state_name() -> None:
+    """SpecReview → foreman:state-spec-review (kebab-case). Same shape on
     both add and remove paths."""
     repo, ticket = _make_repo_and_ticket("SpecReview")
     writer = _RecordingWriter()
@@ -128,8 +128,8 @@ def test_state_label_lowercases_state_name() -> None:
             outcome=None,
         )
     )
-    assert writer.add_calls[0][2] == {"foreman:state-specreview"}
-    assert writer.remove_calls[0][2] == {"foreman:state-specreview"}
+    assert writer.add_calls[0][2] == {"foreman:state-spec-review"}
+    assert writer.remove_calls[0][2] == {"foreman:state-spec-review"}
 
 
 def test_ignores_non_lifecycle_events() -> None:
@@ -194,7 +194,7 @@ def test_observer_does_not_touch_trigger_label() -> None:
         assert "foreman:plan" not in labels, f"foreman:plan leaked into {op}_labels call: {labels}"
 
     # Sanity: the observer DID do its job (added new, removed old).
-    assert writer.add_calls == [("foreman", 42, {"foreman:state-specreview"})]
+    assert writer.add_calls == [("foreman", 42, {"foreman:state-spec-review"})]
     assert writer.remove_calls == [("foreman", 42, {"foreman:state-planning"})]
 
 
@@ -266,7 +266,7 @@ def test_observer_does_not_remove_trigger_label_on_later_transitions() -> None:
 
 
 def test_observer_stamps_terminal_state_label_on_state_entered() -> None:
-    """Phase 8d.12 — observer stamps ``foreman:state-needshelp`` (or
+    """Phase 8d.12 — observer stamps ``foreman:state-needs-help`` (or
     ``-done`` / ``-failed``) when transition() emits StateEnteredEvent
     for a terminal landing.
 
@@ -289,12 +289,12 @@ def test_observer_stamps_terminal_state_label_on_state_entered() -> None:
         )
     )
     assert writer.add_calls == [
-        ("foreman", 42, {"foreman:state-needshelp"}),
+        ("foreman", 42, {"foreman:state-needs-help"}),
     ]
 
 
 def test_done_entry_scrubs_sibling_terminal_labels() -> None:
-    """StateEntered(Done) removes foreman:state-needshelp + foreman:state-failed.
+    """StateEntered(Done) removes foreman:state-needs-help + foreman:state-failed.
 
     Regression for the class of residue found 2026-07-10: tickets that
     transited through NeedsHelp (and/or Failed) accumulated sibling terminal
@@ -315,7 +315,7 @@ def test_done_entry_scrubs_sibling_terminal_labels() -> None:
     assert writer.add_calls == [("foreman", 42, {"foreman:state-done"})]
     # remove_labels called with the two sibling terminal labels.
     remove_label_sets = [labels for _proj, _issue, labels in writer.remove_calls]
-    assert {"foreman:state-needshelp", "foreman:state-failed"} in remove_label_sets
+    assert {"foreman:state-needs-help", "foreman:state-failed"} in remove_label_sets
 
 
 def test_needshelp_terminal_does_not_scrub_siblings() -> None:
@@ -335,12 +335,12 @@ def test_needshelp_terminal_does_not_scrub_siblings() -> None:
             at=_T0,
         )
     )
-    assert writer.add_calls == [("foreman", 42, {"foreman:state-needshelp"})]
+    assert writer.add_calls == [("foreman", 42, {"foreman:state-needs-help"})]
     # No remove call for sibling terminal labels.
     sibling_scrub_calls = [
         labels
         for _proj, _issue, labels in writer.remove_calls
-        if labels & {"foreman:state-needshelp", "foreman:state-failed"}
+        if labels & {"foreman:state-needs-help", "foreman:state-failed"}
     ]
     assert sibling_scrub_calls == [], (
         f"NeedsHelp entry must not scrub sibling labels; got: {sibling_scrub_calls!r}"
@@ -368,11 +368,97 @@ def test_failed_terminal_does_not_scrub_siblings() -> None:
     sibling_scrub_calls = [
         labels
         for _proj, _issue, labels in writer.remove_calls
-        if labels & {"foreman:state-needshelp", "foreman:state-failed"}
+        if labels & {"foreman:state-needs-help", "foreman:state-failed"}
     ]
     assert sibling_scrub_calls == [], (
         f"Failed entry must not scrub sibling labels; got: {sibling_scrub_calls!r}"
     )
+
+
+def test_observer_adds_merge_queued_label_on_state_entered() -> None:
+    """foreman:state-merge-queued label-stamp fix (criterion 1, add-side).
+
+    ``state._enter_merge_queued`` now synthesizes ``StateEnteredEvent``
+    when a ticket parks in ``MergeQueued`` (it's excluded from WorkerPool
+    dispatch, so the normal flow never fired this event before). This
+    pins the observer's response to it.
+
+    The observer derives the label via the shared
+    ``foreman.v4.state_labels.state_label`` helper, which kebab-cases —
+    the same transform ``foreman.init`` uses to pre-create the label —
+    so the daemon stamps exactly the label ``foreman init`` provisioned
+    (``foreman:state-merge-queued``, not a run-together
+    ``foreman:state-mergequeued``).
+    """
+    repo, ticket = _make_repo_and_ticket("MergeQueued")
+    writer = _RecordingWriter()
+    obs = LabelObservabilityObserver(writer=writer, repo=repo)
+    obs(
+        StateEnteredEvent(
+            ticket_id=ticket.id,
+            instance_id=99,
+            state_name="MergeQueued",
+            sequence=1,
+            at=_T0,
+        )
+    )
+    assert writer.add_calls == [("foreman", 42, {"foreman:state-merge-queued"})]
+
+
+def test_observer_removes_merge_queued_label_on_state_exited() -> None:
+    """foreman:state-merge-queued label-stamp fix (criteria 2/3, remove-side).
+
+    ``MergeCoordinator._route`` now publishes ``StateExitedEvent(MergeQueued)``
+    on every drain route so the label doesn't linger next to the
+    ticket's next-state label. This pins the observer's response."""
+    repo, ticket = _make_repo_and_ticket("MergeQueued")
+    writer = _RecordingWriter()
+    obs = LabelObservabilityObserver(writer=writer, repo=repo)
+    obs(
+        StateExitedEvent(
+            ticket_id=ticket.id,
+            instance_id=99,
+            state_name="MergeQueued",
+            sequence=1,
+            at=_T0,
+            outcome=None,
+        )
+    )
+    assert writer.remove_calls == [("foreman", 42, {"foreman:state-merge-queued"})]
+
+
+def test_merging_to_merge_queued_transition_swaps_labels() -> None:
+    """Criterion 1, full transition: Merging -> MergeQueued must gain
+    foreman:state-merge-queued and lose foreman:state-merging -- the
+    exact enqueue-time swap the label-stamp fix restores. Mirrors
+    test_observer_does_not_touch_trigger_label's Planning->SpecReview
+    sequence pattern."""
+    repo, ticket = _make_repo_and_ticket("MergeQueued")
+    writer = _RecordingWriter()
+    obs = LabelObservabilityObserver(writer=writer, repo=repo)
+
+    obs(
+        StateExitedEvent(
+            ticket_id=ticket.id,
+            instance_id=98,
+            state_name="Merging",
+            sequence=1,
+            at=_T0,
+            outcome=None,
+        )
+    )
+    obs(
+        StateEnteredEvent(
+            ticket_id=ticket.id,
+            instance_id=99,
+            state_name="MergeQueued",
+            sequence=2,
+            at=_T0,
+        )
+    )
+
+    assert writer.add_calls == [("foreman", 42, {"foreman:state-merge-queued"})]
+    assert writer.remove_calls == [("foreman", 42, {"foreman:state-merging"})]
 
 
 def test_writer_failure_propagates() -> None:

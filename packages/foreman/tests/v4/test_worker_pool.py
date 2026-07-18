@@ -106,7 +106,7 @@ def test_worker_crash_parks_ticket_on_needs_help():
         _wait_until_idle(qm)
         # Parked terminally → Poller stops re-enqueueing.
         assert inner.get_ticket(ticket.id).current_state == "NeedsHelp"
-        # Surfaced → LabelObservabilityObserver applies foreman:state-needshelp.
+        # Surfaced → LabelObservabilityObserver applies foreman:state-needs-help.
         assert any(isinstance(e, StateEnteredEvent) and e.state_name == "NeedsHelp" for e in events)
     finally:
         pool.shutdown(wait=True)

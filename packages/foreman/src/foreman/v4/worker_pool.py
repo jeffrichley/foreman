@@ -202,7 +202,7 @@ class WorkerPool:
             if ctx is not None:
                 # The StateContext exists, so we can land the full terminal
                 # sequence (close the failed instance + drop its label, add
-                # foreman:state-needshelp). Idempotent against transition()'s
+                # foreman:state-needs-help). Idempotent against transition()'s
                 # own finally if it already closed the row.
                 escalate_to_needs_help(
                     ctx,

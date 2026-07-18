@@ -59,6 +59,7 @@ from github import Github, GithubException
 from foreman.auth import fetch_app_metadata, mint_installation_token
 from foreman.labels import Label
 from foreman.v4.config import AppsConfig, V4Config, load_config
+from foreman.v4.state_labels import state_label
 from foreman.v4.states.registry import STATE_REGISTRY
 
 _log = logging.getLogger(__name__)
@@ -92,16 +93,6 @@ _DEFAULT_LOG_DIR = "~/.foreman/v4/logs"
 # syntactically valid postgresql:// URL so the config loads under the
 # loud-fail StorageConfig validator (which requires a non-empty dsn).
 _DEFAULT_STORAGE_DSN = "postgresql://USER:PASSWORD@HOST:5432/foreman"
-
-
-def _state_label_name(state_name: str) -> str:
-    """Map a STATE_REGISTRY entry ("Queued", "SpecReview", ...) to a label.
-
-    The label form is ``foreman:state-<kebab>``. "SpecReview" →
-    "spec-review", "NeedsHelp" → "needs-help".
-    """
-    kebab = re.sub(r"(?<!^)([A-Z])", r"-\1", state_name).lower()
-    return f"foreman:state-{kebab}"
 
 
 def _build_v4_label_catalog() -> list[tuple[Label | str, str, str]]:
@@ -148,7 +139,7 @@ def _build_v4_label_catalog() -> list[tuple[Label | str, str, str]]:
             state_name,
             ("FBCA04", f"Foreman v4: state {state_name}"),
         )
-        catalog.append((_state_label_name(state_name), color, description))
+        catalog.append((state_label(state_name), color, description))
     return catalog
 
 
