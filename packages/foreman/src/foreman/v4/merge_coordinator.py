@@ -259,10 +259,29 @@ class MergeCoordinator:
         Idempotent, like ``reconcile.reconcile_on_startup``: a second call
         finds no ``"merging"`` rows (the first either dequeued or requeued
         them), so re-invoking is a no-op.
+
+        Isolated per entry: ``_reconcile_entry`` runs live GitHub I/O via
+        ``get_pr_state`` and can raise on an API blip. Letting that
+        propagate out of the loop would abort recovery of every remaining
+        entry -- and the daemon calls ``_reconcile_startup`` BEFORE
+        ``run_forever()``'s own ``try/except`` (see ``daemon.py``), so an
+        unhandled exception here crashes daemon startup entirely -- a
+        crash-loop under Docker restart-on-crash. Mirrors ``tick()``'s
+        per-project isolation (see above): log loudly (with traceback)
+        and continue to the next entry.
         """
         entries = self._repo.list_active_merges()
         for entry in entries:
-            self._reconcile_entry(entry)
+            try:
+                self._reconcile_entry(entry)
+            except Exception:
+                _log.exception(
+                    "merge-coordinator startup reconcile failed for entry %r "
+                    "(project=%r, pr=%r); isolating and continuing",
+                    entry.id,
+                    entry.project,
+                    entry.pr_number,
+                )
         if entries:
             _log.warning(
                 "crash recovery: reconciled %d in-flight merge_queue entr%s",

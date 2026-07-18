@@ -664,3 +664,76 @@ def test_tick_isolates_a_failing_project_and_still_drains_the_rest():
     assert repo.get_ticket(second.id).current_state == "Done"
     assert repo.head_merge_entry("p2") is None
     assert ("p2", 20) in git.merge_pr_calls
+
+
+# ---------------------------------------------------------------------------
+# Per-entry fault isolation during startup reconciliation (foreman#550 Task 5)
+# ---------------------------------------------------------------------------
+
+
+class _RaisingGetPrStateGitProvider(FakeGitProvider):
+    """A git provider whose ``get_pr_state`` raises for one designated PR.
+
+    Simulates a live GitHub API blip surfacing inside ``_reconcile_entry`` --
+    ``reconcile_on_startup`` re-fetches ground truth directly via
+    ``get_pr_state`` (see its docstring), so raising there exercises the
+    identical unhandled-exception code path without needing to fake other
+    GitHub I/O. Mirrors ``_RaisingHeadEntryRepo`` above.
+    """
+
+    def __init__(self, *, raise_for: tuple[str, int]) -> None:
+        super().__init__()
+        self._raise_for = raise_for
+
+    def get_pr_state(self, *, project: str, pr_number: int) -> PRState:
+        if (project, pr_number) == self._raise_for:
+            raise RuntimeError("simulated GitHub API blip")
+        return super().get_pr_state(project=project, pr_number=pr_number)
+
+
+def test_reconcile_isolates_a_failing_entry_and_still_recovers_the_rest():
+    """One entry's ``_reconcile_entry`` raising must not abort recovery of
+    the others.
+
+    The daemon calls ``_reconcile_startup`` BEFORE ``run_forever()``'s own
+    ``try/except`` (see ``daemon.py`` ~422-423), so letting an exception
+    escape ``reconcile_on_startup`` crashes daemon startup entirely -- a
+    crash-loop under Docker restart-on-crash. Mirrors ``tick()``'s
+    per-project isolation (``test_tick_isolates_a_failing_project_and_still_drains_the_rest``).
+    """
+    git = _RaisingGetPrStateGitProvider(raise_for=("p1", 10))
+    repo = InMemoryTicketRepository()
+    _seed_ticket_in_merge_queue(
+        repo, git, project="p1", issue_number=1, pr=10, kind="impl", mergeable=True, ci_passing=True
+    )
+    second = _seed_ticket_in_merge_queue(
+        repo, git, project="p2", issue_number=2, pr=20, kind="impl", mergeable=True, ci_passing=True
+    )
+    first_entry = repo.head_merge_entry("p1")
+    second_entry = repo.head_merge_entry("p2")
+    assert first_entry is not None
+    assert second_entry is not None
+    repo.mark_merge_active(first_entry.id)
+    repo.mark_merge_active(second_entry.id)
+    # p2's PR actually merged before the (simulated) crash.
+    git.set_pr_state(
+        project="p2",
+        pr_number=20,
+        state=PRState(
+            merged=True,
+            mergeable=True,
+            ci_passing=True,
+            base_ref="main",
+            mergeable_state="clean",
+        ),
+    )
+
+    coordinator = MergeCoordinator(repo=repo, git=git, projects=lambda: ["p1", "p2"], clock=_clock)
+    count = coordinator.reconcile_on_startup()
+
+    # p2 was still recovered despite p1 raising -- reconcile_on_startup
+    # did not propagate p1's exception.
+    assert repo.get_ticket(second.id).current_state == "Done"
+    assert repo.head_merge_entry("p2") is None
+    assert ("p2", 2) in git.closed_issues  # (project, issue_number), not pr_number
+    assert count == 2
