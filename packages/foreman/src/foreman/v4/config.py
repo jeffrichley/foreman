@@ -15,10 +15,11 @@ Schema:
                            in-flight cap AND the WorkerPool
                            ThreadPoolExecutor. Default 1. Values > 1
                            parallelise DIFFERENT repos; each repo stays
-                           serial via the per-repo
-                           ProjectConfig.max_in_flight cap (pinned 1),
-                           which holds the same-repo merge-race
-                           invariant. See that field for the full why.
+                           serial by default via the per-repo
+                           ProjectConfig.max_in_flight cap (default 1,
+                           opt-in above), which holds the same-repo
+                           merge-race invariant. See that field for the
+                           full why.
     role_timeout_seconds - Subprocess timeout per role invocation
                            (default 600 = 10 min). Phase 7.5 threads
                            this to SubprocessRoleDispatcher.
@@ -76,12 +77,12 @@ Schema:
     dev_base_branch   - alternate base branch for spec worktrees (None → origin/default)
     max_fix_attempts  - max fix cycles before NeedsHelp escalation (default 3)
     max_impl_attempts - max impl cycles before NeedsHelp escalation (default 3)
-    max_in_flight     - per-REPO concurrency cap, pinned to 1 (default 1, le=1).
-                        At most one in-flight ticket per repo — the same-repo
-                        merge-race invariant that lets the global cap exceed 1
-                        safely. Lifts to > 1 only when the merge-coordinator
-                        work (foreman#316 / self-heal review ADR-0) ships.
-                        Issue #472; hardened 2026-07-17.
+    max_in_flight     - per-REPO concurrency cap (default 1, ge=1; opt-in
+                        above 1). Was pinned to 1 (le=1, hardened
+                        2026-07-17) for the same-repo merge-race
+                        invariant; foreman#550's merge coordinator now
+                        serializes merges per repo, so > 1 is safe.
+                        Issue #472; lifted by foreman#550.
     auto_merge_impl   - when False (default), an approved impl PR parks at
                         ImplApproved for human merge; when True, foreman
                         auto-merges the impl PR (the historic behavior)
@@ -225,22 +226,23 @@ class ProjectConfig(BaseModel):
     fields inherit from the top-level identity via
     :func:`resolve_operator`. Issue #347."""
 
-    max_in_flight: int = Field(default=1, ge=1, le=1)
-    """Per-repo concurrency cap (issue #472; hardened by the self-heal
-    arch-review, 2026-07-17).
+    max_in_flight: int = Field(default=1, ge=1)
+    """Per-repo concurrency cap (issue #472; default 1, opt-in above that).
 
-    Pinned to exactly 1: at most one in-flight ticket per repo. This is
-    the same-repo safety invariant — a second concurrent ticket in the
-    SAME repo could merge and leave this repo's other PR BEHIND its base
-    mid-flight, the rebase race ``states/merging.py`` sidesteps
-    (foreman#316). Enforcing it here, per repo, is what lets the GLOBAL
-    :attr:`V4Config.max_in_flight` safely exceed 1: different repos
-    parallelise (one foreman + one agent_core ticket at once) while each
-    repo stays serial. ``le=1`` fails loud at boot if an operator sets a
-    per-repo cap > 1 before the merge-coordinator work (foreman#316 /
-    the self-heal review's ADR-0) makes intra-repo concurrency safe —
-    raise the ceiling there and then. The QueueManager reads this as the
-    per-project cap (``daemon.py`` builds ``project_caps`` from it)."""
+    Was pinned to exactly 1 (``le=1``, hardened by the self-heal
+    arch-review, 2026-07-17): at most one in-flight ticket per repo,
+    because a second concurrent ticket in the SAME repo could merge and
+    leave this repo's other PR BEHIND its base mid-flight, the rebase
+    race ``states/merging.py`` sidesteps (foreman#316).
+
+    That ceiling is now lifted (foreman#550): the merge coordinator
+    serializes merges per repo, so > 1 in-flight tickets in the same
+    repo no longer race on the same-repo merge invariant. The default
+    stays 1 — operators opt in to higher per-repo concurrency
+    explicitly. The GLOBAL :attr:`V4Config.max_in_flight` cap is
+    unaffected by this change; it still sizes total tickets across ALL
+    repos. The QueueManager reads this as the per-project cap
+    (``daemon.py`` builds ``project_caps`` from it)."""
 
     auto_merge_impl: bool = False
     """foreman#418: the impl-merge gate.

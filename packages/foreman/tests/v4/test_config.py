@@ -1010,13 +1010,11 @@ def test_project_config_max_in_flight_one_accepted():
     assert p.max_in_flight == 1
 
 
-def test_project_config_max_in_flight_above_one_rejected():
-    """A per-repo cap > 1 is unsafe until the merge coordinator (foreman#316 /
-    self-heal review ADR-0) makes intra-repo concurrency safe. ``le=1`` fails
-    loud at boot rather than silently running an unsafe intra-repo concurrency
-    level — the same-repo merge-race guard, now at the per-repo grain."""
-    with pytest.raises(ValidationError):
-        ProjectConfig(name="p", repo="o/r", local_clone_path="/tmp/r", max_in_flight=2)
+def test_project_config_max_in_flight_above_one_accepted():
+    """foreman#550: the merge coordinator makes intra-repo concurrency safe,
+    so a per-repo cap > 1 is now allowed. Default stays 1 (opt-in)."""
+    p = ProjectConfig(name="p", repo="o/r", local_clone_path="/tmp/r", max_in_flight=3)
+    assert p.max_in_flight == 3
 
 
 # ---------------------------------------------------------------------------
