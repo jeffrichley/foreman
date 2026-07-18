@@ -27,7 +27,7 @@ from foreman.v4.git_provider import FakeGitProvider, PRState, RequiredCheckState
 from foreman.v4.merge_coordinator import MergeCoordinator
 from foreman.v4.queue_manager import QueueManager
 from foreman.v4.records import TicketRecord
-from foreman.v4.repository import InMemoryTicketRepository
+from foreman.v4.repository import InMemoryTicketRepository, MergeQueueEntry
 from foreman.v4.work import WorkItem
 
 _NOW = dt.datetime(2026, 7, 17, tzinfo=dt.UTC)
@@ -445,3 +445,55 @@ def test_non_terminal_route_is_not_journaled_by_the_coordinator():
     )
     _coordinator(repo, git).tick()
     assert repo.list_state_instances_for_ticket(ticket.id) == []
+
+
+# ---------------------------------------------------------------------------
+# Per-project fault isolation (mirrors the daemon's poller isolation)
+# ---------------------------------------------------------------------------
+
+
+class _RaisingHeadEntryRepo(InMemoryTicketRepository):
+    """A repo whose ``head_merge_entry`` raises for one designated project.
+
+    Simulates a live GitHub API blip surfacing inside ``_tick_project`` --
+    the real failure mode is ``attempt_merge`` raising, but raising from
+    ``head_merge_entry`` exercises the identical code path (an unhandled
+    exception escaping ``_tick_project``) without needing to fake GitHub
+    I/O failures.
+    """
+
+    def __init__(self, *, raise_for_project: str) -> None:
+        super().__init__()
+        self._raise_for_project = raise_for_project
+
+    def head_merge_entry(self, project: str) -> MergeQueueEntry | None:
+        if project == self._raise_for_project:
+            raise RuntimeError("simulated GitHub API blip")
+        return super().head_merge_entry(project)
+
+
+def test_tick_isolates_a_failing_project_and_still_drains_the_rest():
+    """One project's ``_tick_project`` raising must not starve the others.
+
+    foreman I1: mirrors the daemon's per-poller fault isolation (see
+    ``daemon.py`` ~369-376) at the ``MergeCoordinator.tick()`` level --
+    the daemon's own ``try/except`` around ``coordinator.tick()`` only
+    catches AFTER the internal ``for`` loop has already aborted, so it
+    does not protect project 2 from project 1's failure.
+    """
+    repo = _RaisingHeadEntryRepo(raise_for_project="p1")
+    git = FakeGitProvider()
+    _seed_ticket_in_merge_queue(
+        repo, git, project="p1", issue_number=1, pr=10, kind="impl", mergeable=True
+    )
+    second = _seed_ticket_in_merge_queue(
+        repo, git, project="p2", issue_number=2, pr=20, kind="impl", mergeable=True, ci_passing=True
+    )
+
+    coordinator = MergeCoordinator(repo=repo, git=git, projects=lambda: ["p1", "p2"], clock=_clock)
+    coordinator.tick()
+
+    # p2 was still drained despite p1 raising.
+    assert repo.get_ticket(second.id).current_state == "Done"
+    assert repo.head_merge_entry("p2") is None
+    assert ("p2", 20) in git.merge_pr_calls

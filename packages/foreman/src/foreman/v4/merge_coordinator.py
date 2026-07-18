@@ -80,6 +80,7 @@ merge can land on, so labels + the state_instances journal stay complete.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from collections.abc import Callable
 
 from foreman.v4.event_bus import EventBus
@@ -96,6 +97,8 @@ from foreman.v4.states.merge_helper import (
     close_originating_issue,
 )
 from foreman.v4.states.terminal import DoneState, NeedsHelpState
+
+_log = logging.getLogger(__name__)
 
 #: State names the coordinator can route directly to that require the same
 #: terminal-landing journal synthesis ``state._enter_terminal`` performs for
@@ -165,9 +168,27 @@ class MergeCoordinator:
         self._bus = bus
 
     def tick(self) -> None:
-        """Process the head merge_queue entry of every current project, once each."""
+        """Process the head merge_queue entry of every current project, once each.
+
+        Isolated per project: ``_tick_project`` runs live GitHub I/O via
+        ``merge_helper.attempt_merge`` (``get_pr_state``/``merge_pr``/
+        ``required_check_state``) and can raise on an API blip. Letting that
+        propagate out of the loop would abort every remaining project's
+        tick this cycle -- cross-project merge starvation. The daemon's
+        outer ``try/except`` around ``coordinator.tick()`` (see
+        ``daemon.py``) does NOT prevent this; it only catches after the
+        loop has already aborted. Mirrors the poller isolation pattern
+        (foreman I1, ``daemon.py`` ~369-376): log loudly (with traceback)
+        and continue to the next project.
+        """
         for project in self._projects():
-            self._tick_project(project)
+            try:
+                self._tick_project(project)
+            except Exception:
+                _log.exception(
+                    "merge-coordinator tick failed for project %r; isolating and continuing",
+                    project,
+                )
 
     def _tick_project(self, project: str) -> None:
         entry = self._repo.head_merge_entry(project)
