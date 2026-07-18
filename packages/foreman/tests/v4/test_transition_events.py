@@ -17,6 +17,7 @@ from foreman.v4.events import (
 from foreman.v4.outcome import Outcome, OutcomeConfidence, OutcomeKind
 from foreman.v4.repository import InMemoryTicketRepository
 from foreman.v4.state import StateContext, TicketState
+from foreman.v4.states.merge_queued import MergeQueuedState
 from foreman.v4.states.terminal import DoneState, NeedsHelpState
 
 
@@ -568,3 +569,78 @@ def test_terminal_landing_no_bus_does_not_crash() -> None:
     landing_row = repo.list_state_instances_for_ticket(ticket.id)[-1]
     assert landing_row.state_name == "Done"
     assert not landing_row.is_in_flight
+
+
+# --- MergeQueued label-stamp fix (foreman#550 follow-up) ---
+#
+# MergeQueued is excluded from WorkerPool dispatch (the MergeCoordinator
+# drains it directly instead — see merge_coordinator.py), so it shares
+# the terminal states' gap above: the normal "WorkerPool opens a row +
+# transition() emits StateEntered" flow never runs for it either, and
+# foreman:state-merge-queued was never stamped. Unlike a true terminal,
+# MergeQueued is TRANSIENT: the coordinator moves the ticket elsewhere
+# later. These tests pin the ENTRY half of the two-part fix — the EXIT
+# half (StateExitedEvent published by MergeCoordinator._route on drain)
+# is covered in test_merge_coordinator.py.
+
+
+def test_transition_to_merge_queued_emits_state_entered_event() -> None:
+    """Advancing to MergeQueued must emit StateEnteredEvent(MergeQueued),
+    exactly like the terminal-landing fix above, so the label observer
+    stamps the merge-queued label the moment a ticket parks there."""
+    repo, ticket, received, ctx = _setup_terminal_advance(MergeQueuedState())
+    state = _AdvanceToTerminalState(MergeQueuedState())
+    result = state.transition(ctx)
+    assert result is not None
+    assert result.state_name == "MergeQueued"
+
+    entered_events = [e for e in received if isinstance(e, StateEnteredEvent)]
+    entered_state_names = [e.state_name for e in entered_events]
+    assert "MergeQueued" in entered_state_names, (
+        f"expected StateEnteredEvent for MergeQueued, got: {entered_state_names!r}"
+    )
+
+    # The synthesized event must carry the freshly opened state_instance
+    # row's real id/sequence (not a placeholder) so observers / archive
+    # can correlate it back to a journal row.
+    merge_queued_event = next(e for e in entered_events if e.state_name == "MergeQueued")
+    landing_row = repo.list_state_instances_for_ticket(ticket.id)[-1]
+    assert landing_row.state_name == "MergeQueued"
+    assert merge_queued_event.instance_id == landing_row.id
+    assert merge_queued_event.sequence == landing_row.sequence
+
+
+def test_merge_queued_entry_row_stays_in_flight() -> None:
+    """Unlike a terminal landing (permanently parked — see
+    test_terminal_landing_state_instance_row_is_closed, which closes the
+    row immediately), MergeQueued is transient: the ticket WILL leave
+    later via MergeCoordinator._route. The synthesized row must stay
+    OPEN at entry so the coordinator's exit-side fix has a real,
+    still-in-flight row to close (with a real instance_id/sequence)
+    when the ticket actually drains."""
+    repo, ticket, received, ctx = _setup_terminal_advance(MergeQueuedState())
+    state = _AdvanceToTerminalState(MergeQueuedState())
+    state.transition(ctx)
+
+    landing_row = repo.list_state_instances_for_ticket(ticket.id)[-1]
+    assert landing_row.state_name == "MergeQueued"
+    assert landing_row.is_in_flight, (
+        "MergeQueued's synthesized row must stay open at entry — closing "
+        "it immediately (like a terminal) would leave the coordinator's "
+        "later drain with no real row to close."
+    )
+
+
+def test_merge_queued_entry_emits_no_state_exited_event() -> None:
+    """Entering MergeQueued must not itself emit StateExitedEvent(MergeQueued)
+    — that would immediately un-stamp the label the entry just added. The
+    real exit fires later, on drain, from MergeCoordinator._route (see
+    test_merge_coordinator.py)."""
+    repo, ticket, received, ctx = _setup_terminal_advance(MergeQueuedState())
+    state = _AdvanceToTerminalState(MergeQueuedState())
+    state.transition(ctx)
+
+    exited_for_merge_queued = [
+        e for e in received if isinstance(e, StateExitedEvent) and e.state_name == "MergeQueued"
+    ]
+    assert exited_for_merge_queued == []

@@ -76,6 +76,22 @@ matters — without it, an issue never gets its ``foreman:state-done`` /
 dogfood). This coordinator calls the same helper on the same two terminals a
 merge can land on, so labels + the state_instances journal stay complete.
 
+MergeQueued label stamping (label-stamp follow-up)
+----------------------------------------------------
+``MergeQueued`` shares the terminal states' WorkerPool-dispatch-excluded
+gap (see above) on BOTH ends of its lifetime, not just entry: the pool
+never processes it, so neither ``StateEnteredEvent`` nor
+``StateExitedEvent`` ever fired for it, and ``foreman:state-merge-queued``
+was never stamped OR unstamped. ``state._enter_merge_queued`` (called
+from ``TicketState.transition()`` when Merging/SpecMerging route here)
+fixes the entry half. This coordinator's ``_route`` fixes the exit half
+via ``_exit_merge_queued``, called on EVERY route out of MergeQueued —
+terminal and non-terminal alike — so the label never lingers next to
+whatever label the ticket's next state picks up. See both methods'
+docstrings for the instance-handling details (the entry-side row is
+deliberately left open so the exit-side close has a real row, with a
+real ``instance_id``, to attach the exit event to).
+
 Crash recovery (foreman#550 Task 5)
 ------------------------------------
 ``_tick_project`` marks its head entry ``"merging"`` for the duration of one
@@ -117,6 +133,7 @@ import logging
 from collections.abc import Callable
 
 from foreman.v4.event_bus import EventBus
+from foreman.v4.events import StateExitedEvent
 from foreman.v4.git_provider import GitProvider
 from foreman.v4.outcome import Outcome, OutcomeKind
 from foreman.v4.queue_manager import QueueManager
@@ -142,6 +159,12 @@ _TERMINAL_LANDING_STATES: dict[str, type[TicketState]] = {
     "Done": DoneState,
     "NeedsHelp": NeedsHelpState,
 }
+
+#: Mirrors ``state._MERGE_QUEUED_STATE_NAME`` — kept as a local literal
+#: (not a shared import) for the same reason ``_TERMINAL_LANDING_STATES``
+#: above uses bare strings: state names are the stable cross-module
+#: contract, not the classes that produce them.
+_MERGE_QUEUED_STATE_NAME = "MergeQueued"
 
 
 def _took_real_action(outcome: Outcome) -> bool:
@@ -324,6 +347,7 @@ class MergeCoordinator:
     def _route(self, ctx: StateContext, entry: MergeQueueEntry, state_name: str) -> None:
         """Move the ticket to ``state_name``, dequeue the entry, and clean up after it."""
         self._repo.set_ticket_state(entry.ticket_id, state_name, now=self._clock())
+        self._exit_merge_queued(ctx, entry.ticket_id)
         self._repo.dequeue_merge(entry.id)
         if self._qm is not None:
             self._qm.evict_merge_queued(entry.ticket_id)
@@ -331,21 +355,74 @@ class MergeCoordinator:
         if terminal_cls is not None:
             _enter_terminal(ctx, terminal_cls())
 
+    def _exit_merge_queued(self, ctx: StateContext, ticket_id: int) -> None:
+        """Close the ticket's open ``MergeQueued`` row (if any) and publish ``StateExitedEvent``.
+
+        Label-stamp fix (foreman#550 follow-up), exit-side half of
+        ``state._enter_merge_queued``. Every ``_route`` call means the
+        ticket is actually leaving ``MergeQueued`` — terminal or not —
+        so ``LabelObservabilityObserver`` must see a ``StateExitedEvent``
+        here or ``foreman:state-merge-queued`` lingers on the issue
+        forever alongside whatever label the ticket's next state gets.
+
+        Instance handling: ``state._enter_merge_queued`` opens a real,
+        in-flight ``state_instances`` row on enqueue and deliberately
+        leaves it open (see its docstring) specifically so this method
+        can close it here with its real ``instance_id``/``sequence``,
+        matching how a normal WorkerPool-dispatched state's row would
+        look if MergeQueued weren't dispatch-excluded. Scans newest-first
+        since that row (if open) is always the ticket's most recent one
+        — nothing else opens a row while a ticket is parked in
+        MergeQueued. Falls back to ``ctx.instance`` (the synthetic,
+        never-persisted record ``_ctx_for`` builds — see its docstring)
+        when no such row is found: a ticket parked directly via
+        ``set_ticket_state`` without going through the real entry path
+        (every unit test above except the instance-handling ones), or a
+        row a generic startup reconcile already closed as a crash
+        orphan. ``LabelObservabilityObserver._on_state_exited`` only
+        reads ``event.ticket_id``/``event.state_name`` to remove the
+        label, so a synthesized fallback event is safe either way.
+        """
+        now = self._clock()
+        instance_id = ctx.instance.id
+        sequence = ctx.instance.sequence
+        for row in reversed(self._repo.list_state_instances_for_ticket(ticket_id)):
+            if row.state_name == _MERGE_QUEUED_STATE_NAME and row.is_in_flight:
+                self._repo.close_state_instance(row.id, now=now)
+                instance_id, sequence = row.id, row.sequence
+                break
+        if self._bus is not None:
+            self._bus.publish(
+                StateExitedEvent(
+                    ticket_id=ticket_id,
+                    instance_id=instance_id,
+                    state_name=_MERGE_QUEUED_STATE_NAME,
+                    sequence=sequence,
+                    at=now,
+                    outcome=None,
+                )
+            )
+
     def _ctx_for(self, entry: MergeQueueEntry) -> StateContext:
         """Build a StateContext for ``attempt_merge`` to run against.
 
-        ``instance`` is a synthetic, never-persisted
-        ``StateInstanceRecord`` — the coordinator does not journal a
-        ``MergeQueued`` state_instance row (nothing ever has; see the
-        ``MergeQueuedState`` module docstring), so there is no real row to
-        attach. Its only consumer, ``merge_helper._prior_blocked_heal_count``
-        / ``_prior_rerun_count``, reads it back via
+        ``instance`` is a synthetic, per-tick ``StateInstanceRecord``
+        (``id=0``, never persisted) — distinct from the REAL
+        ``MergeQueued`` journal row ``state._enter_merge_queued`` opens
+        on enqueue and this coordinator's own ``_exit_merge_queued``
+        closes on drain (see both docstrings; label-stamp fix). This
+        throwaway instance exists purely for ``attempt_merge``'s
+        classifier machinery to run against each tick, and doubles as
+        ``_exit_merge_queued``'s fallback when no real row is found. Its
+        other consumer, ``merge_helper._prior_blocked_heal_count`` /
+        ``_prior_rerun_count``, reads it back via
         ``ctx.repo.list_state_instances_for_ticket`` filtered on
-        ``state_name == ctx.instance.state_name`` — since no ``"MergeQueued"``
-        row is ever persisted, that lookup always returns zero prior heals,
-        which is correct: the coordinator's OWN ``MAX_ATTEMPTS`` bound (3,
-        tracked on the merge_queue entry itself) supersedes
-        ``merge_helper.MAX_HEAL_ACTIONS`` (5) for coordinator-driven merges
+        ``state_name == ctx.instance.state_name`` — the REAL MergeQueued
+        row never gets an ``outcome_kind`` (nothing ever calls
+        ``mark_execute_completed`` on it), so that lookup still always
+        returns zero prior heals, which is correct: the coordinator's OWN
+        ``MAX_ATTEMPTS`` bound (3, tracked on the merge_queue entry itself)
+        supersedes ``merge_helper.MAX_HEAL_ACTIONS`` (5) for coordinator-driven merges
         anyway, since it is strictly tighter.
         """
         ticket = self._repo.get_ticket(entry.ticket_id)

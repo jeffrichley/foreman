@@ -104,6 +104,14 @@ def _publish(ctx: StateContext, event_type: type, **kwargs: Any) -> None:
 #: state that re-dispatches each tick until it detects the human merge.
 _TERMINAL_STATE_NAMES = frozenset({"Done", "Failed", "NeedsHelp"})
 
+#: The name of the parked, coordinator-driven state a Merging/SpecMerging
+#: transition lands on (foreman#550). A bare string (not an import of
+#: ``MergeQueuedState``) for the same reason ``_TERMINAL_STATE_NAMES`` is
+#: a set of strings rather than classes: importing ``states.merge_queued``
+#: here would be circular (it imports ``TicketState``/``StateContext``
+#: from this module).
+_MERGE_QUEUED_STATE_NAME = "MergeQueued"
+
 
 def _enter_terminal(ctx: StateContext, terminal: TicketState) -> None:
     """Create a state_instance row for ``terminal`` and emit ``StateEnteredEvent``.
@@ -147,6 +155,55 @@ def _enter_terminal(ctx: StateContext, terminal: TicketState) -> None:
     # skip StateExitedEvent so the observer keeps the terminal label
     # visible on the issue.
     ctx.repo.close_state_instance(terminal_instance.id, now=now)
+
+
+def _enter_merge_queued(ctx: StateContext, merge_queued: TicketState) -> None:
+    """Create a state_instance row for ``MergeQueued`` and emit ``StateEnteredEvent``.
+
+    ``MergeQueued`` (foreman#550) has the identical underlying gap
+    ``_enter_terminal`` fixes for Done/Failed/NeedsHelp: it is excluded
+    from ``WorkerPool`` dispatch (the ``MergeCoordinator`` drains it
+    directly instead — see ``queue_manager.py``), so the WorkerPool
+    never processes it and the normal "next tick opens a row + emits
+    StateEntered" flow never runs. Without this helper,
+    ``LabelObservabilityObserver`` never sees a ``StateEnteredEvent`` for
+    ``MergeQueued`` and ``foreman:state-merge-queued`` is never stamped
+    — a ticket sits queued for merge with NO state label at all for its
+    whole sojourn there.
+
+    Unlike a true terminal, ``MergeQueued`` is TRANSIENT — the
+    coordinator moves the ticket elsewhere once the merge resolves. So,
+    unlike ``_enter_terminal``, this helper deliberately leaves the
+    opened row IN-FLIGHT (does **not** call ``close_state_instance`` and
+    does **not** emit ``StateExitedEvent``): the ticket hasn't actually
+    left the state yet, so closing it now would misreport how long the
+    ticket sat queued and would force the eventual real exit to either
+    reuse an already-closed row or fabricate a second one. The real exit
+    — closing this same row and emitting ``StateExitedEvent`` — happens
+    later, in ``MergeCoordinator._route``, when the coordinator actually
+    routes the ticket out of ``MergeQueued`` (see that method's
+    docstring for the matching exit-side half of this fix). Leaving the
+    row open here is what lets that later event carry this row's real
+    ``instance_id``/``sequence`` instead of a synthetic one.
+    """
+    now = ctx.clock()
+    sequence = ctx.repo.count_state_instances_for_ticket(ctx.ticket.id) + 1
+    instance = ctx.repo.open_state_instance(
+        ticket_id=ctx.ticket.id,
+        state_name=merge_queued.state_name,
+        sequence=sequence,
+        now=now,
+    )
+    if ctx.bus is not None:
+        ctx.bus.publish(
+            StateEnteredEvent(
+                ticket_id=ctx.ticket.id,
+                instance_id=instance.id,
+                state_name=merge_queued.state_name,
+                sequence=instance.sequence,
+                at=now,
+            )
+        )
 
 
 def escalate_to_needs_help(
@@ -403,6 +460,13 @@ class TicketState(ABC):
                     # the terminal landing event has to be synthesized
                     # inline. See ``_enter_terminal`` for the rationale.
                     _enter_terminal(ctx, next_)
+                elif next_.state_name == _MERGE_QUEUED_STATE_NAME:
+                    # WorkerPool dispatch excludes MergeQueued too (the
+                    # MergeCoordinator drains it instead), so the entry
+                    # event has to be synthesized here as well. See
+                    # ``_enter_merge_queued`` for why this differs from
+                    # the terminal case above (row stays open).
+                    _enter_merge_queued(ctx, next_)
             return next_
         finally:
             try:

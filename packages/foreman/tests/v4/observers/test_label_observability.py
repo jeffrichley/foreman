@@ -375,6 +375,94 @@ def test_failed_terminal_does_not_scrub_siblings() -> None:
     )
 
 
+def test_observer_adds_merge_queued_label_on_state_entered() -> None:
+    """foreman:state-merge-queued label-stamp fix (criterion 1, add-side).
+
+    ``state._enter_merge_queued`` now synthesizes ``StateEnteredEvent``
+    when a ticket parks in ``MergeQueued`` (it's excluded from WorkerPool
+    dispatch, so the normal flow never fired this event before). This
+    pins the observer's response to it.
+
+    NOTE: ``_state_label`` only lowercases (no CamelCase->kebab
+    conversion — see ``foreman.init._state_label_name``, which DOES
+    kebab-case and is what actually creates the GitHub label
+    ``foreman:state-merge-queued`` via ``foreman init``). That mismatch
+    is pre-existing and systemic (also affects e.g. NeedsHelp ->
+    ``foreman:state-needshelp`` vs init's ``foreman:state-needs-help``)
+    — out of scope for this fix; flagged in the task report rather than
+    changed here.
+    """
+    repo, ticket = _make_repo_and_ticket("MergeQueued")
+    writer = _RecordingWriter()
+    obs = LabelObservabilityObserver(writer=writer, repo=repo)
+    obs(
+        StateEnteredEvent(
+            ticket_id=ticket.id,
+            instance_id=99,
+            state_name="MergeQueued",
+            sequence=1,
+            at=_T0,
+        )
+    )
+    assert writer.add_calls == [("foreman", 42, {"foreman:state-mergequeued"})]
+
+
+def test_observer_removes_merge_queued_label_on_state_exited() -> None:
+    """foreman:state-merge-queued label-stamp fix (criteria 2/3, remove-side).
+
+    ``MergeCoordinator._route`` now publishes ``StateExitedEvent(MergeQueued)``
+    on every drain route so the label doesn't linger next to the
+    ticket's next-state label. This pins the observer's response."""
+    repo, ticket = _make_repo_and_ticket("MergeQueued")
+    writer = _RecordingWriter()
+    obs = LabelObservabilityObserver(writer=writer, repo=repo)
+    obs(
+        StateExitedEvent(
+            ticket_id=ticket.id,
+            instance_id=99,
+            state_name="MergeQueued",
+            sequence=1,
+            at=_T0,
+            outcome=None,
+        )
+    )
+    assert writer.remove_calls == [("foreman", 42, {"foreman:state-mergequeued"})]
+
+
+def test_merging_to_merge_queued_transition_swaps_labels() -> None:
+    """Criterion 1, full transition: Merging -> MergeQueued must gain
+    foreman:state-mergequeued and lose foreman:state-merging -- the
+    exact enqueue-time swap the label-stamp fix restores. Mirrors
+    test_observer_does_not_touch_trigger_label's Planning->SpecReview
+    sequence pattern."""
+    repo, ticket = _make_repo_and_ticket("MergeQueued")
+    writer = _RecordingWriter()
+    obs = LabelObservabilityObserver(writer=writer, repo=repo)
+
+    obs(
+        StateExitedEvent(
+            ticket_id=ticket.id,
+            instance_id=98,
+            state_name="Merging",
+            sequence=1,
+            at=_T0,
+            outcome=None,
+        )
+    )
+    obs(
+        StateEnteredEvent(
+            ticket_id=ticket.id,
+            instance_id=99,
+            state_name="MergeQueued",
+            sequence=2,
+            at=_T0,
+        )
+    )
+
+    assert writer.add_calls == [("foreman", 42, {"foreman:state-mergequeued"})]
+    assert writer.remove_calls == [("foreman", 42, {"foreman:state-merging"})]
+
+
 def test_writer_failure_propagates() -> None:
     """Label-write failure propagates — the EventBus owns the firewall,
     not the observer. We assert the exception class so EventBus's

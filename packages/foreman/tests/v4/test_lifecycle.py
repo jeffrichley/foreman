@@ -69,10 +69,6 @@ def _run_until_terminal(repo, ticket_id, *, dispatcher, git, bus, project_config
     ``MergeCoordinator`` itself whenever the ticket is parked there, exactly
     as ``Daemon.tick_once`` does after its own bounded drain.
     """
-    # Resume-safe: continue the sequence after any rows already in the
-    # journal (a parked ticket resumed by the operator path re-enters this
-    # driver with prior state_instances rows present).
-    seq = repo.count_state_instances_for_ticket(ticket_id)
     coordinator = MergeCoordinator(
         repo=repo,
         git=git,
@@ -81,6 +77,7 @@ def _run_until_terminal(repo, ticket_id, *, dispatcher, git, bus, project_config
         bus=bus,
     )
     coordinator_ticks = 0
+    dispatch_count = 0
     while True:
         ticket = repo.get_ticket(ticket_id)
         if ticket.current_state in _TERMINAL_STATES:
@@ -91,7 +88,19 @@ def _run_until_terminal(repo, ticket_id, *, dispatcher, git, bus, project_config
                 raise AssertionError("merge coordinator did not converge; check canned outcomes")
             coordinator.tick()
             continue
-        seq += 1
+        # Re-derive the sequence fresh from the repo every iteration
+        # (mirrors WorkerPool._run_transition, worker_pool.py ~153) rather
+        # than locally incrementing a shadow counter. Resume-safe by
+        # construction: a parked ticket resumed mid-journal, or (the
+        # label-stamp fix) a MergeQueued detour that has
+        # ``state._enter_merge_queued`` open a REAL journal row inside
+        # ``state.transition()`` below, are both picked up automatically.
+        # A locally-incremented counter would silently drift out of sync
+        # with that MergeQueued row's real sequence number and collide
+        # with it on the next dispatch (a hard UniqueViolation on
+        # Postgres; a silent duplicate on InMemory).
+        seq = repo.count_state_instances_for_ticket(ticket.id) + 1
+        dispatch_count += 1
         state = build_state(ticket.current_state)
         instance = repo.open_state_instance(
             ticket_id=ticket.id,
@@ -115,7 +124,7 @@ def _run_until_terminal(repo, ticket_id, *, dispatcher, git, bus, project_config
         if isinstance(state, MergingState):
             state._pr_number_for = lambda _ctx: 42  # type: ignore[method-assign]
         state.transition(ctx)
-        if seq > 25:
+        if dispatch_count > 25:
             raise AssertionError("did not converge; check canned outcomes")
 
 
@@ -160,7 +169,10 @@ def test_happy_path_queued_to_done():
     assert ("p", 42) in git.merge_pr_calls
 
     # Journal records every state transition in order. foreman#416 inserts
-    # SpecMerging between SpecReview and Implementing.
+    # SpecMerging between SpecReview and Implementing. The label-stamp fix
+    # (state._enter_merge_queued) now journals a real MergeQueued row each
+    # time Merging/SpecMerging hand off to the coordinator -- once for the
+    # spec PR, once for the impl PR.
     rows = repo.list_state_instances_for_ticket(ticket.id)
     state_order = [r.state_name for r in rows]
     assert state_order == [
@@ -168,9 +180,11 @@ def test_happy_path_queued_to_done():
         "Planning",
         "SpecReview",
         "SpecMerging",
+        "MergeQueued",
         "Implementing",
         "ImplReview",
         "Merging",
+        "MergeQueued",
         "Done",
     ]
 
