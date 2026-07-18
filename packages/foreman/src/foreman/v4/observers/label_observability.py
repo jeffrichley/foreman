@@ -39,6 +39,7 @@ from typing import Protocol
 
 from foreman.v4.events import Event, StateEnteredEvent, StateExitedEvent
 from foreman.v4.repository import TicketRepository
+from foreman.v4.state_labels import state_label
 
 
 class LabelWriter(Protocol):
@@ -55,11 +56,6 @@ class LabelWriter(Protocol):
     def remove_labels(self, *, project: str, issue_number: int, labels: AbstractSet[str]) -> None:
         """Remove ``labels`` from the issue, leaving any other labels untouched."""
         ...
-
-
-def _state_label(state_name: str) -> str:
-    """Return the canonical ``foreman:state-<lowercased>`` label."""
-    return f"foreman:state-{state_name.lower()}"
 
 
 #: Operator-applied trigger label the Poller searches for. Once the ticket
@@ -88,11 +84,11 @@ _COMPLETION_TERMINAL = "Done"
 
 #: Labels for the two non-completion terminals. These are stripped when the
 #: ticket enters Done so completed issues don't carry misleading residue.
-#: Computed via ``_state_label()`` to stay consistent with the naming helper.
+#: Computed via ``state_label()`` to stay consistent with the naming helper.
 _SIBLING_TERMINAL_LABELS: frozenset[str] = frozenset(
     {
-        _state_label("NeedsHelp"),
-        _state_label("Failed"),
+        state_label("NeedsHelp"),
+        state_label("Failed"),
     }
 )
 
@@ -131,7 +127,7 @@ class LabelObservabilityObserver:
         self._writer.add_labels(
             project=ticket.project,
             issue_number=ticket.issue_number,
-            labels={_state_label(event.state_name)},
+            labels={state_label(event.state_name)},
         )
         if event.state_name in _FIRST_STATES:
             self._writer.remove_labels(
@@ -150,7 +146,7 @@ class LabelObservabilityObserver:
         """Remove the now-old state's label.
 
         Pairs with ``_on_state_entered`` so a Planning → SpecReview
-        transition ends with ``foreman:state-specreview`` present and
+        transition ends with ``foreman:state-spec-review`` present and
         ``foreman:state-planning`` removed — and the trigger label
         + any operator-applied labels untouched throughout. Idempotent
         on the writer side: if the label was never stamped (e.g. the
@@ -160,5 +156,5 @@ class LabelObservabilityObserver:
         self._writer.remove_labels(
             project=ticket.project,
             issue_number=ticket.issue_number,
-            labels={_state_label(event.state_name)},
+            labels={state_label(event.state_name)},
         )
