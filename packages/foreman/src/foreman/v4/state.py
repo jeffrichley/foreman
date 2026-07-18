@@ -232,7 +232,7 @@ def escalate_to_needs_help(
       4. close the failed instance + emit ``StateExitedEvent`` so the observer
          REMOVES the old ``foreman:state-<X>`` label;
       5. synthesize the terminal landing (``_enter_terminal``) so the observer
-         ADDS ``foreman:state-needshelp`` and the Poller stops re-enqueueing.
+         ADDS ``foreman:state-needs-help`` and the Poller stops re-enqueueing.
 
     Steps 4–5 are idempotent against transition()'s own ``finally`` (which may
     have already closed the row + emitted StateExited before re-raising): the
@@ -332,7 +332,7 @@ class TicketState(ABC):
           the old foreman:state-<X> label. Skipping the event leaves the
           failed-state label stuck on the issue alongside the new state
           label (Bug F2 — retry-cap branch left BOTH foreman:state-<failed>
-          AND foreman:state-needshelp on the GitHub issue).
+          AND foreman:state-needs-help on the GitHub issue).
         * close_state_instance flips exited_at, which drops the row from
           partial index idx_state_instances_inflight. Skipping it leaks
           rows on every poll-while-held cycle (Bug F4 — held tickets
@@ -386,7 +386,7 @@ class TicketState(ABC):
             # crash-handler, foreman#454): record_failure → StateFailed → set
             # NeedsHelp → close + StateExited (drops the old foreman:state-<X>
             # label) → synthesize the terminal landing (adds
-            # foreman:state-needshelp; WorkerPool won't re-enqueue once parked).
+            # foreman:state-needs-help; WorkerPool won't re-enqueue once parked).
             return escalate_to_needs_help(
                 ctx,
                 failure_phase="retry_cap",

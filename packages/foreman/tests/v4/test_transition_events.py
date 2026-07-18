@@ -196,7 +196,7 @@ def test_misbehaving_observer_does_not_break_transition(setup):
 # Without the fix, transitioning a ticket onto Done / Failed / NeedsHelp
 # only flipped tickets.current_state and exited the prior instance — no
 # StateEnteredEvent ever fired for the terminal, so
-# LabelObservabilityObserver never stamped foreman:state-needshelp (or
+# LabelObservabilityObserver never stamped foreman:state-needs-help (or
 # -done / -failed). algokit#21 ended in NeedsHelp with no state label at
 # all, hiding the result from anyone viewing the GitHub issue.
 
@@ -409,7 +409,7 @@ def test_terminal_landing_state_instance_row_is_closed() -> None:
 # try/finally block that emits StateExitedEvent for the failing state.
 # LabelObservabilityObserver listens to StateExitedEvent to REMOVE the
 # old state's label. Without that event, the GitHub issue ended up with
-# both foreman:state-<failed-state> AND foreman:state-needshelp labels
+# both foreman:state-<failed-state> AND foreman:state-needs-help labels
 # (retry-cap branch) or with the state label sticking across operator
 # holds (held branch).
 
@@ -425,7 +425,7 @@ def test_retry_cap_emits_state_exited_for_failed_state() -> None:
 
     Without the StateExitedEvent, LabelObservabilityObserver never sees
     the failed state exit, leaving foreman:state-<failed> stuck on the
-    issue alongside the newly-added foreman:state-needshelp label.
+    issue alongside the newly-added foreman:state-needs-help label.
     """
     repo = InMemoryTicketRepository()
     now = dt.datetime(2026, 6, 15, 12, 0, 0)

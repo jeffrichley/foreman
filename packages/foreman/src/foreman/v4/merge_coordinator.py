@@ -72,7 +72,7 @@ Routing directly to a terminal state bypasses ``TicketState.transition()``,
 which normally synthesizes the terminal's journal row + ``StateEnteredEvent``
 via ``state._enter_terminal`` (see that function's docstring for why this
 matters — without it, an issue never gets its ``foreman:state-done`` /
-``foreman:state-needshelp`` label, the exact gap that wedged a 2026-06-15
+``foreman:state-needs-help`` label, the exact gap that wedged a 2026-06-15
 dogfood). This coordinator calls the same helper on the same two terminals a
 merge can land on, so labels + the state_instances journal stay complete.
 
