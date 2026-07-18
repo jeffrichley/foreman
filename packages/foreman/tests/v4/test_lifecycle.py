@@ -12,6 +12,7 @@ import datetime as dt
 from foreman.v4.config import ProjectConfig
 from foreman.v4.event_bus import EventBus
 from foreman.v4.git_provider import FakeGitProvider, PRState
+from foreman.v4.merge_coordinator import MergeCoordinator
 from foreman.v4.observers.event_archive import EventArchiveObserver
 from foreman.v4.observers.structured_log import StructuredLogObserver
 from foreman.v4.repository import InMemoryTicketRepository
@@ -59,15 +60,37 @@ def _run_until_terminal(repo, ticket_id, *, dispatcher, git, bus, project_config
     terminally-parked ticket, and this loop mirrors that: it checks
     ticket state at the top of each iteration and returns as soon as
     the ticket lands on a terminal.
+
+    foreman#550: ``Merging``/``SpecMerging`` no longer merge inline — they
+    enqueue the PR and park the ticket in ``MergeQueued``, which is
+    coordinator-driven, not dispatched through ``TicketState.transition()``
+    at all (mirrors production: the QueueManager excludes ``MergeQueued``
+    from the WorkerPool). This driver has no WorkerPool, so it drives the
+    ``MergeCoordinator`` itself whenever the ticket is parked there, exactly
+    as ``Daemon.tick_once`` does after its own bounded drain.
     """
     # Resume-safe: continue the sequence after any rows already in the
     # journal (a parked ticket resumed by the operator path re-enters this
     # driver with prior state_instances rows present).
     seq = repo.count_state_instances_for_ticket(ticket_id)
+    coordinator = MergeCoordinator(
+        repo=repo,
+        git=git,
+        projects=lambda: [repo.get_ticket(ticket_id).project],
+        clock=lambda: dt.datetime(2026, 6, 13),
+        bus=bus,
+    )
+    coordinator_ticks = 0
     while True:
         ticket = repo.get_ticket(ticket_id)
         if ticket.current_state in _TERMINAL_STATES:
             return ticket
+        if ticket.current_state == "MergeQueued":
+            coordinator_ticks += 1
+            if coordinator_ticks > 25:
+                raise AssertionError("merge coordinator did not converge; check canned outcomes")
+            coordinator.tick()
+            continue
         seq += 1
         state = build_state(ticket.current_state)
         instance = repo.open_state_instance(
@@ -168,7 +191,11 @@ def test_happy_path_queued_to_done():
 def test_behind_spec_pr_heals_then_reaches_implementing_and_done():
     """foreman#416 end-to-end: a spec PR that starts BEHIND self-heals.
 
-    SpecMerging issues update_branch (BLOCKED → self-loop), and on the next
+    foreman#550: the heal loop now lives in the MergeCoordinator, not in
+    SpecMerging itself — SpecMerging enqueues the PR and hands off to
+    MergeQueued unconditionally (always CLEAN), so it only ever journals
+    ONCE. The coordinator issues update_branch (BLOCKED → self-loop within
+    its own tick loop, invisible to the ticket's journal), and on the next
     poll the PR is no longer behind, so it merges and the ticket advances
     to Implementing → … → Done. This is the exact case that used to 405 in
     SpecReviewState.verify() and escalate to NeedsHelp (agent_core#190).
@@ -230,8 +257,10 @@ def test_behind_spec_pr_heals_then_reaches_implementing_and_done():
     assert ("p", 42) in git.merge_pr_calls
 
     state_order = [r.state_name for r in repo.list_state_instances_for_ticket(ticket.id)]
-    # SpecMerging appears twice: once heals (BLOCKED self-loop), once merges.
-    assert state_order.count("SpecMerging") == 2
+    # foreman#550: SpecMerging hands off unconditionally (always CLEAN) and
+    # journals exactly once; the heal-then-merge cycle now happens inside
+    # the MergeCoordinator's own tick loop, not as repeated SpecMerging rows.
+    assert state_order.count("SpecMerging") == 1
     assert "Implementing" in state_order
 
 
@@ -240,12 +269,14 @@ def test_spec_pr_heal_then_ci_pending_then_heal_reaches_done_not_needs_help():
     CI-pending BLOCKED for several polls, then goes behind again and heals
     a SECOND time must still reach Done — NOT escalate to NeedsHelp.
 
-    The heal bound counts ONLY heal-acted cycles (2 here), not the
-    interleaved CI-pending polls. Before the bound-counting fix, the
-    combined BLOCKED-row total (2 heals + N CI-pending) would trip the
-    bound and wrongly escalate. The scripted git below walks PR #42 through
-    behind → (heal) clean-but-CI-pending → CI-pending×3 → behind → (heal)
-    clean+green.
+    The attempts bound (foreman#546, now enforced by the MergeCoordinator
+    on the merge_queue entry rather than by SpecMerging journal rows) counts
+    ONLY heal-acted cycles (2 here), not the interleaved CI-pending polls.
+    Before the bound-counting fix this guards, the combined BLOCKED total
+    (2 heals + N CI-pending) would trip the bound and wrongly escalate. The
+    scripted git below walks PR #42 through behind → (heal)
+    clean-but-CI-pending → CI-pending×3 → behind → (heal) clean+green, all
+    inside the coordinator's own tick loop.
     """
     repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(project="p", issue_number=4, now=dt.datetime(2026, 6, 13))
@@ -327,8 +358,10 @@ def test_spec_pr_heal_then_ci_pending_then_heal_reaches_done_not_needs_help():
     assert ("p", 42) in git.merge_pr_calls
     state_order = [r.state_name for r in repo.list_state_instances_for_ticket(ticket.id)]
     assert "NeedsHelp" not in state_order
-    # SpecMerging polled 6 times (2 heals + 3 CI-pending + 1 merge).
-    assert state_order.count("SpecMerging") == 6
+    # foreman#550: SpecMerging journals exactly once (unconditional hand-off);
+    # the 6 polls (2 heals + 3 CI-pending + 1 merge) all happen inside the
+    # MergeCoordinator's own tick loop, invisible to the ticket's journal.
+    assert state_order.count("SpecMerging") == 1
     assert "Implementing" in state_order
 
 

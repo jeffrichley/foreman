@@ -258,6 +258,44 @@ def test_per_project_cap_does_not_block_other_projects(repo):
     assert {first.project, second.project} == {"alpha", "beta"}
 
 
+def test_evict_merge_queued_drops_the_stale_entry(repo):
+    """foreman#550: MergeCoordinator's heap-zombie cleanup — once a ticket
+    leaves MergeQueued, the stale WorkItem the Poller enqueued while it sat
+    parked must be dropped entirely, not just filtered."""
+    tid = _ticket(repo, 1, state="MergeQueued")
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    qm.enqueue(WorkItem(ticket_id=tid, state_name="MergeQueued", project="p"))
+    assert qm.queue_depth() == 1
+
+    qm.evict_merge_queued(tid)
+
+    assert qm.queue_depth() == 0
+    assert qm.dequeue() is None
+
+
+def test_evict_merge_queued_only_targets_that_ticket_and_state(repo):
+    """Eviction is scoped to (ticket_id, "MergeQueued") -- other queued
+    WorkItems, including a different state for the SAME ticket, survive."""
+    tid = _ticket(repo, 1, state="Planning")
+    other = _ticket(repo, 2, state="MergeQueued")
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    qm.enqueue(WorkItem(ticket_id=tid, state_name="Planning", project="p"))
+    qm.enqueue(WorkItem(ticket_id=other, state_name="MergeQueued", project="p"))
+
+    qm.evict_merge_queued(tid)
+
+    assert qm.queue_depth() == 2  # neither entry matched (tid isn't MergeQueued)
+    first = qm.dequeue()
+    assert first is not None and first.ticket_id == tid
+
+
+def test_evict_merge_queued_is_idempotent_on_a_missing_entry(repo):
+    """Calling evict for a ticket with no queued MergeQueued WorkItem is a no-op."""
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    qm.evict_merge_queued(999)  # must not raise
+    assert qm.queue_depth() == 0
+
+
 def test_mark_done_releases_per_project_slot(repo):
     """After mark_done, a third ticket from the same capped project becomes dequeuable."""
     a = _ticket(repo, 1, project="proj")

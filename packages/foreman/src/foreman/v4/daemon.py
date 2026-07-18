@@ -26,6 +26,7 @@ from foreman.v4.clone_refresh import (
 )
 from foreman.v4.event_bus import EventBus
 from foreman.v4.git_provider import GitProvider
+from foreman.v4.merge_coordinator import MergeCoordinator
 from foreman.v4.pg_backup import (
     BackupSchedulerLike,
     _DisabledBackupScheduler,
@@ -146,6 +147,19 @@ class Daemon:
             clock=clock,
             max_state_attempts=config.max_state_attempts,
             registry=self._registry,
+        )
+        # foreman#550: drains the merge_queue that Merging/SpecMerging enqueue
+        # onto — nothing else does. ``projects`` reads ``self._registry.current``
+        # live (not a snapshot) so a hot-reloaded project list is picked up
+        # without reconstructing the coordinator, mirroring how the WorkerPool
+        # holds the registry itself rather than a copy of its map.
+        self._merge_coordinator = MergeCoordinator(
+            repo=repo,
+            git=git,
+            projects=lambda: list(self._registry.current.keys()),
+            clock=clock,
+            qm=self._qm,
+            bus=bus,
         )
         # foreman#407: per-poll project clone refresh. Default is the no-op
         # ``_DisabledCloneRefresher`` sentinel so test-only ``Daemon(...)``
@@ -374,6 +388,16 @@ class Daemon:
         while self._qm.in_flight_count() > 0 and budget > 0:
             time.sleep(0.01)
             budget -= 0.01
+        # foreman#550/I1: drain the merge_queue AFTER the bounded drain so a
+        # Merging/SpecMerging transition that just completed this tick (and
+        # enqueued its PR) is visible to the coordinator immediately, rather
+        # than waiting a full extra tick. Isolated in its own try/except —
+        # mirrors the poller/pool boundaries above — so a coordinator error
+        # (a GitHub API blip, a repo hiccup) cannot kill the loop.
+        try:
+            self._merge_coordinator.tick()
+        except Exception:
+            _log.exception("merge-coordinator tick failed; continuing to next tick")
 
     def _reconcile_startup(self) -> None:
         """Close crash-orphaned in-flight rows left by a previous process.

@@ -178,3 +178,36 @@ class QueueManager:
         """Return how many WorkItems are waiting in the heap, not yet dequeued."""
         with self._lock:
             return len(self._heap)
+
+    def evict_merge_queued(self, ticket_id: int) -> None:
+        """Drop any queued ``MergeQueued`` WorkItem for ``ticket_id`` from the heap.
+
+        foreman#550. A ``MergeQueued`` WorkItem is never popped by
+        ``dequeue()`` (see the MergeQueued filter above) — it is always
+        pushed back onto the heap so it stays available for the day the
+        ticket's state changes and a future dequeue needs to re-evaluate
+        it. But when the ``MergeCoordinator`` moves a ticket OUT of
+        ``MergeQueued`` directly (bypassing this QueueManager entirely,
+        since coordinator-driven merges never go through
+        ``dequeue()``/``mark_done()``), nothing else ever removes that
+        WorkItem: the Poller's next sweep enqueues a NEW WorkItem for the
+        ticket's new state, but the stale ``MergeQueued`` entry is a
+        DIFFERENT WorkItem (different ``state_name``, so no dedup
+        collapse) and would otherwise linger in the heap forever — a
+        "heap zombie". Call this once, right after routing a ticket away
+        from ``MergeQueued``. No-op if no such entry exists (idempotent).
+        """
+        with self._lock:
+            self._heap = [
+                candidate
+                for candidate in self._heap
+                if not (
+                    candidate[2].ticket_id == ticket_id and candidate[2].state_name == "MergeQueued"
+                )
+            ]
+            heapq.heapify(self._heap)
+            self._queued = {
+                item
+                for item in self._queued
+                if not (item.ticket_id == ticket_id and item.state_name == "MergeQueued")
+            }

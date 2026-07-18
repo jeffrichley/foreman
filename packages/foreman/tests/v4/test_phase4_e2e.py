@@ -7,6 +7,7 @@ import time
 
 from foreman.v4.config import ProjectConfig
 from foreman.v4.git_provider import FakeGitProvider, PRState
+from foreman.v4.merge_coordinator import MergeCoordinator
 from foreman.v4.poller import Poller
 from foreman.v4.queue_manager import QueueManager
 from foreman.v4.repository import InMemoryTicketRepository
@@ -88,11 +89,24 @@ def test_three_concurrent_tickets_with_one_dep_blocked():
             )
         },
     )
+    # foreman#550: Merging/SpecMerging park tickets in MergeQueued, excluded
+    # from WorkerPool dispatch — nothing else drains that queue. Mirrors
+    # Daemon.tick_once's ordering (poller -> pool -> bounded drain ->
+    # coordinator) since this test drives the runtime triad by hand instead
+    # of through a Daemon.
+    coordinator = MergeCoordinator(
+        repo=repo,
+        git=git,
+        projects=lambda: ["p"],
+        clock=lambda: dt.datetime(2026, 6, 13, 12, 0, 0),
+        qm=qm,
+    )
     try:
         # First tick adopts the 3 tickets. Set ticket 3's dep AFTER adoption.
         poller.tick()
         pool.tick()
         _wait_idle(qm)
+        coordinator.tick()
         t1 = repo.get_ticket_by_issue(project="p", issue_number=1)
         t3 = repo.get_ticket_by_issue(project="p", issue_number=3)
         repo.set_ticket_dependencies(t3.id, deps=[t1.id])
@@ -102,6 +116,7 @@ def test_three_concurrent_tickets_with_one_dep_blocked():
             poller.tick()
             pool.tick()
             _wait_idle(qm)
+            coordinator.tick()
             tickets = [repo.get_ticket_by_issue(project="p", issue_number=i) for i in (1, 2, 3)]
             if all(t.current_state in ("Done", "Failed", "NeedsHelp") for t in tickets):
                 break
