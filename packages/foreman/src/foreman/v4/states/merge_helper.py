@@ -205,20 +205,22 @@ def _prior_rerun_count(ctx: StateContext) -> int:
     return count
 
 
-def _rerun_or_escalate(ctx: StateContext, pr_number: int) -> Outcome:
-    """Re-run a PR's timed-out/cancelled required checks once, then escalate.
+def _rerun_or_escalate(
+    ctx: StateContext, pr_number: int, *, cause: str = "timed out/cancelled"
+) -> Outcome:
+    """Re-run a PR's failed/timed-out required checks once, then escalate.
 
-    foreman#317 Decision T: a TIMED_OUT_OR_CANCELLED required check is
-    likely an infra flake rather than something ImplFix can act on, so
-    this re-runs the checks a single time (bounded by
-    ``MAX_CHECK_RERUNS``) before giving up and asking a human.
+    foreman#317 Decision T: originally for TIMED_OUT_OR_CANCELLED.
+    foreman#537: extended to FAILED (same bounded-rerun logic, different cause label).
+    Re-runs once (bounded by MAX_CHECK_RERUNS when called from a TicketState context;
+    by MergeCoordinator.MAX_ATTEMPTS in the coordinator context — see _ctx_for docstring).
     """
     prior = _prior_rerun_count(ctx)
     if prior >= MAX_CHECK_RERUNS:
         return Outcome(
             kind=OutcomeKind.NEEDS_HELP,
             confidence=OutcomeConfidence.HIGH,
-            summary=(f"checks timed out/cancelled after {MAX_CHECK_RERUNS} re-run — escalating"),
+            summary=f"required check {cause} after {MAX_CHECK_RERUNS} re-run — escalating",
             artifacts=OutcomeArtifacts(pr_number=pr_number),
         )
     # attempt_merge guarantees ctx.git is non-None before any caller
@@ -229,7 +231,7 @@ def _rerun_or_escalate(ctx: StateContext, pr_number: int) -> Outcome:
     return Outcome(
         kind=OutcomeKind.BLOCKED,
         confidence=OutcomeConfidence.HIGH,
-        summary="checks timed out/cancelled — re-running once",
+        summary=f"required check {cause} — re-running once",
         artifacts=OutcomeArtifacts(pr_number=pr_number),
         details={RERUN_DETAIL_KEY: True},
     )
@@ -373,13 +375,7 @@ def attempt_merge(
         )
     check = ctx.git.required_check_state(project=ctx.ticket.project, pr_number=pr_number)
     if check == RequiredCheckState.FAILED:
-        return Outcome(
-            kind=OutcomeKind.NEEDS_FIX,
-            confidence=OutcomeConfidence.HIGH,
-            summary="required CI check failed — routing to ImplFix",
-            artifacts=OutcomeArtifacts(pr_number=pr_number),
-            details={"fix_reason": "ci_failed"},
-        )
+        return _rerun_or_escalate(ctx, pr_number, cause="failed")
     if check == RequiredCheckState.ACTION_REQUIRED:
         return Outcome(
             kind=OutcomeKind.NEEDS_HELP,

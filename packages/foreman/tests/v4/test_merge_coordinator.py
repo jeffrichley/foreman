@@ -115,7 +115,10 @@ def test_spec_merge_routes_to_implementing():
     assert repo.head_merge_entry("p") is None
 
 
-def test_ci_failed_routes_to_impl_fix_and_dequeues():
+def test_ci_failed_reruns_and_stays_queued_on_first_tick():
+    """foreman#537: a failed required check is re-run once before blocking merge.
+    On the first tick the PR stays in MergeQueued (not routed to ImplFix)
+    and rerun_failed_checks is called once."""
     repo, git = _fake()
     ticket = _seed_ticket_in_merge_queue(
         repo,
@@ -127,11 +130,15 @@ def test_ci_failed_routes_to_impl_fix_and_dequeues():
         ci=RequiredCheckState.FAILED,
     )
     _coordinator(repo, git).tick()
-    assert repo.get_ticket(ticket.id).current_state == "ImplFix"
-    assert repo.head_merge_entry("p") is None
+    assert repo.get_ticket(ticket.id).current_state == "MergeQueued"
+    assert git.rerun_failed_checks_calls == [("p", 10)]
+    entry = repo.head_merge_entry("p")
+    assert entry is not None
+    assert entry.attempts == 1
 
 
-def test_ci_failed_spec_routes_to_spec_fix():
+def test_ci_failed_spec_reruns_and_stays_queued_on_first_tick():
+    """foreman#537: same bounded-rerun logic applies to spec PRs with FAILED checks."""
     repo, git = _fake()
     ticket = _seed_ticket_in_merge_queue(
         repo,
@@ -143,7 +150,71 @@ def test_ci_failed_spec_routes_to_spec_fix():
         ci=RequiredCheckState.FAILED,
     )
     _coordinator(repo, git).tick()
-    assert repo.get_ticket(ticket.id).current_state == "SpecFix"
+    assert repo.get_ticket(ticket.id).current_state == "MergeQueued"
+    assert git.rerun_failed_checks_calls == [("p", 10)]
+
+
+def test_failed_check_escalates_to_needs_help_after_max_attempts():
+    """foreman#537: a required check that keeps failing for MAX_ATTEMPTS
+    coordinator ticks escalates to NeedsHelp and dequeues — not looped forever."""
+    repo, git = _fake()
+    ticket = _seed_ticket_in_merge_queue(
+        repo,
+        git,
+        issue_number=1,
+        pr=10,
+        kind="impl",
+        mergeable_state="blocked",
+        ci=RequiredCheckState.FAILED,
+    )
+    coordinator = _coordinator(repo, git)
+    # Ticks 1 and 2: rerun, stay queued, attempts advance.
+    coordinator.tick()
+    assert repo.get_ticket(ticket.id).current_state == "MergeQueued"
+    coordinator.tick()
+    assert repo.get_ticket(ticket.id).current_state == "MergeQueued"
+    # Tick 3: MAX_ATTEMPTS reached — escalate to NeedsHelp, dequeue.
+    coordinator.tick()
+    assert repo.get_ticket(ticket.id).current_state == "NeedsHelp"
+    assert repo.head_merge_entry("p") is None
+    assert len(git.rerun_failed_checks_calls) == MergeCoordinator.MAX_ATTEMPTS
+
+
+def test_failed_check_clears_after_rerun_and_merges():
+    """foreman#537: if the rerun succeeds, the PR merges normally on the next tick."""
+    repo, git = _fake()
+    ticket = _seed_ticket_in_merge_queue(
+        repo,
+        git,
+        issue_number=1,
+        pr=10,
+        kind="impl",
+        mergeable_state="blocked",
+        ci=RequiredCheckState.FAILED,
+    )
+    coordinator = _coordinator(repo, git)
+    # First tick: FAILED → rerun, stays queued.
+    coordinator.tick()
+    assert repo.get_ticket(ticket.id).current_state == "MergeQueued"
+    assert git.rerun_failed_checks_calls == [("p", 10)]
+    # Simulate the rerun clearing the failure: PR is now mergeable + CI green.
+    git.set_pr_state(
+        project="p",
+        pr_number=10,
+        state=PRState(
+            merged=False,
+            mergeable=True,
+            ci_passing=True,
+            base_ref="main",
+            mergeable_state="clean",
+        ),
+    )
+    git.seed_check_state("p", 10, RequiredCheckState.PASSED)
+    # Second tick: PR merges, ticket routes to Done.
+    coordinator.tick()
+    assert repo.get_ticket(ticket.id).current_state == "Done"
+    assert ("p", 10) in git.merge_pr_calls
+    assert repo.head_merge_entry("p") is None
 
 
 def test_dirty_routes_to_impl_fix():
