@@ -25,7 +25,7 @@ import logging
 
 from foreman.v4.config import ProjectConfig
 from foreman.v4.git_provider import FakeGitProvider, PRState
-from foreman.v4.outcome import OutcomeKind
+from foreman.v4.outcome import Outcome, OutcomeConfidence, OutcomeKind
 from foreman.v4.repository import InMemoryTicketRepository
 from foreman.v4.state import StateContext
 from foreman.v4.states.merging import MergingState
@@ -306,6 +306,21 @@ def test_missing_git_provider_routes_through_execute_failure():
     MergingState().transition(ctx)
     closed = repo.get_state_instance(instance.id)
     assert closed.failure_phase == "execute"
+
+
+def test_needs_fix_routes_merging_to_impl_fix():
+    """foreman#317 C1: attempt_merge (Task 2) now emits NEEDS_FIX for a
+    CI-failed or dirty impl PR. Before this branch existed, next_state()
+    fell through to the defensive NeedsHelp fallback, stranding a
+    genuinely fixable PR in a human queue instead of routing it back to
+    the Fixer. This pins the new Merging -> ImplFix edge.
+    """
+    from foreman.v4.states.impl_fix import ImplFixState
+
+    ctx, _repo, _git = _ctx_with_pr(pr_number=99)
+    outcome = Outcome(kind=OutcomeKind.NEEDS_FIX, confidence=OutcomeConfidence.HIGH, summary="x")
+    next_state = MergingState().next_state(ctx, outcome)
+    assert isinstance(next_state, ImplFixState)
 
 
 # ---------------------------------------------------------------------------

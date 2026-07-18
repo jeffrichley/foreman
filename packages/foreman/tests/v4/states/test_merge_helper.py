@@ -23,11 +23,11 @@ from __future__ import annotations
 
 import datetime as dt
 
-from foreman.v4.git_provider import FakeGitProvider, PRState
+from foreman.v4.git_provider import FakeGitProvider, PRState, RequiredCheckState
 from foreman.v4.outcome import OutcomeKind
 from foreman.v4.repository import InMemoryTicketRepository
 from foreman.v4.state import StateContext
-from foreman.v4.states.merge_helper import MAX_HEAL_ACTIONS, attempt_merge
+from foreman.v4.states.merge_helper import MAX_CHECK_RERUNS, MAX_HEAL_ACTIONS, attempt_merge
 
 
 def _ctx(
@@ -37,15 +37,19 @@ def _ctx(
     state_name: str = "Merging",
     prior_blocked_heals: int = 0,
     prior_ci_pending_blocks: int = 0,
+    prior_check_reruns: int = 0,
 ) -> StateContext:
     """Build a StateContext with the ticket parked in ``state_name``.
 
     ``prior_blocked_heals`` seeds prior BLOCKED rows that carry the
-    ``heal_action`` marker (a healer acted) — these count toward the bound.
-    ``prior_ci_pending_blocks`` seeds plain wait-for-CI BLOCKED rows (no
-    healer acted, no marker) — these must NOT count toward the bound. Both
-    journal as ``outcome_kind == BLOCKED``; only the marker distinguishes
-    them, which is exactly the regression the bound-counting fix guards.
+    ``heal_action`` marker (a healer acted) — these count toward the heal
+    bound. ``prior_ci_pending_blocks`` seeds plain wait-for-CI BLOCKED rows
+    (no healer acted, no marker) — these must NOT count toward either
+    bound. ``prior_check_reruns`` seeds BLOCKED rows carrying the
+    ``reran_checks`` marker (foreman#317) — these count toward the
+    check-rerun bound in ``_rerun_or_escalate``. All three journal as
+    ``outcome_kind == BLOCKED``; only the marker distinguishes them, which
+    is exactly the regression the bound-counting fix guards against.
     """
     repo = repo or InMemoryTicketRepository()
     ticket = repo.create_ticket(
@@ -56,7 +60,7 @@ def _ctx(
     repo.set_ticket_state(ticket.id, state_name, now=dt.datetime(2026, 6, 13))
     seq = 0
 
-    def _seed_blocked(*, heal_action: str | None) -> None:
+    def _seed_blocked(*, details: dict | None) -> None:
         nonlocal seq
         seq += 1
         inst = repo.open_state_instance(
@@ -66,8 +70,8 @@ def _ctx(
             now=dt.datetime(2026, 6, 13),
         )
         payload: dict = {"artifacts": {"pr_number": 99}}
-        if heal_action is not None:
-            payload["details"] = {"heal_action": heal_action}
+        if details is not None:
+            payload["details"] = details
         repo.mark_execute_completed(
             inst.id,
             now=dt.datetime(2026, 6, 13),
@@ -78,9 +82,11 @@ def _ctx(
         repo.close_state_instance(inst.id, now=dt.datetime(2026, 6, 13))
 
     for _ in range(prior_blocked_heals):
-        _seed_blocked(heal_action="behind-branch")
+        _seed_blocked(details={"heal_action": "behind-branch"})
     for _ in range(prior_ci_pending_blocks):
-        _seed_blocked(heal_action=None)
+        _seed_blocked(details=None)
+    for _ in range(prior_check_reruns):
+        _seed_blocked(details={"reran_checks": True})
     seq += 1
     instance = repo.open_state_instance(
         ticket_id=ticket.id,
@@ -328,3 +334,140 @@ def test_pre_merge_guard_short_circuits():
     assert outcome is guard_outcome
     assert ("p", 99) not in git.merge_pr_calls
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# The classifier (foreman#317): no healer applied -> route on ground truth
+# instead of a blanket BLOCKED. See docs/superpowers/specs/foreman-issue-
+# 317-spec.md "Routing table" for the (mergeable_state x
+# RequiredCheckState) -> Outcome matrix these tests lock in.
+# ---------------------------------------------------------------------------
+
+
+def test_blocked_and_failed_routes_to_needs_fix():
+    """blocked + required FAILED -> NEEDS_FIX (the C1 fix: a genuinely
+    failing PR must not loop BLOCKED forever)."""
+    git = FakeGitProvider()
+    _seed_pr(git, mergeable=False, ci_passing=False, mergeable_state="blocked")
+    git.seed_check_state("p", 99, RequiredCheckState.FAILED)
+    ctx = _ctx(git=git)
+    outcome = attempt_merge(ctx, pr_number=99, on_merge_success=lambda: None)
+    assert outcome.kind == OutcomeKind.NEEDS_FIX
+    assert outcome.details["fix_reason"] == "ci_failed"
+
+
+def test_blocked_and_pending_stays_blocked():
+    """blocked + required PENDING -> BLOCKED (the legitimate wait, not a
+    failure)."""
+    git = FakeGitProvider()
+    _seed_pr(git, mergeable=False, ci_passing=False, mergeable_state="blocked")
+    git.seed_check_state("p", 99, RequiredCheckState.PENDING)
+    ctx = _ctx(git=git)
+    outcome = attempt_merge(ctx, pr_number=99, on_merge_success=lambda: None)
+    assert outcome.kind == OutcomeKind.BLOCKED
+    assert "fix_reason" not in outcome.details
+
+
+def test_passed_but_blocked_is_transient_wait():
+    """blocked + required PASSED -> BLOCKED. GitHub hasn't recomputed
+    ``mergeable_state`` yet even though the required checks already
+    report green; still a wait, not a failure."""
+    git = FakeGitProvider()
+    _seed_pr(git, mergeable=False, ci_passing=False, mergeable_state="blocked")
+    git.seed_check_state("p", 99, RequiredCheckState.PASSED)
+    ctx = _ctx(git=git)
+    outcome = attempt_merge(ctx, pr_number=99, on_merge_success=lambda: None)
+    assert outcome.kind == OutcomeKind.BLOCKED
+
+
+def test_dirty_routes_to_needs_fix_conflict():
+    """dirty (textual merge conflict) -> NEEDS_FIX, regardless of check
+    state — CI never even runs on a dirty PR (Decision D: only the Fixer
+    can resolve a real conflict; update_branch/rebase just fails on it)."""
+    git = FakeGitProvider()
+    _seed_pr(git, mergeable=False, ci_passing=False, mergeable_state="dirty")
+    ctx = _ctx(git=git)
+    outcome = attempt_merge(ctx, pr_number=99, on_merge_success=lambda: None)
+    assert outcome.kind == OutcomeKind.NEEDS_FIX
+    assert outcome.details["fix_reason"] == "merge_conflict"
+
+
+def test_draft_routes_to_needs_help():
+    """draft -> NEEDS_HELP (spec routing table). A foreman impl PR being a
+    draft is anomalous — no healer applies (only BehindBranchHealer, keyed
+    on "behind"), so without this branch the classifier fell through to
+    the check-state branches and could loop BLOCKED on this one
+    pre-check-runs ``mergeable_state`` the ``dirty`` branch doesn't cover."""
+    git = FakeGitProvider()
+    _seed_pr(git, mergeable=False, ci_passing=False, mergeable_state="draft")
+    ctx = _ctx(git=git)
+    outcome = attempt_merge(ctx, pr_number=99, on_merge_success=lambda: None)
+    assert outcome.kind == OutcomeKind.NEEDS_HELP
+
+
+def test_action_required_routes_to_needs_help():
+    """blocked + required ACTION_REQUIRED -> NEEDS_HELP (a human gate;
+    ImplFix cannot act on it)."""
+    git = FakeGitProvider()
+    _seed_pr(git, mergeable=False, ci_passing=False, mergeable_state="blocked")
+    git.seed_check_state("p", 99, RequiredCheckState.ACTION_REQUIRED)
+    ctx = _ctx(git=git)
+    outcome = attempt_merge(ctx, pr_number=99, on_merge_success=lambda: None)
+    assert outcome.kind == OutcomeKind.NEEDS_HELP
+
+
+def test_timed_out_reruns_once_then_needs_help():
+    """blocked + required TIMED_OUT_OR_CANCELLED -> re-run once (Decision
+    T: likely an infra flake), returning BLOCKED with the ``reran_checks``
+    marker and recording the provider call."""
+    git = FakeGitProvider()
+    _seed_pr(git, mergeable=False, ci_passing=False, mergeable_state="blocked")
+    git.seed_check_state("p", 99, RequiredCheckState.TIMED_OUT_OR_CANCELLED)
+    ctx = _ctx(git=git)
+    outcome = attempt_merge(ctx, pr_number=99, on_merge_success=lambda: None)
+    assert outcome.kind == OutcomeKind.BLOCKED
+    assert outcome.details.get("reran_checks") is True
+    assert git.rerun_failed_checks_calls == [("p", 99)]
+
+
+def test_timed_out_escalates_after_max_reruns():
+    """After ``MAX_CHECK_RERUNS`` prior re-run cycles, a still timed-out/
+    cancelled PR escalates to NEEDS_HELP instead of re-running again."""
+    git = FakeGitProvider()
+    _seed_pr(git, mergeable=False, ci_passing=False, mergeable_state="blocked")
+    git.seed_check_state("p", 99, RequiredCheckState.TIMED_OUT_OR_CANCELLED)
+    ctx = _ctx(git=git, prior_check_reruns=MAX_CHECK_RERUNS)
+    outcome = attempt_merge(ctx, pr_number=99, on_merge_success=lambda: None)
+    assert outcome.kind == OutcomeKind.NEEDS_HELP
+    # Bound tripped BEFORE acting -- no further rerun issued.
+    assert git.rerun_failed_checks_calls == []
+
+
+# ---------------------------------------------------------------------------
+# End-to-end regression (foreman#317 Task 4): the exact agent_core#390
+# incident this issue closes — a blocked PR with a FAILED required check
+# must reach ImplFix, not loop BLOCKED forever.
+# ---------------------------------------------------------------------------
+
+
+def test_ci_failed_pr_reaches_impl_fix_not_infinite_blocked():
+    """REGRESSION (agent_core#390 / foreman#317): before the classifier
+    (Task 2) and the Merging->ImplFix edge (Task 3) landed, attempt_merge
+    collapsed every not-yet-mergeable PR into a blanket BLOCKED and
+    ``MergingState.next_state`` self-looped BLOCKED back into Merging — so
+    a genuinely CI-failed PR polled BLOCKED forever. This drives the full
+    composed path: the classifier's NEEDS_FIX outcome feeds
+    ``MergingState.next_state`` and must land on a concrete
+    ``ImplFixState``, not another Merging self-loop.
+    """
+    from foreman.v4.states.impl_fix import ImplFixState
+    from foreman.v4.states.merging import MergingState
+
+    git = FakeGitProvider()
+    _seed_pr(git, mergeable=False, ci_passing=False, mergeable_state="blocked")
+    git.seed_check_state("p", 99, RequiredCheckState.FAILED)
+    ctx = _ctx(git=git)
+    outcome = attempt_merge(ctx, pr_number=99, on_merge_success=lambda: None)
+    assert outcome.kind == OutcomeKind.NEEDS_FIX
+    next_state = MergingState().next_state(ctx, outcome)
+    assert isinstance(next_state, ImplFixState)  # #390 would have looped BLOCKED here

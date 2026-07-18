@@ -22,7 +22,7 @@ import datetime as dt
 import pytest
 
 from foreman.git_host import CommentRef
-from foreman.v4.git_provider import FakeGitProvider, PRState
+from foreman.v4.git_provider import FakeGitProvider, PRState, RequiredCheckState
 from foreman.v4.routing_git_provider import (
     RoutingGitProvider,
     UnknownProjectError,
@@ -295,6 +295,33 @@ def test_update_branch_dispatches_to_per_project_provider():
     router.update_branch(project="b", pr_number=42)
     assert b.update_branch_calls == [("b", 42)]
     assert a.update_branch_calls == []
+
+
+def test_required_check_state_dispatches_to_per_project_provider():
+    """foreman#317: required_check_state routes by project like every
+    other Protocol method (closes a gap left by Task 1, which added the
+    method to the Protocol/Fake/PyGithub trio but not the router)."""
+    a = FakeGitProvider()
+    b = FakeGitProvider()
+    b.seed_check_state("b", 42, RequiredCheckState.FAILED)
+    router = RoutingGitProvider(providers={"a": a, "b": b})
+    result = router.required_check_state(project="b", pr_number=42)
+    assert result == RequiredCheckState.FAILED
+    # Asymmetry check: "a" was never seeded, so if the router silently
+    # routed there instead it would surface the default PENDING, not
+    # FAILED. Reading FAILED back proves the "b" provider was hit.
+
+
+def test_rerun_failed_checks_dispatches_to_per_project_provider():
+    """foreman#317: rerun_failed_checks routes by project like every
+    other Protocol method. The asymmetry (other-not-called) is
+    load-bearing."""
+    a = FakeGitProvider()
+    b = FakeGitProvider()
+    router = RoutingGitProvider(providers={"a": a, "b": b})
+    router.rerun_failed_checks(project="b", pr_number=42)
+    assert b.rerun_failed_checks_calls == [("b", 42)]
+    assert a.rerun_failed_checks_calls == []
 
 
 def test_delete_branch_unknown_project_raises():

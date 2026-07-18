@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Protocol
 
 from foreman.git_host import CommentRef
@@ -42,6 +43,20 @@ from foreman.git_host import CommentRef
 
 class PRNotFoundError(LookupError):
     """No PR matching this (project, pr_number)."""
+
+
+class RequiredCheckState(StrEnum):
+    """Classification of a PR's check-runs on its head SHA (foreman#317).
+
+    Precedence when mixed: FAILED > ACTION_REQUIRED > TIMED_OUT_OR_CANCELLED
+    > PENDING > PASSED (fail-fast on a concluded failure).
+    """
+
+    PENDING = "pending"
+    FAILED = "failed"
+    TIMED_OUT_OR_CANCELLED = "timed_out_or_cancelled"
+    ACTION_REQUIRED = "action_required"
+    PASSED = "passed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +130,21 @@ class GitProvider(Protocol):
 
         Raises :class:`PRNotFoundError` if no PR matches
         ``(project, pr_number)``.
+        """
+        ...
+
+    def required_check_state(self, *, project: str, pr_number: int) -> RequiredCheckState:
+        """Classify the check-runs on the PR's head SHA. See RequiredCheckState."""
+        ...
+
+    def rerun_failed_checks(self, *, project: str, pr_number: int) -> None:
+        """Re-run the PR's failed/timed-out/cancelled check-runs at its head SHA.
+
+        foreman#317: called once by the merge classifier's re-run-then-
+        escalate bound (``_rerun_or_escalate`` in
+        ``foreman.v4.states.merge_helper``) when ``required_check_state``
+        reports ``TIMED_OUT_OR_CANCELLED`` — Decision T treats that as a
+        likely infra flake worth one retry before asking a human.
         """
         ...
 
@@ -302,6 +332,16 @@ class FakeGitProvider:
 
     def __init__(self) -> None:
         self._prs: dict[tuple[str, int], PRState] = {}
+        # foreman#317: seeded RequiredCheckState per (project, pr_number).
+        # seed_check_state populates; required_check_state reads (defaulting
+        # to PENDING — mirrors reality where C-CI guarantees CI exists, so
+        # an unseeded PR reads "still running" rather than a silent PASSED).
+        self._check_states: dict[tuple[str, int], RequiredCheckState] = {}
+        # foreman#317: recorder for rerun_failed_checks calls. A LIST
+        # (mirrors update_branch_calls) so tests can assert exact call
+        # counts against the bounded re-run-then-escalate cycle in
+        # ``_rerun_or_escalate``.
+        self.rerun_failed_checks_calls: list[tuple[str, int]] = []
         # Recorder for merge_pr calls. Tests assert on this set instead
         # of (or in addition to) the PRState transition, since the
         # CLEAN-when-merged-externally case must NOT call merge_pr at all.
@@ -383,6 +423,22 @@ class FakeGitProvider:
             return self._prs[(project, pr_number)]
         except KeyError as exc:
             raise PRNotFoundError(f"{project}#{pr_number}") from exc
+
+    def seed_check_state(self, project: str, pr_number: int, state: RequiredCheckState) -> None:
+        """Test helper: seed the RequiredCheckState returned for (project, pr_number)."""
+        self._check_states[(project, pr_number)] = state
+
+    def required_check_state(self, *, project: str, pr_number: int) -> RequiredCheckState:
+        """Return the seeded RequiredCheckState, defaulting to PENDING."""
+        return self._check_states.get((project, pr_number), RequiredCheckState.PENDING)
+
+    def rerun_failed_checks(self, *, project: str, pr_number: int) -> None:
+        """No-op that records the call so tests can assert it fired.
+
+        Mirrors ``update_branch``'s recorder pattern — the sole observable
+        side effect from the state machine's vantage.
+        """
+        self.rerun_failed_checks_calls.append((project, pr_number))
 
     def merge_pr(self, *, project: str, pr_number: int) -> None:
         """Mark the PR merged + record the call for test assertions.

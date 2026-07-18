@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from foreman.git_host import CommentRef
-from foreman.v4.git_provider import PRNotFoundError, PRState
+from foreman.v4.git_provider import PRNotFoundError, PRState, RequiredCheckState
 from foreman.v4.pygithub_git_provider import PyGithubGitProvider, _resolve_merge_method
 
 
@@ -900,3 +900,118 @@ def test_read_blocked_by_returns_empty_list_on_404(mock_github, mock_repo, mock_
     )
     result = provider.read_blocked_by(project="p", issue_number=291)
     assert result == []
+
+
+# ---------------------------------------------------------------------------
+# required_check_state (foreman#317)
+# ---------------------------------------------------------------------------
+
+
+def _run(status: str, conclusion: str | None = None) -> MagicMock:
+    """Build a MagicMock standing in for a PyGithub CheckRun."""
+    r = MagicMock()
+    r.status = status
+    r.conclusion = conclusion
+    return r
+
+
+def _make_provider_with_check_runs(
+    mock_repo: MagicMock,
+    mock_identity: MagicMock,
+    runs: list[MagicMock],
+) -> PyGithubGitProvider:
+    """Stub repo.get_pull().head.sha → repo.get_commit().get_check_runs() to return runs."""
+    mock_pr = MagicMock()
+    mock_pr.head.sha = "deadbeef"
+    mock_repo.get_pull.return_value = mock_pr
+    mock_commit = MagicMock()
+    mock_commit.get_check_runs.return_value = runs
+    mock_repo.get_commit.return_value = mock_commit
+    return PyGithubGitProvider(
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
+    )
+
+
+@pytest.mark.parametrize(
+    "runs, expected",
+    [
+        ([_run("completed", "success")], RequiredCheckState.PASSED),
+        (
+            [_run("completed", "success"), _run("completed", "neutral")],
+            RequiredCheckState.PASSED,
+        ),
+        ([_run("in_progress")], RequiredCheckState.PENDING),
+        ([_run("completed", "failure")], RequiredCheckState.FAILED),
+        # fail-fast: failure wins over a still-pending sibling
+        (
+            [_run("completed", "failure"), _run("queued")],
+            RequiredCheckState.FAILED,
+        ),
+        ([_run("completed", "timed_out")], RequiredCheckState.TIMED_OUT_OR_CANCELLED),
+        ([_run("completed", "cancelled")], RequiredCheckState.TIMED_OUT_OR_CANCELLED),
+        # fail-fast: timed_out/cancelled wins over a still-pending sibling
+        (
+            [_run("completed", "timed_out"), _run("queued")],
+            RequiredCheckState.TIMED_OUT_OR_CANCELLED,
+        ),
+        (
+            [_run("completed", "action_required"), _run("queued")],
+            RequiredCheckState.ACTION_REQUIRED,
+        ),
+        ([_run("completed", "startup_failure")], RequiredCheckState.FAILED),
+        ([], RequiredCheckState.PENDING),  # no checks registered yet (C-CI)
+    ],
+)
+def test_pygithub_required_check_state_classifies(
+    mock_github, mock_repo, mock_identity, runs, expected
+):
+    """``required_check_state`` classifies check-runs per the precedence order:
+    FAILED > ACTION_REQUIRED > TIMED_OUT_OR_CANCELLED > PENDING > PASSED."""
+    provider = _make_provider_with_check_runs(mock_repo, mock_identity, runs)
+    assert provider.required_check_state(project="o/r", pr_number=7) == expected
+    mock_repo.get_pull.assert_called_once_with(7)
+    mock_repo.get_commit.assert_called_once_with("deadbeef")
+
+
+# ---------------------------------------------------------------------------
+# rerun_failed_checks (foreman#317)
+# ---------------------------------------------------------------------------
+
+
+def test_rerun_failed_checks_reruns_every_workflow_run_at_head_sha(
+    mock_github, mock_repo, mock_identity
+):
+    """``rerun_failed_checks`` fans out to every workflow run PyGithub
+    reports at the PR's head SHA -- a single head commit can trigger more
+    than one workflow file, so this must not assume exactly one run."""
+    mock_pr = MagicMock()
+    mock_pr.head.sha = "deadbeef"
+    mock_repo.get_pull.return_value = mock_pr
+    run1, run2 = MagicMock(), MagicMock()
+    mock_repo.get_workflow_runs.return_value = [run1, run2]
+    provider = PyGithubGitProvider(
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
+    )
+    provider.rerun_failed_checks(project="p", pr_number=7)
+    mock_repo.get_pull.assert_called_once_with(7)
+    mock_repo.get_workflow_runs.assert_called_once_with(head_sha="deadbeef")
+    run1.rerun_failed_jobs.assert_called_once_with()
+    run2.rerun_failed_jobs.assert_called_once_with()
+
+
+def test_rerun_failed_checks_no_workflow_runs_is_noop(mock_github, mock_repo, mock_identity):
+    """No workflow runs registered at the head SHA yet -- a no-op, not an error."""
+    mock_pr = MagicMock()
+    mock_pr.head.sha = "deadbeef"
+    mock_repo.get_pull.return_value = mock_pr
+    mock_repo.get_workflow_runs.return_value = []
+    provider = PyGithubGitProvider(
+        identity=mock_identity,
+        role="orchestrator",
+        repo_full_name="owner/p",
+    )
+    provider.rerun_failed_checks(project="p", pr_number=7)

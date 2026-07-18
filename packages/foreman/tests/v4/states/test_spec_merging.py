@@ -12,7 +12,7 @@ from __future__ import annotations
 import datetime as dt
 
 from foreman.v4.git_provider import FakeGitProvider, PRState
-from foreman.v4.outcome import OutcomeKind
+from foreman.v4.outcome import Outcome, OutcomeConfidence, OutcomeKind
 from foreman.v4.repository import InMemoryTicketRepository
 from foreman.v4.state import StateContext
 from foreman.v4.states.spec_merging import SpecMerging
@@ -162,3 +162,25 @@ def test_spec_merging_has_no_base_ref_guard():
     assert next_state is not None
     assert next_state.state_name == "Implementing"
     assert ("p", 42) in git.merge_pr_calls
+
+
+def test_needs_fix_routes_spec_merging_to_needs_help():
+    """foreman#317: attempt_merge can now emit NEEDS_FIX for a dirty
+    (merge-conflict) or CI-failed spec PR -- the same classifier
+    MergingState uses. Unlike MergingState, SpecMerging has no Fixer to
+    route to (no SpecFix role exists yet -- see foreman#548), so this pins
+    the explicit NEEDS_FIX -> NeedsHelp edge as intentional rather than an
+    accident of the defensive fall-through."""
+    ctx, _repo, _git = _ctx_with_pr(
+        pr_state=PRState(
+            merged=False,
+            mergeable=False,
+            ci_passing=False,
+            base_ref="main",
+            mergeable_state="dirty",
+        ),
+    )
+    outcome = Outcome(kind=OutcomeKind.NEEDS_FIX, confidence=OutcomeConfidence.HIGH, summary="x")
+    next_state = SpecMerging().next_state(ctx, outcome)
+    assert next_state is not None
+    assert next_state.state_name == "NeedsHelp"

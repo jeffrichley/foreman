@@ -11,6 +11,7 @@ from foreman.v4.git_provider import (
     FakeGitProvider,
     PRNotFoundError,
     PRState,
+    RequiredCheckState,
 )
 
 
@@ -402,3 +403,42 @@ def test_read_blocked_by_readback() -> None:
     p = FakeGitProvider()
     p.set_blocked_by(project="agent_core", issue_number=291, blocked_by=[290])
     assert p.read_blocked_by(project="agent_core", issue_number=291) == [290]
+
+
+# ---------------------------------------------------------------------------
+# required_check_state (foreman#317)
+# ---------------------------------------------------------------------------
+
+
+def test_fake_required_check_state_roundtrips():
+    p = FakeGitProvider()
+    p.seed_check_state("proj", 7, RequiredCheckState.FAILED)
+    assert p.required_check_state(project="proj", pr_number=7) == RequiredCheckState.FAILED
+
+
+def test_fake_required_check_state_defaults_pending_when_unseeded():
+    # Mirror reality: a PR whose checks haven't registered yet reads PENDING
+    # (C-CI guarantees CI exists), never a silent PASSED.
+    p = FakeGitProvider()
+    assert p.required_check_state(project="proj", pr_number=9) == RequiredCheckState.PENDING
+
+
+# ---------------------------------------------------------------------------
+# rerun_failed_checks (foreman#317)
+# ---------------------------------------------------------------------------
+
+
+def test_fake_rerun_failed_checks_records_call():
+    p = FakeGitProvider()
+    assert p.rerun_failed_checks_calls == []
+    p.rerun_failed_checks(project="proj", pr_number=7)
+    assert p.rerun_failed_checks_calls == [("proj", 7)]
+
+
+def test_fake_rerun_failed_checks_records_repeated_calls_as_list():
+    # A LIST (mirrors update_branch_calls), not a set -- the classifier's
+    # re-run-then-escalate bound cares about the exact call count.
+    p = FakeGitProvider()
+    p.rerun_failed_checks(project="proj", pr_number=7)
+    p.rerun_failed_checks(project="proj", pr_number=7)
+    assert p.rerun_failed_checks_calls == [("proj", 7), ("proj", 7)]

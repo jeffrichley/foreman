@@ -20,16 +20,30 @@ CLEAN
     issue tracker — without that, algokit#23's 2026-06-16 dogfood
     reached Done via pr.merge() but left the issue OPEN. Routes to Done.
 BLOCKED
-    GitHub says the PR isn't yet mergeable + CI-green. Stay in
+    GitHub says the PR isn't yet mergeable + CI-green, and no other
+    classification applies (CI still in flight, or PASSED-but-blocked —
+    GitHub hasn't recomputed ``mergeable_state`` yet). Stay in
     MergingState; Poller picks it up next tick. Phase 8d.18's
     BLOCKED-exemption keeps the retry cap from tripping on this
     legitimate polling. ``close_issue`` is NOT called on this branch —
     closing on every poll tick would prematurely close issues whose
     impl PR isn't actually merged yet.
+NEEDS_FIX
+    foreman#317: a dirty (merge-conflict) or CI-failed impl PR. Routes to
+    ImplFix so the Fixer resolves it, instead of looping BLOCKED forever
+    or landing an operator in NeedsHelp for something fixable
+    automatically.
+NEEDS_HELP
+    A required check needs manual action, the PR is an anomalous draft,
+    a heal-loop bound tripped, or the foreman#357 base-ref guard refused
+    to merge — see ``attempt_merge`` / ``merge_helper.py`` for the full
+    classifier. Escalates to a human.
 
 Granular failure handling (CI failed → ImplFix, dirty → ImplFix, blocked
-by review, etc.) is foreman#317. This task ships the minimum 3-branch
-shape that lets the chain reach Done on the happy path.
+by review, etc.) shipped in foreman#317 — see ``merge_helper.attempt_merge``
+for the classifier that reads ``mergeable_state`` and
+``required_check_state`` to decide between BLOCKED / NEEDS_FIX /
+NEEDS_HELP.
 
 The rebase case (PR base advanced while we were in this state) is
 operationally sidestepped by ``max_in_flight = 1`` for now — foreman#316
@@ -181,9 +195,17 @@ class MergingState(TicketState):
         # from the new test names.
         if outcome.kind == OutcomeKind.NEEDS_HELP:
             return NeedsHelpState()
-        # Defensive fall-through: execute() only ever returns CLEAN,
-        # BLOCKED, or NEEDS_HELP today, but any other outcome kind from
-        # a future refactor (or a misbehaving subclass) should route to
-        # NeedsHelp so an operator can sort it out — never silently
-        # land on Failed.
+        # foreman#317 (C1): attempt_merge emits NEEDS_FIX for a CI-failed
+        # or dirty (merge-conflict) impl PR — routes to the Fixer instead
+        # of looping BLOCKED forever or landing an operator in NeedsHelp
+        # for something the Fixer can resolve on its own.
+        if outcome.kind == OutcomeKind.NEEDS_FIX:
+            from foreman.v4.states.impl_fix import ImplFixState
+
+            return ImplFixState()
+        # Defensive fall-through: CLEAN, BLOCKED, NEEDS_HELP, and
+        # NEEDS_FIX all have explicit branches above; any other outcome
+        # kind from a future refactor (or a misbehaving subclass) should
+        # route to NeedsHelp so an operator can sort it out — never
+        # silently land on Failed.
         return NeedsHelpState()

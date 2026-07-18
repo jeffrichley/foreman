@@ -16,7 +16,36 @@ Skeleton
    CLEAN.
 5. else → consult ``MERGE_HEALERS``: first applicable healer's result maps
    ``RETRY``/``PROCEED`` → BLOCKED (re-poll), ``ESCALATE`` → NEEDS_HELP. No
-   applicable healer → BLOCKED (the unchanged "wait for CI" behavior).
+   applicable healer → the classifier (foreman#317, see below).
+
+Classifier (foreman#317)
+-------------------------
+When no healer applies, the old code fell straight through to a blanket
+BLOCKED — which looped forever on a genuinely CI-failed PR (review finding
+C1). Instead it now reads ``state.mergeable_state`` and
+``ctx.git.required_check_state(...)`` and routes per the spec's routing
+table (``docs/superpowers/specs/foreman-issue-317-spec.md``):
+
+- ``mergeable_state == "dirty"`` (textual merge conflict) → NEEDS_FIX,
+  ``details={"fix_reason": "merge_conflict"}`` — only a Fixer can resolve
+  a real conflict (Decision D).
+- ``mergeable_state == "draft"`` → NEEDS_HELP — a foreman-managed impl PR
+  should never be a draft; this is the other pre-check-runs
+  ``mergeable_state`` special-case (alongside ``dirty``) so it can't fall
+  through to the check-state branches below.
+- required check ``FAILED`` → NEEDS_FIX, ``details={"fix_reason":
+  "ci_failed"}`` — the C1 fix.
+- required check ``ACTION_REQUIRED`` → NEEDS_HELP — a human gate ImplFix
+  can't act on.
+- required check ``TIMED_OUT_OR_CANCELLED`` → ``_rerun_or_escalate``: a
+  bounded re-run-once-then-escalate cycle (Decision T — likely an infra
+  flake).
+- ``PENDING`` or ``PASSED``-but-still-``blocked`` (GitHub hasn't
+  recomputed ``mergeable_state`` yet) → BLOCKED — the legitimate wait,
+  unchanged from before #317.
+
+``NEEDS_FIX`` reuses the existing ``OutcomeKind`` (already routes
+Implementing/ImplReview → ImplFix); no new kind was added.
 
 Heal-loop bound
 ---------------
@@ -31,6 +60,14 @@ row). At/after ``MAX_HEAL_ACTIONS`` such cycles, the helper escalates to
 NEEDS_HELP instead of asking a healer to act again. No new repository
 method, no GitProvider counter — the existing journal is the counter, and
 the mechanism works identically across InMemory / Sqlite / Postgres.
+
+Check-rerun bound (foreman#317)
+--------------------------------
+A parallel bound protects the ``TIMED_OUT_OR_CANCELLED`` re-run path the
+same way: ``_prior_rerun_count`` counts prior BLOCKED rows carrying the
+``reran_checks`` marker, and at/after ``MAX_CHECK_RERUNS`` such cycles
+``_rerun_or_escalate`` returns NEEDS_HELP instead of issuing another
+``rerun_failed_checks`` call.
 """
 
 from __future__ import annotations
@@ -38,6 +75,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from foreman.v4.git_provider import RequiredCheckState
 from foreman.v4.merge_healers import MERGE_HEALERS, HealResult
 from foreman.v4.outcome import (
     Outcome,
@@ -114,6 +152,75 @@ def _prior_blocked_heal_count(ctx: StateContext) -> int:
         if details.get(HEAL_ACTION_DETAIL_KEY):
             count += 1
     return count
+
+
+#: Max check-run re-run attempts on one merge state before a still
+#: timed-out/cancelled PR escalates to NEEDS_HELP. One is deliberately
+#: tight — Decision T (foreman#317 spec): a TIMED_OUT_OR_CANCELLED
+#: required check is likely an infra flake rather than a defect ImplFix
+#: can act on, so a single re-run absorbs the common case and a human
+#: decides if it recurs.
+MAX_CHECK_RERUNS = 1
+
+
+#: Marker key written into a re-run-issued BLOCKED outcome's ``details``
+#: (value ``True``). The re-run bound counts ONLY rows carrying this
+#: marker — mirrors ``HEAL_ACTION_DETAIL_KEY``'s role in
+#: ``_prior_blocked_heal_count``: plain CI-pending BLOCKED rows must not
+#: count toward it either.
+RERUN_DETAIL_KEY = "reran_checks"
+
+
+def _prior_rerun_count(ctx: StateContext) -> int:
+    """Count prior re-run-issued BLOCKED instances of the current state.
+
+    Mirrors ``_prior_blocked_heal_count`` exactly, keyed on
+    ``details.get(RERUN_DETAIL_KEY)`` instead of the heal-action marker —
+    a TIMED_OUT_OR_CANCELLED check-run re-run (Decision T) is a parallel
+    bounded self-loop to the heal-action bound, journaled the same way, so
+    the same read-back logic applies.
+    """
+    rows = ctx.repo.list_state_instances_for_ticket(ctx.ticket.id)
+    count = 0
+    for r in rows:
+        if r.state_name != ctx.instance.state_name:
+            continue
+        if r.outcome_kind != OutcomeKind.BLOCKED:
+            continue
+        details = (r.outcome_payload or {}).get("details") or {}
+        if details.get(RERUN_DETAIL_KEY):
+            count += 1
+    return count
+
+
+def _rerun_or_escalate(ctx: StateContext, pr_number: int) -> Outcome:
+    """Re-run a PR's timed-out/cancelled required checks once, then escalate.
+
+    foreman#317 Decision T: a TIMED_OUT_OR_CANCELLED required check is
+    likely an infra flake rather than something ImplFix can act on, so
+    this re-runs the checks a single time (bounded by
+    ``MAX_CHECK_RERUNS``) before giving up and asking a human.
+    """
+    prior = _prior_rerun_count(ctx)
+    if prior >= MAX_CHECK_RERUNS:
+        return Outcome(
+            kind=OutcomeKind.NEEDS_HELP,
+            confidence=OutcomeConfidence.HIGH,
+            summary=(f"checks timed out/cancelled after {MAX_CHECK_RERUNS} re-run — escalating"),
+            artifacts=OutcomeArtifacts(pr_number=pr_number),
+        )
+    # attempt_merge guarantees ctx.git is non-None before any caller
+    # reaches here; narrow for the type checker (same pattern as
+    # BehindBranchHealer.heal in merge_healers.py).
+    assert ctx.git is not None
+    ctx.git.rerun_failed_checks(project=ctx.ticket.project, pr_number=pr_number)
+    return Outcome(
+        kind=OutcomeKind.BLOCKED,
+        confidence=OutcomeConfidence.HIGH,
+        summary="checks timed out/cancelled — re-running once",
+        artifacts=OutcomeArtifacts(pr_number=pr_number),
+        details={RERUN_DETAIL_KEY: True},
+    )
 
 
 def attempt_merge(
@@ -227,10 +334,55 @@ def attempt_merge(
             },
         )
 
-    # No healer applied: the plain "wait for CI" case — unchanged.
+    # foreman#317: no healer applied — classify on ground truth instead of
+    # a blanket BLOCKED, which looped forever on CI-failed PRs (review
+    # finding C1). "dirty" is a textual merge conflict that only a Fixer
+    # can resolve (Decision D — update_branch/rebase just fails on a real
+    # conflict); everything else defers to the required check-run state.
+    if state.mergeable_state == "dirty":
+        return Outcome(
+            kind=OutcomeKind.NEEDS_FIX,
+            confidence=OutcomeConfidence.HIGH,
+            summary="merge conflict with base — routing to ImplFix to resolve",
+            artifacts=OutcomeArtifacts(pr_number=pr_number),
+            details={"fix_reason": "merge_conflict"},
+        )
+    # "draft" is the other pre-check-runs mergeable_state (alongside
+    # "dirty"): a foreman-managed impl PR should never be a draft, so
+    # falling through to the check-state branches below would classify on
+    # a signal that doesn't apply yet and could loop BLOCKED on this one
+    # state — a human should look, per the spec routing table.
+    if state.mergeable_state == "draft":
+        return Outcome(
+            kind=OutcomeKind.NEEDS_HELP,
+            confidence=OutcomeConfidence.HIGH,
+            summary="PR is a draft — anomalous for a foreman-managed impl PR; escalating",
+            artifacts=OutcomeArtifacts(pr_number=pr_number),
+        )
+    check = ctx.git.required_check_state(project=ctx.ticket.project, pr_number=pr_number)
+    if check == RequiredCheckState.FAILED:
+        return Outcome(
+            kind=OutcomeKind.NEEDS_FIX,
+            confidence=OutcomeConfidence.HIGH,
+            summary="required CI check failed — routing to ImplFix",
+            artifacts=OutcomeArtifacts(pr_number=pr_number),
+            details={"fix_reason": "ci_failed"},
+        )
+    if check == RequiredCheckState.ACTION_REQUIRED:
+        return Outcome(
+            kind=OutcomeKind.NEEDS_HELP,
+            confidence=OutcomeConfidence.HIGH,
+            summary="a required check needs manual action — escalating",
+            artifacts=OutcomeArtifacts(pr_number=pr_number),
+        )
+    if check == RequiredCheckState.TIMED_OUT_OR_CANCELLED:
+        return _rerun_or_escalate(ctx, pr_number)
+    # PENDING (CI still running) or PASSED-but-blocked (GitHub hasn't
+    # recomputed mergeable_state yet, a transient lag) → wait for the next
+    # poll — the legitimate case, not a failure.
     return Outcome(
         kind=OutcomeKind.BLOCKED,
         confidence=OutcomeConfidence.HIGH,
-        summary="PR not yet mergeable (CI pending or merge conflict)",
+        summary="CI still in flight — re-polling",
         artifacts=OutcomeArtifacts(pr_number=pr_number),
     )

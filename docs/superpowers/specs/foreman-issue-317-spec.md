@@ -67,6 +67,10 @@ Design notes:
   timed_out present AND no required check still pending ⇒ classify the concluded problem; if
   ANY required check is still pending ⇒ `PENDING` (we haven't heard the full verdict yet).
   (Resolve the exact precedence in the plan with explicit test cases.)
+  **Resolved in the plan:** the implementation deliberately fail-fasts instead — precedence is
+  `FAILED` > `ACTION_REQUIRED` > `TIMED_OUT_OR_CANCELLED` > `PENDING` > `PASSED`, so a concluded
+  failure wins over a still-pending check rather than waiting for every check to report in (see
+  `PyGithubGitProvider.required_check_state`).
 
 ## Routing table (decisions resolved 2026-07-17)
 
