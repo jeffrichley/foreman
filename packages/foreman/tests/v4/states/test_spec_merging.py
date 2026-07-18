@@ -1,17 +1,20 @@
-"""SpecMerging — merge the spec PR; mirror MergingState minus impl bits.
+"""SpecMerging — hands the approved spec PR to the merge queue.
 
-foreman#416. The spec-PR merge moved out of ``SpecReviewState.verify()``
-(where a BEHIND spec PR hit HTTP 405 and escalated — agent_core#190) into
-this dedicated state, so it gets the same self-heal framework as the impl
-merge. Differences from MergingState: no base-ref guard, no issue close,
-and CLEAN routes onward to Implementing (not Done).
+foreman#550 moved the actual merge out of this state (see MergingState's
+module docstring for the parallel rationale). SpecMerging's execute() now
+only enqueues the spec PR (idempotently, via ``merge_helper.enqueue_for_merge``)
+and routes to ``MergeQueued`` — no base-ref guard (spec PRs aren't
+constrained by ``dev_base_branch``, unlike impl PRs), no issue-close (the
+originating issue closes when the IMPL PR merges, not the spec PR — that
+will happen in the coordinator, a later foreman#550 task), and no
+GitProvider dependency at all (the PR number comes from the ticket's own
+outcome history, not from GitHub).
 """
 
 from __future__ import annotations
 
 import datetime as dt
 
-from foreman.v4.git_provider import FakeGitProvider, PRState
 from foreman.v4.outcome import Outcome, OutcomeConfidence, OutcomeKind
 from foreman.v4.repository import InMemoryTicketRepository
 from foreman.v4.state import StateContext
@@ -37,11 +40,7 @@ def _seed_prior_outcome(repo: InMemoryTicketRepository, ticket_id: int, pr_numbe
     repo.close_state_instance(prior.id, now=dt.datetime(2026, 6, 13))
 
 
-def _ctx_with_pr(
-    pr_number: int = 42,
-    *,
-    pr_state: PRState,
-) -> tuple[StateContext, InMemoryTicketRepository, FakeGitProvider]:
+def _ctx_with_pr(pr_number: int = 42) -> tuple[StateContext, InMemoryTicketRepository]:
     repo = InMemoryTicketRepository()
     ticket = repo.create_ticket(
         project="p",
@@ -56,130 +55,61 @@ def _ctx_with_pr(
         sequence=1,
         now=dt.datetime(2026, 6, 13),
     )
-    git = FakeGitProvider()
-    git.set_pr_state(project="p", pr_number=pr_number, state=pr_state)
     ctx = StateContext(
         ticket=repo.get_ticket(ticket.id),
         instance=instance,
         repo=repo,
         clock=lambda: dt.datetime(2026, 6, 13),
-        git=git,
+        # No git — SpecMerging's hand-off doesn't need a GitProvider.
     )
-    return ctx, repo, git
+    return ctx, repo
 
 
 def test_spec_merging_state_name():
     assert SpecMerging.state_name == "SpecMerging"
 
 
-def test_mergeable_spec_pr_merges_and_advances_to_implementing():
-    ctx, _repo, git = _ctx_with_pr(
-        pr_state=PRState(
-            merged=False,
-            mergeable=True,
-            ci_passing=True,
-            base_ref="main",
-            mergeable_state="clean",
-        ),
-    )
+def test_spec_merging_enqueues_spec_pr_and_routes_to_merge_queued():
+    ctx, repo = _ctx_with_pr(pr_number=42)
     next_state = SpecMerging().transition(ctx)
     assert next_state is not None
-    assert next_state.state_name == "Implementing"
-    assert ("p", 42) in git.merge_pr_calls
-    assert git.get_pr_state(project="p", pr_number=42).merged is True
-    # Spec merge does NOT close the issue.
-    assert git.closed_issues == set()
+    assert next_state.state_name == "MergeQueued"
+
+    entries = repo.merge_queue_for_project("p")
+    assert len(entries) == 1
+    assert entries[0].ticket_id == ctx.ticket.id
+    assert entries[0].pr_number == 42
+    assert entries[0].kind == "spec"
 
 
-def test_already_merged_spec_pr_advances_to_implementing_without_merge_call():
-    ctx, _repo, git = _ctx_with_pr(
-        pr_state=PRState(
-            merged=True,
-            mergeable=True,
-            ci_passing=True,
-            base_ref="main",
-            mergeable_state="clean",
-        ),
-    )
+def test_spec_merging_second_execute_does_not_double_enqueue():
+    """A re-dispatched SpecMerging execute() on an already-queued ticket
+    must not insert a second merge_queue row for the same ticket."""
+    ctx, repo = _ctx_with_pr(pr_number=42)
+    SpecMerging().execute(ctx)
+    SpecMerging().execute(ctx)
+    entries = repo.merge_queue_for_project("p")
+    assert len(entries) == 1
+
+
+def test_spec_merging_does_not_require_git_provider():
+    """Unlike MergingState (which needs git for the base-ref guard),
+    SpecMerging's hand-off doesn't touch GitHub at all — the PR number
+    comes from the ticket's own outcome history. A StateContext built
+    without ``git`` must still succeed."""
+    ctx, _repo = _ctx_with_pr(pr_number=42)
+    assert ctx.git is None
     next_state = SpecMerging().transition(ctx)
     assert next_state is not None
-    assert next_state.state_name == "Implementing"
-    assert ("p", 42) not in git.merge_pr_calls
-    assert git.closed_issues == set()
+    assert next_state.state_name == "MergeQueued"
 
 
-def test_behind_spec_pr_updates_branch_and_blocks():
-    """The agent_core#190 fix: a BEHIND spec PR self-heals via
-    update_branch instead of 405-ing into NeedsHelp. The state stays in
-    SpecMerging (self-loop) for the next poll."""
-    ctx, _repo, git = _ctx_with_pr(
-        pr_state=PRState(
-            merged=False,
-            mergeable=False,
-            ci_passing=True,
-            base_ref="main",
-            mergeable_state="behind",
-        ),
-    )
-    next_state = SpecMerging().transition(ctx)
-    assert next_state is not None
-    assert next_state.state_name == "SpecMerging"
-    assert git.update_branch_calls == [("p", 42)]
-    assert ("p", 42) not in git.merge_pr_calls
-
-
-def test_ci_pending_spec_pr_blocks_without_update_branch():
-    ctx, _repo, git = _ctx_with_pr(
-        pr_state=PRState(
-            merged=False,
-            mergeable=False,
-            ci_passing=False,
-            base_ref="main",
-            mergeable_state="blocked",
-        ),
-    )
-    next_state = SpecMerging().transition(ctx)
-    assert next_state is not None
-    assert next_state.state_name == "SpecMerging"
-    assert git.update_branch_calls == []
-    assert ("p", 42) not in git.merge_pr_calls
-
-
-def test_spec_merging_has_no_base_ref_guard():
-    """Spec PRs legitimately target the project dev branch but the spec
-    flow has no dev_base_branch expectation; a non-main base must NOT
-    block the spec merge (unlike MergingState's impl guard)."""
-    ctx, _repo, git = _ctx_with_pr(
-        pr_state=PRState(
-            merged=False,
-            mergeable=True,
-            ci_passing=True,
-            base_ref="some-other-branch",
-            mergeable_state="clean",
-        ),
-    )
-    next_state = SpecMerging().transition(ctx)
-    assert next_state is not None
-    assert next_state.state_name == "Implementing"
-    assert ("p", 42) in git.merge_pr_calls
-
-
-def test_needs_fix_routes_spec_merging_to_needs_help():
-    """foreman#317: attempt_merge can now emit NEEDS_FIX for a dirty
-    (merge-conflict) or CI-failed spec PR -- the same classifier
-    MergingState uses. Unlike MergingState, SpecMerging has no Fixer to
-    route to (no SpecFix role exists yet -- see foreman#548), so this pins
-    the explicit NEEDS_FIX -> NeedsHelp edge as intentional rather than an
-    accident of the defensive fall-through."""
-    ctx, _repo, _git = _ctx_with_pr(
-        pr_state=PRState(
-            merged=False,
-            mergeable=False,
-            ci_passing=False,
-            base_ref="main",
-            mergeable_state="dirty",
-        ),
-    )
+def test_spec_merging_next_state_defensive_fallback_to_needs_help():
+    """execute() only ever emits CLEAN now that the merge classifier lives
+    in the coordinator, not here — but next_state() keeps a defensive
+    fallback to NeedsHelp for any other outcome kind, mirroring
+    MergingState's shape."""
+    ctx, _repo = _ctx_with_pr(pr_number=42)
     outcome = Outcome(kind=OutcomeKind.NEEDS_FIX, confidence=OutcomeConfidence.HIGH, summary="x")
     next_state = SpecMerging().next_state(ctx, outcome)
     assert next_state is not None

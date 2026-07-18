@@ -14,6 +14,7 @@ from foreman.v4.states.impl_approved import ImplApprovedState
 from foreman.v4.states.impl_fix import ImplFixState
 from foreman.v4.states.impl_review import ImplReviewState
 from foreman.v4.states.implementing import ImplementingState
+from foreman.v4.states.merge_queued import MergeQueuedState
 from foreman.v4.states.merging import MergingState
 from foreman.v4.states.planning import PlanningState
 from foreman.v4.states.queued import QueuedState
@@ -33,6 +34,9 @@ STATE_REGISTRY: dict[str, Callable[[], TicketState]] = {
     "ImplFix": ImplFixState,
     "ImplApproved": ImplApprovedState,
     "Merging": MergingState,
+    # foreman#550: hand-off state after Merging/SpecMerging enqueue the PR;
+    # coordinator-driven, excluded from QueueManager dequeue.
+    "MergeQueued": MergeQueuedState,
     "Done": DoneState,
     "Failed": FailedState,
     "NeedsHelp": NeedsHelpState,

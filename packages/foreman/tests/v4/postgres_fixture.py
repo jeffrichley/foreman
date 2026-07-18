@@ -76,5 +76,7 @@ def postgres_dsn() -> Iterator[str]:
 @pytest.fixture()
 def clean_postgres_dsn(postgres_dsn: str) -> Iterator[str]:
     with psycopg.connect(postgres_dsn, autocommit=True) as conn:
-        conn.execute("TRUNCATE tickets, state_instances, events RESTART IDENTITY CASCADE")
+        conn.execute(
+            "TRUNCATE tickets, state_instances, events, merge_queue RESTART IDENTITY CASCADE"
+        )
     yield postgres_dsn

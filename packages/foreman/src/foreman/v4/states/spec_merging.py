@@ -1,43 +1,46 @@
-"""SpecMerging — merge the approved spec PR before Implementing.
+"""SpecMerging — hand the approved spec PR off to the merge queue.
 
 foreman#416. The spec-PR merge used to live in
 ``SpecReviewState.verify()``: on CLEAN the reviewer-approved spec PR was
 merged inline, then the ticket advanced to Implementing. A spec PR that was
 ``BEHIND`` (its base advanced while it sat in review) made that inline
 ``merge_pr`` call return HTTP 405 → verify failure → escalate to NeedsHelp.
-That forced a manual operator rescue of agent_core#190.
+That forced a manual operator rescue of agent_core#190. A dedicated state
+was carved out so the spec merge could get the same self-heal framework as
+the impl merge (``attempt_merge`` + ``MERGE_HEALERS``).
 
-This dedicated state mirrors ``MergingState`` so the spec merge gets the
-same self-heal framework (``attempt_merge`` + ``MERGE_HEALERS``): a BEHIND
-spec PR now issues ``update_branch`` and re-polls instead of 405-ing.
+foreman#550 moved the actual merge attempt out of this state entirely, into
+a per-repo ``MergeCoordinator`` (a later foreman#550 task) that serializes
+same-repo merges — see ``MergingState``'s module docstring for the parallel
+rationale. ``SpecMerging.execute()`` now only enqueues the spec PR
+(idempotently, via ``merge_helper.enqueue_for_merge``) and routes to
+``MergeQueued``.
 
 Differences from MergingState (impl merge)
 ------------------------------------------
 * No base-ref guard — the foreman#357 ``dev_base_branch`` check is specific
   to impl PRs (the bug class was a wrong-base IMPL PR). The spec PR's base
-  isn't constrained by that config, so ``pre_merge_guard`` is omitted.
-* No issue close — the originating issue is closed when the IMPL PR merges
-  (MergingState), not when the spec PR merges. ``on_merge_success`` is a
-  no-op.
-* On success the ticket advances to ``Implementing`` (not Done) — the spec
-  is now on the dev branch and the Worker can start.
+  isn't constrained by that config, so there's nothing to check before the
+  hand-off.
+* No issue close — the originating issue is closed when the IMPL PR merges,
+  not when the spec PR merges. That happens in the coordinator once it
+  actually merges the impl PR, not here.
+* No ``GitProvider`` dependency at all — the spec PR number comes from the
+  ticket's own outcome history (``latest_pr_number_for_ticket``), so
+  ``execute()`` never needs ``ctx.git``.
 
 Outcomes / routing
 ------------------
-CLEAN     → Implementing (spec merged; start the build).
-BLOCKED   → SpecMerging (self-loop; Poller re-polls — heal-then-wait or
-            wait-for-CI). BLOCKED rows are retry-cap-exempt (Phase 8d.18),
-            and the heal-action bound in ``attempt_merge`` catches
-            pathological base-churn.
-NEEDS_HELP → NeedsHelp (a healer escalated, or the heal bound tripped).
-NEEDS_FIX  → NeedsHelp (foreman#317: a dirty/CI-failed spec PR). Unlike
-            MergingState, this does NOT route to a Fixer — there is no
-            SpecFix role yet, so it escalates to a human. The symmetric
-            SpecMerging→SpecFix option is tracked in foreman#548.
+CLEAN → MergeQueued (spec PR enqueued; the coordinator merges it and
+        advances the ticket to Implementing once that succeeds).
+
+The merge classifier that used to live here (BLOCKED wait-for-CI, the
+BehindBranchHealer, NEEDS_FIX for a dirty/CI-failed spec PR — see
+``merge_helper.attempt_merge``) still exists, unchanged, for the
+coordinator to reuse. It is simply no longer invoked from this state.
 
 Not terminal — it transitions onward, so it is deliberately NOT in
-``state._TERMINAL_STATE_NAMES`` / ``poller._TERMINAL_STATES``; it keeps
-being polled exactly like MergingState.
+``state._TERMINAL_STATE_NAMES`` / ``poller._TERMINAL_STATES``.
 """
 
 from __future__ import annotations
@@ -45,11 +48,11 @@ from __future__ import annotations
 from foreman.v4.outcome import Outcome, OutcomeKind
 from foreman.v4.repository import MissingPRNumberError
 from foreman.v4.state import StateContext, TicketState
-from foreman.v4.states.merge_helper import attempt_merge
+from foreman.v4.states.merge_helper import enqueue_for_merge
 
 
 class SpecMerging(TicketState):
-    """Merge the approved spec PR, self-healing a BEHIND base via MERGE_HEALERS."""
+    """Enqueue the approved spec PR for the coordinator to merge."""
 
     state_name = "SpecMerging"
 
@@ -72,42 +75,23 @@ class SpecMerging(TicketState):
         return pr
 
     def execute(self, ctx: StateContext) -> Outcome:
-        """Attempt the spec-PR merge; no base-ref guard or issue-close.
+        """Enqueue the spec PR for the coordinator; no base-ref guard, no GitProvider needed.
 
         See the module docstring for why those differ from MergingState.
         """
-        if ctx.git is None:
-            raise RuntimeError("SpecMerging requires git in StateContext")
         pr_number = self._pr_number_for(ctx)
-        # No base-ref guard, no issue close — see module docstring.
-        return attempt_merge(
-            ctx,
-            pr_number=pr_number,
-            on_merge_success=lambda: None,
-        )
+        return enqueue_for_merge(ctx, pr_number=pr_number, kind="spec")
 
     def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:
-        """Route CLEAN to Implementing, BLOCKED to a self-loop, else NeedsHelp."""
-        from foreman.v4.states.implementing import ImplementingState
+        """Route CLEAN (enqueued) to MergeQueued, else NeedsHelp."""
+        from foreman.v4.states.merge_queued import MergeQueuedState
         from foreman.v4.states.terminal import NeedsHelpState
 
         if outcome.kind == OutcomeKind.CLEAN:
-            return ImplementingState()
-        if outcome.kind == OutcomeKind.BLOCKED:
-            return SpecMerging()
-        if outcome.kind == OutcomeKind.NEEDS_HELP:
-            return NeedsHelpState()
-        # foreman#317: attempt_merge can now emit NEEDS_FIX for a dirty
-        # (merge-conflict) or CI-failed spec PR. Unlike MergingState (impl
-        # PRs), spec PRs don't route NEEDS_FIX to a Fixer — there is no
-        # SpecFix role yet, so this escalates to a human rather than
-        # attempting an auto-fix. The symmetric SpecMerging→SpecFix option
-        # is tracked in foreman#548. Made explicit (not left to the
-        # defensive fall-through below) so this is a deliberate choice, not
-        # an accident of an unhandled outcome kind.
-        if outcome.kind == OutcomeKind.NEEDS_FIX:
-            return NeedsHelpState()
-        # Defensive fall-through (mirrors MergingState): any other outcome
-        # routes to NeedsHelp so an operator sorts it out — never silently
-        # land on Failed.
+            return MergeQueuedState()
+        # Defensive fall-through: execute() only ever emits CLEAN now that
+        # the merge classifier (BLOCKED / NEEDS_FIX, foreman#317) lives in
+        # the coordinator, not here — but any other outcome kind routes to
+        # NeedsHelp so an operator sorts it out, never silently lands on
+        # Failed. Mirrors MergingState's fallback shape.
         return NeedsHelpState()

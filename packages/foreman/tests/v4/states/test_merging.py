@@ -1,21 +1,23 @@
-"""MergingState — direct pr.merge() against the impl PR.
+"""MergingState — guards the impl PR's base ref, then hands it to the merge queue.
 
-Phase 8d.19 collapsed the MergeQueue enqueue-then-poll path into one
-direct merge call. These tests pin down the 3-branch shape of
-``MergingState.execute``:
+foreman#550 moved the actual merge (``attempt_merge`` + the healer/
+classifier machinery) out of this state and into the (forthcoming) per-repo
+``MergeCoordinator``. ``MergingState.execute()`` now does two things only:
+the foreman#357 base-ref guard (still enforced here — a wrong-base PR must
+never even enter the FIFO) and the hand-off itself (``ctx.repo.enqueue_merge``
++ route to ``MergeQueued``). These tests pin that shape:
 
-  - PR already merged externally → CLEAN (no merge_pr call).
-  - PR mergeable + CI passing → call merge_pr → CLEAN.
-  - Anything else → BLOCKED (Poller picks it up next tick).
+  - PR base mismatches the project's configured dev_base_branch → NEEDS_HELP,
+    nothing enqueued (the base-ref guard test block below).
+  - PR base matches → enqueue one ``impl`` merge_queue entry, route to
+    MergeQueued.
+  - A second execute() on an already-queued ticket does not double-enqueue
+    (idempotent hand-off).
 
-foreman#357 added a fourth branch in front of all three: the base-ref
-guard returns NEEDS_HELP when ``pr.base.ref`` doesn't match the
-project's configured ``dev_base_branch``. The guard tests live below
-the original three-branch tests, after the helper.
-
-Granular ``mergeable_state`` handling (CI failed → ImplFix, dirty →
-ImplFix, etc.) is deferred to foreman#317. The BLOCKED branch is the
-catch-all today.
+The merge classifier itself (BLOCKED wait-for-CI, the BehindBranchHealer,
+NEEDS_FIX for a dirty/CI-failed PR) is no longer exercised at this layer —
+that logic still lives in ``attempt_merge`` (``merge_helper.py``), reused by
+the coordinator (a later foreman#550 task), not by MergingState directly.
 """
 
 from __future__ import annotations
@@ -71,30 +73,18 @@ def _seed_prior_outcome(repo: InMemoryTicketRepository, ticket_id: int, pr_numbe
 def _ctx_with_pr(
     pr_number: int = 99,
     *,
-    pr_state: PRState | None = None,
     base_ref: str = "main",
     project_configs: dict[str, ProjectConfig] | None = None,
 ) -> tuple[StateContext, InMemoryTicketRepository, FakeGitProvider]:
-    """Build a StateContext where the ticket is in Merging with the
-    named PR seeded against the FakeGitProvider in the given state.
-
-    The default ``pr_state`` is mergeable + CI passing + not yet merged
-    — the "execute() should call merge_pr" happy path. Tests override
-    when they want to exercise the merged-externally or BLOCKED branches.
+    """Build a StateContext where the ticket is in Merging with the named PR
+    seeded against the FakeGitProvider at the given base ref.
 
     foreman#357: by default the PR's ``base_ref`` is ``"main"`` and the
     ``project_configs`` map contains a project ``"p"`` with
-    ``dev_base_branch="main"`` so existing tests pass through the new
-    base-ref guard unchanged. Tests overriding the guard pass an
-    explicit ``base_ref`` and/or ``project_configs``.
+    ``dev_base_branch="main"`` so the base-ref guard passes by default.
+    Tests exercising the guard pass an explicit ``base_ref`` and/or
+    ``project_configs``.
     """
-    if pr_state is None:
-        pr_state = PRState(
-            merged=False,
-            mergeable=True,
-            ci_passing=True,
-            base_ref=base_ref,
-        )
     if project_configs is None:
         project_configs = {"p": _project_config()}
     repo = InMemoryTicketRepository()
@@ -108,7 +98,11 @@ def _ctx_with_pr(
         now=dt.datetime(2026, 6, 13),
     )
     git = FakeGitProvider()
-    git.set_pr_state(project="p", pr_number=pr_number, state=pr_state)
+    git.set_pr_state(
+        project="p",
+        pr_number=pr_number,
+        state=PRState(merged=False, mergeable=True, ci_passing=True, base_ref=base_ref),
+    )
     ctx = StateContext(
         ticket=repo.get_ticket(ticket.id),
         instance=instance,
@@ -120,170 +114,44 @@ def _ctx_with_pr(
     return ctx, repo, git
 
 
-def test_merging_state_returns_clean_when_pr_merged_externally():
-    """If the PR is already merged by something outside the daemon
-    (operator click-merge, GitHub's own merge-queue, an earlier daemon
-    instance), execute() returns CLEAN without calling merge_pr again.
-
-    The recorder asymmetry is load-bearing: a naive implementation that
-    always calls merge_pr would set merged=True via the fake's state
-    machine and "pass" a merged-state assertion, masking the bug class.
-
-    Phase 8d.20 extension: the originating issue must STILL get closed
-    on the already-merged branch — otherwise an operator click-merge
-    leaves the issue OPEN forever despite the loop reaching Done.
-    """
-    ctx, _repo, git = _ctx_with_pr(
-        pr_number=99,
-        pr_state=PRState(
-            merged=True,
-            mergeable=True,
-            ci_passing=True,
-            base_ref="main",
-        ),
-    )
+def test_merging_state_enqueues_impl_pr_and_routes_to_merge_queued():
+    """Happy path: base ref matches → one 'impl' merge_queue entry, MergeQueued."""
+    ctx, repo, git = _ctx_with_pr(pr_number=99, base_ref="main")
     next_state = MergingState().transition(ctx)
     assert next_state is not None
-    assert next_state.state_name == "Done"
-    # NO merge_pr call — the PR was already merged.
-    assert ("p", 99) not in git.merge_pr_calls
-    # But the issue MUST still be closed (Phase 8d.20).
-    assert ("p", 1) in git.closed_issues
+    assert next_state.state_name == "MergeQueued"
 
-
-def test_merging_state_calls_merge_pr_when_mergeable_and_ci_passing():
-    """The happy path: GitHub reports the PR mergeable + CI green,
-    execute() calls merge_pr and returns CLEAN → Done.
-
-    Phase 8d.20 extension: the originating issue is also closed after
-    the merge — same call-site, gated on the same CLEAN outcome.
-    """
-    ctx, _repo, git = _ctx_with_pr(
-        pr_number=99,
-        pr_state=PRState(
-            merged=False,
-            mergeable=True,
-            ci_passing=True,
-            base_ref="main",
-        ),
-    )
-    next_state = MergingState().transition(ctx)
-    assert next_state is not None
-    assert next_state.state_name == "Done"
-    assert ("p", 99) in git.merge_pr_calls
-    assert git.get_pr_state(project="p", pr_number=99).merged is True
-    # Phase 8d.20: the originating issue is closed after the merge.
-    assert ("p", 1) in git.closed_issues
-
-
-def test_merging_state_returns_blocked_when_ci_pending():
-    """CI hasn't passed yet — execute() returns BLOCKED so the Poller
-    tries again next tick. merge_pr MUST NOT be called: merging while
-    CI is still running would defeat the whole point of the gate."""
-    ctx, _repo, git = _ctx_with_pr(
-        pr_number=99,
-        pr_state=PRState(
-            merged=False,
-            mergeable=True,
-            ci_passing=False,
-            base_ref="main",
-        ),
-    )
-    next_state = MergingState().transition(ctx)
-    assert next_state is not None
-    assert next_state.state_name == "Merging"
-    assert ("p", 99) not in git.merge_pr_calls
-    # And the PR is still un-merged from the daemon's perspective.
-    assert git.get_pr_state(project="p", pr_number=99).merged is False
-
-
-def test_merging_state_returns_blocked_when_not_mergeable():
-    """The PR isn't mergeable (conflict, blocked-by-review, etc.) —
-    execute() returns BLOCKED. Granular dispatch on the underlying
-    cause (rebase needed, review missing, etc.) is foreman#317; this
-    task ships the minimum-shape that lets the happy path reach Done."""
-    ctx, _repo, git = _ctx_with_pr(
-        pr_number=99,
-        pr_state=PRState(
-            merged=False,
-            mergeable=False,
-            ci_passing=True,
-            base_ref="main",
-        ),
-    )
-    next_state = MergingState().transition(ctx)
-    assert next_state is not None
-    assert next_state.state_name == "Merging"
-    assert ("p", 99) not in git.merge_pr_calls
-
-
-def test_merging_state_blocked_does_not_close_issue():
-    """BLOCKED branch (CI pending OR not mergeable) MUST NOT close the
-    issue. Closing on every poll tick would prematurely close issues
-    whose impl PR isn't actually merged yet — directly user-visible.
-    """
-    ctx, _repo, git = _ctx_with_pr(
-        pr_number=99,
-        pr_state=PRState(
-            merged=False,
-            mergeable=False,
-            ci_passing=False,
-            base_ref="main",
-        ),
-    )
-    next_state = MergingState().transition(ctx)
-    assert next_state is not None
-    assert next_state.state_name == "Merging"
-    assert ("p", 99) not in git.merge_pr_calls
-    # Crucial: BLOCKED leaves the issue OPEN.
-    assert git.closed_issues == set()
-
-
-def test_merging_state_behind_impl_pr_updates_branch_and_blocks():
-    """foreman#416: a BEHIND impl PR (base advanced while it waited) used
-    to loop BLOCKED forever — it was never mergeable, so the merge gate
-    never fired and nothing advanced the branch. Now the BehindBranchHealer
-    issues update_branch and the state stays BLOCKED for the next poll.
-    merge_pr MUST NOT be called; the issue stays open.
-    """
-    ctx, _repo, git = _ctx_with_pr(
-        pr_number=99,
-        pr_state=PRState(
-            merged=False,
-            mergeable=False,
-            ci_passing=True,
-            base_ref="main",
-            mergeable_state="behind",
-        ),
-    )
-    next_state = MergingState().transition(ctx)
-    assert next_state is not None
-    assert next_state.state_name == "Merging"
-    assert git.update_branch_calls == [("p", 99)]
+    entries = repo.merge_queue_for_project("p")
+    assert len(entries) == 1
+    assert entries[0].ticket_id == ctx.ticket.id
+    assert entries[0].pr_number == 99
+    assert entries[0].kind == "impl"
+    # The merge itself doesn't happen here anymore — the coordinator does it.
     assert ("p", 99) not in git.merge_pr_calls
     assert git.closed_issues == set()
 
 
-def test_merging_state_behind_then_healed_merges_and_closes_issue():
-    """Once the behind impl PR heals (next poll reports mergeable + CI
-    green), the normal merge path fires: merge_pr + close issue + Done."""
-    ctx, _repo, git = _ctx_with_pr(
-        pr_number=99,
-        pr_state=PRState(
-            merged=False,
-            mergeable=True,
-            ci_passing=True,
-            base_ref="main",
-            mergeable_state="clean",
-        ),
-    )
-    next_state = MergingState().transition(ctx)
+def test_merging_state_second_execute_does_not_double_enqueue():
+    """A re-dispatched Merging execute() on an already-queued ticket must
+    not insert a second merge_queue row for the same ticket."""
+    ctx, repo, _git = _ctx_with_pr(pr_number=99, base_ref="main")
+    MergingState().execute(ctx)
+    MergingState().execute(ctx)
+    entries = repo.merge_queue_for_project("p")
+    assert len(entries) == 1
+
+
+def test_merging_state_next_state_defensive_fallback_to_needs_help():
+    """execute() only ever emits CLEAN or NEEDS_HELP now that the merge
+    classifier lives in the coordinator, not here — but next_state() keeps
+    a defensive fallback for any other outcome kind, so a future change to
+    execute() can't silently strand a ticket instead of surfacing to a
+    human."""
+    ctx, _repo, _git = _ctx_with_pr(pr_number=99)
+    outcome = Outcome(kind=OutcomeKind.NEEDS_FIX, confidence=OutcomeConfidence.HIGH, summary="x")
+    next_state = MergingState().next_state(ctx, outcome)
     assert next_state is not None
-    assert next_state.state_name == "Done"
-    assert ("p", 99) in git.merge_pr_calls
-    assert ("p", 1) in git.closed_issues
-    # The healed path doesn't touch update_branch.
-    assert git.update_branch_calls == []
+    assert next_state.state_name == "NeedsHelp"
 
 
 def test_missing_git_provider_routes_through_execute_failure():
@@ -308,30 +176,15 @@ def test_missing_git_provider_routes_through_execute_failure():
     assert closed.failure_phase == "execute"
 
 
-def test_needs_fix_routes_merging_to_impl_fix():
-    """foreman#317 C1: attempt_merge (Task 2) now emits NEEDS_FIX for a
-    CI-failed or dirty impl PR. Before this branch existed, next_state()
-    fell through to the defensive NeedsHelp fallback, stranding a
-    genuinely fixable PR in a human queue instead of routing it back to
-    the Fixer. This pins the new Merging -> ImplFix edge.
-    """
-    from foreman.v4.states.impl_fix import ImplFixState
-
-    ctx, _repo, _git = _ctx_with_pr(pr_number=99)
-    outcome = Outcome(kind=OutcomeKind.NEEDS_FIX, confidence=OutcomeConfidence.HIGH, summary="x")
-    next_state = MergingState().next_state(ctx, outcome)
-    assert isinstance(next_state, ImplFixState)
-
-
 # ---------------------------------------------------------------------------
-# Base-ref guard (foreman#357)
+# Base-ref guard (foreman#357) — still enforced before the hand-off.
 #
-# Defense-in-depth: before either the already-merged short-circuit or the
-# merge call, MergingState compares the impl PR's base ref against the
-# project's configured dev_base_branch. Mismatch → NEEDS_HELP. The bug
-# class this catches was directly observed twice in production
-# (foreman#341 logic bug; foreman#347 stale-binary regression) and would
-# silently move substrate state forward into the spec branch.
+# Defense-in-depth: before enqueueing, MergingState compares the impl PR's
+# base ref against the project's configured dev_base_branch. Mismatch →
+# NEEDS_HELP, nothing enqueued. The bug class this catches was directly
+# observed twice in production (foreman#341 logic bug; foreman#347
+# stale-binary regression) and would silently move substrate state forward
+# into the spec branch.
 # ---------------------------------------------------------------------------
 
 
@@ -347,29 +200,23 @@ def _outcome_payload(repo: InMemoryTicketRepository, ticket_id: int) -> dict:
     return latest.outcome_payload
 
 
-def test_merging_state_refuses_to_merge_when_pr_base_diverges_from_dev_base_branch():
+def test_merging_state_refuses_to_enqueue_when_pr_base_diverges_from_dev_base_branch():
     """The bug class from foreman#341 / #347: Worker emitted the impl PR
     with ``base=foreman/issue-N`` (the spec branch) instead of the
-    project's ``dev_base_branch``. Without the guard, MergingState
-    cheerfully merges into the spec branch and the impl never reaches
-    main. With the guard, MergingState returns NEEDS_HELP and the
-    operator gets a structured diagnostic.
+    project's ``dev_base_branch``. Without the guard, MergingState would
+    enqueue a merge into the spec branch. With the guard, it returns
+    NEEDS_HELP and nothing is enqueued.
     """
     ctx, repo, git = _ctx_with_pr(
         pr_number=99,
-        pr_state=PRState(
-            merged=False,
-            mergeable=True,
-            ci_passing=True,
-            base_ref="foreman/issue-1",
-        ),
+        base_ref="foreman/issue-1",
         project_configs={"p": _project_config(dev_base_branch="main")},
     )
     next_state = MergingState().transition(ctx)
     assert next_state is not None
     assert next_state.state_name == "NeedsHelp"
-    # CRITICAL invariants: no merge happened and the issue stays open.
-    assert ("p", 99) not in git.merge_pr_calls
+    # CRITICAL invariants: nothing enqueued and the issue stays open.
+    assert repo.merge_queue_for_project("p") == []
     assert ("p", 1) not in git.closed_issues
     # The outcome's details bag carries the diagnostic triplet so the
     # operator can see actual vs expected base directly.
@@ -380,26 +227,20 @@ def test_merging_state_refuses_to_merge_when_pr_base_diverges_from_dev_base_bran
     assert details["pr_number"] == 99
 
 
-def test_merging_state_merges_when_pr_base_matches_dev_base_branch():
-    """Happy path regression: with the new guard in place, the
-    plain-vanilla matching-base flow still reaches Done + closes the
-    issue. If this fails, the guard accidentally blocks every merge.
+def test_merging_state_enqueues_when_pr_base_matches_dev_base_branch():
+    """Happy path regression: with the guard in place, the plain-vanilla
+    matching-base flow still enqueues and routes to MergeQueued. If this
+    fails, the guard accidentally blocks every hand-off.
     """
-    ctx, _repo, git = _ctx_with_pr(
+    ctx, repo, _git = _ctx_with_pr(
         pr_number=99,
-        pr_state=PRState(
-            merged=False,
-            mergeable=True,
-            ci_passing=True,
-            base_ref="main",
-        ),
+        base_ref="main",
         project_configs={"p": _project_config(dev_base_branch="main")},
     )
     next_state = MergingState().transition(ctx)
     assert next_state is not None
-    assert next_state.state_name == "Done"
-    assert ("p", 99) in git.merge_pr_calls
-    assert ("p", 1) in git.closed_issues
+    assert next_state.state_name == "MergeQueued"
+    assert len(repo.merge_queue_for_project("p")) == 1
 
 
 def test_merging_state_base_ref_comparison_is_case_insensitive():
@@ -407,117 +248,94 @@ def test_merging_state_base_ref_comparison_is_case_insensitive():
     comparison normalizes both sides via casefold so the guard isn't
     accidentally case-fragile.
     """
-    # Config Main, PR main → match → Done.
-    ctx_a, _repo_a, git_a = _ctx_with_pr(
+    # Config Main, PR main → match → MergeQueued.
+    ctx_a, repo_a, _git_a = _ctx_with_pr(
         pr_number=99,
-        pr_state=PRState(
-            merged=False,
-            mergeable=True,
-            ci_passing=True,
-            base_ref="main",
-        ),
+        base_ref="main",
         project_configs={"p": _project_config(dev_base_branch="Main")},
     )
-    assert MergingState().transition(ctx_a).state_name == "Done"
-    assert ("p", 99) in git_a.merge_pr_calls
+    next_a = MergingState().transition(ctx_a)
+    assert next_a is not None
+    assert next_a.state_name == "MergeQueued"
+    assert len(repo_a.merge_queue_for_project("p")) == 1
 
-    # Config main, PR MAIN → match → Done.
-    ctx_b, _repo_b, git_b = _ctx_with_pr(
+    # Config main, PR MAIN → match → MergeQueued.
+    ctx_b, repo_b, _git_b = _ctx_with_pr(
         pr_number=99,
-        pr_state=PRState(
-            merged=False,
-            mergeable=True,
-            ci_passing=True,
-            base_ref="MAIN",
-        ),
+        base_ref="MAIN",
         project_configs={"p": _project_config(dev_base_branch="main")},
     )
-    assert MergingState().transition(ctx_b).state_name == "Done"
-    assert ("p", 99) in git_b.merge_pr_calls
+    next_b = MergingState().transition(ctx_b)
+    assert next_b is not None
+    assert next_b.state_name == "MergeQueued"
+    assert len(repo_b.merge_queue_for_project("p")) == 1
 
 
 def test_merging_state_falls_back_to_main_when_dev_base_branch_unset():
     """``ProjectConfig.dev_base_branch=None`` falls back to
     ``DEFAULT_DEV_BASE_BRANCH = "main"``. The Worker resolves None to
-    origin's actual default branch by probing a clone; MergingState
-    has no clone to probe, so the documented constant fallback is the
-    smallest correct shape.
+    origin's actual default branch by probing a clone; MergingState has no
+    clone to probe, so the documented constant fallback is the smallest
+    correct shape.
     """
-    # Happy: PR base "main" matches the fallback → Done.
-    ctx_ok, _repo_ok, git_ok = _ctx_with_pr(
+    # Happy: PR base "main" matches the fallback → MergeQueued.
+    ctx_ok, repo_ok, _git_ok = _ctx_with_pr(
         pr_number=99,
-        pr_state=PRState(
-            merged=False,
-            mergeable=True,
-            ci_passing=True,
-            base_ref="main",
-        ),
+        base_ref="main",
         project_configs={"p": _project_config(dev_base_branch=None)},
     )
-    assert MergingState().transition(ctx_ok).state_name == "Done"
-    assert ("p", 99) in git_ok.merge_pr_calls
+    next_ok = MergingState().transition(ctx_ok)
+    assert next_ok is not None
+    assert next_ok.state_name == "MergeQueued"
+    assert len(repo_ok.merge_queue_for_project("p")) == 1
 
     # Refusal: PR base "foreman/issue-1" diverges from the fallback →
     # NeedsHelp.
-    ctx_bad, _repo_bad, git_bad = _ctx_with_pr(
+    ctx_bad, repo_bad, _git_bad = _ctx_with_pr(
         pr_number=99,
-        pr_state=PRState(
-            merged=False,
-            mergeable=True,
-            ci_passing=True,
-            base_ref="foreman/issue-1",
-        ),
+        base_ref="foreman/issue-1",
         project_configs={"p": _project_config(dev_base_branch=None)},
     )
-    assert MergingState().transition(ctx_bad).state_name == "NeedsHelp"
-    assert ("p", 99) not in git_bad.merge_pr_calls
+    next_bad = MergingState().transition(ctx_bad)
+    assert next_bad is not None
+    assert next_bad.state_name == "NeedsHelp"
+    assert repo_bad.merge_queue_for_project("p") == []
 
 
 def test_merging_state_refuses_when_base_ref_empty():
-    """``base_ref=""`` means "couldn't read it" — the production
-    PyGithub path always populates it, so an empty value signals a
-    config-shape problem or a Fake provider that wasn't seeded.
-    Treat the unknown as a refusal — never silently merge.
+    """``base_ref=""`` means "couldn't read it" — the production PyGithub
+    path always populates it, so an empty value signals a config-shape
+    problem or a Fake provider that wasn't seeded. Treat the unknown as a
+    refusal — never silently enqueue.
     """
-    ctx, _repo, git = _ctx_with_pr(
+    ctx, repo, git = _ctx_with_pr(
         pr_number=99,
-        pr_state=PRState(
-            merged=False,
-            mergeable=True,
-            ci_passing=True,
-            base_ref="",
-        ),
+        base_ref="",
         project_configs={"p": _project_config(dev_base_branch="main")},
     )
     next_state = MergingState().transition(ctx)
     assert next_state is not None
     assert next_state.state_name == "NeedsHelp"
-    assert ("p", 99) not in git.merge_pr_calls
+    assert repo.merge_queue_for_project("p") == []
     assert ("p", 1) not in git.closed_issues
 
 
 def test_merging_state_skips_guard_when_project_config_missing(caplog):
     """Legacy test shape: when ``project_configs`` is empty (or doesn't
-    contain ``ticket.project``), the guard short-circuits with a
-    warning log line and the existing merge path proceeds unchanged.
-    Keeps the change additive — older tests don't have to thread the
-    map through.
+    contain ``ticket.project``), the guard short-circuits with a warning
+    log line and the hand-off proceeds unchanged. Keeps the change
+    additive — older tests don't have to thread the map through.
     """
-    ctx, _repo, git = _ctx_with_pr(
+    ctx, repo, _git = _ctx_with_pr(
         pr_number=99,
-        pr_state=PRState(
-            merged=False,
-            mergeable=True,
-            ci_passing=True,
-            base_ref="anything",
-        ),
+        base_ref="anything",
         project_configs={},
     )
     with caplog.at_level(logging.WARNING, logger="foreman.v4.states.merging"):
         next_state = MergingState().transition(ctx)
     assert next_state is not None
-    assert next_state.state_name == "Done"
-    assert ("p", 99) in git.merge_pr_calls
+    assert next_state.state_name == "MergeQueued"
+    assert len(repo.merge_queue_for_project("p")) == 1
     # The skip must be operator-visible.
     assert any("no project_config for project=p" in rec.message for rec in caplog.records), (
         caplog.records

@@ -36,6 +36,7 @@ from foreman.v4.records import (
     TicketRecord,
 )
 from foreman.v4.repository import (
+    MergeQueueEntry,
     StateInstanceNotFoundError,
     TicketAlreadyExistsError,
     TicketNotFoundError,
@@ -119,6 +120,19 @@ def _instance_from_row(row: dict[str, Any]) -> StateInstanceRecord:
         failure_phase=row["failure_phase"],
         failure_reason=row["failure_reason"],
         session_id=row["session_id"],
+    )
+
+
+def _merge_entry_from_row(row: dict[str, Any]) -> MergeQueueEntry:
+    return MergeQueueEntry(
+        id=row["id"],
+        project=row["project"],
+        ticket_id=row["ticket_id"],
+        pr_number=row["pr_number"],
+        kind=row["kind"],
+        status=row["status"],
+        attempts=row["attempts"],
+        enqueued_at=_from_db_required(row["enqueued_at"]),
     )
 
 
@@ -635,3 +649,113 @@ class PostgresTicketRepository:
         ``depends_on`` contains issue numbers of untracked GitHub issues.
         """
         return list(self.get_ticket(ticket_id).depends_on)
+
+    # --- Merge queue (foreman#550) ---
+
+    def enqueue_merge(
+        self, *, project: str, ticket_id: int, pr_number: int, kind: str, now: dt.datetime
+    ) -> MergeQueueEntry:
+        """Insert a new ``queued`` merge_queue row and return it."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO merge_queue
+                    (project, ticket_id, pr_number, kind, status, attempts, enqueued_at)
+                VALUES (%s, %s, %s, %s, 'queued', 0, %s)
+                RETURNING *
+                """,
+                (project, ticket_id, pr_number, kind, _to_db(now)),
+            ).fetchone()
+            conn.commit()
+            assert row is not None
+            return _merge_entry_from_row(row)
+
+    def merge_queue_for_project(self, project: str) -> list[MergeQueueEntry]:
+        """Select the project's merge_queue rows, FIFO-ordered by ``enqueued_at``, then ``id``.
+
+        ``id`` is a secondary sort key so entries enqueued with an
+        identical ``enqueued_at`` (the coordinator's clock can produce
+        ties) still order deterministically.
+        """
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM merge_queue WHERE project = %s ORDER BY enqueued_at ASC, id ASC",
+                (project,),
+            ).fetchall()
+        return [_merge_entry_from_row(r) for r in rows]
+
+    def head_merge_entry(self, project: str) -> MergeQueueEntry | None:
+        """Select the project's earliest merge_queue row, or None if its queue is empty."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM merge_queue WHERE project = %s "
+                "ORDER BY enqueued_at ASC, id ASC LIMIT 1",
+                (project,),
+            ).fetchone()
+        return _merge_entry_from_row(row) if row is not None else None
+
+    def mark_merge_active(self, entry_id: int) -> None:
+        """Update the entry's ``status`` to ``'merging'``.
+
+        Raises:
+            LookupError: no merge_queue entry with ``entry_id`` exists.
+        """
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "UPDATE merge_queue SET status = 'merging' WHERE id = %s",
+                (entry_id,),
+            )
+            if cur.rowcount == 0:
+                conn.rollback()
+                raise LookupError(str(entry_id))
+            conn.commit()
+
+    def increment_merge_attempts(self, entry_id: int) -> int:
+        """Increment the entry's ``attempts`` column by one and return the new count.
+
+        Raises:
+            LookupError: no merge_queue entry with ``entry_id`` exists. A
+                zero-row ``UPDATE ... RETURNING`` is a legitimate outcome
+                for an unknown id, not an invariant violation, so it is
+                translated to this domain error rather than asserted away.
+        """
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "UPDATE merge_queue SET attempts = attempts + 1 WHERE id = %s RETURNING attempts",
+                (entry_id,),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                raise LookupError(str(entry_id))
+            conn.commit()
+        return int(row["attempts"])
+
+    def dequeue_merge(self, entry_id: int) -> None:
+        """Delete the entry from merge_queue."""
+        with self._pool.connection() as conn:
+            conn.execute("DELETE FROM merge_queue WHERE id = %s", (entry_id,))
+            conn.commit()
+
+    def list_active_merges(self) -> list[MergeQueueEntry]:
+        """Select every merge_queue row, across all projects, whose status is ``'merging'``."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM merge_queue WHERE status = 'merging' ORDER BY id"
+            ).fetchall()
+        return [_merge_entry_from_row(r) for r in rows]
+
+    def reset_merge_to_queued(self, entry_id: int) -> None:
+        """Update the entry's ``status`` back to ``'queued'``.
+
+        Raises:
+            LookupError: no merge_queue entry with ``entry_id`` exists.
+        """
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "UPDATE merge_queue SET status = 'queued' WHERE id = %s",
+                (entry_id,),
+            )
+            if cur.rowcount == 0:
+                conn.rollback()
+                raise LookupError(str(entry_id))
+            conn.commit()

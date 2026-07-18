@@ -26,6 +26,7 @@ from foreman.v4.clone_refresh import (
 )
 from foreman.v4.event_bus import EventBus
 from foreman.v4.git_provider import GitProvider
+from foreman.v4.merge_coordinator import MergeCoordinator
 from foreman.v4.pg_backup import (
     BackupSchedulerLike,
     _DisabledBackupScheduler,
@@ -124,9 +125,10 @@ class Daemon:
         self._registry: ProjectRegistry = ProjectRegistry(project_configs or {})
         # issue #472: extract per-project caps and pass to QueueManager so it
         # can enforce per-project concurrency limits in its dequeue filter.
-        # ProjectConfig.max_in_flight is pinned to 1 (per-repo serial), but
-        # QueueManager stays general — it accepts int | None (None = unbounded)
-        # so the annotation widens to match its signature.
+        # ProjectConfig.max_in_flight defaults to 1 (per-repo serial) but may
+        # be raised per project now that the MergeCoordinator (#550) serializes
+        # merges; QueueManager stays general — it accepts int | None (None =
+        # unbounded) so the annotation widens to match its signature.
         project_caps: dict[str, int | None] = {
             name: pc.max_in_flight for name, pc in self._registry.current.items()
         }
@@ -146,6 +148,19 @@ class Daemon:
             clock=clock,
             max_state_attempts=config.max_state_attempts,
             registry=self._registry,
+        )
+        # foreman#550: drains the merge_queue that Merging/SpecMerging enqueue
+        # onto — nothing else does. ``projects`` reads ``self._registry.current``
+        # live (not a snapshot) so a hot-reloaded project list is picked up
+        # without reconstructing the coordinator, mirroring how the WorkerPool
+        # holds the registry itself rather than a copy of its map.
+        self._merge_coordinator = MergeCoordinator(
+            repo=repo,
+            git=git,
+            projects=lambda: list(self._registry.current.keys()),
+            clock=clock,
+            qm=self._qm,
+            bus=bus,
         )
         # foreman#407: per-poll project clone refresh. Default is the no-op
         # ``_DisabledCloneRefresher`` sentinel so test-only ``Daemon(...)``
@@ -374,6 +389,16 @@ class Daemon:
         while self._qm.in_flight_count() > 0 and budget > 0:
             time.sleep(0.01)
             budget -= 0.01
+        # foreman#550/I1: drain the merge_queue AFTER the bounded drain so a
+        # Merging/SpecMerging transition that just completed this tick (and
+        # enqueued its PR) is visible to the coordinator immediately, rather
+        # than waiting a full extra tick. Isolated in its own try/except —
+        # mirrors the poller/pool boundaries above — so a coordinator error
+        # (a GitHub API blip, a repo hiccup) cannot kill the loop.
+        try:
+            self._merge_coordinator.tick()
+        except Exception:
+            _log.exception("merge-coordinator tick failed; continuing to next tick")
 
     def _reconcile_startup(self) -> None:
         """Close crash-orphaned in-flight rows left by a previous process.
@@ -382,8 +407,16 @@ class Daemon:
         Deliberately NOT in ``bootstrap_cli_context`` — that is built by every
         CLI command (``foreman ps``, ``foreman show``); reconciliation must
         fire only when the daemon actually starts processing.
+
+        foreman#550 Task 5: the merge_queue's own crash recovery
+        (``MergeCoordinator.reconcile_on_startup``) runs AFTER this — a
+        crash-orphaned ``merge_queue`` entry is independent of any
+        state_instances row, but closing tickets' in-flight state first
+        keeps the two reconcile passes in the same "oldest first" order the
+        rest of the daemon's startup sequencing follows.
         """
         reconcile_on_startup(self._repo, clock=self._clock)
+        self._merge_coordinator.reconcile_on_startup()
 
     def run_forever(self) -> None:
         """Main loop. Returns when ``stop()`` is called."""

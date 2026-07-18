@@ -4,12 +4,14 @@ Producer/consumer Mediator between Poller and WorkerPool. The queue is a
 priority heap keyed by (state's distance to Done, enqueue sequence) so
 late-stage work drains before early-stage work fills the pipeline.
 
-Four filters apply at dequeue time, in order:
+Five filters apply at dequeue time, in order:
 
   1. ticket already in flight (per-ticket FIFO serialization)
-  2. ticket held by an operator
-  3. ticket has unmet dependencies
-  4. project per-concurrency cap exceeded (issue #472)
+  2. ticket parked in MergeQueued — coordinator-driven, not worker-driven
+     (foreman#550)
+  3. ticket held by an operator
+  4. ticket has unmet dependencies
+  5. project per-concurrency cap exceeded (issue #472)
 
 A filtered WorkItem stays in the heap; it's not requeued, not reordered.
 The next dequeue() re-evaluates everyone naturally.
@@ -102,12 +104,13 @@ class QueueManager:
     def dequeue(self) -> WorkItem | None:
         """Pop the highest-priority eligible WorkItem, or return None if none qualifies.
 
-        Applies the four filters (per-ticket FIFO serialization, operator
-        hold, unmet dependencies, per-project cap) in order. A filtered
-        candidate is popped off the heap and pushed back in the
-        ``finally`` clause rather than requeued or reordered, so the next
-        call re-evaluates it from scratch. Returns None immediately if
-        the global ``max_in_flight`` cap is already saturated.
+        Applies the five filters (per-ticket FIFO serialization,
+        MergeQueued exclusion, operator hold, unmet dependencies,
+        per-project cap) in order. A filtered candidate is popped off the
+        heap and pushed back in the ``finally`` clause rather than
+        requeued or reordered, so the next call re-evaluates it from
+        scratch. Returns None immediately if the global ``max_in_flight``
+        cap is already saturated.
         """
         with self._lock:
             if len(self._in_flight_tickets) >= self.max_in_flight:
@@ -123,6 +126,12 @@ class QueueManager:
                     _, _, candidate = entry
                     if candidate.ticket_id in self._in_flight_tickets:
                         continue  # per-ticket FIFO — wait for prior
+                    # foreman#550: a MergeQueued ticket is coordinator-driven,
+                    # not worker-driven — it consumes no worker slot. Checked
+                    # directly off the WorkItem (no repo round-trip needed)
+                    # since state_name travels with the candidate.
+                    if candidate.state_name == "MergeQueued":
+                        continue
                     ticket = self._repo.get_ticket(candidate.ticket_id)
                     if ticket.is_held:
                         continue
@@ -169,3 +178,36 @@ class QueueManager:
         """Return how many WorkItems are waiting in the heap, not yet dequeued."""
         with self._lock:
             return len(self._heap)
+
+    def evict_merge_queued(self, ticket_id: int) -> None:
+        """Drop any queued ``MergeQueued`` WorkItem for ``ticket_id`` from the heap.
+
+        foreman#550. A ``MergeQueued`` WorkItem is never popped by
+        ``dequeue()`` (see the MergeQueued filter above) — it is always
+        pushed back onto the heap so it stays available for the day the
+        ticket's state changes and a future dequeue needs to re-evaluate
+        it. But when the ``MergeCoordinator`` moves a ticket OUT of
+        ``MergeQueued`` directly (bypassing this QueueManager entirely,
+        since coordinator-driven merges never go through
+        ``dequeue()``/``mark_done()``), nothing else ever removes that
+        WorkItem: the Poller's next sweep enqueues a NEW WorkItem for the
+        ticket's new state, but the stale ``MergeQueued`` entry is a
+        DIFFERENT WorkItem (different ``state_name``, so no dedup
+        collapse) and would otherwise linger in the heap forever — a
+        "heap zombie". Call this once, right after routing a ticket away
+        from ``MergeQueued``. No-op if no such entry exists (idempotent).
+        """
+        with self._lock:
+            self._heap = [
+                candidate
+                for candidate in self._heap
+                if not (
+                    candidate[2].ticket_id == ticket_id and candidate[2].state_name == "MergeQueued"
+                )
+            ]
+            heapq.heapify(self._heap)
+            self._queued = {
+                item
+                for item in self._queued
+                if not (item.ticket_id == ticket_id and item.state_name == "MergeQueued")
+            }

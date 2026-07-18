@@ -399,3 +399,79 @@ def test_run_forever_survives_a_tick_error_and_continues():
     daemon.tick_once = flaky_tick  # type: ignore[method-assign]
     daemon.run_forever()  # must return, not raise
     assert calls["n"] == 2  # reached a 2nd tick ⇒ first error was isolated
+
+
+# --- foreman#550: MergeCoordinator wiring ---
+
+
+def test_daemon_constructs_a_merge_coordinator():
+    repo = InMemoryTicketRepository()
+    poller = Poller(
+        repo=repo,
+        qm=None,
+        git=FakeGitProvider(),
+        project="p",
+        trigger_label="foreman:plan",
+        clock=lambda: dt.datetime(2026, 7, 17, 12, 0, 0),
+    )
+    daemon = Daemon(
+        repo=repo,
+        git=FakeGitProvider(),
+        dispatcher=FakeRoleDispatcher(responses={}),
+        pollers=[poller],
+        config=DaemonConfig(tick_seconds=0, max_in_flight=4),
+        clock=lambda: dt.datetime(2026, 7, 17, 12, 0, 0),
+    )
+    from foreman.v4.merge_coordinator import MergeCoordinator
+
+    assert isinstance(daemon._merge_coordinator, MergeCoordinator)
+
+
+def test_tick_once_calls_the_merge_coordinator_once():
+    repo = InMemoryTicketRepository()
+    poller = Poller(
+        repo=repo,
+        qm=None,
+        git=FakeGitProvider(),
+        project="p",
+        trigger_label="foreman:plan",
+        clock=lambda: dt.datetime(2026, 7, 17, 12, 0, 0),
+    )
+    daemon = Daemon(
+        repo=repo,
+        git=FakeGitProvider(),
+        dispatcher=FakeRoleDispatcher(responses={}),
+        pollers=[poller],
+        config=DaemonConfig(tick_seconds=0, max_in_flight=4),
+        clock=lambda: dt.datetime(2026, 7, 17, 12, 0, 0),
+    )
+    calls = MagicMock()
+    daemon._merge_coordinator.tick = calls  # type: ignore[method-assign]
+    daemon.tick_once()
+    calls.assert_called_once()
+
+
+def test_tick_once_isolates_a_failing_merge_coordinator():
+    """A coordinator error (GitHub API blip, repo hiccup) must not propagate
+    out of tick_once — mirrors the poller/pool isolation boundaries (#540/I1)."""
+    repo = InMemoryTicketRepository()
+    poller = Poller(
+        repo=repo,
+        qm=None,
+        git=FakeGitProvider(),
+        project="p",
+        trigger_label="foreman:plan",
+        clock=lambda: dt.datetime(2026, 7, 17, 12, 0, 0),
+    )
+    daemon = Daemon(
+        repo=repo,
+        git=FakeGitProvider(),
+        dispatcher=FakeRoleDispatcher(responses={}),
+        pollers=[poller],
+        config=DaemonConfig(tick_seconds=0, max_in_flight=4),
+        clock=lambda: dt.datetime(2026, 7, 17, 12, 0, 0),
+    )
+    boom = MagicMock(side_effect=RuntimeError("coordinator boom"))
+    daemon._merge_coordinator.tick = boom  # type: ignore[method-assign]
+    daemon.tick_once()  # must not raise
+    boom.assert_called_once()

@@ -68,6 +68,18 @@ same way: ``_prior_rerun_count`` counts prior BLOCKED rows carrying the
 ``reran_checks`` marker, and at/after ``MAX_CHECK_RERUNS`` such cycles
 ``_rerun_or_escalate`` returns NEEDS_HELP instead of issuing another
 ``rerun_failed_checks`` call.
+
+``enqueue_for_merge`` (foreman#550)
+------------------------------------
+``MergingState``/``SpecMerging`` no longer call ``attempt_merge`` directly —
+the actual merge attempt (this whole skeleton) moved to the per-repo
+``MergeCoordinator`` (a later foreman#550 task), which reuses
+``attempt_merge`` from its own tick loop instead. The two merge *states*
+now only guard (impl-only base-ref check) and hand off:
+``enqueue_for_merge`` appends the PR to ``ctx.ticket.project``'s
+``merge_queue`` (idempotently — a re-dispatched execute() on an
+already-queued ticket does not insert a second row) and reports CLEAN so
+the caller's ``next_state`` routes to ``MergeQueuedState``.
 """
 
 from __future__ import annotations
@@ -384,5 +396,53 @@ def attempt_merge(
         kind=OutcomeKind.BLOCKED,
         confidence=OutcomeConfidence.HIGH,
         summary="CI still in flight — re-polling",
+        artifacts=OutcomeArtifacts(pr_number=pr_number),
+    )
+
+
+def enqueue_for_merge(ctx: StateContext, *, pr_number: int, kind: str) -> Outcome:
+    """Hand a PR off to the project's merge_queue and report CLEAN.
+
+    foreman#550. Replaces the direct ``attempt_merge`` call previously made
+    by ``MergingState``/``SpecMerging``: the actual merge attempt now runs
+    in the (forthcoming) per-repo ``MergeCoordinator``, not inline in the
+    ticket's state machine. This helper's only job is the hand-off:
+    idempotently append a ``merge_queue`` row for ``ctx.ticket`` (skipping
+    the insert if one already exists for this ticket — a re-dispatched
+    ``execute()``, e.g. a Poller re-enqueue racing the state machine's own
+    ``set_ticket_state`` write, must not create a second queue entry) and
+    report CLEAN so the caller's ``next_state`` routes to
+    ``MergeQueuedState``.
+
+    Parameters
+    ----------
+    ctx:
+        The state's :class:`StateContext`.
+    pr_number:
+        The PR being enqueued (impl PR for MergingState, spec PR for
+        SpecMerging).
+    kind:
+        ``"impl"`` or ``"spec"`` — see :class:`~foreman.v4.repository.MergeQueueEntry.kind`.
+    """
+    already_queued = any(
+        entry.ticket_id == ctx.ticket.id
+        for entry in ctx.repo.merge_queue_for_project(ctx.ticket.project)
+    )
+    if not already_queued:
+        ctx.repo.enqueue_merge(
+            project=ctx.ticket.project,
+            ticket_id=ctx.ticket.id,
+            pr_number=pr_number,
+            kind=kind,
+            now=ctx.clock(),
+        )
+    return Outcome(
+        kind=OutcomeKind.CLEAN,
+        confidence=OutcomeConfidence.HIGH,
+        summary=(
+            f"{kind} PR already queued for merge"
+            if already_queued
+            else f"{kind} PR enqueued for merge"
+        ),
         artifacts=OutcomeArtifacts(pr_number=pr_number),
     )

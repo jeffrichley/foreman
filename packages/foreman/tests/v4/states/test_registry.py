@@ -26,6 +26,9 @@ def test_registry_contains_all_states() -> None:
         # human merge (when auto_merge_impl is False).
         "ImplApproved",
         "Merging",
+        # foreman#550: hand-off state after Merging/SpecMerging enqueue the
+        # PR; coordinator-driven, excluded from QueueManager dequeue.
+        "MergeQueued",
         "Done",
         "Failed",
         "NeedsHelp",

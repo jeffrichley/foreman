@@ -35,6 +35,26 @@ class MissingPRNumberError(LookupError):
     """No state outcome on this ticket recorded a pr_number."""
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class MergeQueueEntry:
+    """Read-only snapshot of one merge_queue row — a PR waiting to merge.
+
+    Written by the per-repo :class:`~foreman.v4.merge_coordinator.MergeCoordinator`
+    (a later task) to serialize merges into a project's target branch:
+    only one entry per project is ever ``merging`` at a time, and entries
+    are drained strictly FIFO by ``enqueued_at``.
+    """
+
+    id: int
+    project: str
+    ticket_id: int
+    pr_number: int
+    kind: str  # "spec" | "impl"
+    status: str  # "queued" | "merging"
+    attempts: int
+    enqueued_at: dt.datetime
+
+
 class TicketRepository(Protocol):
     """Persistence contract for tickets and state-instances."""
 
@@ -306,6 +326,73 @@ class TicketRepository(Protocol):
         """
         ...
 
+    # --- Merge queue (foreman#550) ---
+
+    def enqueue_merge(
+        self, *, project: str, ticket_id: int, pr_number: int, kind: str, now: dt.datetime
+    ) -> MergeQueueEntry:
+        """Append a new ``queued`` entry to ``project``'s merge queue.
+
+        ``kind`` is ``"spec"`` or ``"impl"``. FIFO ordering is by
+        ``now`` (stamped as ``enqueued_at``), so callers must pass a
+        monotonically increasing clock for entries meant to serialize
+        in submission order.
+        """
+        ...
+
+    def merge_queue_for_project(self, project: str) -> list[MergeQueueEntry]:
+        """Return every entry for ``project``, FIFO-ordered by ``enqueued_at``, then ``id``.
+
+        ``id`` breaks ties on identical ``enqueued_at`` values
+        deterministically.
+        """
+        ...
+
+    def head_merge_entry(self, project: str) -> MergeQueueEntry | None:
+        """Return ``project``'s earliest ``queued`` or ``merging`` entry, or None if empty."""
+        ...
+
+    def mark_merge_active(self, entry_id: int) -> None:
+        """Transition the entry's status to ``"merging"``.
+
+        Raises:
+            LookupError: no merge_queue entry with ``entry_id`` exists.
+        """
+        ...
+
+    def increment_merge_attempts(self, entry_id: int) -> int:
+        """Increment the entry's ``attempts`` counter by one and return the new count.
+
+        Raises:
+            LookupError: no merge_queue entry with ``entry_id`` exists.
+        """
+        ...
+
+    def dequeue_merge(self, entry_id: int) -> None:
+        """Permanently remove the entry from the merge queue."""
+        ...
+
+    def list_active_merges(self) -> list[MergeQueueEntry]:
+        """Return every entry, across all projects, whose status is ``"merging"``.
+
+        Used at startup for crash recovery — a killed daemon may have
+        left an entry marked ``merging`` mid-attempt.
+        """
+        ...
+
+    def reset_merge_to_queued(self, entry_id: int) -> None:
+        """Transition the entry's status back to ``"queued"`` (crash recovery).
+
+        Used by ``MergeCoordinator.reconcile_on_startup`` (foreman#550 Task
+        5) when a ``"merging"`` entry's PR turns out NOT to have merged —
+        the crash happened before the merge landed, so the entry goes back
+        to the head of the queue for the next tick to re-process.
+
+        Raises:
+            LookupError: no merge_queue entry with ``entry_id`` exists.
+        """
+        ...
+
 
 _TERMINAL_STATES = frozenset({"Done", "Failed"})
 
@@ -328,6 +415,8 @@ class InMemoryTicketRepository:
         self._next_ticket_id = 1
         self._next_instance_id = 1
         self._events: list[dict[str, Any]] = []
+        self._merge_queue: list[MergeQueueEntry] = []
+        self._next_merge_entry_id = 1
 
     # --- Ticket CRUD ---
 
@@ -690,3 +779,83 @@ class InMemoryTicketRepository:
         ``depends_on`` contains issue numbers of untracked GitHub issues.
         """
         return list(self.get_ticket(ticket_id).depends_on)
+
+    # --- Merge queue (foreman#550) ---
+
+    def _replace_merge_entry(self, entry_id: int, **changes: Any) -> MergeQueueEntry:
+        for i, existing in enumerate(self._merge_queue):
+            if existing.id == entry_id:
+                updated = dataclasses.replace(existing, **changes)
+                self._merge_queue[i] = updated
+                return updated
+        raise LookupError(str(entry_id))
+
+    def enqueue_merge(
+        self, *, project: str, ticket_id: int, pr_number: int, kind: str, now: dt.datetime
+    ) -> MergeQueueEntry:
+        """Append a new ``queued`` entry, allocating the next merge-queue id."""
+        entry = MergeQueueEntry(
+            id=self._next_merge_entry_id,
+            project=project,
+            ticket_id=ticket_id,
+            pr_number=pr_number,
+            kind=kind,
+            status="queued",
+            attempts=0,
+            enqueued_at=now,
+        )
+        self._merge_queue.append(entry)
+        self._next_merge_entry_id += 1
+        return entry
+
+    def merge_queue_for_project(self, project: str) -> list[MergeQueueEntry]:
+        """Return the project's entries FIFO-ordered by ``enqueued_at``, then ``id``.
+
+        ``id`` is a secondary sort key so entries enqueued with an
+        identical ``enqueued_at`` (the coordinator's clock can produce
+        ties) still order deterministically.
+        """
+        matches = [e for e in self._merge_queue if e.project == project]
+        matches.sort(key=lambda e: (e.enqueued_at, e.id))
+        return matches
+
+    def head_merge_entry(self, project: str) -> MergeQueueEntry | None:
+        """Return the project's earliest entry, or None if its queue is empty."""
+        entries = self.merge_queue_for_project(project)
+        return entries[0] if entries else None
+
+    def mark_merge_active(self, entry_id: int) -> None:
+        """Stamp the entry's ``status`` as ``"merging"``.
+
+        Raises:
+            LookupError: no merge_queue entry with ``entry_id`` exists.
+        """
+        self._replace_merge_entry(entry_id, status="merging")
+
+    def increment_merge_attempts(self, entry_id: int) -> int:
+        """Increment the entry's ``attempts`` counter and return the new count.
+
+        Raises:
+            LookupError: no merge_queue entry with ``entry_id`` exists.
+        """
+        for existing in self._merge_queue:
+            if existing.id == entry_id:
+                updated = self._replace_merge_entry(entry_id, attempts=existing.attempts + 1)
+                return updated.attempts
+        raise LookupError(str(entry_id))
+
+    def dequeue_merge(self, entry_id: int) -> None:
+        """Remove the entry from the in-memory queue."""
+        self._merge_queue = [e for e in self._merge_queue if e.id != entry_id]
+
+    def list_active_merges(self) -> list[MergeQueueEntry]:
+        """Return every entry, across all projects, whose status is ``"merging"``."""
+        return [e for e in self._merge_queue if e.status == "merging"]
+
+    def reset_merge_to_queued(self, entry_id: int) -> None:
+        """Stamp the entry's ``status`` back to ``"queued"``.
+
+        Raises:
+            LookupError: no merge_queue entry with ``entry_id`` exists.
+        """
+        self._replace_merge_entry(entry_id, status="queued")

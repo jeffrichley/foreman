@@ -32,6 +32,7 @@ from foreman.v4.cli.doctor import cmd_doctor
 from foreman.v4.cli.gate_update import cmd_gate_update
 from foreman.v4.cli.init import cmd_init
 from foreman.v4.cli.log import cmd_log
+from foreman.v4.cli.merge_queue import cmd_merge_queue
 from foreman.v4.cli.mutations import (
     cmd_drop,
     cmd_enqueue,
@@ -81,6 +82,7 @@ app.command("gate-update")(cmd_gate_update)
 app.command("ps")(cmd_ps)
 app.command("show")(cmd_show)
 app.command("queue")(cmd_queue)
+app.command("merge-queue")(cmd_merge_queue)
 app.command("log")(cmd_log)
 app.command("hold")(cmd_hold)
 app.command("resume")(cmd_resume)
