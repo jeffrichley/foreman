@@ -131,6 +131,7 @@ def _build_v4_label_catalog() -> list[tuple[Label | str, str, str]]:
         "ImplReview": ("FBCA04", "Foreman v4: Reviewer running on impl PR"),
         "ImplFix": ("D93F0B", "Foreman v4: Fixer running on impl PR"),
         "Merging": ("FBCA04", "Foreman v4: Orchestrator merging PR"),
+        "MergeQueued": ("FBCA04", "Foreman v4: PR queued for the merge coordinator (#550)"),
         "Done": ("6F42C1", "Foreman v4: ticket complete"),
         "Failed": ("B60205", "Foreman v4: ticket exhausted retries (terminal)"),
         "NeedsHelp": ("FBCA04", "Foreman v4: surfaced for human intervention"),
