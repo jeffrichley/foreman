@@ -65,3 +65,15 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_ticket
     ON events (ticket_id, at);
+
+CREATE TABLE IF NOT EXISTS merge_queue (
+    id            BIGSERIAL PRIMARY KEY,
+    project       TEXT NOT NULL,
+    ticket_id     BIGINT NOT NULL,
+    pr_number     INTEGER NOT NULL,
+    kind          TEXT NOT NULL CHECK (kind IN ('spec','impl')),
+    status        TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','merging')),
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    enqueued_at   TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS merge_queue_project_order ON merge_queue (project, enqueued_at);
