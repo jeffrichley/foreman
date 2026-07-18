@@ -46,7 +46,7 @@ def _row(pos: int, entry: MergeQueueEntry) -> dict[str, object]:
 
 def cmd_merge_queue(
     ctx: typer.Context,
-    project: str = typer.Option(
+    project: str | None = typer.Option(
         None,
         "--project",
         help="Limit to one project's merge queue (default: every project)",

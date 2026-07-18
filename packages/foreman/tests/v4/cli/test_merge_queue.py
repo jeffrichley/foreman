@@ -78,7 +78,7 @@ def test_merge_queue_json_format_carries_position_and_detail() -> None:
     assert tail["kind"] == "spec"
     assert tail["status"] == "queued"
     assert tail["attempts"] == "0/3"
-    assert tail["detail"] != head["detail"]
+    assert tail["detail"] == ""
 
 
 def test_merge_queue_without_project_shows_all_repos() -> None:
@@ -96,8 +96,8 @@ def test_merge_queue_without_project_shows_all_repos() -> None:
     )
     assert result.exit_code == 0, result.output
     rows = json.loads(result.output)
-    projects = {r["project"] for r in rows}
-    assert projects == {"p", "q"}
+    # Projects render in sorted order ("p" before "q").
+    assert [r["project"] for r in rows] == ["p", "q"]
     # Each project's own FIFO restarts position numbering at 1.
     assert all(r["pos"] == 1 for r in rows)
 
