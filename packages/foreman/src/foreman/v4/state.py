@@ -185,7 +185,30 @@ def _enter_merge_queued(ctx: StateContext, merge_queued: TicketState) -> None:
     docstring for the matching exit-side half of this fix). Leaving the
     row open here is what lets that later event carry this row's real
     ``instance_id``/``sequence`` instead of a synthetic one.
+
+    Idempotency guard (review finding on the 08d5aab fix):
+    ``MergeQueuedState.next_state()`` defensively self-loops back to a
+    fresh ``MergeQueuedState()`` if the WorkerPool ever mistakenly
+    dispatches an already-parked ``MergeQueued`` ticket (see that
+    class's docstring). If that ever fired, ``ctx.instance`` here is
+    ITSELF an open ``MergeQueued`` row (the one the mistaken dispatch
+    opened) sitting alongside the real row this helper opened when the
+    ticket first legitimately entered ``MergeQueued`` — that real row
+    is still open too, since only the coordinator ever closes it.
+    Opening a THIRD row unconditionally would leak that real row
+    forever: ``MergeCoordinator._exit_merge_queued`` only ever finds
+    and closes the ticket's NEWEST in-flight ``MergeQueued`` row, so
+    every older open row becomes an orphan no code path ever closes.
+    Guard against it: if an in-flight ``MergeQueued`` row already
+    exists for this ticket OTHER than ``ctx.instance``, reuse it —
+    no-op instead of opening a duplicate.
     """
+    already_open = any(
+        row.state_name == merge_queued.state_name and row.is_in_flight and row.id != ctx.instance.id
+        for row in ctx.repo.list_state_instances_for_ticket(ctx.ticket.id)
+    )
+    if already_open:
+        return
     now = ctx.clock()
     sequence = ctx.repo.count_state_instances_for_ticket(ctx.ticket.id) + 1
     instance = ctx.repo.open_state_instance(

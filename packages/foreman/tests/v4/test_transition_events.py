@@ -644,3 +644,102 @@ def test_merge_queued_entry_emits_no_state_exited_event() -> None:
         e for e in received if isinstance(e, StateExitedEvent) and e.state_name == "MergeQueued"
     ]
     assert exited_for_merge_queued == []
+
+
+def test_defensive_self_loop_does_not_leak_a_second_merge_queued_row() -> None:
+    """08d5aab review finding (Important): a mistaken WorkerPool dispatch of
+    an already-parked MergeQueued ticket must not leak the real, still-open
+    MergeQueued row.
+
+    ``MergeQueuedState.next_state()`` unconditionally self-loops to a fresh
+    ``MergeQueuedState()`` (see that class's module docstring — defensive,
+    should never fire in production since QueueManager excludes MergeQueued
+    from dispatch). If it ever did fire, ``transition()``'s
+    ``next_.state_name == "MergeQueued"`` branch would call
+    ``_enter_merge_queued`` again. Without the idempotency guard this opens
+    a SECOND in-flight MergeQueued row while the REAL row (opened when the
+    ticket first legitimately entered MergeQueued) is still open --
+    ``MergeCoordinator._exit_merge_queued`` only ever closes the newest
+    in-flight row on drain, so the older real row would leak forever.
+
+    Repro: seed the real row directly (bypassing the WorkerPool, which
+    would never actually dispatch MergeQueued), then drive
+    ``MergeQueuedState().transition()`` against a SECOND, WorkerPool-opened
+    instance for the same ticket -- exactly what a mistaken dispatch would
+    look like.
+    """
+    repo = InMemoryTicketRepository()
+    now = dt.datetime(2026, 6, 15, 12, 0, 0)
+    ticket = repo.create_ticket(project="p", issue_number=9, now=now)
+    repo.set_ticket_state(ticket.id, "MergeQueued", now=now)
+
+    # The REAL row: opened when the ticket first legitimately entered
+    # MergeQueued (mirrors what _enter_merge_queued does on the happy
+    # path). Left open -- nothing has drained the ticket yet.
+    real_row = repo.open_state_instance(
+        ticket_id=ticket.id,
+        state_name="MergeQueued",
+        sequence=1,
+        now=now,
+    )
+    assert real_row.is_in_flight
+
+    # The MISTAKEN dispatch: WorkerPool opens its own fresh instance
+    # before calling transition() -- see WorkerPool._run_transition. This
+    # is ctx.instance for the self-loop below.
+    dispatched_row = repo.open_state_instance(
+        ticket_id=ticket.id,
+        state_name="MergeQueued",
+        sequence=2,
+        now=now,
+    )
+    bus = EventBus()
+    received: list[Event] = []
+    bus.subscribe(received.append)
+    ctx = StateContext(
+        ticket=repo.get_ticket(ticket.id),
+        instance=dispatched_row,
+        repo=repo,
+        clock=lambda: now,
+        bus=bus,
+    )
+
+    MergeQueuedState().transition(ctx)
+
+    # No third row: the guard must reuse the real row instead of opening
+    # a duplicate.
+    all_rows = repo.list_state_instances_for_ticket(ticket.id)
+    assert len(all_rows) == 2, f"expected exactly 2 rows (real + dispatched), got: {all_rows!r}"
+
+    # The finally block always closes ctx.instance (the mistakenly
+    # dispatched row) -- that part of transition() is unaffected by the
+    # guard.
+    closed = repo.get_state_instance(dispatched_row.id)
+    assert not closed.is_in_flight
+
+    # The REAL row must still be open -- the guard's entire point. A
+    # regression here means the coordinator's later drain would close
+    # some OTHER row and this one would leak forever.
+    still_open = repo.get_state_instance(real_row.id)
+    assert still_open.is_in_flight, (
+        "the real MergeQueued row must stay open across a defensive "
+        "self-loop -- the guard must not close or replace it"
+    )
+
+    # transition() itself always publishes one ordinary StateEnteredEvent
+    # for whatever instance it was dispatched against (here,
+    # dispatched_row) -- that's unrelated to _enter_merge_queued and
+    # fires regardless of the guard. The guard's job is narrower: don't
+    # let the self-loop's _enter_merge_queued call synthesize a SECOND
+    # one for a brand-new row. Exactly one StateEnteredEvent(MergeQueued)
+    # total, carrying the dispatched row's own id -- not a freshly
+    # opened third row's.
+    entered_for_merge_queued = [
+        e for e in received if isinstance(e, StateEnteredEvent) and e.state_name == "MergeQueued"
+    ]
+    assert len(entered_for_merge_queued) == 1, (
+        f"expected exactly one StateEnteredEvent(MergeQueued) -- the guard must suppress "
+        f"a duplicate from the self-loop's _enter_merge_queued call; got: "
+        f"{entered_for_merge_queued!r}"
+    )
+    assert entered_for_merge_queued[0].instance_id == dispatched_row.id

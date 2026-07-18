@@ -928,6 +928,78 @@ def test_route_closes_the_real_merge_queued_row_and_reuses_its_id():
     assert repo.get_ticket(ticket.id).current_state == "Done"
 
 
+def test_exit_merge_queued_falls_back_when_real_row_already_closed():
+    """Minor finding from the 08d5aab review: an anticipated-but-untested
+    branch in ``_exit_merge_queued``'s row scan.
+
+    Unlike ``test_route_falls_back_to_synthetic_instance_when_no_real_row_was_opened``
+    (empty ``list_state_instances_for_ticket`` -- no row was ever opened),
+    this pins the case where a real row EXISTS (a non-empty list) but is
+    already closed by the time ``_route`` runs -- e.g. a generic startup
+    reconcile closed it as a crash orphan before this coordinator's own
+    reconcile got to it. The scan's ``row.is_in_flight`` guard must skip
+    that closed row rather than re-closing it, and fall through to the
+    ``ctx.instance`` synthetic fallback so the exit event -- and the
+    label removal it drives -- still fires."""
+    repo, git = _fake()
+    ticket = repo.create_ticket(project="p", issue_number=1, now=_NOW)
+    repo.set_ticket_state(ticket.id, "Merging", now=_NOW)
+    merging_instance = repo.open_state_instance(
+        ticket_id=ticket.id, state_name="Merging", sequence=1, now=_NOW
+    )
+    git.set_pr_state(
+        project="p",
+        pr_number=10,
+        state=PRState(merged=False, mergeable=True, ci_passing=True, base_ref="main"),
+    )
+    bus = EventBus()
+    events: list[Event] = []
+    bus.subscribe(events.append)
+    ctx = StateContext(
+        ticket=repo.get_ticket(ticket.id),
+        instance=merging_instance,
+        repo=repo,
+        clock=_clock,
+        bus=bus,
+        git=git,
+    )
+    merging_state = MergingState()
+    merging_state._pr_number_for = lambda _ctx: 10  # type: ignore[method-assign]
+    result = merging_state.transition(ctx)
+    assert result is not None
+    assert result.state_name == "MergeQueued"
+
+    merge_queued_row = repo.list_state_instances_for_ticket(ticket.id)[-1]
+    assert merge_queued_row.state_name == "MergeQueued"
+    assert merge_queued_row.is_in_flight
+
+    # Simulate a generic startup reconcile closing the row as a crash
+    # orphan before this coordinator's own reconcile/tick runs.
+    repo.close_state_instance(merge_queued_row.id, now=_NOW)
+    events.clear()  # drop the entry-side StateEnteredEvent -- only exit matters here
+
+    # Drain -- mergeable + CI-passing, so one tick merges and routes to Done.
+    _coordinator(repo, git, bus=bus).tick()
+
+    exited = [
+        e for e in events if isinstance(e, StateExitedEvent) and e.state_name == "MergeQueued"
+    ]
+    assert len(exited) == 1, (
+        "exit must still fire (and the label still get removed) even when the real row was "
+        "already closed"
+    )
+    assert exited[0].instance_id != merge_queued_row.id, (
+        "an already-closed row must not be reused or re-closed -- exit must fall back to the "
+        "synthetic per-tick instance"
+    )
+    assert repo.get_ticket(ticket.id).current_state == "Done"
+
+    # Closing it again must be a safe no-op: the row is exactly as closed
+    # as it was before ``_route`` ran, not double-closed or errored.
+    still_closed = repo.get_state_instance(merge_queued_row.id)
+    assert not still_closed.is_in_flight
+
+
 def test_route_falls_back_to_synthetic_instance_when_no_real_row_was_opened():
     """Every other test in this file (and any operator/CLI path that
     parks a ticket in MergeQueued without going through
