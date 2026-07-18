@@ -1,53 +1,45 @@
-"""MergingState — direct ``pr.merge()`` on the impl PR.
+"""MergingState — guards the impl PR's base ref, then hands it to the merge queue.
 
 The only state in v4 whose execute() doesn't dispatch a role. The Worker
-already opened the impl PR; here we wait for GitHub to report the PR as
-mergeable + CI passing, then call ``pr.merge()`` ourselves.
+already opened the impl PR; historically this state waited for GitHub to
+report it mergeable + CI passing and called ``pr.merge()`` itself
+(Phase 8d.19 collapsed the old MergeQueue-based enqueue/poll path into that
+single direct merge call — see foreman#317/#357 history below for how the
+classifier grew from there).
 
-Phase 8d.19 collapsed the previous MergeQueue-based path (enqueue → poll
-verdict → MERGED/REJECTED/PENDING) into a single direct merge call.
-Algokit#23's 2026-06-15 dogfood proved MergingState looped on PENDING
-forever because algokit doesn't have MergeQueue configured — most repos
-won't. The minimum-fix design decision: same merge mechanism on every
-project, until granular ``mergeable_state`` handling lands (foreman#317).
+foreman#550 moved the actual merge back out — this time into a per-repo
+``MergeCoordinator`` (a later foreman#550 task) rather than a role. The
+merge-queue *concept* returns, but as an explicit, observable
+``TicketRepository``-backed FIFO instead of the ad-hoc mechanism Phase
+8d.19 replaced: multiple same-repo PRs can now be ready to merge
+concurrently (once ``ProjectConfig.max_in_flight`` is raised above 1)
+without racing each other, because the coordinator serializes them.
+``MergingState.execute()`` now does two things only:
+
+1. The foreman#357 base-ref guard — still enforced *before* the ticket
+   ever enters the queue. A wrong-base impl PR (foreman#341 logic bug;
+   foreman#347 stale-binary regression) must never even be handed to the
+   coordinator.
+2. The hand-off: ``ctx.repo.enqueue_merge(...)`` (idempotent — see
+   ``merge_helper.enqueue_for_merge``) then route to ``MergeQueued``.
 
 Outcomes
 --------
 CLEAN
-    Either the PR is already merged externally OR we just merged it.
-    In BOTH sub-branches the originating GitHub issue is also closed
-    (Phase 8d.20) so the loop's terminal state propagates back to the
-    issue tracker — without that, algokit#23's 2026-06-16 dogfood
-    reached Done via pr.merge() but left the issue OPEN. Routes to Done.
-BLOCKED
-    GitHub says the PR isn't yet mergeable + CI-green, and no other
-    classification applies (CI still in flight, or PASSED-but-blocked —
-    GitHub hasn't recomputed ``mergeable_state`` yet). Stay in
-    MergingState; Poller picks it up next tick. Phase 8d.18's
-    BLOCKED-exemption keeps the retry cap from tripping on this
-    legitimate polling. ``close_issue`` is NOT called on this branch —
-    closing on every poll tick would prematurely close issues whose
-    impl PR isn't actually merged yet.
-NEEDS_FIX
-    foreman#317: a dirty (merge-conflict) or CI-failed impl PR. Routes to
-    ImplFix so the Fixer resolves it, instead of looping BLOCKED forever
-    or landing an operator in NeedsHelp for something fixable
-    automatically.
+    The base-ref guard passed and the impl PR was (idempotently) enqueued
+    on the project's merge_queue. Routes to ``MergeQueued`` — the
+    coordinator drives the ticket from there; this state does not merge,
+    close the issue, or poll anything itself.
 NEEDS_HELP
-    A required check needs manual action, the PR is an anomalous draft,
-    a heal-loop bound tripped, or the foreman#357 base-ref guard refused
-    to merge — see ``attempt_merge`` / ``merge_helper.py`` for the full
-    classifier. Escalates to a human.
+    The foreman#357 base-ref guard refused the hand-off (the impl PR's
+    base doesn't match the project's configured ``dev_base_branch``).
+    Escalates to a human; nothing is enqueued.
 
-Granular failure handling (CI failed → ImplFix, dirty → ImplFix, blocked
-by review, etc.) shipped in foreman#317 — see ``merge_helper.attempt_merge``
-for the classifier that reads ``mergeable_state`` and
-``required_check_state`` to decide between BLOCKED / NEEDS_FIX /
-NEEDS_HELP.
-
-The rebase case (PR base advanced while we were in this state) is
-operationally sidestepped by ``max_in_flight = 1`` for now — foreman#316
-tracks the proper fix.
+The merge classifier that used to live here (BLOCKED wait-for-CI, the
+BehindBranchHealer, NEEDS_FIX for a dirty/CI-failed PR — shipped in
+foreman#317, see ``merge_helper.attempt_merge``) still exists, unchanged,
+for the coordinator to reuse from its own tick loop. It is simply no
+longer invoked from this state.
 """
 
 from __future__ import annotations
@@ -64,7 +56,7 @@ from foreman.v4.outcome import (
 )
 from foreman.v4.repository import MissingPRNumberError
 from foreman.v4.state import StateContext, TicketState
-from foreman.v4.states.merge_helper import attempt_merge, close_originating_issue
+from foreman.v4.states.merge_helper import enqueue_for_merge
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +75,7 @@ DEFAULT_DEV_BASE_BRANCH = "main"
 
 
 class MergingState(TicketState):
-    """Merge the impl PR directly once GitHub reports it mergeable and green."""
+    """Guard the impl PR's base ref, then hand it off to the merge coordinator's queue."""
 
     state_name = "Merging"
 
@@ -156,56 +148,42 @@ class MergingState(TicketState):
         return guard
 
     def execute(self, ctx: StateContext) -> Outcome:
-        """Attempt the impl-PR merge, guarded by the foreman#357 base-ref check."""
+        """Guard the impl PR's base ref, then enqueue it for the coordinator.
+
+        foreman#550: the merge itself no longer happens here — see the
+        module docstring. This fetches the PR's current state purely to
+        feed the foreman#357 base-ref guard; if the guard passes, the PR
+        is handed to ``ctx.repo``'s merge_queue via
+        ``merge_helper.enqueue_for_merge``.
+        """
         if ctx.git is None:
             raise RuntimeError("MergingState requires git in StateContext")
         pr_number = self._pr_number_for(ctx)
 
-        def on_merge_success() -> None:
-            # Close the originating issue on BOTH success branches
-            # (already-merged + just-merged). foreman#443: delegated to
-            # the shared close_originating_issue helper so both MergingState
-            # and ImplApprovedState call one implementation. Idempotent at
-            # the REST API level — if an external merge also closed the
-            # issue, this is a no-op. On the just-merged branch
-            # attempt_merge calls this AFTER merge_pr confirms, so the
-            # close is tied to the merge succeeding — never a premature
-            # close on a still-unmerged PR.
-            close_originating_issue(ctx)
+        state = ctx.git.get_pr_state(project=ctx.ticket.project, pr_number=pr_number)
+        guard_outcome = self._base_ref_guard(ctx, pr_number)(state)
+        if guard_outcome is not None:
+            return guard_outcome
 
-        return attempt_merge(
-            ctx,
-            pr_number=pr_number,
-            on_merge_success=on_merge_success,
-            pre_merge_guard=self._base_ref_guard(ctx, pr_number),
-        )
+        return enqueue_for_merge(ctx, pr_number=pr_number, kind="impl")
 
     def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:
-        """Route CLEAN to Done, BLOCKED to a self-loop, else NeedsHelp."""
-        from foreman.v4.states.terminal import DoneState, NeedsHelpState
+        """Route CLEAN (enqueued) to MergeQueued, NEEDS_HELP (bad base) to NeedsHelp."""
+        from foreman.v4.states.merge_queued import MergeQueuedState
+        from foreman.v4.states.terminal import NeedsHelpState
 
         if outcome.kind == OutcomeKind.CLEAN:
-            return DoneState()
-        if outcome.kind == OutcomeKind.BLOCKED:
-            return MergingState()
-        # foreman#357: explicit NEEDS_HELP branch — the base-ref guard
-        # emits this when the impl PR's base doesn't match the project's
-        # configured dev_base_branch. Made explicit (rather than relying
-        # on the fall-through below) so the routing intent is grep-able
-        # from the new test names.
+            return MergeQueuedState()
+        # foreman#357: the base-ref guard emits NEEDS_HELP when the impl
+        # PR's base doesn't match the project's configured
+        # dev_base_branch. Made explicit (rather than relying on the
+        # fall-through below) so the routing intent is grep-able.
         if outcome.kind == OutcomeKind.NEEDS_HELP:
             return NeedsHelpState()
-        # foreman#317 (C1): attempt_merge emits NEEDS_FIX for a CI-failed
-        # or dirty (merge-conflict) impl PR — routes to the Fixer instead
-        # of looping BLOCKED forever or landing an operator in NeedsHelp
-        # for something the Fixer can resolve on its own.
-        if outcome.kind == OutcomeKind.NEEDS_FIX:
-            from foreman.v4.states.impl_fix import ImplFixState
-
-            return ImplFixState()
-        # Defensive fall-through: CLEAN, BLOCKED, NEEDS_HELP, and
-        # NEEDS_FIX all have explicit branches above; any other outcome
-        # kind from a future refactor (or a misbehaving subclass) should
-        # route to NeedsHelp so an operator can sort it out — never
-        # silently land on Failed.
+        # Defensive fall-through: execute() only ever emits CLEAN or
+        # NEEDS_HELP now that the merge classifier (BLOCKED / NEEDS_FIX,
+        # foreman#317) lives in the coordinator, not here — but any other
+        # outcome kind from a future refactor (or a misbehaving subclass)
+        # should still route to NeedsHelp so an operator can sort it out,
+        # never silently land on Failed.
         return NeedsHelpState()

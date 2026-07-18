@@ -97,6 +97,18 @@ def test_global_max_in_flight_cap(repo):
     assert qm.in_flight_count() == 2
 
 
+def test_merge_queued_ticket_is_never_dequeued(repo):
+    """foreman#550: a ticket parked in MergeQueued is coordinator-driven —
+    the QueueManager must never hand it to the WorkerPool, even when a
+    slot is free. It stays in the heap (not dropped), same as the
+    held/dep-blocked filters."""
+    tid = _ticket(repo, 1, state="MergeQueued")
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    qm.enqueue(WorkItem(ticket_id=tid, state_name="MergeQueued", project="p"))
+    assert qm.dequeue() is None
+    assert qm.queue_depth() == 1
+
+
 def test_mark_done_frees_slot_for_other_ticket(repo):
     a = _ticket(repo, 1)
     b = _ticket(repo, 2)
