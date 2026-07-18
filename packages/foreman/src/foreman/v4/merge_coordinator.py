@@ -75,6 +75,39 @@ matters — without it, an issue never gets its ``foreman:state-done`` /
 ``foreman:state-needshelp`` label, the exact gap that wedged a 2026-06-15
 dogfood). This coordinator calls the same helper on the same two terminals a
 merge can land on, so labels + the state_instances journal stay complete.
+
+Crash recovery (foreman#550 Task 5)
+------------------------------------
+``_tick_project`` marks its head entry ``"merging"`` for the duration of one
+``attempt_merge`` call. If the daemon dies inside that window — after
+GitHub actually merged the PR but before ``_route`` dequeued the entry, or
+at any earlier point — the entry is left ``status="merging"`` in Postgres
+with nothing left to finish it. ``reconcile_on_startup`` runs once, before
+the first tick (see ``daemon.py``'s ``_reconcile_startup``, AFTER the
+existing state-instance reconcile), and re-fetches ground truth for every
+``list_active_merges()`` row (Task 2, unused until now):
+
+merged
+    The crash landed between the merge and the dequeue. Reuse the exact
+    Task-4 success path — ``_on_merge_success`` (closes the originating
+    issue for an impl entry, no-ops for spec) then ``_route`` to
+    ``_post_merge_state`` — so the recovered outcome is byte-identical to
+    what a normal tick would have produced.
+not merged
+    The crash landed before the merge happened at all.
+    ``repo.reset_merge_to_queued`` puts the entry back at ``"queued"`` so
+    the next ``tick()`` re-processes it from the head, exactly as if it had
+    never been picked up. The ticket itself is untouched — it is still
+    correctly parked in ``MergeQueued``.
+
+Deliberately calls ``ctx.git.get_pr_state`` directly rather than
+``attempt_merge`` — recovery only needs to observe whether the merge
+already landed, not run the full heal/classify skeleton (which could take
+a new healing action on an entry the crash may have already been healing).
+Merge ops are idempotent (an already-merged PR reports ``merged=True``
+forever; a not-yet-mergeable PR is simply re-classified from scratch by the
+next normal tick), so this reconciliation is itself safe to run more than
+once.
 """
 
 from __future__ import annotations
@@ -211,6 +244,47 @@ class MergeCoordinator:
             # NEEDS_FIX / NEEDS_HELP (the only remaining OutcomeKinds
             # attempt_merge's merge skeleton ever returns).
             self._route(ctx, entry, self._failure_state(entry, outcome))
+
+    def reconcile_on_startup(self) -> int:
+        """Recover every crash-orphaned ``"merging"`` merge_queue entry. Returns the count.
+
+        Called once at daemon startup (see ``daemon.py``'s
+        ``_reconcile_startup``), AFTER the existing state-instance reconcile
+        — see the module docstring's "Crash recovery" section for the full
+        rationale. For each ``list_active_merges()`` entry: re-fetch the PR
+        and route to the post-merge state (reusing the Task-4 success path
+        exactly) if it merged, otherwise reset the entry back to
+        ``"queued"`` so the next ``tick()`` re-processes it at the head.
+
+        Idempotent, like ``reconcile.reconcile_on_startup``: a second call
+        finds no ``"merging"`` rows (the first either dequeued or requeued
+        them), so re-invoking is a no-op.
+        """
+        entries = self._repo.list_active_merges()
+        for entry in entries:
+            self._reconcile_entry(entry)
+        if entries:
+            _log.warning(
+                "crash recovery: reconciled %d in-flight merge_queue entr%s",
+                len(entries),
+                "y" if len(entries) == 1 else "ies",
+            )
+        return len(entries)
+
+    def _reconcile_entry(self, entry: MergeQueueEntry) -> None:
+        """Resolve one crash-orphaned entry by re-fetching ground truth from GitHub.
+
+        Deliberately calls ``get_pr_state`` directly instead of
+        ``attempt_merge`` — recovery only needs to observe whether the merge
+        already landed, not run the full heal/classify skeleton again.
+        """
+        ctx = self._ctx_for(entry)
+        state = self._git.get_pr_state(project=entry.project, pr_number=entry.pr_number)
+        if state.merged:
+            self._on_merge_success(ctx, entry)()
+            self._route(ctx, entry, self._post_merge_state(entry))
+        else:
+            self._repo.reset_merge_to_queued(entry.id)
 
     def _handle_blocked(
         self,

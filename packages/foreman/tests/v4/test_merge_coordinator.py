@@ -472,6 +472,173 @@ class _RaisingHeadEntryRepo(InMemoryTicketRepository):
         return super().head_merge_entry(project)
 
 
+def test_reconcile_recovers_merging_entry_that_already_merged():
+    """foreman#550 Task 5: a crash between the merge landing and the dequeue
+    leaves the entry ``status="merging"``. Startup reconciliation re-fetches
+    the PR, sees it merged, and reuses the Task-4 success path — post-merge
+    routing, close-originating-issue, and dequeue — so the crash never loses
+    a merge."""
+    repo, git = _fake()
+    ticket = _seed_ticket_in_merge_queue(
+        repo, git, issue_number=7, pr=10, kind="impl", mergeable=True, ci_passing=True
+    )
+    entry = repo.head_merge_entry("p")
+    assert entry is not None
+    repo.mark_merge_active(entry.id)
+    # The PR actually merged before the daemon died -- ground truth on GitHub.
+    git.set_pr_state(
+        project="p",
+        pr_number=10,
+        state=PRState(
+            merged=True,
+            mergeable=True,
+            ci_passing=True,
+            base_ref="main",
+            mergeable_state="clean",
+        ),
+    )
+
+    _coordinator(repo, git).reconcile_on_startup()
+
+    assert repo.get_ticket(ticket.id).current_state == "Done"
+    assert repo.head_merge_entry("p") is None
+    assert ("p", 7) in git.closed_issues
+
+
+def test_reconcile_spec_merge_routes_to_implementing():
+    """The recovered post-merge routing must respect ``kind`` exactly like
+    the normal tick path -- a spec merge lands in Implementing, not Done."""
+    repo, git = _fake()
+    ticket = _seed_ticket_in_merge_queue(
+        repo, git, issue_number=7, pr=10, kind="spec", mergeable=True, ci_passing=True
+    )
+    entry = repo.head_merge_entry("p")
+    assert entry is not None
+    repo.mark_merge_active(entry.id)
+    git.set_pr_state(
+        project="p",
+        pr_number=10,
+        state=PRState(
+            merged=True,
+            mergeable=True,
+            ci_passing=True,
+            base_ref="main",
+            mergeable_state="clean",
+        ),
+    )
+
+    _coordinator(repo, git).reconcile_on_startup()
+
+    assert repo.get_ticket(ticket.id).current_state == "Implementing"
+    assert ("p", 7) not in git.closed_issues  # spec merges never close the issue
+
+
+def test_reconcile_resets_merging_entry_that_did_not_merge():
+    """A ``"merging"`` entry whose PR is NOT actually merged means the crash
+    landed before the merge -- reset to ``"queued"`` so the next tick
+    re-processes it at the head; the ticket itself is untouched."""
+    repo, git = _fake()
+    ticket = _seed_ticket_in_merge_queue(
+        repo,
+        git,
+        issue_number=1,
+        pr=10,
+        kind="impl",
+        mergeable_state="blocked",
+        ci=RequiredCheckState.PENDING,
+    )
+    entry = repo.head_merge_entry("p")
+    assert entry is not None
+    repo.mark_merge_active(entry.id)
+
+    _coordinator(repo, git).reconcile_on_startup()
+
+    assert repo.get_ticket(ticket.id).current_state == "MergeQueued"  # unchanged
+    reset_entry = repo.head_merge_entry("p")
+    assert reset_entry is not None
+    assert reset_entry.id == entry.id
+    assert reset_entry.status == "queued"
+    assert repo.list_active_merges() == []
+
+
+def test_reconcile_evicts_stale_workitem_on_recovered_merge():
+    """Reconcile reuses the Task-4 ``_route`` helper -- QueueManager
+    heap-zombie eviction must fire exactly as it does on a normal tick."""
+    repo, git = _fake()
+    ticket = _seed_ticket_in_merge_queue(
+        repo, git, issue_number=1, pr=10, kind="impl", mergeable=True, ci_passing=True
+    )
+    entry = repo.head_merge_entry("p")
+    assert entry is not None
+    repo.mark_merge_active(entry.id)
+    git.set_pr_state(
+        project="p",
+        pr_number=10,
+        state=PRState(
+            merged=True,
+            mergeable=True,
+            ci_passing=True,
+            base_ref="main",
+            mergeable_state="clean",
+        ),
+    )
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    qm.enqueue(WorkItem(ticket_id=ticket.id, state_name="MergeQueued", project="p"))
+
+    _coordinator(repo, git, qm=qm).reconcile_on_startup()
+
+    assert repo.get_ticket(ticket.id).current_state == "Done"
+    assert qm.queue_depth() == 0
+
+
+def test_reconcile_covers_every_active_project():
+    """``list_active_merges`` is cross-project -- reconcile must recover
+    every ``"merging"`` entry it returns, not just the first project's."""
+    repo, git = _fake()
+    merged_ticket = _seed_ticket_in_merge_queue(
+        repo, git, project="p1", issue_number=1, pr=10, kind="impl", mergeable=True, ci_passing=True
+    )
+    unmerged_ticket = _seed_ticket_in_merge_queue(
+        repo,
+        git,
+        project="p2",
+        issue_number=2,
+        pr=20,
+        kind="impl",
+        mergeable_state="blocked",
+        ci=RequiredCheckState.PENDING,
+    )
+    merged_entry = repo.head_merge_entry("p1")
+    unmerged_entry = repo.head_merge_entry("p2")
+    assert merged_entry is not None
+    assert unmerged_entry is not None
+    repo.mark_merge_active(merged_entry.id)
+    repo.mark_merge_active(unmerged_entry.id)
+    git.set_pr_state(
+        project="p1",
+        pr_number=10,
+        state=PRState(
+            merged=True,
+            mergeable=True,
+            ci_passing=True,
+            base_ref="main",
+            mergeable_state="clean",
+        ),
+    )
+
+    # ``reconcile_on_startup`` reads ``list_active_merges()`` directly (it is
+    # already cross-project), so the coordinator's ``projects`` callable --
+    # which only matters for ``tick()`` -- is irrelevant here.
+    _coordinator(repo, git).reconcile_on_startup()
+
+    assert repo.get_ticket(merged_ticket.id).current_state == "Done"
+    assert repo.head_merge_entry("p1") is None
+    assert repo.get_ticket(unmerged_ticket.id).current_state == "MergeQueued"
+    reset_entry = repo.head_merge_entry("p2")
+    assert reset_entry is not None
+    assert reset_entry.status == "queued"
+
+
 def test_tick_isolates_a_failing_project_and_still_drains_the_rest():
     """One project's ``_tick_project`` raising must not starve the others.
 

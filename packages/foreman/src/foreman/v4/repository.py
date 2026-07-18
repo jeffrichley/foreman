@@ -380,6 +380,19 @@ class TicketRepository(Protocol):
         """
         ...
 
+    def reset_merge_to_queued(self, entry_id: int) -> None:
+        """Transition the entry's status back to ``"queued"`` (crash recovery).
+
+        Used by ``MergeCoordinator.reconcile_on_startup`` (foreman#550 Task
+        5) when a ``"merging"`` entry's PR turns out NOT to have merged —
+        the crash happened before the merge landed, so the entry goes back
+        to the head of the queue for the next tick to re-process.
+
+        Raises:
+            LookupError: no merge_queue entry with ``entry_id`` exists.
+        """
+        ...
+
 
 _TERMINAL_STATES = frozenset({"Done", "Failed"})
 
@@ -838,3 +851,11 @@ class InMemoryTicketRepository:
     def list_active_merges(self) -> list[MergeQueueEntry]:
         """Return every entry, across all projects, whose status is ``"merging"``."""
         return [e for e in self._merge_queue if e.status == "merging"]
+
+    def reset_merge_to_queued(self, entry_id: int) -> None:
+        """Stamp the entry's ``status`` back to ``"queued"``.
+
+        Raises:
+            LookupError: no merge_queue entry with ``entry_id`` exists.
+        """
+        self._replace_merge_entry(entry_id, status="queued")

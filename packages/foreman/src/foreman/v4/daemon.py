@@ -406,8 +406,16 @@ class Daemon:
         Deliberately NOT in ``bootstrap_cli_context`` — that is built by every
         CLI command (``foreman ps``, ``foreman show``); reconciliation must
         fire only when the daemon actually starts processing.
+
+        foreman#550 Task 5: the merge_queue's own crash recovery
+        (``MergeCoordinator.reconcile_on_startup``) runs AFTER this — a
+        crash-orphaned ``merge_queue`` entry is independent of any
+        state_instances row, but closing tickets' in-flight state first
+        keeps the two reconcile passes in the same "oldest first" order the
+        rest of the daemon's startup sequencing follows.
         """
         reconcile_on_startup(self._repo, clock=self._clock)
+        self._merge_coordinator.reconcile_on_startup()
 
     def run_forever(self) -> None:
         """Main loop. Returns when ``stop()`` is called."""

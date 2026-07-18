@@ -655,9 +655,26 @@ class RepositoryContract:
 
     def test_merge_queue_unknown_entry_id_raises_lookup_error(self, repo: TicketRepository) -> None:
         """A zero-row UPDATE on an unknown ``entry_id`` is a legitimate miss,
-        not an invariant violation — both mutators must translate it to
+        not an invariant violation — every mutator must translate it to
         ``LookupError`` rather than crash (foreman#550 Task 2 review)."""
         with pytest.raises(LookupError):
             repo.increment_merge_attempts(9999)
         with pytest.raises(LookupError):
             repo.mark_merge_active(9999)
+        with pytest.raises(LookupError):
+            repo.reset_merge_to_queued(9999)
+
+    def test_reset_merge_to_queued(self, repo: TicketRepository) -> None:
+        """foreman#550 Task 5: crash recovery resets a ``merging`` entry back
+        to ``queued`` so the next tick re-processes it at the head."""
+        e = repo.enqueue_merge(
+            project="p", ticket_id=1, pr_number=10, kind="impl", now=_enqueued_at(1)
+        )
+        repo.mark_merge_active(e.id)
+        assert [x.id for x in repo.list_active_merges()] == [e.id]
+        repo.reset_merge_to_queued(e.id)
+        assert repo.list_active_merges() == []
+        head = repo.head_merge_entry("p")
+        assert head is not None
+        assert head.id == e.id
+        assert head.status == "queued"

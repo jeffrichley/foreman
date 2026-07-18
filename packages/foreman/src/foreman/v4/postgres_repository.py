@@ -743,3 +743,19 @@ class PostgresTicketRepository:
                 "SELECT * FROM merge_queue WHERE status = 'merging' ORDER BY id"
             ).fetchall()
         return [_merge_entry_from_row(r) for r in rows]
+
+    def reset_merge_to_queued(self, entry_id: int) -> None:
+        """Update the entry's ``status`` back to ``'queued'``.
+
+        Raises:
+            LookupError: no merge_queue entry with ``entry_id`` exists.
+        """
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "UPDATE merge_queue SET status = 'queued' WHERE id = %s",
+                (entry_id,),
+            )
+            if cur.rowcount == 0:
+                conn.rollback()
+                raise LookupError(str(entry_id))
+            conn.commit()
