@@ -28,6 +28,11 @@ def _now() -> dt.datetime:
     return dt.datetime(2026, 6, 13, 12, 0, 0)
 
 
+def _enqueued_at(n: int) -> dt.datetime:
+    """Distinct timestamps for merge-queue FIFO-ordering assertions."""
+    return dt.datetime(2026, 7, 17, 0, 0, n)
+
+
 class RepositoryContract:
     """Mixin: subclass and override ``factory`` to bind a concrete repo."""
 
@@ -618,3 +623,41 @@ class RepositoryContract:
         assert len(events) == 1
         assert events[0]["event_type"] == "StateEntered"
         assert events[0]["payload"] == {"foo": "bar"}
+
+    # --- Merge queue (foreman#550) ---
+
+    def test_enqueue_merge_and_fifo_order(self, repo: TicketRepository) -> None:
+        a = repo.enqueue_merge(
+            project="p", ticket_id=1, pr_number=10, kind="impl", now=_enqueued_at(1)
+        )
+        repo.enqueue_merge(project="p", ticket_id=2, pr_number=11, kind="spec", now=_enqueued_at(2))
+        assert [e.pr_number for e in repo.merge_queue_for_project("p")] == [10, 11]
+        head = repo.head_merge_entry("p")
+        assert head is not None
+        assert head.id == a.id
+
+    def test_mark_merge_active_attempts_and_dequeue(self, repo: TicketRepository) -> None:
+        e = repo.enqueue_merge(
+            project="p", ticket_id=1, pr_number=10, kind="impl", now=_enqueued_at(1)
+        )
+        repo.mark_merge_active(e.id)
+        head = repo.head_merge_entry("p")
+        assert head is not None
+        assert head.status == "merging"
+        assert repo.increment_merge_attempts(e.id) == 1
+        assert [x.id for x in repo.list_active_merges()] == [e.id]
+        repo.dequeue_merge(e.id)
+        assert repo.head_merge_entry("p") is None
+
+    def test_merge_queue_per_project_isolation(self, repo: TicketRepository) -> None:
+        repo.enqueue_merge(project="a", ticket_id=1, pr_number=10, kind="impl", now=_enqueued_at(1))
+        assert repo.head_merge_entry("b") is None
+
+    def test_merge_queue_unknown_entry_id_raises_lookup_error(self, repo: TicketRepository) -> None:
+        """A zero-row UPDATE on an unknown ``entry_id`` is a legitimate miss,
+        not an invariant violation — both mutators must translate it to
+        ``LookupError`` rather than crash (foreman#550 Task 2 review)."""
+        with pytest.raises(LookupError):
+            repo.increment_merge_attempts(9999)
+        with pytest.raises(LookupError):
+            repo.mark_merge_active(9999)

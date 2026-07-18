@@ -341,7 +341,11 @@ class TicketRepository(Protocol):
         ...
 
     def merge_queue_for_project(self, project: str) -> list[MergeQueueEntry]:
-        """Return every entry for ``project``, ordered ascending by ``enqueued_at`` (FIFO)."""
+        """Return every entry for ``project``, FIFO-ordered by ``enqueued_at``, then ``id``.
+
+        ``id`` breaks ties on identical ``enqueued_at`` values
+        deterministically.
+        """
         ...
 
     def head_merge_entry(self, project: str) -> MergeQueueEntry | None:
@@ -349,11 +353,19 @@ class TicketRepository(Protocol):
         ...
 
     def mark_merge_active(self, entry_id: int) -> None:
-        """Transition the entry's status to ``"merging"``."""
+        """Transition the entry's status to ``"merging"``.
+
+        Raises:
+            LookupError: no merge_queue entry with ``entry_id`` exists.
+        """
         ...
 
     def increment_merge_attempts(self, entry_id: int) -> int:
-        """Increment the entry's ``attempts`` counter by one and return the new count."""
+        """Increment the entry's ``attempts`` counter by one and return the new count.
+
+        Raises:
+            LookupError: no merge_queue entry with ``entry_id`` exists.
+        """
         ...
 
     def dequeue_merge(self, entry_id: int) -> None:
@@ -784,9 +796,14 @@ class InMemoryTicketRepository:
         return entry
 
     def merge_queue_for_project(self, project: str) -> list[MergeQueueEntry]:
-        """Return the project's entries sorted ascending by ``enqueued_at`` (FIFO)."""
+        """Return the project's entries FIFO-ordered by ``enqueued_at``, then ``id``.
+
+        ``id`` is a secondary sort key so entries enqueued with an
+        identical ``enqueued_at`` (the coordinator's clock can produce
+        ties) still order deterministically.
+        """
         matches = [e for e in self._merge_queue if e.project == project]
-        matches.sort(key=lambda e: e.enqueued_at)
+        matches.sort(key=lambda e: (e.enqueued_at, e.id))
         return matches
 
     def head_merge_entry(self, project: str) -> MergeQueueEntry | None:
@@ -795,11 +812,19 @@ class InMemoryTicketRepository:
         return entries[0] if entries else None
 
     def mark_merge_active(self, entry_id: int) -> None:
-        """Stamp the entry's ``status`` as ``"merging"``."""
+        """Stamp the entry's ``status`` as ``"merging"``.
+
+        Raises:
+            LookupError: no merge_queue entry with ``entry_id`` exists.
+        """
         self._replace_merge_entry(entry_id, status="merging")
 
     def increment_merge_attempts(self, entry_id: int) -> int:
-        """Increment the entry's ``attempts`` counter and return the new count."""
+        """Increment the entry's ``attempts`` counter and return the new count.
+
+        Raises:
+            LookupError: no merge_queue entry with ``entry_id`` exists.
+        """
         for existing in self._merge_queue:
             if existing.id == entry_id:
                 updated = self._replace_merge_entry(entry_id, attempts=existing.attempts + 1)

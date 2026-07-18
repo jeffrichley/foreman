@@ -671,10 +671,15 @@ class PostgresTicketRepository:
             return _merge_entry_from_row(row)
 
     def merge_queue_for_project(self, project: str) -> list[MergeQueueEntry]:
-        """Select the project's merge_queue rows, ordered ascending by ``enqueued_at`` (FIFO)."""
+        """Select the project's merge_queue rows, FIFO-ordered by ``enqueued_at``, then ``id``.
+
+        ``id`` is a secondary sort key so entries enqueued with an
+        identical ``enqueued_at`` (the coordinator's clock can produce
+        ties) still order deterministically.
+        """
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM merge_queue WHERE project = %s ORDER BY enqueued_at ASC",
+                "SELECT * FROM merge_queue WHERE project = %s ORDER BY enqueued_at ASC, id ASC",
                 (project,),
             ).fetchall()
         return [_merge_entry_from_row(r) for r in rows]
@@ -683,29 +688,46 @@ class PostgresTicketRepository:
         """Select the project's earliest merge_queue row, or None if its queue is empty."""
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT * FROM merge_queue WHERE project = %s ORDER BY enqueued_at ASC LIMIT 1",
+                "SELECT * FROM merge_queue WHERE project = %s "
+                "ORDER BY enqueued_at ASC, id ASC LIMIT 1",
                 (project,),
             ).fetchone()
         return _merge_entry_from_row(row) if row is not None else None
 
     def mark_merge_active(self, entry_id: int) -> None:
-        """Update the entry's ``status`` to ``'merging'``."""
+        """Update the entry's ``status`` to ``'merging'``.
+
+        Raises:
+            LookupError: no merge_queue entry with ``entry_id`` exists.
+        """
         with self._pool.connection() as conn:
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE merge_queue SET status = 'merging' WHERE id = %s",
                 (entry_id,),
             )
+            if cur.rowcount == 0:
+                conn.rollback()
+                raise LookupError(str(entry_id))
             conn.commit()
 
     def increment_merge_attempts(self, entry_id: int) -> int:
-        """Increment the entry's ``attempts`` column by one and return the new count."""
+        """Increment the entry's ``attempts`` column by one and return the new count.
+
+        Raises:
+            LookupError: no merge_queue entry with ``entry_id`` exists. A
+                zero-row ``UPDATE ... RETURNING`` is a legitimate outcome
+                for an unknown id, not an invariant violation, so it is
+                translated to this domain error rather than asserted away.
+        """
         with self._pool.connection() as conn:
             row = conn.execute(
                 "UPDATE merge_queue SET attempts = attempts + 1 WHERE id = %s RETURNING attempts",
                 (entry_id,),
             ).fetchone()
+            if row is None:
+                conn.rollback()
+                raise LookupError(str(entry_id))
             conn.commit()
-        assert row is not None
         return int(row["attempts"])
 
     def dequeue_merge(self, entry_id: int) -> None:
