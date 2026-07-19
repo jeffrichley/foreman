@@ -85,6 +85,13 @@ email = "${FOREMAN_OPERATOR_SUPERVISOR_EMAIL}"
 name = "${FOREMAN_OPERATOR_SIGNER_NAME}"
 email = "${FOREMAN_OPERATOR_SIGNER_EMAIL}"
 
+[sandbox]
+# Wrap each role subprocess in a bubblewrap sandbox (foreman#557/#556).
+# Default OFF (opt-in). Flip FOREMAN_SANDBOX_ENABLED=true in .env +
+# `up -d daemon` to enable — no rebuild. Requires unprivileged user
+# namespaces (works under Docker's default profile).
+enabled = ${FOREMAN_SANDBOX_ENABLED}
+
 # [[projects]] tables are no longer baked into this template.
 # The project list is the sole responsibility of the host-mounted
 # $FOREMAN_PROJECTS_PATH file (default /root/.foreman/projects.toml).
