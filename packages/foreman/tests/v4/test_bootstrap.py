@@ -557,22 +557,29 @@ def fake_git_factory():
 
 @pytest.fixture
 def minimal_config_with_sandbox(tmp_path: Path):
-    """Factory fixture: a minimal zero-project V4Config with ``[sandbox]`` set.
+    """Factory fixture: a minimal V4Config with ``[sandbox]`` set.
 
     Reuses the module's existing compact-fakes helpers for the other
     required blocks (``apps`` / ``orchestrator`` / ``operator`` /
     ``storage``), then overrides ``sandbox`` via ``model_copy`` per the
-    Task 6 brief.
+    Task 6 brief. ``projects`` defaults to empty — most sandbox-wiring
+    tests don't care about project config — but foreman#556 callers pass
+    a project list to exercise ``sandbox_projects`` map construction.
     """
 
-    def _make(*, enabled: bool, allow_unsandboxed: bool) -> V4Config:
+    def _make(
+        *,
+        enabled: bool,
+        allow_unsandboxed: bool,
+        projects: list[ProjectConfig] | None = None,
+    ) -> V4Config:
         base = V4Config(
             log_dir=str(tmp_path / "logs"),
             apps=_apps_config(),
             orchestrator=_orchestrator_config(),
             operator=_operator_config(),
             storage=_storage_config(),
-            projects=[],
+            projects=projects or [],
         )
         return base.model_copy(
             update={
@@ -666,3 +673,60 @@ def test_bootstrap_disabled_sandbox_skips_preflight(
     assert ctx is not None
     dispatcher = ctx.dispatcher
     assert dispatcher._sandbox is None  # type: ignore[attr-defined]
+    # foreman#556: sandbox off => no project map either. Dispatch never
+    # consults it (self._sandbox is None short-circuits the check in
+    # SubprocessRoleDispatcher.dispatch), but asserting None here pins
+    # the off-path as genuinely unchanged rather than incidentally safe.
+    assert dispatcher._sandbox_projects is None  # type: ignore[attr-defined]
+
+
+def test_bootstrap_threads_project_map_into_dispatcher_when_sandbox_enabled(
+    minimal_config_with_sandbox, fake_identity, fake_git_factory, monkeypatch, tmp_path: Path
+):
+    """foreman#556: when sandbox.enabled, the dispatcher gets the project
+    map so it can prep each job's private clone.
+
+    The map is built unconditionally inside the ``sandbox.enabled``
+    branch — not gated on whether preflight actually succeeds — so the
+    ``allow_unsandboxed`` local-dev downgrade (which leaves
+    ``sandbox_launcher`` / dispatcher's ``_sandbox`` at None) never
+    leaves ``_sandbox_projects`` None while sandbox.enabled is True.
+    Preflight is monkeypatched to fail deterministically (mirroring
+    ``test_bootstrap_warns_and_continues_when_allow_unsandboxed``) so
+    this doesn't depend on the test host's userns support.
+    """
+    from foreman.v4 import bootstrap
+
+    cfg = minimal_config_with_sandbox(
+        enabled=True,
+        allow_unsandboxed=True,
+        projects=[
+            ProjectConfig(
+                name="foreman",
+                repo="owner/foreman",
+                local_clone_path=str(tmp_path / "foreman-clone"),
+            ),
+        ],
+    )
+
+    def boom(**kwargs):
+        raise SandboxUnavailableError("no userns")
+
+    monkeypatch.setattr(bootstrap, "preflight", boom)
+    ctx = bootstrap.bootstrap_cli_context(
+        config=cfg,
+        identity=fake_identity,
+        git_provider_factory=fake_git_factory,
+    )
+    dispatcher = ctx.dispatcher
+    # The preflight failure + allow_unsandboxed downgrades the launcher
+    # to None (mirrors test_bootstrap_warns_and_continues_when_allow_unsandboxed)
+    # — confirms the map is populated on this branch specifically, not
+    # merely on the preflight-succeeds happy path.
+    assert dispatcher._sandbox is None  # type: ignore[attr-defined]
+    sandbox_projects = dispatcher._sandbox_projects  # type: ignore[attr-defined]
+    assert sandbox_projects is not None
+    assert "foreman" in sandbox_projects
+    project_cfg = sandbox_projects["foreman"]
+    assert project_cfg.repo == "owner/foreman"
+    assert project_cfg.local_clone_path == str(tmp_path / "foreman-clone")

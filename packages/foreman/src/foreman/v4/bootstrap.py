@@ -182,7 +182,16 @@ def bootstrap_cli_context(
     # hatch: downgrade to a loud warning and continue with launcher=None.
     sandbox_launcher: SandboxLauncher | None = None
     sandbox_scratch_root: Path | None = None
+    sandbox_projects: dict[str, ProjectConfig] | None = None
     if config.sandbox.enabled:
+        # foreman#556: the project map lets the dispatcher resolve each
+        # project's base clone + repo to prep the private per-job clone.
+        # Built unconditionally here — independent of whether preflight
+        # below succeeds — so the allow_unsandboxed local-dev downgrade
+        # (which leaves sandbox_launcher None) never leaves this None
+        # while config.sandbox.enabled is True; re-enabling the sandbox
+        # later needs no further bootstrap change.
+        sandbox_projects = {pc.name: pc for pc in active_projects}
         try:
             preflight(bwrap_path=config.sandbox.bwrap_path)
         except SandboxUnavailableError:
@@ -223,6 +232,7 @@ def bootstrap_cli_context(
         inactivity_timeout_seconds=config.role_inactivity_timeout_seconds,
         sandbox=sandbox_launcher,
         sandbox_scratch_root=sandbox_scratch_root,
+        sandbox_projects=sandbox_projects,
     )
 
     pollers: list[Poller] = []
