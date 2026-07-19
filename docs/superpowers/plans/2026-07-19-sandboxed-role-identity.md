@@ -494,36 +494,6 @@ git commit -m "test(v4): real-bwrap lock — sandbox identity resolves with no P
 
 ---
 
-### Task 6: Canary keystone — re-run agent_core #408 sandboxed (manual)
-
-**This is not a pytest.** It is the keystone that proves the fix against the real backend, executed by the controller AFTER Tasks 1-5 land, the whole-branch review is clean, the branch is merged to `main`, and the `:dev` image rebuilds. Per "never done without running the real backend," the feature is not done until this passes.
-
-- [ ] **Step 1: Merge + rebuild.** Merge the branch to `main` (squash). Wait for the main `image` workflow to push the new `:dev` (`gh run watch <id> --exit-status`).
-
-- [ ] **Step 2: Sanity-run the hermetic test in a container** (the userns proof CI can't do):
-
-```bash
-SP="/usr/local/lib/python3.12/site-packages/foreman"
-MSYS_NO_PATHCONV=1 docker run --rm \
-  -v "$PWD/packages/foreman/src/foreman/v4":"$SP/v4":ro \
-  -v "$PWD/packages/foreman/tests":/work/tests:ro \
-  -w /work ghcr.io/jeffrichley/foreman:dev sh -lc \
-  'python -m pip install -q pytest; python -m pytest tests/v4/test_sandbox_integration.py -q --no-cov'
-```
-Expected: all pass (no skips) — includes `test_sandbox_identity_resolves_token_with_no_pem`.
-
-- [ ] **Step 3: Enable the sandbox on the deploy host.** In `E:\workspaces\ai\agents\foreman`: `git pull` (ff-only) to the merge commit; set `FOREMAN_SANDBOXED`/`sandbox` on — `sed -i 's/^FOREMAN_SANDBOX_ENABLED=false/FOREMAN_SANDBOX_ENABLED=true/' .env`; `docker compose pull daemon`; `docker compose up -d daemon`.
-
-- [ ] **Step 4: Verify the daemon is stable + sandbox on.** `docker ps` shows the daemon `Up` (not restarting); `docker logs foreman-daemon --since 2m | grep -i "sandbox enabled"`; `docker exec foreman-daemon foreman ps` shows an idle board.
-
-- [ ] **Step 5: Run the canary.** Label agent_core #408: `gh issue edit 408 --repo jeffrichley/agent_core --add-label foreman:plan` (Wren PAT as `GH_TOKEN`). Watch `foreman ps` + `/foreman/logs/planner/<ticket>__*.log`.
-
-- [ ] **Step 6: Assert the keystone.** The ticket advances **past Planning** — the planner subprocess runs inside bwrap, does its GitHub work via the injected `GH_TOKEN`, and the planner log shows **no `/run/secrets/*_pem` FileNotFoundError**. Expected: state moves Planning → (Implementing / next), not → NeedsHelp with the PEM error.
-
-- [ ] **Step 7: Decide rollout.** On a clean pass: keep the flag on, drop the "no foreman-self tickets until dogfood passes" caveat (surface to Jeff), and update the `project_foreman_job_sandbox_isolation` memory. On any failure: capture the planner log, flip `FOREMAN_SANDBOX_ENABLED=false`, `up -d daemon`, reset #408, and surface with the trace.
-
----
-
 ## Roles-layer extension (Tasks 6-9; added after whole-branch review)
 
 **Why:** the foundation (Tasks 1-5) fixes only the `main()` bootstrap layer, but role subcommands bypass it. These tasks give the `roles/*` layer a PEM-free identity so the box authenticates entirely on injected data. See the spec's "Extension: roles layer" section. Each task is TDD; run `uv run --no-sync` for everything; NO Co-Authored-By; lowercase conventional subjects; ruff + `mypy --strict` (unscoped: `uv run --no-sync mypy packages/foreman/src`) clean; `git add` only the named files.
