@@ -48,6 +48,7 @@ from types import MappingProxyType
 from typing import IO, Protocol, cast
 
 from foreman.v4.outcome import OUTCOME_MARKER
+from foreman.v4.sandbox import SandboxLauncher
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,21 @@ _READER_JOIN_TIMEOUT_SECONDS = 30.0
 # happy-path exit.
 _WATCHDOG_POLL_CEILING_SECONDS = 1.0
 _WATCHDOG_POLL_FLOOR_SECONDS = 0.05
+
+
+def _redact_cmd(cmd: list[str]) -> list[str]:
+    """Return a copy of ``cmd`` with any ``--setenv GH_TOKEN <value>`` masked.
+
+    The log banner records the full command. Under the sandbox the role
+    token is passed as a ``bwrap --setenv GH_TOKEN <token>`` triple, which
+    would otherwise write the secret to the on-disk log. Mask the value so
+    the banner is safe to keep.
+    """
+    redacted = list(cmd)
+    for i in range(len(redacted) - 2):
+        if redacted[i] == "--setenv" and redacted[i + 1] == "GH_TOKEN":
+            redacted[i + 2] = "***"
+    return redacted
 
 
 class IdentityProvider(Protocol):
@@ -161,7 +177,7 @@ def _write_banner(
         f"role={role} ticket_id={ticket_id} "
         f"project={project} issue_number={issue_number}\n"
         f"started_at={started_at.isoformat()}\n"
-        f"cmd={cmd}\n"
+        f"cmd={_redact_cmd(cmd)}\n"
         "--- output ---\n"
     )
     log_file.flush()
@@ -259,6 +275,8 @@ class SubprocessRoleDispatcher:
         log_dir: Path,
         timeout_seconds: int = 600,
         inactivity_timeout_seconds: int = 0,
+        sandbox: SandboxLauncher | None = None,
+        sandbox_scratch_root: Path | None = None,
     ) -> None:
         self._foreman_cli = foreman_cli
         self._identity = identity
@@ -269,6 +287,11 @@ class SubprocessRoleDispatcher:
         # preserving pre-#483 behavior for direct-CLI / test callers).
         # Production wires this from ``V4Config.role_inactivity_timeout_seconds``.
         self._inactivity_timeout = inactivity_timeout_seconds
+        # foreman#job-sandbox-isolation: when set, every role command is
+        # wrapped in a bwrap box and the per-job worktree is rooted under
+        # the RW scratch mount. Both None => pre-sandbox behavior.
+        self._sandbox = sandbox
+        self._sandbox_scratch_root = sandbox_scratch_root
 
     def dispatch(
         self,
@@ -342,6 +365,39 @@ class SubprocessRoleDispatcher:
             # ``session_id is not None`` also keeps the env value a str.
             if resume:
                 env["FOREMAN_RESUME_SESSION_ID"] = session_id
+
+        if self._sandbox is not None:
+            if self._sandbox_scratch_root is None:
+                raise RoleSubprocessError(
+                    f"role={role}: sandbox enabled but no scratch root "
+                    f"configured; cannot create the job's writable mount"
+                )
+            role_base = _base_role(role)
+            scratch_dir = self._sandbox_scratch_root / project / f"{role_base}-{issue_number}"
+            scratch_dir.mkdir(parents=True, exist_ok=True)
+            # Curated non-secret passthrough allowlist (positive defense):
+            # only these keys cross into the box, plus GH_TOKEN handled by
+            # the launcher. Everything else in the daemon env is dropped by
+            # bwrap --clearenv.
+            passthrough = {
+                key: env[key]
+                for key in (
+                    "FOREMAN_STATE_INSTANCE_ID",
+                    "FOREMAN_SESSION_ID",
+                    "FOREMAN_RESUME_SESSION_ID",
+                    "FOREMAN_V4_CONFIG",
+                    "CLAUDE_CONFIG_DIR",
+                    "ANTHROPIC_API_KEY",
+                    "LANG",
+                )
+                if key in env
+            }
+            cmd = self._sandbox.build_argv(
+                role_token=env["GH_TOKEN"],
+                scratch_dir=str(scratch_dir),
+                role_cmd=cmd,
+                passthrough=passthrough,
+            )
 
         started_at = dt.datetime.now(dt.UTC)
         role_base = _base_role(role)
