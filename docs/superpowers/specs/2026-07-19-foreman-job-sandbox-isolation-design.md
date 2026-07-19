@@ -30,7 +30,7 @@ The fix must be *positive*: a job must be structurally unable to see or write an
 
 Two cheap, high-value hardenings against the *hostile* case are baked in from the start, because every Worker holds a GitHub token that can push code and runs arbitrary generated commands:
 
-1. **Secret-scoping** — a job carries only its own short-lived, minimally-scoped role token; the PEM keys that mint tokens, the credential vault, and sibling roles' tokens are never present in the box.
+1. **Secret-scoping** — a job carries only its own short-lived, minimally-scoped role token; the **crown jewels** — the GitHub App **PEM keys** (which mint push tokens for *all* repos), the **credential vault**, and sibling roles' tokens — are never present in the box. One necessary exception (accepted for v1): the role makes its LLM call from inside the box, so the **Claude CLI credentials** are mounted read-only. Their blast radius (an LLM key) is far smaller than the repo-push PEMs. Future hardening: proxy the LLM call through the daemon so even the Claude key stays out.
 2. **The existing human-merge gate** is the backstop — a job's token can only open a PR against one repo; nothing merges without human review.
 
 Network stays **open** (agents need PyPI/npm/docs/research); we defend by keeping the crown-jewel secrets *out of the box* rather than fencing the network.
@@ -60,7 +60,8 @@ bwrap box for one role job:
   lifecycle:  --die-with-parent
   NEVER MOUNTED: daemon foreman source, role PEM keys, the credential vault,
                  /root/.foreman, sibling scratch dirs
-  ENV IN:     GH_TOKEN=<this job's scoped role token>  (nothing else secret)
+  RO   Claude CLI creds (/root/.claude*)   necessary for the in-box LLM call (v1 exception)
+  ENV IN:     GH_TOKEN=<this job's scoped role token>  (no PEM keys / vault)
 ```
 
 **Implementation nuance (deliberate):** binding `/usr` read-only carries the daemon's foreman along inside the box. The job's Python therefore must run from **its own venv** (whose site-packages contain the project's deps, not foreman); the system site-packages must not be on the job's `sys.path`. The launcher pins this explicitly (activate the scratch venv; do not inherit `PYTHONPATH`/system site-packages) so foreman cannot be imported inside the box even by accident. This is also what makes the regression test below meaningful.
