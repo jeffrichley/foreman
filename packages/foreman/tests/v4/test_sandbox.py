@@ -62,6 +62,18 @@ def test_argv_mounts_cache_rw_and_scratch_rw() -> None:
     assert not _has_triple(argv, "--ro-bind", "/foreman/scratch/foreman/worker-537", "/scratch")
 
 
+def test_argv_mounts_dev_proc_and_ld_cache() -> None:
+    """The box needs /dev, /proc, and the dynamic-linker cache to run a real
+    role. Verified by the #556 dogfood: without these, python can't load
+    libpython (``/usr/local/lib`` unresolvable) and git can't open /dev/null.
+    The preflight probe runs ``/bin/true``, which needs none of them, so only
+    a real-role run surfaces the gap — this test locks it in."""
+    argv = _argv()
+    assert _has_pair(argv, "--dev", "/dev")
+    assert _has_pair(argv, "--proc", "/proc")
+    assert _has_triple(argv, "--ro-bind-try", "/etc/ld.so.cache", "/etc/ld.so.cache")
+
+
 def test_argv_mounts_base_ro_roots() -> None:
     argv = _argv()
     assert _has_triple(argv, "--ro-bind", "/usr", "/usr")
