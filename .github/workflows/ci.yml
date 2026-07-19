@@ -38,12 +38,20 @@ jobs:
           python-version: "3.12"
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4
       - run: uv sync --locked --all-packages
-      # foreman#555: install bubblewrap so the sandbox hermetic tests
+      # foreman#555: install bubblewrap AND enable unprivileged user
+      # namespaces so the sandbox hermetic tests
       # (packages/foreman/tests/v4/test_sandbox_integration.py) actually run
-      # instead of self-skipping. GitHub's ubuntu runners support
-      # unprivileged user namespaces, which bwrap needs.
-      - name: Install bubblewrap (sandbox hermetic tests)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bubblewrap
+      # instead of self-skipping. GitHub's ubuntu-24.04 runners restrict
+      # unprivileged userns via AppArmor (kernel.apparmor_restrict_unprivileged_userns=1),
+      # which bwrap needs — installing bwrap alone leaves the tests skipping.
+      # (Production is unaffected: the daemon runs under Docker's default
+      # profile where nested userns works without this knob.)
+      - name: Install bubblewrap + enable unprivileged userns (sandbox hermetic tests)
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends bubblewrap
+          # ubuntu-24.04 AppArmor restriction; ignore if the knob is absent on the kernel
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
       - run: just check
       # Upload coverage to Codecov (account-wide GitHub App, tokenless).
       # Never reddens CI: fail_ci_if_error is false. coverage.xml is produced
