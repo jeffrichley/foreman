@@ -1097,7 +1097,7 @@ def test_sandbox_defaults_off_when_block_absent(tmp_path: Path) -> None:
     assert cfg.sandbox.enabled is False
     assert cfg.sandbox.allow_unsandboxed is False
     assert cfg.sandbox.cache_dir == "/root/.cache/uv"
-    assert cfg.sandbox.scratch_root == "/foreman/scratch"
+    assert cfg.sandbox.scratch_root == "/foreman/repos/.scratch"
     assert cfg.sandbox.bwrap_path == "bwrap"
 
 
@@ -1132,3 +1132,14 @@ def test_sandbox_config_rejects_extra_field_directly() -> None:
     TOML-loading path."""
     with pytest.raises(ValidationError):
         SandboxConfig(bogus=1)  # type: ignore[call-arg]
+
+
+def test_sandbox_scratch_root_defaults_onto_repos_volume() -> None:
+    """The per-job scratch defaults under the repos volume so ``git clone --local`` hardlinks.
+
+    A scratch dir on a different filesystem than the base repo makes the
+    local clone fail with "Invalid cross-device link" (hardlinks cannot
+    cross devices). Co-locating under /foreman/repos guarantees the free clone.
+    """
+    cfg = SandboxConfig()
+    assert cfg.scratch_root == "/foreman/repos/.scratch"
