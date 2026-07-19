@@ -521,3 +521,222 @@ Expected: all pass (no skips) — includes `test_sandbox_identity_resolves_token
 - [ ] **Step 6: Assert the keystone.** The ticket advances **past Planning** — the planner subprocess runs inside bwrap, does its GitHub work via the injected `GH_TOKEN`, and the planner log shows **no `/run/secrets/*_pem` FileNotFoundError**. Expected: state moves Planning → (Implementing / next), not → NeedsHelp with the PEM error.
 
 - [ ] **Step 7: Decide rollout.** On a clean pass: keep the flag on, drop the "no foreman-self tickets until dogfood passes" caveat (surface to Jeff), and update the `project_foreman_job_sandbox_isolation` memory. On any failure: capture the planner log, flip `FOREMAN_SANDBOX_ENABLED=false`, `up -d daemon`, reset #408, and surface with the trace.
+
+---
+
+## Roles-layer extension (Tasks 6-9; added after whole-branch review)
+
+**Why:** the foundation (Tasks 1-5) fixes only the `main()` bootstrap layer, but role subcommands bypass it. These tasks give the `roles/*` layer a PEM-free identity so the box authenticates entirely on injected data. See the spec's "Extension: roles layer" section. Each task is TDD; run `uv run --no-sync` for everything; NO Co-Authored-By; lowercase conventional subjects; ruff + `mypy --strict` (unscoped: `uv run --no-sync mypy packages/foreman/src`) clean; `git add` only the named files.
+
+### Task 6: `SandboxIdentityRegistry` + `V4IdentityRegistry.get_app_slug`
+
+**Files:**
+- Modify: `packages/foreman/src/foreman/v4/identity.py` (add `SandboxIdentityRegistry`; add public `get_app_slug` to `V4IdentityRegistry`)
+- Test: `packages/foreman/tests/v4/test_sandbox_identity_registry.py` (create); extend `packages/foreman/tests/v4/test_identity.py` for `get_app_slug`
+
+**Interfaces:**
+- Consumes: `EnvTokenIdentity` (Task 1), `SandboxIdentityError` (Task 1), the existing private `V4IdentityRegistry._get_app_metadata(role) -> AppMetadata` (has `.slug`).
+- Produces: `SandboxIdentityRegistry(EnvTokenIdentity)` with `get_app_slug(role: str) -> str` and `get_role_bot_logins() -> set[str]`; `V4IdentityRegistry.get_app_slug(role: str) -> str`.
+
+- [ ] **Step 1 — failing tests.** Create `test_sandbox_identity_registry.py`:
+
+```python
+"""Unit tests for SandboxIdentityRegistry — env-backed identity for the box."""
+
+from __future__ import annotations
+
+import pytest
+
+from foreman.v4.identity import SandboxIdentityError, SandboxIdentityRegistry
+
+
+def test_get_role_token_returns_injected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GH_TOKEN", "ghs_X")
+    assert SandboxIdentityRegistry().get_role_token("planner") == "ghs_X"
+
+
+def test_get_app_slug_returns_env_slug(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FOREMAN_BOT_SLUG", "my-planner-app")
+    assert SandboxIdentityRegistry().get_app_slug("planner") == "my-planner-app"
+
+
+def test_get_app_slug_raises_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FOREMAN_BOT_SLUG", raising=False)
+    with pytest.raises(SandboxIdentityError):
+        SandboxIdentityRegistry().get_app_slug("planner")
+
+
+def test_get_role_bot_logins_parses_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FOREMAN_BOT_LOGINS", "a[bot] b[bot]  c[bot]")
+    assert SandboxIdentityRegistry().get_role_bot_logins() == {"a[bot]", "b[bot]", "c[bot]"}
+
+
+def test_get_role_bot_logins_raises_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FOREMAN_BOT_LOGINS", raising=False)
+    with pytest.raises(SandboxIdentityError):
+        SandboxIdentityRegistry().get_role_bot_logins()
+```
+
+For `get_app_slug` on the real registry, add to `test_identity.py` a test that mirrors the module's existing `get_role_bot_logins`/metadata tests (they already patch/fake `_get_app_metadata` or the `GET /app` fetch — reuse that exact fake) and asserts `registry.get_app_slug("planner")` returns the faked slug. Read the existing metadata test first; do not invent a new fake.
+
+- [ ] **Step 2 — run, confirm fail** (`ImportError` / `AttributeError`).
+
+- [ ] **Step 3 — implement.** In `identity.py` add:
+
+```python
+class SandboxIdentityRegistry(EnvTokenIdentity):
+    """Env-backed registry for a sandboxed role subprocess.
+
+    Extends :class:`EnvTokenIdentity` (token from ``GH_TOKEN``) with the two
+    other pieces the role path needs, sourced from data the daemon injected
+    into the box — never a PEM: the dispatched role's bot slug
+    (``FOREMAN_BOT_SLUG``, for commit attribution) and the set of role-bot
+    logins (``FOREMAN_BOT_LOGINS``, whitespace-separated, for self-comment
+    filtering). Duck-types the role-facing surface of
+    :class:`V4IdentityRegistry` used by ``build_role_resources`` and the role
+    delegates. Fail-closed (:class:`SandboxIdentityError`) if a needed var is
+    absent.
+    """
+
+    def get_app_slug(self, role: str) -> str:
+        slug = os.environ.get("FOREMAN_BOT_SLUG")
+        if not slug:
+            raise SandboxIdentityError(
+                "FOREMAN_SANDBOXED is set but FOREMAN_BOT_SLUG is unset; the "
+                "sandboxed role has no bot slug for commit attribution. The "
+                "dispatcher must inject it. Refusing to run."
+            )
+        return slug
+
+    def get_role_bot_logins(self) -> set[str]:
+        raw = os.environ.get("FOREMAN_BOT_LOGINS")
+        if not raw:
+            raise SandboxIdentityError(
+                "FOREMAN_SANDBOXED is set but FOREMAN_BOT_LOGINS is unset; the "
+                "sandboxed role cannot filter bot self-comments. The dispatcher "
+                "must inject it. Refusing to run."
+            )
+        return {tok for tok in raw.split() if tok}
+```
+
+And add to `V4IdentityRegistry`, next to `get_role_bot_logins`:
+
+```python
+    def get_app_slug(self, role: str) -> str:
+        """Return the role App's bot slug, fetched via ``GET /app`` and cached."""
+        return self._get_app_metadata(role).slug
+```
+
+- [ ] **Step 4 — run, confirm pass.** Full `test_identity.py` + the new file; `mypy` unscoped; ruff+format.
+
+- [ ] **Step 5 — commit** (`feat(v4): SandboxIdentityRegistry + V4IdentityRegistry.get_app_slug`).
+
+### Task 7: `build_role_resources` sources slug via the registry
+
+**Files:**
+- Modify: `packages/foreman/src/foreman/roles/__init__.py` (`build_role_resources`: drop the direct `fetch_app_metadata` + `private_key_path`; use `registry.get_app_slug(role)`)
+- Modify: the four call sites passing `private_key_path=` to `build_role_resources` (`roles/planner.py`, `reviewer.py`, `fixer.py`, `worker.py`) — remove that kwarg.
+- Test: extend the existing `build_role_resources` test.
+
+**Interfaces:**
+- Consumes: `registry.get_app_slug(role)` (Task 6 — on both registries).
+- Produces: `build_role_resources(*, registry, role, app_id) -> tuple[GitHostProvider, str, Github]` (`private_key_path` REMOVED).
+
+- [ ] **Step 1 — failing test.** Find the existing `build_role_resources` test (grep `build_role_resources` under `packages/foreman/tests/`). Update it so the fake `registry` also provides `get_app_slug(role) -> "<slug>"`, drop `private_key_path`, and assert the returned `BotIdentity.slug` comes from `registry.get_app_slug`, and that `fetch_app_metadata` is NOT called (patch it to raise). Fails against the current signature.
+
+- [ ] **Step 2 — run, confirm fail.**
+
+- [ ] **Step 3 — implement.** In `roles/__init__.py`, change the body to:
+
+```python
+    token = registry.get_role_token(role)
+    client = Github(auth=Auth.Token(token))
+    slug = registry.get_app_slug(role)
+    identity = BotIdentity(slug=slug, user_id=app_id, token=token)
+    host = GitHubProvider(identity=identity, client=client)
+    return host, token, client
+```
+
+Remove `private_key_path` from the signature, remove the now-unused `fetch_app_metadata` import if nothing else in the file uses it (check), and update the docstring (no more `GET /app` fetch — slug comes from the registry). Then remove `private_key_path=...` from the four call sites (grep `build_role_resources(` in `roles/`).
+
+- [ ] **Step 4 — run, confirm pass.** Role tests touching `build_role_resources` + `mypy` unscoped + ruff.
+
+- [ ] **Step 5 — commit** (`refactor(v4): build_role_resources sources bot slug via registry`).
+
+### Task 8: role delegates select `SandboxIdentityRegistry` when sandboxed
+
+**Files:**
+- Modify: `roles/planner.py`, `reviewer.py`, `fixer.py`, `worker.py` (the `V4IdentityRegistry(...)` construction in each delegate).
+- Add: shared helper `role_identity(config, *, installation_repo)` in `roles/__init__.py`.
+- Test: `packages/foreman/tests/` — a `role_identity` selection test.
+
+**Interfaces:**
+- Consumes: `SandboxIdentityRegistry` (Task 6), `V4IdentityRegistry`.
+- Produces: `role_identity(config, *, installation_repo: str)`; the four delegates call it instead of constructing `V4IdentityRegistry` directly.
+
+- [ ] **Step 1 — failing test.** `test_role_identity_selection.py`: with `FOREMAN_SANDBOXED=1` monkeypatched → `role_identity(MagicMock(), installation_repo="o/r")` returns a `SandboxIdentityRegistry`; unset → a `V4IdentityRegistry`. Mirror Task 3's `_select_identity` test shape.
+
+- [ ] **Step 2 — run, confirm fail.**
+
+- [ ] **Step 3 — implement.** Add to `roles/__init__.py`:
+
+```python
+def role_identity(config: Any, *, installation_repo: str) -> Any:
+    """Return the identity registry a role subprocess should use.
+
+    Sandboxed (``FOREMAN_SANDBOXED=1``) -> :class:`SandboxIdentityRegistry`
+    (env-backed, no PEM). Otherwise the PEM-based
+    :class:`~foreman.v4.identity.V4IdentityRegistry`.
+    """
+    import os
+
+    from foreman.v4.identity import SandboxIdentityRegistry, V4IdentityRegistry
+
+    if os.environ.get("FOREMAN_SANDBOXED") == "1":
+        return SandboxIdentityRegistry()
+    return V4IdentityRegistry(
+        apps=config.apps,
+        orchestrator=config.orchestrator,
+        installation_repo=installation_repo,
+    )
+```
+
+In each of the four role modules, replace `registry = V4IdentityRegistry(apps=..., orchestrator=..., installation_repo=<X>)` with `registry = role_identity(config, installation_repo=<X>)` — read each site (grep `V4IdentityRegistry(` per file) and preserve the exact `installation_repo` expression it passes today. Import `role_identity` from `foreman.roles`. If a module no longer references `V4IdentityRegistry` directly, drop that import (ruff).
+
+- [ ] **Step 4 — run, confirm pass.** Each role's test module + `mypy` unscoped + ruff.
+
+- [ ] **Step 5 — commit** (`feat(v4): role delegates use SandboxIdentityRegistry when sandboxed`).
+
+### Task 9: dispatcher injects `FOREMAN_BOT_SLUG` + `FOREMAN_BOT_LOGINS`
+
+**Files:**
+- Modify: `packages/foreman/src/foreman/v4/subprocess_dispatcher.py` (inject the two vars in sandbox mode).
+- Possibly modify the daemon's dispatcher-construction site so the dispatcher can source the metadata from the daemon's registry.
+- Test: extend the dispatcher / sandbox-dispatch tests.
+
+**Interfaces:**
+- Consumes: `get_app_slug` + `get_role_bot_logins` on the daemon's registry (Task 6); `build_argv` `passthrough`.
+- Produces: in sandbox mode the box env carries `FOREMAN_BOT_SLUG=<role slug>` and `FOREMAN_BOT_LOGINS="<all four bot logins>"`.
+
+- [ ] **Step 1 — failing test.** In the dispatcher test, drive a sandboxed dispatch with a fake identity exposing `get_app_slug`/`get_role_bot_logins`, and assert the built argv (or passthrough) contains `--setenv FOREMAN_BOT_SLUG <slug>` and `--setenv FOREMAN_BOT_LOGINS "<logins>"`. Reuse the existing sandboxed-dispatch test construction (grep `FOREMAN_SANDBOXED` / `build_argv` in the dispatcher tests).
+
+- [ ] **Step 2 — run, confirm fail.**
+
+- [ ] **Step 3 — implement.** In `dispatch()` (near `env["GH_TOKEN"] = self._identity.get_role_token(role)`), on the sandbox branch compute:
+
+```python
+        sandbox_setenv = {
+            "FOREMAN_BOT_SLUG": self._identity.get_app_slug(role),
+            "FOREMAN_BOT_LOGINS": " ".join(sorted(self._identity.get_role_bot_logins())),
+        }
+```
+
+and merge into the `passthrough` handed to `build_argv` (with whatever passthrough is already assembled). If `self._identity`'s static type doesn't expose the two methods, read the dispatcher construction site and either type it to the concrete `V4IdentityRegistry` there or thread a small `bot_metadata` provider — pick the minimal change and note it in the report. Ensure this runs ONLY on the sandbox branch (never unsandboxed dispatch).
+
+- [ ] **Step 4 — run, confirm pass.** Dispatcher test module + `mypy` unscoped + ruff.
+
+- [ ] **Step 5 — commit** (`feat(v4): inject bot slug + logins into the sandbox box`).
+
+### Task 10: canary keystone (manual) — supersedes the old Task 6
+
+Same as the earlier "Task 6: Canary keystone" section — merge to main, rebuild `:dev`, run the in-container hermetic suite, flip the flag on the deploy host, label agent_core #408, and assert it advances PAST Planning with no `/run/secrets/*_pem` error in the planner log. This now exercises the full roles-layer path, not just bootstrap.
