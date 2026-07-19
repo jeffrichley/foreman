@@ -24,7 +24,8 @@ never import a v3-substrate module (import-lint R2).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import subprocess
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
 # Paths that must NEVER be bind-mounted into a job box. Asserted absent
@@ -175,3 +176,87 @@ class SandboxLauncher:
         argv += ["--chdir", self.scratch_mount, "--"]
         argv += role_cmd
         return argv
+
+
+class SandboxUnavailableError(RuntimeError):
+    """The bubblewrap sandbox cannot be created on this host.
+
+    Raised by :func:`preflight` when a minimal ``bwrap`` boot fails —
+    typically because the host lacks unprivileged user namespaces. The
+    daemon fails closed on this rather than silently running role
+    subprocesses unsandboxed.
+    """
+
+
+def _default_runner(argv: list[str]) -> int:
+    """Run ``argv`` discarding output; return its exit code.
+
+    Args:
+        argv: The full command to run, ``bwrap`` and its flags.
+
+    Returns:
+        The subprocess exit code.
+    """
+    return subprocess.run(  # argv is built here, not user input
+        argv,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode
+
+
+def preflight(
+    *,
+    bwrap_path: str = "bwrap",
+    runner: Callable[[list[str]], int] | None = None,
+) -> None:
+    """Boot a minimal sandbox to prove the host supports it; else fail closed.
+
+    Runs ``bwrap`` with the same namespaces the real jobs use, a RO
+    ``/usr`` bind, a ``/tmp`` tmpfs, and ``/bin/true`` as the payload. A
+    zero exit proves unprivileged user namespaces + the requested
+    namespaces work under the container's default (non-privileged)
+    security profile — the make-or-break capability the spike validated.
+
+    Args:
+        bwrap_path: The ``bwrap`` binary to probe.
+        runner: Test seam ``(argv) -> returncode``. Defaults to a real
+            ``subprocess.run`` that discards output.
+
+    Raises:
+        SandboxUnavailableError: on non-zero exit or a missing ``bwrap``
+            binary, with an actionable operator message.
+    """
+    run = runner if runner is not None else _default_runner
+    argv = [
+        bwrap_path,
+        "--unshare-user",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--die-with-parent",
+        "--ro-bind",
+        "/usr",
+        "/usr",
+        "--tmpfs",
+        "/tmp",
+        "--",
+        "/bin/true",
+    ]
+    try:
+        rc = run(argv)
+    except FileNotFoundError as exc:
+        raise SandboxUnavailableError(
+            f"bwrap binary not found at {bwrap_path!r}. Install bubblewrap "
+            f"in the daemon image (apt-get install -y bubblewrap) or set "
+            f"[sandbox].bwrap_path. Refusing to run jobs unsandboxed."
+        ) from exc
+    if rc != 0:
+        raise SandboxUnavailableError(
+            f"bwrap preflight exited {rc}: the host cannot create an "
+            f"unprivileged user namespace sandbox. Verify unprivileged "
+            f"user namespaces are enabled (kernel.unprivileged_userns_clone=1 "
+            f"/ user.max_user_namespaces > 0). Refusing to run jobs "
+            f"unsandboxed; set [sandbox].allow_unsandboxed = true only for "
+            f"local dev."
+        )

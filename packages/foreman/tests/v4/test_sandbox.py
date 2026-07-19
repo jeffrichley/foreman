@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from foreman.v4.sandbox import DAEMON_NEVER_BIND, SandboxLauncher
+import pytest
+
+from foreman.v4.sandbox import (
+    DAEMON_NEVER_BIND,
+    SandboxLauncher,
+    SandboxUnavailableError,
+    preflight,
+)
 
 
 def _argv() -> list[str]:
@@ -102,3 +109,33 @@ def _has_pair(argv: list[str], a: str, b: str) -> bool:
 
 def _has_triple(argv: list[str], a: str, b: str, c: str) -> bool:
     return any(argv[i] == a and argv[i + 1] == b and argv[i + 2] == c for i in range(len(argv) - 2))
+
+
+def test_preflight_passes_when_runner_returns_zero() -> None:
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str]) -> int:
+        calls.append(argv)
+        return 0
+
+    preflight(bwrap_path="bwrap", runner=runner)  # no raise
+    assert calls, "preflight must actually invoke bwrap"
+    assert calls[0][0] == "bwrap"
+    assert "--unshare-user" in calls[0]
+
+
+def test_preflight_fails_closed_when_runner_returns_nonzero() -> None:
+    def runner(argv: list[str]) -> int:
+        return 1
+
+    with pytest.raises(SandboxUnavailableError) as exc:
+        preflight(bwrap_path="bwrap", runner=runner)
+    assert "user namespace" in str(exc.value).lower() or "bwrap" in str(exc.value).lower()
+
+
+def test_preflight_fails_closed_when_bwrap_missing() -> None:
+    def runner(argv: list[str]) -> int:
+        raise FileNotFoundError("bwrap")
+
+    with pytest.raises(SandboxUnavailableError):
+        preflight(bwrap_path="bwrap", runner=runner)
