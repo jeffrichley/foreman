@@ -90,6 +90,14 @@ def test_argv_sets_scoped_token_and_scratch_rooted_env() -> None:
     assert "--clearenv" in argv
 
 
+def test_argv_marks_the_box_as_sandboxed() -> None:
+    """The box must carry FOREMAN_SANDBOXED=1 so the role uses the injected
+    GH_TOKEN identity (EnvTokenIdentity) instead of minting from a withheld
+    PEM. Regression lock for the 2026-07-19 canary auth gap."""
+    argv = _argv()
+    assert _has_triple(argv, "--setenv", "FOREMAN_SANDBOXED", "1")
+
+
 def test_argv_never_binds_daemon_secrets() -> None:
     argv = _argv()
     joined = " ".join(argv)
