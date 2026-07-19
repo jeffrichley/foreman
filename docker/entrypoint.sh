@@ -86,6 +86,12 @@ export FOREMAN_STORAGE_ENGINE FOREMAN_PG_DSN
 : "${FOREMAN_MAX_IN_FLIGHT:=4}"
 export FOREMAN_MAX_IN_FLIGHT
 
+# Bubblewrap sandbox toggle (foreman#557/#556). envsubst has no default
+# syntax, so an unset ${FOREMAN_SANDBOX_ENABLED} would render `enabled = `
+# — invalid TOML. Default OFF (opt-in); set true in .env to enable.
+: "${FOREMAN_SANDBOX_ENABLED:=false}"
+export FOREMAN_SANDBOX_ENABLED
+
 envsubst < "$FOREMAN_CONFIG_TEMPLATE" > "$FOREMAN_V4_CONFIG"
 export FOREMAN_V4_CONFIG
 
