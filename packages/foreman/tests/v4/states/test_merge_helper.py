@@ -344,16 +344,41 @@ def test_pre_merge_guard_short_circuits():
 # ---------------------------------------------------------------------------
 
 
-def test_blocked_and_failed_routes_to_needs_fix():
-    """blocked + required FAILED -> NEEDS_FIX (the C1 fix: a genuinely
-    failing PR must not loop BLOCKED forever)."""
+def test_blocked_and_failed_reruns_once_then_blocked():
+    """blocked + required FAILED -> BLOCKED + rerun (foreman#537: a failed
+    required check is re-run once — same bounded path as TIMED_OUT_OR_CANCELLED —
+    before escalating, so a single CI infrastructure flake does not
+    immediately route the ticket to ImplFix). See
+    ``test_failed_reruns_once_then_escalates_to_needs_fix`` below for what
+    happens on the NEXT pass if it's still failing."""
     git = FakeGitProvider()
     _seed_pr(git, mergeable=False, ci_passing=False, mergeable_state="blocked")
     git.seed_check_state("p", 99, RequiredCheckState.FAILED)
     ctx = _ctx(git=git)
     outcome = attempt_merge(ctx, pr_number=99, on_merge_success=lambda: None)
+    assert outcome.kind == OutcomeKind.BLOCKED
+    assert outcome.details.get("reran_checks") is True
+    assert git.rerun_failed_checks_calls == [("p", 99)]
+
+
+def test_failed_reruns_once_then_escalates_to_needs_fix():
+    """REGRESSION (foreman#554): after ``MAX_CHECK_RERUNS`` prior re-run
+    cycles, a required check that is STILL FAILED must escalate to
+    NEEDS_FIX with ``fix_reason=ci_failed`` (-> ImplFix auto-fixes the
+    code), NOT NEEDS_HELP. #554 broke the #317/C1 fix by routing FAILED
+    through the same rerun-then-escalate path as TIMED_OUT_OR_CANCELLED and
+    hardcoding its escalation to NEEDS_HELP too — a genuine CI failure
+    dead-ended waiting on a human instead of being auto-fixed. This test
+    pins the restored behavior so the regression can't come back."""
+    git = FakeGitProvider()
+    _seed_pr(git, mergeable=False, ci_passing=False, mergeable_state="blocked")
+    git.seed_check_state("p", 99, RequiredCheckState.FAILED)
+    ctx = _ctx(git=git, prior_check_reruns=MAX_CHECK_RERUNS)
+    outcome = attempt_merge(ctx, pr_number=99, on_merge_success=lambda: None)
     assert outcome.kind == OutcomeKind.NEEDS_FIX
-    assert outcome.details["fix_reason"] == "ci_failed"
+    assert outcome.details.get("fix_reason") == "ci_failed"
+    # Bound tripped BEFORE acting -- no further rerun issued.
+    assert git.rerun_failed_checks_calls == []
 
 
 def test_blocked_and_pending_stays_blocked():
@@ -458,9 +483,13 @@ def test_timed_out_escalates_after_max_reruns():
 # and route failures itself, not through the TicketState.next_state()
 # machinery. The underlying classifier behavior this test pinned — a
 # blocked + FAILED-check PR reaches NEEDS_FIX, not an infinite BLOCKED loop —
-# remains covered by ``test_blocked_and_failed_routes_to_needs_fix`` above;
-# only the now-obsolete ``MergingState``-composition assertion was removed.
+# remains covered by the pair ``test_blocked_and_failed_reruns_once_then_blocked``
+# (first pass: rerun once) + ``test_failed_reruns_once_then_escalates_to_needs_fix``
+# (next pass: still failing -> NEEDS_FIX) above; only the now-obsolete
+# ``MergingState``-composition assertion was removed.
 # The equivalent "classifier failure reaches ImplFix" regression on the new
 # composed path (MergeCoordinator + #317 routing) belongs to that later
-# task's own tests.
+# task's own tests (see ``test_merge_coordinator.py``'s
+# ``test_ci_failed_reruns_and_stays_queued_on_first_tick`` /
+# ``test_failed_check_escalates_to_impl_fix_after_max_attempts``).
 # ---------------------------------------------------------------------------

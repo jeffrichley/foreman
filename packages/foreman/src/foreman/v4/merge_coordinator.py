@@ -40,9 +40,14 @@ must NOT count — mirrors the marker discipline
 foreman#317's heal-loop bound, for the identical reason: PENDING checks can
 legitimately poll BLOCKED for many ticks while CI runs, and counting those
 would trip the bound on a perfectly healthy in-flight PR. After 3 real
-(heal/rerun-acted) cycles without resolving, the entry escalates to
-``NeedsHelp`` and is dequeued — a PR whose branch keeps churning or whose
-checks keep timing out gets a human's attention instead of retrying forever.
+(heal/rerun-acted) cycles without resolving, the entry escalates and is
+dequeued — cause-aware (see ``_handle_blocked``): a still-FAILED required
+check escalates to ``ImplFix``/``SpecFix`` so ImplFix can auto-fix a genuine
+CI failure (foreman#317/C1, restored after foreman#554 briefly routed this
+to ``NeedsHelp`` too); a PR whose branch keeps churning (heal-acted) or
+whose checks keep timing out (TIMED_OUT_OR_CANCELLED-rerun-acted) still
+escalates to ``NeedsHelp`` — a human's attention instead of retrying
+forever.
 
 close_originating_issue (foreman#443/#550)
 -------------------------------------------
@@ -346,7 +351,24 @@ class MergeCoordinator:
         entry: MergeQueueEntry,
         outcome: Outcome,
     ) -> None:
-        """Advance the poison-PR bound only on a real heal/rerun cycle; escalate at the cap."""
+        """Advance the poison-PR bound only on a real heal/rerun cycle; escalate at the cap.
+
+        ``_ctx_for``'s synthetic per-tick ``StateContext`` never persists a
+        journal row, so ``merge_helper._prior_rerun_count`` always reads 0
+        here — ``_rerun_or_escalate``'s OWN ``MAX_CHECK_RERUNS`` bound can
+        never trip for a coordinator-driven merge. This coordinator's
+        ``MAX_ATTEMPTS`` bound is what actually governs escalation in
+        production, so it must make the same cause-aware choice
+        ``_rerun_or_escalate`` makes: a still-FAILED required check
+        escalates to ``*Fix`` (ImplFix/SpecFix) so ImplFix can auto-fix a
+        genuine CI failure (foreman#317/C1, restored after foreman#554);
+        a heal-action or TIMED_OUT_OR_CANCELLED rerun exceeding the bound
+        still escalates to ``NeedsHelp`` (unchanged). The cause rides on
+        ``outcome.details["fix_reason"]`` — ``_rerun_or_escalate`` merges
+        its ``escalate_details`` into every interim BLOCKED-rerun outcome,
+        not just the eventual escalation, specifically so it's available
+        here regardless of which tick trips this bound.
+        """
         if not _took_real_action(outcome):
             # Plain CI-pending poll — the legitimate wait. No bound
             # movement, no dequeue; the entry stays head-of-queue for the
@@ -354,7 +376,10 @@ class MergeCoordinator:
             return
         attempts = self._repo.increment_merge_attempts(entry.id)
         if attempts >= self.MAX_ATTEMPTS:
-            self._route(ctx, entry, "NeedsHelp")
+            if outcome.details.get("fix_reason") == "ci_failed":
+                self._route(ctx, entry, "SpecFix" if entry.kind == "spec" else "ImplFix")
+            else:
+                self._route(ctx, entry, "NeedsHelp")
 
     def _route(self, ctx: StateContext, entry: MergeQueueEntry, state_name: str) -> None:
         """Move the ticket to ``state_name``, dequeue the entry, and clean up after it."""

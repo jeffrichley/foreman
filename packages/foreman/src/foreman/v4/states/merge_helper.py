@@ -33,13 +33,17 @@ table (``docs/superpowers/specs/foreman-issue-317-spec.md``):
   should never be a draft; this is the other pre-check-runs
   ``mergeable_state`` special-case (alongside ``dirty``) so it can't fall
   through to the check-state branches below.
-- required check ``FAILED`` → NEEDS_FIX, ``details={"fix_reason":
-  "ci_failed"}`` — the C1 fix.
+- required check ``FAILED`` → ``_rerun_or_escalate``: rerun once (foreman#537
+  — absorbs a CI infrastructure flake without wasting a Fixer dispatch),
+  then, if it's STILL FAILED, NEEDS_FIX with ``details={"fix_reason":
+  "ci_failed"}`` — the C1 fix, restored after foreman#554 wrongly routed
+  this to NEEDS_HELP (see ``_rerun_or_escalate``'s docstring).
 - required check ``ACTION_REQUIRED`` → NEEDS_HELP — a human gate ImplFix
   can't act on.
 - required check ``TIMED_OUT_OR_CANCELLED`` → ``_rerun_or_escalate``: a
   bounded re-run-once-then-escalate cycle (Decision T — likely an infra
-  flake).
+  flake, so this cause always escalates to NEEDS_HELP, unlike FAILED
+  above).
 - ``PENDING`` or ``PASSED``-but-still-``blocked`` (GitHub hasn't
   recomputed ``mergeable_state`` yet) → BLOCKED — the legitimate wait,
   unchanged from before #317.
@@ -61,13 +65,14 @@ NEEDS_HELP instead of asking a healer to act again. No new repository
 method, no GitProvider counter — the existing journal is the counter, and
 the mechanism works identically across InMemory / Sqlite / Postgres.
 
-Check-rerun bound (foreman#317)
---------------------------------
-A parallel bound protects the ``TIMED_OUT_OR_CANCELLED`` re-run path the
-same way: ``_prior_rerun_count`` counts prior BLOCKED rows carrying the
-``reran_checks`` marker, and at/after ``MAX_CHECK_RERUNS`` such cycles
-``_rerun_or_escalate`` returns NEEDS_HELP instead of issuing another
-``rerun_failed_checks`` call.
+Check-rerun bound (foreman#317, extended #537/#554)
+------------------------------------------------------
+A parallel bound protects both re-run paths (``TIMED_OUT_OR_CANCELLED`` and
+``FAILED``) the same way: ``_prior_rerun_count`` counts prior BLOCKED rows
+carrying the ``reran_checks`` marker, and at/after ``MAX_CHECK_RERUNS`` such
+cycles ``_rerun_or_escalate`` returns its caller-supplied ``escalate_kind``
+(NEEDS_HELP for a timeout, NEEDS_FIX for a still-failing check) instead of
+issuing another ``rerun_failed_checks`` call.
 
 ``enqueue_for_merge`` (foreman#550)
 ------------------------------------
@@ -85,7 +90,7 @@ the caller's ``next_state`` routes to ``MergeQueuedState``.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from foreman.v4.git_provider import RequiredCheckState
 from foreman.v4.merge_healers import MERGE_HEALERS, HealResult
@@ -205,33 +210,66 @@ def _prior_rerun_count(ctx: StateContext) -> int:
     return count
 
 
-def _rerun_or_escalate(ctx: StateContext, pr_number: int) -> Outcome:
-    """Re-run a PR's timed-out/cancelled required checks once, then escalate.
+def _rerun_or_escalate(
+    ctx: StateContext,
+    pr_number: int,
+    *,
+    cause: str = "timed out/cancelled",
+    escalate_kind: OutcomeKind = OutcomeKind.NEEDS_HELP,
+    escalate_details: dict[str, Any] | None = None,
+) -> Outcome:
+    """Re-run a PR's failed/timed-out required checks once, then escalate.
 
-    foreman#317 Decision T: a TIMED_OUT_OR_CANCELLED required check is
-    likely an infra flake rather than something ImplFix can act on, so
-    this re-runs the checks a single time (bounded by
-    ``MAX_CHECK_RERUNS``) before giving up and asking a human.
+    foreman#317 Decision T: originally for TIMED_OUT_OR_CANCELLED, which
+    always escalates to NEEDS_HELP (a timeout/cancellation isn't a code
+    defect ImplFix can act on — the default ``escalate_kind``).
+
+    foreman#537 extended the bounded-rerun mechanics to FAILED (same
+    rerun-once-then-escalate shape, different cause label) but foreman#554
+    then wrongly hardcoded ITS escalation to NEEDS_HELP too, dead-ending a
+    genuinely-failing check at a human instead of restoring the #317/C1
+    routing (FAILED -> NEEDS_FIX -> ImplFix auto-fixes it). ``escalate_kind``
+    / ``escalate_details`` let the FAILED caller opt into NEEDS_FIX +
+    ``{"fix_reason": "ci_failed"}`` while TIMED_OUT_OR_CANCELLED keeps the
+    original NEEDS_HELP default — restoring the C1 fix without regressing
+    the #537 rerun-once benefit for either cause.
+
+    ``escalate_details`` is also merged into the interim BLOCKED-rerun
+    outcome (not just the eventual escalation) so a caller whose OWN bound
+    supersedes ``MAX_CHECK_RERUNS`` — e.g. ``MergeCoordinator``, whose
+    synthetic per-tick ``StateContext`` never persists a journal row, so
+    ``_prior_rerun_count`` here always reads 0 (see ``_ctx_for``'s
+    docstring) — can still recover the cause from ``outcome.details`` when
+    its own bound trips, without this function needing to know about that
+    caller at all.
+
+    Re-runs once (bounded by MAX_CHECK_RERUNS when called from a TicketState
+    context; by MergeCoordinator.MAX_ATTEMPTS in the coordinator context —
+    see _ctx_for docstring).
     """
     prior = _prior_rerun_count(ctx)
     if prior >= MAX_CHECK_RERUNS:
         return Outcome(
-            kind=OutcomeKind.NEEDS_HELP,
+            kind=escalate_kind,
             confidence=OutcomeConfidence.HIGH,
-            summary=(f"checks timed out/cancelled after {MAX_CHECK_RERUNS} re-run — escalating"),
+            summary=f"required check {cause} after {MAX_CHECK_RERUNS} re-run — escalating",
             artifacts=OutcomeArtifacts(pr_number=pr_number),
+            details=dict(escalate_details) if escalate_details else {},
         )
     # attempt_merge guarantees ctx.git is non-None before any caller
     # reaches here; narrow for the type checker (same pattern as
     # BehindBranchHealer.heal in merge_healers.py).
     assert ctx.git is not None
     ctx.git.rerun_failed_checks(project=ctx.ticket.project, pr_number=pr_number)
+    details: dict[str, Any] = {RERUN_DETAIL_KEY: True}
+    if escalate_details:
+        details.update(escalate_details)
     return Outcome(
         kind=OutcomeKind.BLOCKED,
         confidence=OutcomeConfidence.HIGH,
-        summary="checks timed out/cancelled — re-running once",
+        summary=f"required check {cause} — re-running once",
         artifacts=OutcomeArtifacts(pr_number=pr_number),
-        details={RERUN_DETAIL_KEY: True},
+        details=details,
     )
 
 
@@ -373,12 +411,16 @@ def attempt_merge(
         )
     check = ctx.git.required_check_state(project=ctx.ticket.project, pr_number=pr_number)
     if check == RequiredCheckState.FAILED:
-        return Outcome(
-            kind=OutcomeKind.NEEDS_FIX,
-            confidence=OutcomeConfidence.HIGH,
-            summary="required CI check failed — routing to ImplFix",
-            artifacts=OutcomeArtifacts(pr_number=pr_number),
-            details={"fix_reason": "ci_failed"},
+        # foreman#317/C1, restored after the #554 regression: a required
+        # check that is STILL FAILED after one rerun is a genuine CI
+        # failure, not an infra flake — route to NEEDS_FIX so ImplFix
+        # auto-fixes it, not NEEDS_HELP (a human dead-end).
+        return _rerun_or_escalate(
+            ctx,
+            pr_number,
+            cause="failed",
+            escalate_kind=OutcomeKind.NEEDS_FIX,
+            escalate_details={"fix_reason": "ci_failed"},
         )
     if check == RequiredCheckState.ACTION_REQUIRED:
         return Outcome(
