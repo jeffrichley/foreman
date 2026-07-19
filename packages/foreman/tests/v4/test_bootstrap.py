@@ -531,6 +531,48 @@ def test_bootstrap_survives_transient_clone_failure(
     assert "https://github.com/owner/ok.git" in call_order
 
 
+def test_skips_clone_loop_when_run_startup_clone_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """run_startup_clone=False must not mint the orchestrator token.
+
+    A sandboxed role subprocess's private clone is already prepped by the
+    daemon; it has no PEM of its own to mint an orchestrator token with,
+    so the daemon-level all-projects clone loop must be fully skippable.
+    Uses a raising identity — if the clone loop ran at all, it would call
+    ``get_role_token("orchestrator")`` and fail the test immediately."""
+
+    class _RaisingIdentity:
+        def get_role_token(self, role: str) -> str:
+            raise AssertionError(f"clone loop ran: minted token for {role!r}")
+
+    pc = ProjectConfig(
+        name="voice",
+        repo="owner/voice",
+        local_clone_path=str(tmp_path / "voice"),
+    )
+    # config.projects is EMPTY — mirrors production after #503.
+    config = V4Config(
+        log_dir=str(tmp_path / "logs"),
+        apps=_apps_config(),
+        orchestrator=_orchestrator_config(),
+        operator=_operator_config(),
+        storage=_storage_config(),
+        projects=[],
+    )
+    ctx = bootstrap_cli_context(
+        config=config,
+        identity=_RaisingIdentity(),
+        git_provider_factory=lambda repo: _stub_git_factory(),
+        # Project supplied via kwarg — the production call path — and
+        # non-empty on purpose, so the only thing preventing the clone
+        # loop from running is run_startup_clone=False.
+        projects=[pc],
+        run_startup_clone=False,
+    )
+    assert ctx is not None
+
+
 # ----------------------------------------------------------------------
 # foreman#job-sandbox-isolation Task 6 — bootstrap wiring
 #

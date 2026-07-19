@@ -59,6 +59,7 @@ def bootstrap_cli_context(
     foreman_cli: list[str] | None = None,
     projects: list[ProjectConfig] | None = None,
     projects_loader: Callable[[], list[ProjectConfig]] | None = None,
+    run_startup_clone: bool = True,
 ) -> CliContext:
     """Build the full v4 object graph from config.
 
@@ -75,6 +76,11 @@ def bootstrap_cli_context(
     ``projects_loader`` — a zero-arg callable stored on the Daemon for
     hot-reload on SIGHUP.  Production passes
     ``lambda: load_projects(projects_path)``; tests may omit it.
+
+    ``run_startup_clone`` — when False, skip the daemon-level all-projects
+    clone-maintenance loop (and the orchestrator-token mint it needs). Set
+    False for a sandboxed role subprocess, whose private clone the daemon
+    already prepped and which has no PEM to mint with.
     """
     configure_logging(log_dir=Path(config.log_dir), level=config.log_level)
 
@@ -93,7 +99,7 @@ def bootstrap_cli_context(
     # Transient failures (network, auth, disk) are caught and logged as
     # warnings so the daemon still starts; corrupt/non-git paths (RuntimeError)
     # remain fatal with their existing actionable message.
-    if active_projects:
+    if run_startup_clone and active_projects:
         orch_token = identity.get_role_token("orchestrator")
         for pc in active_projects:
             clone_path = Path(pc.local_clone_path)
