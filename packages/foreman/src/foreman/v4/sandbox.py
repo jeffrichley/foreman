@@ -160,6 +160,14 @@ class SandboxLauncher:
             "--die-with-parent",
             "--tmpfs",
             "/tmp",
+            # Minimal /dev (null, zero, random, tty, ...) — git and most
+            # tools open /dev/null; without this they fail hard.
+            "--dev",
+            "/dev",
+            # Fresh procfs for the box's PID namespace — many tools read
+            # /proc/self/...; python subprocess/multiprocessing need it.
+            "--proc",
+            "/proc",
             "--ro-bind",
             "/usr",
             "/usr",
@@ -187,6 +195,12 @@ class SandboxLauncher:
             "--ro-bind-try",
             "/etc/gitconfig",
             "/etc/gitconfig",
+            # The dynamic-linker cache — without it the loader can't resolve
+            # /usr/local/lib (where libpython lives), so `python` won't start
+            # inside the box even though /usr (and libpython) are bound.
+            "--ro-bind-try",
+            "/etc/ld.so.cache",
+            "/etc/ld.so.cache",
             "--bind",
             self.cache_dir,
             self.cache_mount,
