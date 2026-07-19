@@ -86,6 +86,18 @@ Schema:
     auto_merge_impl   - when False (default), an approved impl PR parks at
                         ImplApproved for human merge; when True, foreman
                         auto-merges the impl PR (the historic behavior)
+
+  [sandbox]
+    enabled           - master switch for bwrap job-isolation (default
+                        False; existing configs without this block keep
+                        running role subprocesses unwrapped)
+    allow_unsandboxed - local-dev escape hatch downgrading the startup
+                        preflight failure to a warning (default False)
+    cache_dir         - host path of the shared uv cache, bind-mounted
+                        read-write into the box
+    scratch_root      - host directory under which per-job scratch dirs
+                        are created and bind-mounted read-write
+    bwrap_path        - path to the ``bwrap`` binary (default "bwrap")
 """
 
 from __future__ import annotations
@@ -363,6 +375,37 @@ class BackupConfig(BaseModel):
     retention_weekly: int = Field(default=4, ge=0)
 
 
+class SandboxConfig(BaseModel):
+    """Bubblewrap job-isolation settings (foreman#job-sandbox-isolation).
+
+    Each role subprocess is wrapped in a ``bwrap`` box so it can only read
+    a shared uv cache and write its own scratch worktree. The
+    block is optional; a config without ``[sandbox]`` defaults to
+    ``enabled = False`` so the daemon behaves exactly as before until the
+    sandbox is deliberately turned on.
+
+    Attributes:
+        enabled: Master switch. When ``False`` the dispatcher runs role
+            subprocesses unwrapped (pre-sandbox behavior).
+        allow_unsandboxed: Local-dev escape hatch. When ``True`` the
+            startup preflight failure is downgraded from fail-closed to a
+            loud per-dispatch warning. Must be set deliberately.
+        cache_dir: Host path of the shared uv cache, bind-mounted
+            read-write to ``/cache`` inside the box (jobs warm the shared
+            cache; uv's content-addressed cache is concurrency-safe).
+        scratch_root: Host directory under which per-job scratch dirs are
+            created and bind-mounted read-write to ``/scratch``.
+        bwrap_path: Path to the ``bwrap`` binary (overridable for tests).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    allow_unsandboxed: bool = False
+    cache_dir: str = "/root/.cache/uv"
+    scratch_root: str = "/foreman/scratch"
+    bwrap_path: str = "bwrap"
+
+
 class V4Config(BaseModel):
     """Root of the daemon's TOML-loaded configuration.
 
@@ -447,6 +490,10 @@ class V4Config(BaseModel):
     """v5: persistence engine selection. Postgres-only with a required
     ``dsn`` — a config without a valid ``[storage]`` block raises a
     ``ValidationError`` at load time (loud-fail; no SQLite fallback)."""
+    sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
+    """foreman#job-sandbox-isolation: bubblewrap isolation for role
+    subprocesses. Optional with a default — existing operator configs
+    without a ``[sandbox]`` block load and default to ``enabled=False``."""
 
 
 class ProjectRegistry:
@@ -506,6 +553,8 @@ def load_config(path: Path) -> V4Config:
         payload["storage"] = raw["storage"]
     if "backup" in raw:
         payload["backup"] = raw["backup"]
+    if "sandbox" in raw:
+        payload["sandbox"] = raw["sandbox"]
     return V4Config.model_validate(payload)
 
 

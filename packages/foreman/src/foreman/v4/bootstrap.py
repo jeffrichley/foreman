@@ -31,6 +31,7 @@ from foreman.v4.pg_backup import BackupScheduler
 from foreman.v4.poller import Poller
 from foreman.v4.repository import TicketRepository
 from foreman.v4.routing_git_provider import RoutingGitProvider
+from foreman.v4.sandbox import SandboxLauncher, SandboxUnavailableError, preflight
 from foreman.v4.subprocess_dispatcher import SubprocessRoleDispatcher
 from foreman.worktree import ensure_clone
 
@@ -173,6 +174,44 @@ def bootstrap_cli_context(
         pool_max=config.storage.pool_max,
     )
 
+    # foreman#job-sandbox-isolation Task 6: build the sandbox launcher and
+    # run the startup preflight BEFORE constructing the dispatcher. Fail
+    # closed by default — a host that can't create the bwrap sandbox
+    # refuses to start rather than silently running role subprocesses
+    # unwrapped. ``allow_unsandboxed`` is the deliberate local-dev escape
+    # hatch: downgrade to a loud warning and continue with launcher=None.
+    sandbox_launcher: SandboxLauncher | None = None
+    sandbox_scratch_root: Path | None = None
+    if config.sandbox.enabled:
+        try:
+            preflight(bwrap_path=config.sandbox.bwrap_path)
+        except SandboxUnavailableError:
+            if not config.sandbox.allow_unsandboxed:
+                logger.error(
+                    "sandbox preflight failed and allow_unsandboxed is false; "
+                    "refusing to start. Fix the host's unprivileged user "
+                    "namespaces or set [sandbox].allow_unsandboxed for local dev."
+                )
+                raise
+            logger.warning(
+                "sandbox preflight FAILED but allow_unsandboxed=true: running "
+                "role subprocesses UNSANDBOXED (local-dev escape hatch). Every "
+                "dispatch is unprotected — do not use this in production."
+            )
+        else:
+            sandbox_launcher = SandboxLauncher(
+                cache_dir=config.sandbox.cache_dir,
+                bwrap_path=config.sandbox.bwrap_path,
+            )
+            sandbox_scratch_root = Path(config.sandbox.scratch_root)
+            logger.info(
+                "sandbox enabled: role subprocesses run in bwrap boxes",
+                extra={
+                    "cache_dir": config.sandbox.cache_dir,
+                    "scratch_root": config.sandbox.scratch_root,
+                },
+            )
+
     dispatcher = SubprocessRoleDispatcher(
         foreman_cli=foreman_cli or ["foreman"],
         identity=identity,
@@ -182,6 +221,8 @@ def bootstrap_cli_context(
         # streams nothing for this long, rather than burning the full
         # role_timeout_seconds on a silent hang.
         inactivity_timeout_seconds=config.role_inactivity_timeout_seconds,
+        sandbox=sandbox_launcher,
+        sandbox_scratch_root=sandbox_scratch_root,
     )
 
     pollers: list[Poller] = []
