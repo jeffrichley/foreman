@@ -205,3 +205,84 @@ unsandboxed run keep the PEM path.
 Lands behind the existing, default-off `config.sandbox.enabled` flag — no new
 operator flag. When the sandbox is enabled, the marker and the env-token path
 activate together. First real proof is the #408 canary re-run.
+
+---
+
+## Extension: roles layer (added 2026-07-19 after whole-branch review)
+
+**The miss.** The original design assumed the role's GitHub work flows through
+`main()`'s object graph. It does not: `cmd_plan|review|fix|implement`
+(`cli/__init__.py:126,137,153,168`) call `run_<role>_cli(...)` directly and
+never touch `app(obj=ctx)`. Each role delegate builds its OWN
+`V4IdentityRegistry` (`roles/planner.py:617`, etc.) and reads the PEM on the
+role path in three places, all withheld from the box:
+1. `build_role_resources` → `registry.get_role_token(role)` (token);
+2. `build_role_resources` → `fetch_app_metadata(app_id, private_key_path)`
+   (`GET /app`, JWT-signed) for the bot **slug** → `BotIdentity` commit
+   attribution (`<slug>[bot]`);
+3. `identity_registry.get_role_bot_logins()` (`roles/planner.py:324`) → the
+   four `<slug>[bot]` logins, used to filter the bots' self-comments
+   (prompt-injection hygiene, foreman#328).
+
+So the foundation (main() layer) is necessary but not sufficient; the box
+would clear the `orchestrator_pem` crash then die on `<role>_pem`.
+
+**Corrected data flow.** The daemon (which holds the PEMs) sources the static
+bot metadata and injects it; the box reads it — no PEM enters the box.
+
+```
+daemon dispatcher (has self._identity = V4IdentityRegistry)
+  build_argv sets, in sandbox mode:
+    --setenv GH_TOKEN <role token>          (already)
+    --setenv FOREMAN_SANDBOXED 1            (already)
+    --setenv FOREMAN_BOT_SLUG <dispatched role's slug>     ← new
+    --setenv FOREMAN_BOT_LOGINS "<planner>[bot] <reviewer>[bot] …"  ← new
+       └─ role subprocess:
+            role delegate selects SandboxIdentityRegistry (FOREMAN_SANDBOXED)
+              get_role_token   → GH_TOKEN
+              get_app_slug     → FOREMAN_BOT_SLUG   (used by build_role_resources)
+              get_role_bot_logins → parse FOREMAN_BOT_LOGINS
+```
+
+**Components (extension).**
+
+1. **`SandboxIdentityRegistry(EnvTokenIdentity)`** — `identity.py`. Inherits
+   `get_role_token` (→ `GH_TOKEN`); adds `get_app_slug(role) -> str` (→
+   `FOREMAN_BOT_SLUG`) and `get_role_bot_logins() -> set[str]` (→ parse
+   `FOREMAN_BOT_LOGINS`, whitespace-separated). Fail-closed
+   (`SandboxIdentityError`) if a needed var is missing.
+
+2. **`get_app_slug(role) -> str` on `V4IdentityRegistry`** — a public accessor
+   wrapping the existing `_get_app_metadata(role).slug`. This lets
+   `build_role_resources` source the slug through the registry polymorphically
+   instead of calling `fetch_app_metadata` directly.
+
+3. **`build_role_resources` refactor** — `roles/__init__.py`. Replace the
+   direct `fetch_app_metadata(app_id, private_key_path)` with
+   `registry.get_app_slug(role)`; build `BotIdentity(slug=slug, user_id=app_id,
+   token=token)` (`user_id` = the `app_id` already threaded in). Drop the now
+   unused `private_key_path` parameter and update the four call sites. Behavior
+   is identical for the non-sandbox path (V4IdentityRegistry.get_app_slug does
+   the same `GET /app` fetch it did before).
+
+4. **Role-delegate identity selection** — `roles/planner.py`, `reviewer.py`,
+   `fixer.py`, `worker.py` (via one shared helper). When `FOREMAN_SANDBOXED=1`,
+   build `SandboxIdentityRegistry()` instead of `V4IdentityRegistry(...)`.
+   Everything downstream (`build_role_resources`, `get_role_bot_logins`) then
+   runs PEM-free.
+
+5. **Dispatcher bot-metadata injection** — `subprocess_dispatcher.py`. The
+   dispatcher gains a `bot_metadata` source (the daemon builds it from its
+   registry: `get_role_bot_logins()` + each role's slug). In sandbox mode,
+   `dispatch`/`build_argv` inject `FOREMAN_BOT_SLUG` (dispatched role) +
+   `FOREMAN_BOT_LOGINS` (all four). `IdentityProvider` stays narrow — the
+   metadata moves as data, not through the protocol.
+
+**Testing (extension).** Unit: `SandboxIdentityRegistry` (slug + logins from
+env; fail-closed); `V4IdentityRegistry.get_app_slug`; `build_role_resources`
+sources slug via registry (non-sandbox unchanged; sandbox path needs no PEM);
+role-delegate selection under `FOREMAN_SANDBOXED`; dispatcher injects the two
+new vars. The hermetic bwrap lock is upgraded to invoke an actual role path
+(or `build_role_resources` with a `SandboxIdentityRegistry`) with no
+`/run/secrets` and assert no PEM read. The #408 keystone is unchanged and
+remains the final proof.
