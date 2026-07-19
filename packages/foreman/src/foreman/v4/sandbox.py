@@ -63,6 +63,9 @@ class SandboxLauncher:
             exist — the Claude CLI config + session dirs the role needs
             to make its LLM call. These are operational config, not the
             crown-jewel secrets in :data:`DAEMON_NEVER_BIND`.
+        claude_writable_session_dir: Optional in-box path made writable
+            via a ``--tmpfs`` overlay, off by default. See the field's
+            own docstring below for details.
     """
 
     cache_dir: str
@@ -72,6 +75,13 @@ class SandboxLauncher:
     extra_ro_binds: tuple[str, ...] = field(
         default_factory=lambda: ("/root/.claude", "/root/.claude-container")
     )
+    claude_writable_session_dir: str | None = None
+    """Optional in-box path made WRITABLE via a ``--tmpfs`` overlay AFTER
+    the read-only Claude creds bind, so the Claude CLI can write its
+    session/session-lock files without the daemon's real creds dir being
+    writable. Off by default — verify the CLI actually needs this during
+    the #556 dogfood before enabling; the tmpfs is ephemeral (dropped when
+    the box exits), so no session state leaks between jobs."""
 
     def build_argv(
         self,
@@ -195,6 +205,11 @@ class SandboxLauncher:
             argv += ["--ro-bind", host_file, box_file]
         for extra in self.extra_ro_binds:
             argv += ["--ro-bind-try", extra, extra]
+        # foreman#556 (dogfood-gated): overlay a writable tmpfs on the
+        # Claude session dir if configured, so the CLI can write its
+        # session files. Must follow the RO creds bind to take effect.
+        if self.claude_writable_session_dir is not None:
+            argv += ["--tmpfs", self.claude_writable_session_dir]
         for key in sorted(setenv):
             argv += ["--setenv", key, setenv[key]]
         argv += ["--chdir", self.scratch_mount, "--"]

@@ -193,6 +193,36 @@ def test_argv_passthrough_forwards_non_secret_env_only() -> None:
     assert _has_triple(argv, "--setenv", "CLAUDE_CONFIG_DIR", "/root/.claude-container")
 
 
+def test_argv_adds_writable_claude_session_tmpfs_when_set() -> None:
+    launcher = SandboxLauncher(
+        cache_dir="/root/.cache/uv",
+        claude_writable_session_dir="/root/.claude/projects",
+    )
+    argv = launcher.build_argv(
+        role_token="ghs_X", scratch_dir="/scratch", role_cmd=["foreman", "plan"]
+    )
+    assert _has_pair(argv, "--tmpfs", "/root/.claude/projects")
+    # the tmpfs must come AFTER the RO creds bind so it overlays (writable) it
+    ro_i = argv.index("/root/.claude")  # from extra_ro_binds
+    tmp_i = argv.index("/root/.claude/projects")
+    assert tmp_i > ro_i
+    # the RO creds bind itself is unchanged: still a --ro-bind-try triple,
+    # not upgraded to a writable --bind.
+    assert _has_triple(argv, "--ro-bind-try", "/root/.claude", "/root/.claude")
+    assert not _has_triple(argv, "--bind", "/root/.claude", "/root/.claude")
+    # the never-bind guardrail still holds with the session tmpfs configured
+    joined = " ".join(argv)
+    for forbidden in DAEMON_NEVER_BIND:
+        assert forbidden not in joined, forbidden
+
+
+def test_argv_no_claude_tmpfs_by_default() -> None:
+    argv = SandboxLauncher(cache_dir="/c").build_argv(
+        role_token="ghs_X", scratch_dir="/scratch", role_cmd=["foreman", "plan"]
+    )
+    assert not _has_pair(argv, "--tmpfs", "/root/.claude/projects")
+
+
 def _has_pair(argv: list[str], a: str, b: str) -> bool:
     return any(argv[i] == a and argv[i + 1] == b for i in range(len(argv) - 1))
 
