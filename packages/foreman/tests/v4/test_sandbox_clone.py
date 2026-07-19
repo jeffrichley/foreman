@@ -197,3 +197,19 @@ def test_cleanup_ticket_scratch_is_idempotent_on_missing_dirs(tmp_path: Path) ->
     scratch_root = tmp_path / "scratch"
     removed = cleanup_ticket_scratch(scratch_root=scratch_root, project="proj", issue_number=99)
     assert removed == []
+
+
+def test_cleanup_removes_all_role_job_dirs_for_ticket(tmp_path: Path) -> None:
+    """A different ticket's scratch dir under the same project must survive."""
+    root = tmp_path / ".scratch"
+    for base in ("planner", "reviewer", "worker"):
+        (root / "foreman" / f"{base}-42" / "clone").mkdir(parents=True)
+    # a different ticket's dir must survive
+    (root / "foreman" / "worker-7" / "clone").mkdir(parents=True)
+
+    removed = cleanup_ticket_scratch(scratch_root=root, project="foreman", issue_number=42)
+
+    assert not (root / "foreman" / "planner-42").exists()
+    assert not (root / "foreman" / "worker-42").exists()
+    assert (root / "foreman" / "worker-7").exists()  # untouched
+    assert len(removed) == 3

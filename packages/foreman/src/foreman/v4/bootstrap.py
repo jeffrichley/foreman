@@ -357,6 +357,13 @@ def bootstrap_cli_context(
         backup_scheduler=backup_scheduler,
         projects_loader=projects_loader,
         git_provider_factory=git_provider_factory,
+        # foreman#556: same scratch root the dispatcher above got — a
+        # terminal landing (WorkerPool- or MergeCoordinator-driven) then
+        # reclaims the ticket's per-job sandbox scratch. Reuses the local
+        # already computed for the dispatcher rather than recomputing from
+        # config, and stays None whenever the sandbox is disabled or its
+        # preflight failed (sandbox_launcher stayed None too).
+        sandbox_scratch_root=sandbox_scratch_root,
     )
 
     return build_cli_context(

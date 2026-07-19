@@ -35,6 +35,8 @@ from foreman.v4.states.registry import build_state
 from foreman.v4.work import WorkItem
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from foreman.v4.config import ProjectConfig, ProjectRegistry
 
 _LOG = logging.getLogger(__name__)
@@ -63,6 +65,7 @@ class WorkerPool:
         max_state_attempts: int = 3,
         project_configs: dict[str, ProjectConfig] | None = None,
         registry: ProjectRegistry | None = None,
+        sandbox_scratch_root: Path | None = None,
     ) -> None:
         self._repo = repo
         self._qm = qm
@@ -70,6 +73,12 @@ class WorkerPool:
         self._git = git
         self._bus = bus
         self._clock = clock
+        # foreman#556: threaded into every StateContext built by
+        # _run_transition so _enter_terminal can reclaim the ticket's
+        # per-job sandbox scratch on Done/Failed/NeedsHelp. None (sandbox
+        # off, or a test-only WorkerPool(...) construction) keeps cleanup
+        # a no-op.
+        self._sandbox_scratch_root = sandbox_scratch_root
         # Threaded into every StateContext built by _run_transition so
         # the state machine can enforce the runaway-defense cap (Phase
         # 8c.2). Daemon plumbs DaemonConfig.max_state_attempts here.
@@ -172,6 +181,7 @@ class WorkerPool:
                 # point is immediately visible.  No snapshot needed — readers
                 # always see a consistent (non-torn) dict under the GIL.
                 project_configs=self._registry.current,
+                sandbox_scratch_root=self._sandbox_scratch_root,
             )
             state.transition(ctx)
         except Exception:
