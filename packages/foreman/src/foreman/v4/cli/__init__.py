@@ -290,17 +290,8 @@ def main() -> None:
         # orchestrator read-path only. Under EnvTokenIdentity (sandboxed),
         # this role="orchestrator" label is inert — the injected token is
         # returned regardless of the role argument.
-        #
-        # mypy: PyGithubGitProvider.__init__ still types `identity` as the
-        # concrete V4IdentityRegistry, but only ever calls
-        # `identity.get_role_token(role)` — the same one-method contract
-        # as `foreman.v4.bootstrap.IdentityProvider`, which is the return
-        # type `_select_identity` actually produces (EnvTokenIdentity or
-        # V4IdentityRegistry). EnvTokenIdentity satisfies that contract at
-        # runtime; widening PyGithubGitProvider's signature to the
-        # Protocol is the real fix but is out of this task's file scope.
         return PyGithubGitProvider(
-            identity=identity,  # type: ignore[arg-type]
+            identity=identity,
             role="orchestrator",
             repo_full_name=repo,
         )
