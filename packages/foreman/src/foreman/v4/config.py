@@ -96,7 +96,14 @@ Schema:
     cache_dir         - host path of the shared uv cache, bind-mounted
                         read-write into the box
     scratch_root      - host directory under which per-job scratch dirs
-                        are created and bind-mounted read-write
+                        are created and bind-mounted read-write. MUST sit
+                        on the same filesystem as the projects' base
+                        clones (``local_clone_path``, the repos volume)
+                        so the daemon's ``git clone --local`` into
+                        scratch hardlinks the object store (free)
+                        instead of failing with "Invalid cross-device
+                        link". Defaults under ``/foreman/repos`` for
+                        exactly this reason.
     bwrap_path        - path to the ``bwrap`` binary (default "bwrap")
 """
 
@@ -394,7 +401,13 @@ class SandboxConfig(BaseModel):
             read-write to ``/cache`` inside the box (jobs warm the shared
             cache; uv's content-addressed cache is concurrency-safe).
         scratch_root: Host directory under which per-job scratch dirs are
-            created and bind-mounted read-write to ``/scratch``.
+            created and bind-mounted read-write to ``/scratch``. MUST sit
+            on the same filesystem as the projects' base clones
+            (``local_clone_path``, i.e. the repos volume) so the
+            daemon's ``git clone --local`` into scratch hardlinks the
+            object store (free) instead of failing with "Invalid
+            cross-device link". Defaults under ``/foreman/repos`` for
+            exactly this reason.
         bwrap_path: Path to the ``bwrap`` binary (overridable for tests).
     """
 
@@ -402,7 +415,7 @@ class SandboxConfig(BaseModel):
     enabled: bool = False
     allow_unsandboxed: bool = False
     cache_dir: str = "/root/.cache/uv"
-    scratch_root: str = "/foreman/scratch"
+    scratch_root: str = "/foreman/repos/.scratch"
     bwrap_path: str = "bwrap"
 
 

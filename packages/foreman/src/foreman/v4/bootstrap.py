@@ -182,7 +182,16 @@ def bootstrap_cli_context(
     # hatch: downgrade to a loud warning and continue with launcher=None.
     sandbox_launcher: SandboxLauncher | None = None
     sandbox_scratch_root: Path | None = None
+    sandbox_projects: dict[str, ProjectConfig] | None = None
     if config.sandbox.enabled:
+        # foreman#556: the project map lets the dispatcher resolve each
+        # project's base clone + repo to prep the private per-job clone.
+        # Built unconditionally here — independent of whether preflight
+        # below succeeds — so the allow_unsandboxed local-dev downgrade
+        # (which leaves sandbox_launcher None) never leaves this None
+        # while config.sandbox.enabled is True; re-enabling the sandbox
+        # later needs no further bootstrap change.
+        sandbox_projects = {pc.name: pc for pc in active_projects}
         try:
             preflight(bwrap_path=config.sandbox.bwrap_path)
         except SandboxUnavailableError:
@@ -223,6 +232,7 @@ def bootstrap_cli_context(
         inactivity_timeout_seconds=config.role_inactivity_timeout_seconds,
         sandbox=sandbox_launcher,
         sandbox_scratch_root=sandbox_scratch_root,
+        sandbox_projects=sandbox_projects,
     )
 
     pollers: list[Poller] = []
@@ -347,6 +357,13 @@ def bootstrap_cli_context(
         backup_scheduler=backup_scheduler,
         projects_loader=projects_loader,
         git_provider_factory=git_provider_factory,
+        # foreman#556: same scratch root the dispatcher above got — a
+        # terminal landing (WorkerPool- or MergeCoordinator-driven) then
+        # reclaims the ticket's per-job sandbox scratch. Reuses the local
+        # already computed for the dispatcher rather than recomputing from
+        # config, and stays None whenever the sandbox is disabled or its
+        # preflight failed (sandbox_launcher stayed None too).
+        sandbox_scratch_root=sandbox_scratch_root,
     )
 
     return build_cli_context(

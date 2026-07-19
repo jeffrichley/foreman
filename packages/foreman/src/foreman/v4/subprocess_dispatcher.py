@@ -42,13 +42,16 @@ import os
 import subprocess
 import threading
 import time
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import IO, Protocol, cast
 
+from foreman.v4.config import ProjectConfig
 from foreman.v4.outcome import OUTCOME_MARKER
-from foreman.v4.sandbox import SandboxLauncher
+from foreman.v4.sandbox import DAEMON_NEVER_BIND, SandboxLauncher
+from foreman.v4.sandbox_clone import prepare_sandbox_clone
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +107,56 @@ class RoleSubprocessError(RuntimeError):
     Both carry the role + exit context + log path in the message so an
     operator can jump straight to the on-disk log.
     """
+
+
+# foreman#556 carry-forward (Task 2 review): the single path permitted to
+# sit under a DAEMON_NEVER_BIND prefix despite being RO-bound into the
+# box. FOREMAN_PROJECTS_PATH conventionally resolves to exactly this file
+# (see docker-compose.yml) — it is a small, named config file, not one of
+# the crown-jewel secrets DAEMON_NEVER_BIND exists to keep out. Nothing
+# else under a never-bind root is ever allowed through, no matter which
+# parameter carries it into the sandbox argv.
+_NEVER_BIND_RO_EXCEPTIONS: frozenset[str] = frozenset({"/root/.foreman/projects.toml"})
+
+
+def _reject_never_bind_paths(binds: Iterable[tuple[str, str]]) -> None:
+    """Raise if any bind sits under a ``DAEMON_NEVER_BIND`` prefix.
+
+    foreman#556 carry-forward (Task 2 review): the pre-#556 invariant that
+    a never-bind path can't reach ``bwrap`` was only ever asserted by
+    hand-written unit tests against a literal argv — nothing at runtime
+    stopped a real caller from actually passing one in, and the tests'
+    own substring check (``forbidden not in joined``) could itself
+    false-positive on the allow-listed exception. This is the runtime,
+    PREFIX-based version: a path is forbidden when it equals a never-bind
+    root or is nested under it (``path == prefix or
+    path.startswith(prefix + "/")``), never on a bare substring match, so
+    an unrelated path that merely contains the prefix text is not
+    penalized and a look-alike sibling (``/root/.foreman-lookalike``)
+    isn't either.
+
+    Args:
+        binds: ``(host_path, box_path)`` pairs about to be assembled into
+            the sandbox argv — the private-clone ``repo_bind`` pair plus
+            every ``ro_file_binds`` entry.
+
+    Raises:
+        RoleSubprocessError: either side of a pair equals, or is nested
+            under, a :data:`foreman.v4.sandbox.DAEMON_NEVER_BIND` prefix
+            and is not the single named exception in
+            :data:`_NEVER_BIND_RO_EXCEPTIONS`.
+    """
+    for host_path, box_path in binds:
+        for path in (host_path, box_path):
+            if path in _NEVER_BIND_RO_EXCEPTIONS:
+                continue
+            for prefix in DAEMON_NEVER_BIND:
+                if path == prefix or path.startswith(prefix + "/"):
+                    raise RoleSubprocessError(
+                        f"refusing to bind {path!r}: sits under the "
+                        f"never-bind prefix {prefix!r} "
+                        f"(host={host_path!r} box={box_path!r})"
+                    )
 
 
 @dataclass(frozen=True)
@@ -277,6 +330,8 @@ class SubprocessRoleDispatcher:
         inactivity_timeout_seconds: int = 0,
         sandbox: SandboxLauncher | None = None,
         sandbox_scratch_root: Path | None = None,
+        sandbox_projects: Mapping[str, ProjectConfig] | None = None,
+        sandbox_clone_prep: Callable[..., None] | None = None,
     ) -> None:
         self._foreman_cli = foreman_cli
         self._identity = identity
@@ -292,6 +347,11 @@ class SubprocessRoleDispatcher:
         # the RW scratch mount. Both None => pre-sandbox behavior.
         self._sandbox = sandbox
         self._sandbox_scratch_root = sandbox_scratch_root
+        # foreman#556: project map (local_clone_path + repo) so the
+        # dispatcher can prep the private clone; clone-prep is a seam so
+        # unit tests don't shell out to git.
+        self._sandbox_projects = sandbox_projects
+        self._sandbox_clone_prep = sandbox_clone_prep or prepare_sandbox_clone
 
     def dispatch(
         self,
@@ -372,13 +432,54 @@ class SubprocessRoleDispatcher:
                     f"role={role}: sandbox enabled but no scratch root "
                     f"configured; cannot create the job's writable mount"
                 )
+            if self._sandbox_projects is None:
+                raise RoleSubprocessError(
+                    f"role={role}: sandbox enabled but no project map "
+                    f"configured; cannot resolve the base clone to prep"
+                )
+            project_cfg = self._sandbox_projects.get(project)
+            if project_cfg is None:
+                raise RoleSubprocessError(
+                    f"role={role}: project {project!r} absent from the "
+                    f"sandbox project map; cannot prep its private clone"
+                )
             role_base = _base_role(role)
-            scratch_dir = self._sandbox_scratch_root / project / f"{role_base}-{issue_number}"
-            scratch_dir.mkdir(parents=True, exist_ok=True)
+            job_dir = self._sandbox_scratch_root / project / f"{role_base}-{issue_number}"
+            clone_dir = job_dir / "clone"
+            wt_dir = job_dir / "wt"
+
+            # Bind the config + projects TOML RO so load_v4_config /
+            # load_projects succeed; thread FOREMAN_PROJECTS_PATH into the box.
+            ro_file_binds: list[tuple[str, str]] = []
+            config_path = env.get("FOREMAN_V4_CONFIG")
+            if config_path:
+                ro_file_binds.append((config_path, config_path))
+            projects_path = env.get("FOREMAN_PROJECTS_PATH")
+            if projects_path:
+                ro_file_binds.append((projects_path, projects_path))
+            repo_bind = (str(clone_dir), project_cfg.local_clone_path)
+            # foreman#556 carry-forward (Task 2 review): runtime guard, not
+            # just a unit-test assertion — reject BEFORE we do any
+            # filesystem/network side effect (clone-prep below) or ever
+            # hand a never-bind path to build_argv.
+            _reject_never_bind_paths([repo_bind, *ro_file_binds])
+
+            wt_dir.mkdir(parents=True, exist_ok=True)
+            # foreman#556: prep the private clone OUTSIDE the box (trusted
+            # daemon has /foreman/repos). Co-located → hardlinked; origin
+            # re-pointed at GitHub for network fetch/push.
+            self._sandbox_clone_prep(
+                base_clone_path=Path(project_cfg.local_clone_path),
+                dest_clone_path=clone_dir,
+                repo_url=f"https://github.com/{project_cfg.repo}.git",
+                role_token=env["GH_TOKEN"],
+            )
             # Curated non-secret passthrough allowlist (positive defense):
             # only these keys cross into the box, plus GH_TOKEN handled by
             # the launcher. Everything else in the daemon env is dropped by
-            # bwrap --clearenv.
+            # bwrap --clearenv. foreman#556 carry-forward (Task 2 review):
+            # FOREMAN_PROJECTS_PATH joins FOREMAN_V4_CONFIG here so the
+            # role's own ``load_projects`` call resolves the in-box path.
             passthrough = {
                 key: env[key]
                 for key in (
@@ -386,6 +487,7 @@ class SubprocessRoleDispatcher:
                     "FOREMAN_SESSION_ID",
                     "FOREMAN_RESUME_SESSION_ID",
                     "FOREMAN_V4_CONFIG",
+                    "FOREMAN_PROJECTS_PATH",
                     "CLAUDE_CONFIG_DIR",
                     "ANTHROPIC_API_KEY",
                     "LANG",
@@ -394,9 +496,11 @@ class SubprocessRoleDispatcher:
             }
             cmd = self._sandbox.build_argv(
                 role_token=env["GH_TOKEN"],
-                scratch_dir=str(scratch_dir),
+                scratch_dir=str(wt_dir),
                 role_cmd=cmd,
                 passthrough=passthrough,
+                repo_bind=repo_bind,
+                ro_file_binds=tuple(ro_file_binds),
             )
 
         started_at = dt.datetime.now(dt.UTC)

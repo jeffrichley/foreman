@@ -131,6 +131,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from foreman.v4.event_bus import EventBus
 from foreman.v4.events import StateExitedEvent
@@ -147,6 +148,9 @@ from foreman.v4.states.merge_helper import (
     close_originating_issue,
 )
 from foreman.v4.states.terminal import DoneState, NeedsHelpState
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _log = logging.getLogger(__name__)
 
@@ -194,6 +198,7 @@ class MergeCoordinator:
         clock: Callable[[], dt.datetime],
         qm: QueueManager | None = None,
         bus: EventBus | None = None,
+        sandbox_scratch_root: Path | None = None,
     ) -> None:
         """Wire the coordinator's dependencies.
 
@@ -215,6 +220,12 @@ class MergeCoordinator:
                 NeedsHelp) so ``LabelObservabilityObserver`` and friends
                 see it, exactly as the WorkerPool-driven path does.
                 ``None`` (the default) skips publication.
+            sandbox_scratch_root: foreman#556 — threaded into every
+                ``StateContext`` this coordinator builds so a merge-driven
+                terminal landing (Done / NeedsHelp) reclaims the ticket's
+                per-job sandbox scratch exactly like the WorkerPool-driven
+                path. ``None`` (the default, sandbox off) keeps cleanup a
+                no-op.
         """
         self._repo = repo
         self._git = git
@@ -222,6 +233,7 @@ class MergeCoordinator:
         self._clock = clock
         self._qm = qm
         self._bus = bus
+        self._sandbox_scratch_root = sandbox_scratch_root
 
     def tick(self) -> None:
         """Process the head merge_queue entry of every current project, once each.
@@ -449,6 +461,7 @@ class MergeCoordinator:
             clock=self._clock,
             bus=self._bus,
             git=self._git,
+            sandbox_scratch_root=self._sandbox_scratch_root,
         )
 
     def _on_merge_success(self, ctx: StateContext, entry: MergeQueueEntry) -> Callable[[], None]:

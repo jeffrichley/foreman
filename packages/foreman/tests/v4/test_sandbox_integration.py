@@ -165,6 +165,18 @@ def test_regression_2026_07_18_import_foreman_and_daemon_install_write_fail(
     fails because /usr is read-only and the daemon source is never mounted;
     (2) a fresh venv under /scratch cannot import foreman because the box's
     Python does not inherit the daemon's system site-packages on its path.
+
+    Clarification (foreman#556): assertion (2) is specifically the FRESH
+    ISOLATED venv context (``python3 -m venv`` with no system site-packages).
+    That import failing is a real guarantee. It does NOT contradict the role
+    entry point — which runs on the /usr-bound system Python and CAN import
+    foreman. The isolation the sandbox actually provides is that foreman is
+    READ-ONLY (assertion (1)): a job's ``uv sync`` cannot rewrite the
+    daemon's install (the 2026-07-18 foreman.prompts corruption is
+    structurally dead). See
+    ``test_enabled_path_role_operates_in_private_clone`` below for the
+    companion assertion that exercises this exact guarantee (a write to
+    ``/usr`` fails) alongside the enabled path's private-clone isolation.
     """
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
@@ -236,3 +248,65 @@ def test_sandboxed_dispatch_log_banner_redacts_gh_token(tmp_path: Path) -> None:
     banner = log_files[0].read_text(encoding="utf-8")
     assert secret_token not in banner
     assert "***" in banner
+
+
+def test_enabled_path_role_operates_in_private_clone(tmp_path: Path) -> None:
+    """Enabled path (real bwrap): prep a co-located private clone, bind it at the
+    role's local_clone_path, and confirm a sandboxed command loads config,
+    commits in the clone, sees the base repo as INVISIBLE, and cannot write foreman."""
+    from foreman.v4.sandbox_clone import prepare_sandbox_clone
+
+    # --- a real base git repo (stands in for /foreman/repos/<project>) ---
+    base = tmp_path / "base"
+    base.mkdir()
+    subprocess.run(["git", "init", "-q", str(base)], check=True)
+    subprocess.run(["git", "-C", str(base), "config", "user.email", "t@t.t"], check=True)
+    subprocess.run(["git", "-C", str(base), "config", "user.name", "t"], check=True)
+    (base / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(base), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(base), "commit", "-qm", "init"], check=True)
+
+    # --- daemon preps the co-located private clone (same tmp fs → hardlinks) ---
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    job = tmp_path / ".scratch" / "proj" / "worker-1"
+    clone_dir = job / "clone"
+    wt_dir = job / "wt"
+    wt_dir.mkdir(parents=True)
+    prepare_sandbox_clone(
+        base_clone_path=base,
+        dest_clone_path=clone_dir,
+        repo_url="https://github.com/o/n.git",  # never contacted in this test
+        role_token="ghs_TESTTOKEN",
+    )
+    # config file the box will load
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("log_dir = '/tmp'\n", encoding="utf-8")
+
+    box_repo = "/foreman/repos/proj"
+    launcher = SandboxLauncher(cache_dir=str(cache_dir))
+    script = (
+        # config file is readable at its RO mount
+        f"cat {config_file} >/dev/null && "
+        # operate in the private clone bound at the role's local_clone_path
+        f"cd {box_repo} && git config user.email t@t.t && git config user.name t && "
+        "echo work > f.txt && git add -A && git commit -qm work && git log --oneline | head -1 && "
+        # the shared BASE repo path is NOT mounted → invisible
+        f"(cat {base}/README.md 2>/dev/null && echo BASE_VISIBLE || echo BASE_INVISIBLE) && "
+        # /usr (where the daemon foreman lives) is read-only
+        "(echo x > /usr/lib/foreman_marker.py 2>/dev/null && echo FOREMAN_WRITABLE || echo FOREMAN_RO)"
+    )
+    argv = launcher.build_argv(
+        role_token="ghs_TESTTOKEN",
+        scratch_dir=str(wt_dir),
+        role_cmd=["/bin/sh", "-c", script],
+        repo_bind=(str(clone_dir), box_repo),
+        ro_file_binds=((str(config_file), str(config_file)),),
+    )
+    r = subprocess.run(argv, capture_output=True, text=True, check=False)
+    assert r.returncode == 0, r.stderr
+    assert "work" in r.stdout  # the commit landed in the private clone
+    assert "BASE_INVISIBLE" in r.stdout
+    assert "BASE_VISIBLE" not in r.stdout
+    assert "FOREMAN_RO" in r.stdout
+    assert "FOREMAN_WRITABLE" not in r.stdout

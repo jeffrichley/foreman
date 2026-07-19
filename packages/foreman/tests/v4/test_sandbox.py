@@ -88,6 +88,96 @@ def test_argv_never_binds_daemon_secrets() -> None:
         assert pem not in joined, pem
 
 
+def test_argv_binds_private_repo_rw_and_config_files_ro() -> None:
+    launcher = SandboxLauncher(cache_dir="/root/.cache/uv")
+    argv = launcher.build_argv(
+        role_token="ghs_SECRET",
+        scratch_dir="/foreman/repos/.scratch/foreman/worker-537/wt",
+        role_cmd=["foreman", "implement", "--project", "foreman"],
+        repo_bind=(
+            "/foreman/repos/.scratch/foreman/worker-537/clone",
+            "/foreman/repos/foreman",
+        ),
+        ro_file_binds=(
+            ("/foreman/state/config.toml", "/foreman/state/config.toml"),
+            ("/root/.foreman/projects.toml", "/root/.foreman/projects.toml"),
+        ),
+    )
+    # private clone is RW-bound at the in-box repo path the role's config names
+    assert _has_triple(
+        argv,
+        "--bind",
+        "/foreman/repos/.scratch/foreman/worker-537/clone",
+        "/foreman/repos/foreman",
+    )
+    # it is NOT read-only — the role commits into it
+    assert not _has_triple(
+        argv,
+        "--ro-bind",
+        "/foreman/repos/.scratch/foreman/worker-537/clone",
+        "/foreman/repos/foreman",
+    )
+    # config + projects files are RO-bound at their expected paths
+    assert _has_triple(
+        argv, "--ro-bind", "/foreman/state/config.toml", "/foreman/state/config.toml"
+    )
+    assert _has_triple(
+        argv, "--ro-bind", "/root/.foreman/projects.toml", "/root/.foreman/projects.toml"
+    )
+
+
+def test_argv_omits_repo_and_file_binds_when_not_requested() -> None:
+    """Back-compat: existing callers that pass neither get the pre-#556 argv shape."""
+    launcher = SandboxLauncher(cache_dir="/root/.cache/uv")
+    argv = launcher.build_argv(
+        role_token="ghs_X",
+        scratch_dir="/scratch",
+        role_cmd=["foreman", "plan"],
+    )
+    # no stray config bind, no RW bind other than cache + scratch
+    assert argv.count("--bind") == 2  # cache + scratch only
+
+
+def test_argv_never_binds_daemon_secrets_with_repo_and_file_binds_set() -> None:
+    """The #556 repo/config binds must not regress the never-bind invariant.
+
+    ``ro_file_binds`` here intentionally includes ``projects.toml``, which
+    lives under the never-bind ``/root/.foreman`` prefix (see
+    :data:`DAEMON_NEVER_BIND`'s comment: that directory holds "the
+    credential vault, projects.toml, keys/, backups"). Binding that single
+    *file* read-only does not expose its siblings (the vault, keys/,
+    backups) since bwrap file binds mount only the named node, not its
+    parent directory. So the check below asserts each never-bind path is
+    absent as a whole ``argv`` element (never a bind source/target
+    itself) rather than absent as a substring — a plain substring check
+    would false-positive on the allow-listed file living under that
+    prefix, which is exactly why ``ro_file_binds`` is a separate, narrow
+    escape hatch instead of ever bulk-mounting ``/root/.foreman``.
+    """
+    launcher = SandboxLauncher(cache_dir="/root/.cache/uv")
+    argv = launcher.build_argv(
+        role_token="ghs_SECRET",
+        scratch_dir="/foreman/repos/.scratch/foreman/worker-537/wt",
+        role_cmd=["foreman", "implement", "--project", "foreman"],
+        repo_bind=(
+            "/foreman/repos/.scratch/foreman/worker-537/clone",
+            "/foreman/repos/foreman",
+        ),
+        ro_file_binds=(
+            ("/foreman/state/config.toml", "/foreman/state/config.toml"),
+            ("/root/.foreman/projects.toml", "/root/.foreman/projects.toml"),
+        ),
+    )
+    # never-bind DIRECTORIES themselves must never appear as a bind arg —
+    # only the single allow-listed projects.toml FILE beneath one of them.
+    for forbidden in DAEMON_NEVER_BIND:
+        assert forbidden not in argv, forbidden
+    # explicit PEM paths never leak in either
+    joined = " ".join(argv)
+    for pem in ("planner_pem", "reviewer_pem", "fixer_pem", "worker_pem", "orchestrator_pem"):
+        assert pem not in joined, pem
+
+
 def test_argv_passthrough_forwards_non_secret_env_only() -> None:
     launcher = SandboxLauncher(cache_dir="/root/.cache/uv")
     argv = launcher.build_argv(
@@ -101,6 +191,36 @@ def test_argv_passthrough_forwards_non_secret_env_only() -> None:
     )
     assert _has_triple(argv, "--setenv", "FOREMAN_STATE_INSTANCE_ID", "9")
     assert _has_triple(argv, "--setenv", "CLAUDE_CONFIG_DIR", "/root/.claude-container")
+
+
+def test_argv_adds_writable_claude_session_tmpfs_when_set() -> None:
+    launcher = SandboxLauncher(
+        cache_dir="/root/.cache/uv",
+        claude_writable_session_dir="/root/.claude/projects",
+    )
+    argv = launcher.build_argv(
+        role_token="ghs_X", scratch_dir="/scratch", role_cmd=["foreman", "plan"]
+    )
+    assert _has_pair(argv, "--tmpfs", "/root/.claude/projects")
+    # the tmpfs must come AFTER the RO creds bind so it overlays (writable) it
+    ro_i = argv.index("/root/.claude")  # from extra_ro_binds
+    tmp_i = argv.index("/root/.claude/projects")
+    assert tmp_i > ro_i
+    # the RO creds bind itself is unchanged: still a --ro-bind-try triple,
+    # not upgraded to a writable --bind.
+    assert _has_triple(argv, "--ro-bind-try", "/root/.claude", "/root/.claude")
+    assert not _has_triple(argv, "--bind", "/root/.claude", "/root/.claude")
+    # the never-bind guardrail still holds with the session tmpfs configured
+    joined = " ".join(argv)
+    for forbidden in DAEMON_NEVER_BIND:
+        assert forbidden not in joined, forbidden
+
+
+def test_argv_no_claude_tmpfs_by_default() -> None:
+    argv = SandboxLauncher(cache_dir="/c").build_argv(
+        role_token="ghs_X", scratch_dir="/scratch", role_cmd=["foreman", "plan"]
+    )
+    assert not _has_pair(argv, "--tmpfs", "/root/.claude/projects")
 
 
 def _has_pair(argv: list[str], a: str, b: str) -> bool:
