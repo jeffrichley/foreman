@@ -508,3 +508,29 @@ def test_get_role_bot_logins_caches_metadata_per_role() -> None:
         registry.get_role_bot_logins()
         registry.get_role_bot_logins()
     assert mock_fetch.call_count == 4
+
+
+# ---------------------------------------------------------------------
+# V4IdentityRegistry.get_app_slug — Task 6 (roles-layer extension).
+#
+# Public accessor over the existing ``_get_app_metadata`` cache — mirrors
+# the fake used by the ``get_role_bot_logins`` trio above (same
+# ``fetch_app_metadata`` patch point, same ``_fake_app_metadata`` helper).
+# ---------------------------------------------------------------------
+
+
+def test_get_app_slug_returns_faked_slug() -> None:
+    """``get_app_slug`` returns the role App's slug from ``AppMetadata``,
+    fetched via the same ``_get_app_metadata`` path as
+    ``get_role_bot_logins``."""
+    fake_meta = _fake_app_metadata(app_id=1, slug="foreman-planner")
+    with patch(
+        "foreman.v4.identity.fetch_app_metadata",
+        return_value=fake_meta,
+    ):
+        registry = V4IdentityRegistry(
+            apps=_apps(),
+            orchestrator=_orchestrator(),
+            installation_repo="owner/project",
+        )
+        assert registry.get_app_slug("planner") == "foreman-planner"

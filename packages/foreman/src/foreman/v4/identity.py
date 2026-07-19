@@ -210,6 +210,10 @@ class V4IdentityRegistry:
             for role in ("planner", "reviewer", "fixer", "worker")
         }
 
+    def get_app_slug(self, role: str) -> str:
+        """Return the role App's bot slug, fetched via ``GET /app`` and cached."""
+        return self._get_app_metadata(role).slug
+
     def _get_app_metadata(self, role: str) -> AppMetadata:
         cached = self._app_meta_cache.get(role)
         if cached is not None:
@@ -305,3 +309,58 @@ class EnvTokenIdentity:
                 "Refusing to run."
             )
         return token
+
+
+class SandboxIdentityRegistry(EnvTokenIdentity):
+    """Env-backed registry for a sandboxed role subprocess.
+
+    Extends :class:`EnvTokenIdentity` (token from ``GH_TOKEN``) with the two
+    other pieces the role path needs, sourced from data the daemon injected
+    into the box — never a PEM: the dispatched role's bot slug
+    (``FOREMAN_BOT_SLUG``, for commit attribution) and the set of role-bot
+    logins (``FOREMAN_BOT_LOGINS``, whitespace-separated, for self-comment
+    filtering). Duck-types the role-facing surface of
+    :class:`V4IdentityRegistry` used by ``build_role_resources`` and the role
+    delegates. Fail-closed (:class:`SandboxIdentityError`) if a needed var is
+    absent.
+    """
+
+    def get_app_slug(self, role: str) -> str:
+        """Return the injected bot slug for ``role``.
+
+        Args:
+            role: The requested role. Inert — the box holds exactly one
+                role's identity; see :class:`EnvTokenIdentity`.
+
+        Returns:
+            The ``FOREMAN_BOT_SLUG`` value from the process environment.
+
+        Raises:
+            SandboxIdentityError: if ``FOREMAN_BOT_SLUG`` is unset or empty.
+        """
+        slug = os.environ.get("FOREMAN_BOT_SLUG")
+        if not slug:
+            raise SandboxIdentityError(
+                "FOREMAN_SANDBOXED is set but FOREMAN_BOT_SLUG is unset; the "
+                "sandboxed role has no bot slug for commit attribution. The "
+                "dispatcher must inject it. Refusing to run."
+            )
+        return slug
+
+    def get_role_bot_logins(self) -> set[str]:
+        """Return the injected set of role-bot login strings.
+
+        Returns:
+            The whitespace-separated tokens from ``FOREMAN_BOT_LOGINS``.
+
+        Raises:
+            SandboxIdentityError: if ``FOREMAN_BOT_LOGINS`` is unset or empty.
+        """
+        raw = os.environ.get("FOREMAN_BOT_LOGINS")
+        if not raw:
+            raise SandboxIdentityError(
+                "FOREMAN_SANDBOXED is set but FOREMAN_BOT_LOGINS is unset; the "
+                "sandboxed role cannot filter bot self-comments. The dispatcher "
+                "must inject it. Refusing to run."
+            )
+        return {tok for tok in raw.split() if tok}
