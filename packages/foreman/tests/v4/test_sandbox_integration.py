@@ -165,6 +165,36 @@ def test_daemon_secret_dir_is_invisible(tmp_path: Path) -> None:
     assert "INVISIBLE" in r.stdout
 
 
+def test_sandbox_identity_resolves_token_with_no_pem(tmp_path: Path) -> None:
+    """In a real bwrap box with NO /run/secrets bound, the sandbox identity
+    must still resolve a token from the injected GH_TOKEN. Regression lock for
+    the 2026-07-19 canary, where the box tried to read
+    /run/secrets/orchestrator_pem and crash-failed."""
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    scratch_dir = tmp_path / "scratch"
+    scratch_dir.mkdir()
+    launcher = SandboxLauncher(cache_dir=str(cache_dir))
+    probe = (
+        "import os;"
+        "assert not os.path.exists('/run/secrets'), 'PEM dir leaked into box';"
+        "from foreman.v4.identity import EnvTokenIdentity;"
+        "t = EnvTokenIdentity().get_role_token('orchestrator');"
+        "print('TOKEN_OK' if t == os.environ['GH_TOKEN'] else 'TOKEN_BAD')"
+    )
+    argv = launcher.build_argv(
+        role_token="ghs_INJECTED_TESTTOKEN",
+        scratch_dir=str(scratch_dir),
+        role_cmd=["python", "-c", probe],
+    )
+    r = subprocess.run(argv, capture_output=True, text=True, check=False)
+    assert r.returncode == 0, r.stderr
+    assert "TOKEN_OK" in r.stdout
+    # the PEM path must never appear in a failure trace
+    assert "orchestrator_pem" not in (r.stdout + r.stderr)
+    assert "/run/secrets" not in r.stderr
+
+
 def test_pid_isolation(tmp_path: Path) -> None:
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
