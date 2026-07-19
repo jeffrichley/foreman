@@ -308,7 +308,6 @@ async def _run_planner_core(
             registry=identity_registry,
             role="planner",
             app_id=config.apps.planner.app_id,
-            private_key_path=config.apps.planner.private_key_path,
         )
 
         issue = host.get_issue(actual_repo_slug, issue_number)

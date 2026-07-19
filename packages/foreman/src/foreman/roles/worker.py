@@ -826,7 +826,6 @@ async def _run_worker_core(
             registry=identity_registry,
             role="worker",
             app_id=config.apps.worker.app_id,
-            private_key_path=config.apps.worker.private_key_path,
         )
 
         repo: Repository = worker_client.get_repo(actual_repo_slug)

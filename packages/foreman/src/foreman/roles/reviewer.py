@@ -488,7 +488,6 @@ async def _run_reviewer_core(
             registry=identity_registry,
             role="reviewer",
             app_id=config.apps.reviewer.app_id,
-            private_key_path=config.apps.reviewer.private_key_path,
         )
 
         repo: Repository = reviewer_client.get_repo(actual_repo_slug)
@@ -618,7 +617,6 @@ async def _run_reviewer_core(
                 registry=identity_registry,
                 role="reviewer",
                 app_id=config.apps.reviewer.app_id,
-                private_key_path=config.apps.reviewer.private_key_path,
             )
             state_instance_id = os.environ.get(
                 "FOREMAN_STATE_INSTANCE_ID",
@@ -810,7 +808,6 @@ def _run_reviewer_for_v4(*, project: str, issue_number: int, target: str) -> _V4
         registry=registry,
         role="reviewer",
         app_id=cfg.apps.reviewer.app_id,
-        private_key_path=cfg.apps.reviewer.private_key_path,
     )
     repo: Repository = reviewer_client.get_repo(project_cfg.repo)
     owner = project_cfg.repo.split("/", 1)[0]

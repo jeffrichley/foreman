@@ -459,7 +459,6 @@ async def _run_fixer_core(
             registry=identity_registry,
             role="fixer",
             app_id=config.apps.fixer.app_id,
-            private_key_path=config.apps.fixer.private_key_path,
         )
 
         repo: Repository = fixer_client.get_repo(actual_repo_slug)
@@ -947,7 +946,6 @@ def _run_fixer_for_v4(*, project: str, issue_number: int, target: str) -> _V4Fix
         registry=registry,
         role="fixer",
         app_id=cfg.apps.fixer.app_id,
-        private_key_path=cfg.apps.fixer.private_key_path,
     )
     repo: Repository = fixer_client.get_repo(project_cfg.repo)
     owner = project_cfg.repo.split("/", 1)[0]
