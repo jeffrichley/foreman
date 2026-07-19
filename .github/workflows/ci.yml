@@ -49,9 +49,19 @@ jobs:
       - name: Install bubblewrap + enable unprivileged userns (sandbox hermetic tests)
         run: |
           sudo apt-get update && sudo apt-get install -y --no-install-recommends bubblewrap
-          # ubuntu-24.04 AppArmor restriction; ignore if the knob is absent on the kernel
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+      - name: DIAGNOSTIC — why does userns fail on the runner? (temporary, foreman#555)
+        run: |
+          echo "== os =="; cat /etc/os-release | head -2
+          echo "== apparmor sysctl =="; sysctl kernel.apparmor_restrict_unprivileged_userns 2>&1 || echo "(absent)"
+          echo "== unprivileged_userns_clone =="; sysctl kernel.unprivileged_userns_clone 2>&1 || echo "(absent)"
+          echo "== bwrap probe on BARE runner (stderr shown) =="
+          bwrap --unshare-user --ro-bind /usr /usr --tmpfs /tmp -- /bin/true && echo "BARE: OK" || echo "BARE: FAIL rc=$?"
+          echo "== bwrap probe INSIDE docker (userns works locally this way) =="
+          docker run --rm ubuntu:24.04 sh -c 'apt-get update -qq && apt-get install -y -qq bubblewrap >/dev/null 2>&1; bwrap --unshare-user --ro-bind /usr /usr --tmpfs /tmp -- /bin/true && echo "DOCKER-DEFAULT: OK" || echo "DOCKER-DEFAULT: FAIL rc=$?"'
+          docker run --rm --privileged ubuntu:24.04 sh -c 'apt-get update -qq && apt-get install -y -qq bubblewrap >/dev/null 2>&1; bwrap --unshare-user --ro-bind /usr /usr --tmpfs /tmp -- /bin/true && echo "DOCKER-PRIVILEGED: OK" || echo "DOCKER-PRIVILEGED: FAIL rc=$?"'
+        continue-on-error: true
       - run: just check
       # Upload coverage to Codecov (account-wide GitHub App, tokenless).
       # Never reddens CI: fail_ci_if_error is false. coverage.xml is produced
