@@ -47,6 +47,7 @@ from foreman.roles import (
     build_role_resources,
     emit_transient_provider_outcome,
     handle_unhandled_role_exception,
+    role_identity,
 )
 from foreman.roles._escalation_comment import post_escalation_comment
 from foreman.roles._prompt_helpers import (
@@ -799,11 +800,7 @@ def _run_reviewer_for_v4(*, project: str, issue_number: int, target: str) -> _V4
     # point takes a PR URL — v4's SubprocessRoleDispatcher only knows
     # the issue number + target. Resolve via the reviewer App's client
     # (read-only get_pulls is in scope for the reviewer identity).
-    registry = V4IdentityRegistry(
-        apps=cfg.apps,
-        orchestrator=cfg.orchestrator,
-        installation_repo=project_cfg.repo,
-    )
+    registry = role_identity(cfg, installation_repo=project_cfg.repo)
     _host, _token, reviewer_client = build_role_resources(
         registry=registry,
         role="reviewer",

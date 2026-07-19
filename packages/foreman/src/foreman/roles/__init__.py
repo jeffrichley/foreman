@@ -206,6 +206,26 @@ def emit_transient_provider_outcome(exc: ProviderTransientError) -> int:
     return 0
 
 
+def role_identity(config: Any, *, installation_repo: str) -> Any:
+    """Return the identity registry a role subprocess should use.
+
+    Sandboxed (``FOREMAN_SANDBOXED=1``) -> :class:`SandboxIdentityRegistry`
+    (env-backed, no PEM). Otherwise the PEM-based
+    :class:`~foreman.v4.identity.V4IdentityRegistry`.
+    """
+    import os
+
+    from foreman.v4.identity import SandboxIdentityRegistry, V4IdentityRegistry
+
+    if os.environ.get("FOREMAN_SANDBOXED") == "1":
+        return SandboxIdentityRegistry()
+    return V4IdentityRegistry(
+        apps=config.apps,
+        orchestrator=config.orchestrator,
+        installation_repo=installation_repo,
+    )
+
+
 def build_role_resources(
     *,
     registry: Any,

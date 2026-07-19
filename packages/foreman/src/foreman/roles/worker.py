@@ -77,6 +77,7 @@ from foreman.roles import (
     build_role_resources,
     emit_transient_provider_outcome,
     handle_unhandled_role_exception,
+    role_identity,
 )
 from foreman.roles._escalation_comment import (
     EscalationComment,
@@ -1789,11 +1790,7 @@ def _run_worker_for_v4(*, project: str, issue_number: int) -> _V4WorkerResult:
         )
     )
     provider = make_provider()
-    registry = V4IdentityRegistry(
-        apps=cfg.apps,
-        orchestrator=cfg.orchestrator,
-        installation_repo=project_cfg.repo,
-    )
+    registry = role_identity(cfg, installation_repo=project_cfg.repo)
     core_result = asyncio.run(
         _run_worker_core(
             issue_url=issue_url,
