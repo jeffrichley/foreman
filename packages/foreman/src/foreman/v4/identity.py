@@ -59,6 +59,7 @@ is no cross-file arithmetic invariant to maintain.
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Callable
 
@@ -257,3 +258,50 @@ class V4IdentityRegistry:
         raise ValueError(
             f"Unknown role: {role!r}. Supported: {' | '.join(_KNOWN_ROLES)}.",
         )
+
+
+class SandboxIdentityError(RuntimeError):
+    """Raised when a sandboxed role has no injected GH_TOKEN to authenticate with.
+
+    Typed (not a bare ``RuntimeError``) so the fail-closed path is greppable,
+    mirroring ``SandboxUnavailableError`` in :mod:`foreman.v4.sandbox`.
+    """
+
+
+class EnvTokenIdentity:
+    """``IdentityProvider`` backed by a single injected ``GH_TOKEN``.
+
+    Used only inside the bubblewrap sandbox, where the daemon injects the
+    dispatched role's short-lived installation token as ``GH_TOKEN`` and the
+    PEM keys are deliberately absent (see ``DAEMON_NEVER_BIND``). Returns that
+    one token for ANY ``role`` argument: the box holds exactly one role's
+    identity and nothing else, so ``role`` is inert here — the sandbox mount
+    plan, not this class, is what guarantees single-role. Never reads a PEM;
+    fail-closed if ``GH_TOKEN`` is missing.
+
+    Satisfies :class:`~foreman.v4.bootstrap.IdentityProvider`.
+    """
+
+    _ENV_VAR = "GH_TOKEN"
+
+    def get_role_token(self, role: str) -> str:
+        """Return the injected ``GH_TOKEN``, ignoring ``role``.
+
+        Args:
+            role: The requested role. Inert — see the class docstring.
+
+        Returns:
+            The ``GH_TOKEN`` from the process environment.
+
+        Raises:
+            SandboxIdentityError: if ``GH_TOKEN`` is unset or empty.
+        """
+        token = os.environ.get(self._ENV_VAR)
+        if not token:
+            raise SandboxIdentityError(
+                "FOREMAN_SANDBOXED is set but GH_TOKEN is empty/unset; the "
+                "sandboxed role has no injected token to authenticate with. "
+                "The dispatcher must set --setenv GH_TOKEN <role token>. "
+                "Refusing to run."
+            )
+        return token
