@@ -1,4 +1,4 @@
-"""Pure unit tests for SandboxLauncher.build_argv — runs on every platform."""
+"""Pure unit tests for SandboxLauncher.build_argv and preflight — runs on every platform."""
 
 from __future__ import annotations
 
@@ -114,9 +114,9 @@ def _has_triple(argv: list[str], a: str, b: str, c: str) -> bool:
 def test_preflight_passes_when_runner_returns_zero() -> None:
     calls: list[list[str]] = []
 
-    def runner(argv: list[str]) -> int:
+    def runner(argv: list[str]) -> tuple[int, str]:
         calls.append(argv)
-        return 0
+        return 0, ""
 
     preflight(bwrap_path="bwrap", runner=runner)  # no raise
     assert calls, "preflight must actually invoke bwrap"
@@ -125,17 +125,29 @@ def test_preflight_passes_when_runner_returns_zero() -> None:
 
 
 def test_preflight_fails_closed_when_runner_returns_nonzero() -> None:
-    def runner(argv: list[str]) -> int:
-        return 1
+    distinctive_stderr = "bwrap: setting up uid map: Permission denied"
+
+    def runner(argv: list[str]) -> tuple[int, str]:
+        return 1, distinctive_stderr
 
     with pytest.raises(SandboxUnavailableError) as exc:
         preflight(bwrap_path="bwrap", runner=runner)
-    assert "user namespace" in str(exc.value).lower() or "bwrap" in str(exc.value).lower()
+    message = str(exc.value)
+    assert "user namespace" in message.lower() or "bwrap" in message.lower()
+    assert distinctive_stderr in message
 
 
 def test_preflight_fails_closed_when_bwrap_missing() -> None:
-    def runner(argv: list[str]) -> int:
+    def runner(argv: list[str]) -> tuple[int, str]:
         raise FileNotFoundError("bwrap")
+
+    with pytest.raises(SandboxUnavailableError):
+        preflight(bwrap_path="bwrap", runner=runner)
+
+
+def test_preflight_fails_closed_on_permission_error() -> None:
+    def runner(argv: list[str]) -> tuple[int, str]:
+        raise PermissionError("bwrap")
 
     with pytest.raises(SandboxUnavailableError):
         preflight(bwrap_path="bwrap", runner=runner)

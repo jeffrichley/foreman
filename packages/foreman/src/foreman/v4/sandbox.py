@@ -188,27 +188,31 @@ class SandboxUnavailableError(RuntimeError):
     """
 
 
-def _default_runner(argv: list[str]) -> int:
-    """Run ``argv`` discarding output; return its exit code.
+def _default_runner(argv: list[str]) -> tuple[int, str]:
+    """Run ``argv`` discarding stdout but capturing stderr for diagnostics.
 
     Args:
         argv: The full command to run, ``bwrap`` and its flags.
 
     Returns:
-        The subprocess exit code.
+        A ``(returncode, stderr)`` pair. ``stderr`` is bwrap's captured
+        error output (not stripped), used to make a preflight failure
+        actionable (userns blocked vs. seccomp vs. cgroup, etc.).
     """
-    return subprocess.run(  # argv is built here, not user input
+    result = subprocess.run(  # argv is built here, not user input
         argv,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
         check=False,
-    ).returncode
+    )
+    return result.returncode, result.stderr
 
 
 def preflight(
     *,
     bwrap_path: str = "bwrap",
-    runner: Callable[[list[str]], int] | None = None,
+    runner: Callable[[list[str]], tuple[int, str]] | None = None,
 ) -> None:
     """Boot a minimal sandbox to prove the host supports it; else fail closed.
 
@@ -220,12 +224,16 @@ def preflight(
 
     Args:
         bwrap_path: The ``bwrap`` binary to probe.
-        runner: Test seam ``(argv) -> returncode``. Defaults to a real
-            ``subprocess.run`` that discards output.
+        runner: Test seam ``(argv) -> (returncode, stderr)``. Defaults to
+            a real ``subprocess.run`` that discards stdout but captures
+            stderr.
 
     Raises:
-        SandboxUnavailableError: on non-zero exit or a missing ``bwrap``
-            binary, with an actionable operator message.
+        SandboxUnavailableError: on non-zero exit or any ``OSError`` from
+            spawning ``bwrap`` (e.g. missing binary, permission denied),
+            with an actionable operator message. bwrap's captured stderr
+            is included when available so the operator can tell userns,
+            seccomp, and cgroup failures apart.
     """
     run = runner if runner is not None else _default_runner
     argv = [
@@ -244,19 +252,22 @@ def preflight(
         "/bin/true",
     ]
     try:
-        rc = run(argv)
-    except FileNotFoundError as exc:
+        rc, stderr = run(argv)
+    except OSError as exc:
         raise SandboxUnavailableError(
-            f"bwrap binary not found at {bwrap_path!r}. Install bubblewrap "
-            f"in the daemon image (apt-get install -y bubblewrap) or set "
-            f"[sandbox].bwrap_path. Refusing to run jobs unsandboxed."
+            f"failed to spawn bwrap binary at {bwrap_path!r}: {exc}. Install "
+            f"bubblewrap in the daemon image (apt-get install -y bubblewrap), "
+            f"check its permissions, or set [sandbox].bwrap_path. Refusing to "
+            f"run jobs unsandboxed."
         ) from exc
     if rc != 0:
+        detail = stderr.strip() or "(no stderr captured)"
         raise SandboxUnavailableError(
             f"bwrap preflight exited {rc}: the host cannot create an "
-            f"unprivileged user namespace sandbox. Verify unprivileged "
-            f"user namespaces are enabled (kernel.unprivileged_userns_clone=1 "
-            f"/ user.max_user_namespaces > 0). Refusing to run jobs "
+            f"unprivileged user namespace sandbox. bwrap stderr: {detail}. "
+            f"Verify unprivileged user namespaces are enabled "
+            f"(kernel.unprivileged_userns_clone=1 / "
+            f"user.max_user_namespaces > 0). Refusing to run jobs "
             f"unsandboxed; set [sandbox].allow_unsandboxed = true only for "
             f"local dev."
         )
