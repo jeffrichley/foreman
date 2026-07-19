@@ -15,6 +15,7 @@ per-phase failure handlers. That lands in Task 1.9.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -34,8 +35,12 @@ from foreman.v4.repository import TicketRepository
 from foreman.v4.role_dispatcher import RoleDispatcher
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from foreman.v4.config import ProjectConfig
     from foreman.v4.git_provider import GitProvider
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -71,6 +76,11 @@ class StateContext:
     # in the map, MergingState logs a warning and skips the guard so the
     # change stays additive.
     project_configs: dict[str, ProjectConfig] = field(default_factory=dict)
+    # foreman#556: root of the per-job sandbox scratch. When set (sandbox
+    # enabled), _enter_terminal removes the ticket's per-job clone dirs on
+    # terminal landing so scratch does not accumulate unbounded. None in
+    # headless tests / sandbox-off runs — cleanup is then a no-op.
+    sandbox_scratch_root: Path | None = None
 
 
 def _publish(ctx: StateContext, event_type: type, **kwargs: Any) -> None:
@@ -155,6 +165,33 @@ def _enter_terminal(ctx: StateContext, terminal: TicketState) -> None:
     # skip StateExitedEvent so the observer keeps the terminal label
     # visible on the issue.
     ctx.repo.close_state_instance(terminal_instance.id, now=now)
+    # foreman#556: reclaim the ticket's per-job sandbox scratch (hardlinked
+    # → cheap, cannot corrupt the shared base repo). Runs on every terminal
+    # (Done/Failed/NeedsHelp) — a Failed/NeedsHelp landing still gets a full
+    # GitHub issue + PR history for debugging, so there is no reason to keep
+    # the on-disk scratch clone around too. Import locally to keep the
+    # module-load graph flat and R2-clean. Best-effort: the ticket has
+    # already landed, so a cleanup failure (e.g. a permissions error on the
+    # scratch volume) must not crash the terminal landing or the daemon —
+    # log and move on; the next terminal landing for this ticket (there
+    # won't be one) or an operator sweep can clean up what's left.
+    if ctx.sandbox_scratch_root is not None:
+        from foreman.v4.sandbox_clone import cleanup_ticket_scratch
+
+        try:
+            cleanup_ticket_scratch(
+                scratch_root=ctx.sandbox_scratch_root,
+                project=ctx.ticket.project,
+                issue_number=ctx.ticket.issue_number,
+            )
+        except Exception:
+            _log.exception(
+                "sandbox scratch cleanup failed for ticket %d (project=%r, issue=%d); "
+                "leaving scratch in place",
+                ctx.ticket.id,
+                ctx.ticket.project,
+                ctx.ticket.issue_number,
+            )
 
 
 def _enter_merge_queued(ctx: StateContext, merge_queued: TicketState) -> None:

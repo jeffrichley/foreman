@@ -34,11 +34,15 @@ ENV IMAGE_SHA=${IMAGE_SHA} \
 #   ("just check") AND that target repos' `.githooks/pre-push` invoke.
 #   Without it, role git pushes (when a clone has core.hooksPath set) and
 #   the Worker's ground-truth check fail with "just: not found".
+# bubblewrap: job-execution sandbox (foreman#job-sandbox-isolation). Each
+#   role subprocess is wrapped in `bwrap` so it can only read a shared RO
+#   uv cache and write its own scratch worktree.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git ca-certificates curl gnupg \
         nodejs npm \
         gettext-base \
         just \
+        bubblewrap \
     && rm -rf /var/lib/apt/lists/*
 # gettext-base provides ``envsubst``; the entrypoint uses it to expand
 # ${FOREMAN_*_APP_ID} placeholders in /etc/foreman/config.toml.template
@@ -101,6 +105,38 @@ RUN uv export --no-hashes --format requirements-txt --no-emit-project > requirem
 WORKDIR /app/source
 COPY packages/foreman ./
 RUN uv pip install --system --no-cache --no-deps .
+
+# Immutable-foreman guard (foreman#job-sandbox-isolation). The 2026-07-18
+# incident happened because foreman was editable-installed via a .pth
+# pointing at an ephemeral worktree, so a concurrent job's `uv sync`
+# re-registered it and broke the daemon's import. Assert at build time
+# that foreman lives in the image's stable site-packages and NO editable
+# (.pth / __editable__) registration exists — fail the build loudly if it
+# ever regresses.
+#
+# NOTE: the glob pattern is intentionally backend-agnostic (`*editable*
+# foreman*`, not the setuptools-only `__editable__*foreman*`). This
+# package builds with hatchling, whose non-strict editable installs write
+# `_editable_impl_<dist-name>.pth` (e.g. `_editable_impl_agent_core_
+# foreman.pth`) — a single-underscore, "impl"-named convention that a
+# setuptools-shaped glob silently misses. Verified against this worktree's
+# own (dev-only, editable) venv install before locking in the pattern.
+RUN python - <<'PY'
+import glob
+import pathlib
+import sys
+
+import foreman
+
+mod = pathlib.Path(foreman.__file__).resolve()
+assert "site-packages" in mod.parts, f"foreman not in site-packages: {mod}"
+
+editable = []
+for root in ("/usr/lib", "/usr/local/lib"):
+    editable += glob.glob(f"{root}/python3*/**/*editable*foreman*", recursive=True)
+assert not editable, f"editable foreman install found: {editable}"
+print(f"immutable-foreman guard OK: {mod}")
+PY
 
 # --- Claude Code config (skills, plugins, mcp, CLAUDE.md) --------------
 # Credentials are NOT here — they come via Compose secret at runtime.

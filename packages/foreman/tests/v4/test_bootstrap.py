@@ -22,6 +22,7 @@ from foreman.v4.config import (
     OperatorIdentity,
     OrchestratorConfig,
     ProjectConfig,
+    SandboxConfig,
     StorageConfig,
     V4Config,
 )
@@ -35,6 +36,7 @@ from foreman.v4.observers.terminal_landing import TerminalLandingObserver
 from foreman.v4.postgres_repository import PostgresTicketRepository
 from foreman.v4.repository import InMemoryTicketRepository
 from foreman.v4.routing_git_provider import RoutingGitProvider
+from foreman.v4.sandbox import SandboxUnavailableError
 
 _TEST_DSN = "postgresql://u:p@localhost:5432/foreman"
 
@@ -527,3 +529,204 @@ def test_bootstrap_survives_transient_clone_failure(
     # Both projects were attempted — the failure did not short-circuit.
     assert "https://github.com/owner/failing.git" in call_order
     assert "https://github.com/owner/ok.git" in call_order
+
+
+# ----------------------------------------------------------------------
+# foreman#job-sandbox-isolation Task 6 — bootstrap wiring
+#
+# bootstrap_cli_context builds a SandboxLauncher from config.sandbox and
+# runs preflight() at startup when sandbox.enabled. A preflight failure
+# is fail-closed (raises SandboxUnavailableError) unless
+# allow_unsandboxed is set, in which case it logs a loud warning and
+# continues unsandboxed. sandbox.enabled=False skips preflight entirely
+# and builds the dispatcher exactly as before (launcher=None).
+# ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_identity():
+    """A stub IdentityProvider — mirrors ``_stub_identity()`` above."""
+    return _stub_identity()
+
+
+@pytest.fixture
+def fake_git_factory():
+    """A stub git-provider factory — mirrors ``_stub_git_factory()`` above."""
+    return lambda repo: _stub_git_factory()
+
+
+@pytest.fixture
+def minimal_config_with_sandbox(tmp_path: Path):
+    """Factory fixture: a minimal V4Config with ``[sandbox]`` set.
+
+    Reuses the module's existing compact-fakes helpers for the other
+    required blocks (``apps`` / ``orchestrator`` / ``operator`` /
+    ``storage``), then overrides ``sandbox`` via ``model_copy`` per the
+    Task 6 brief. ``projects`` defaults to empty — most sandbox-wiring
+    tests don't care about project config — but foreman#556 callers pass
+    a project list to exercise ``sandbox_projects`` map construction.
+    """
+
+    def _make(
+        *,
+        enabled: bool,
+        allow_unsandboxed: bool,
+        projects: list[ProjectConfig] | None = None,
+    ) -> V4Config:
+        base = V4Config(
+            log_dir=str(tmp_path / "logs"),
+            apps=_apps_config(),
+            orchestrator=_orchestrator_config(),
+            operator=_operator_config(),
+            storage=_storage_config(),
+            projects=projects or [],
+        )
+        return base.model_copy(
+            update={
+                "sandbox": SandboxConfig(
+                    enabled=enabled,
+                    allow_unsandboxed=allow_unsandboxed,
+                )
+            }
+        )
+
+    return _make
+
+
+def test_bootstrap_fails_closed_when_preflight_fails(
+    minimal_config_with_sandbox, fake_identity, fake_git_factory, monkeypatch
+):
+    """sandbox.enabled + preflight failure + allow_unsandboxed False => raise."""
+    from foreman.v4 import bootstrap
+
+    cfg = minimal_config_with_sandbox(enabled=True, allow_unsandboxed=False)
+
+    def boom(**kwargs):
+        raise SandboxUnavailableError("no userns")
+
+    monkeypatch.setattr(bootstrap, "preflight", boom)
+    with pytest.raises(SandboxUnavailableError):
+        bootstrap.bootstrap_cli_context(
+            config=cfg,
+            identity=fake_identity,
+            git_provider_factory=fake_git_factory,
+        )
+
+
+def test_bootstrap_warns_and_continues_when_allow_unsandboxed(
+    minimal_config_with_sandbox, fake_identity, fake_git_factory, monkeypatch, caplog
+):
+    """sandbox.enabled + preflight failure + allow_unsandboxed True => loud
+    warning, no raise, dispatcher built unsandboxed.
+
+    ``bootstrap_cli_context`` calls ``configure_logging`` as its first
+    statement, which sets ``propagate=False`` on the ``foreman.v4``
+    logger (see the module docstring at the top of this file + the
+    ``_reset_v4_logging`` fixture in ``conftest.py``). ``bootstrap.py``'s
+    own logger (``foreman.v4.bootstrap``) is a child of that logger, so
+    once ``configure_logging`` has run, its records stop propagating at
+    ``foreman.v4`` and never reach caplog's root-attached handler —
+    ``caplog.set_level`` alone only adjusts levels, it does not attach a
+    handler, so it cannot work around this. Attaching ``caplog.handler``
+    directly to the bootstrap logger sidesteps the severed propagate
+    chain; ``_reset_v4_logging`` tears the logger's handlers down again
+    at teardown, so this doesn't leak into other tests."""
+    import logging
+
+    from foreman.v4 import bootstrap
+
+    cfg = minimal_config_with_sandbox(enabled=True, allow_unsandboxed=True)
+
+    def boom(**kwargs):
+        raise SandboxUnavailableError("no userns")
+
+    monkeypatch.setattr(bootstrap, "preflight", boom)
+    logging.getLogger("foreman.v4.bootstrap").addHandler(caplog.handler)
+    ctx = bootstrap.bootstrap_cli_context(
+        config=cfg,
+        identity=fake_identity,
+        git_provider_factory=fake_git_factory,
+    )
+    assert ctx is not None
+    assert any("unsandboxed" in r.message.lower() for r in caplog.records)
+    dispatcher = ctx.dispatcher
+    assert dispatcher._sandbox is None  # type: ignore[attr-defined]
+
+
+def test_bootstrap_disabled_sandbox_skips_preflight(
+    minimal_config_with_sandbox, fake_identity, fake_git_factory, monkeypatch
+):
+    """sandbox.enabled False => preflight never runs, dispatcher unsandboxed."""
+    from foreman.v4 import bootstrap
+
+    cfg = minimal_config_with_sandbox(enabled=False, allow_unsandboxed=False)
+
+    def boom(**kwargs):
+        raise AssertionError("preflight must not run when sandbox disabled")
+
+    monkeypatch.setattr(bootstrap, "preflight", boom)
+    ctx = bootstrap.bootstrap_cli_context(
+        config=cfg,
+        identity=fake_identity,
+        git_provider_factory=fake_git_factory,
+    )
+    assert ctx is not None
+    dispatcher = ctx.dispatcher
+    assert dispatcher._sandbox is None  # type: ignore[attr-defined]
+    # foreman#556: sandbox off => no project map either. Dispatch never
+    # consults it (self._sandbox is None short-circuits the check in
+    # SubprocessRoleDispatcher.dispatch), but asserting None here pins
+    # the off-path as genuinely unchanged rather than incidentally safe.
+    assert dispatcher._sandbox_projects is None  # type: ignore[attr-defined]
+
+
+def test_bootstrap_threads_project_map_into_dispatcher_when_sandbox_enabled(
+    minimal_config_with_sandbox, fake_identity, fake_git_factory, monkeypatch, tmp_path: Path
+):
+    """foreman#556: when sandbox.enabled, the dispatcher gets the project
+    map so it can prep each job's private clone.
+
+    The map is built unconditionally inside the ``sandbox.enabled``
+    branch — not gated on whether preflight actually succeeds — so the
+    ``allow_unsandboxed`` local-dev downgrade (which leaves
+    ``sandbox_launcher`` / dispatcher's ``_sandbox`` at None) never
+    leaves ``_sandbox_projects`` None while sandbox.enabled is True.
+    Preflight is monkeypatched to fail deterministically (mirroring
+    ``test_bootstrap_warns_and_continues_when_allow_unsandboxed``) so
+    this doesn't depend on the test host's userns support.
+    """
+    from foreman.v4 import bootstrap
+
+    cfg = minimal_config_with_sandbox(
+        enabled=True,
+        allow_unsandboxed=True,
+        projects=[
+            ProjectConfig(
+                name="foreman",
+                repo="owner/foreman",
+                local_clone_path=str(tmp_path / "foreman-clone"),
+            ),
+        ],
+    )
+
+    def boom(**kwargs):
+        raise SandboxUnavailableError("no userns")
+
+    monkeypatch.setattr(bootstrap, "preflight", boom)
+    ctx = bootstrap.bootstrap_cli_context(
+        config=cfg,
+        identity=fake_identity,
+        git_provider_factory=fake_git_factory,
+    )
+    dispatcher = ctx.dispatcher
+    # The preflight failure + allow_unsandboxed downgrades the launcher
+    # to None (mirrors test_bootstrap_warns_and_continues_when_allow_unsandboxed)
+    # — confirms the map is populated on this branch specifically, not
+    # merely on the preflight-succeeds happy path.
+    assert dispatcher._sandbox is None  # type: ignore[attr-defined]
+    sandbox_projects = dispatcher._sandbox_projects  # type: ignore[attr-defined]
+    assert sandbox_projects is not None
+    assert "foreman" in sandbox_projects
+    project_cfg = sandbox_projects["foreman"]
+    assert project_cfg.repo == "owner/foreman"
+    assert project_cfg.local_clone_path == str(tmp_path / "foreman-clone")

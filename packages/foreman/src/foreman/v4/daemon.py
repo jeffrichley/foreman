@@ -55,6 +55,8 @@ _DISABLED_CLONE_REFRESHER: CloneRefresherLike = _DisabledCloneRefresher()
 _log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from foreman.v4.config import ProjectConfig, ProjectRegistry
 
 
@@ -102,6 +104,7 @@ class Daemon:
         backup_scheduler: BackupSchedulerLike = _DISABLED_BACKUP_SCHEDULER,
         projects_loader: Callable[[], list[ProjectConfig]] | None = None,
         git_provider_factory: Callable[[str], GitProvider] | None = None,
+        sandbox_scratch_root: Path | None = None,
     ) -> None:
         from foreman.v4.config import ProjectRegistry
 
@@ -111,6 +114,11 @@ class Daemon:
         self._config = config
         self._clock = clock
         self._bus = bus
+        # foreman#556: threaded into the WorkerPool + MergeCoordinator below
+        # so a terminal landing (either dispatch path) reclaims the ticket's
+        # per-job sandbox scratch. None (sandbox off, or a test-only
+        # Daemon(...) construction) keeps cleanup a no-op end to end.
+        self._sandbox_scratch_root = sandbox_scratch_root
         # foreman#357: per-project config map forwarded to WorkerPool so
         # MergingState's base-ref guard can read dev_base_branch. Default
         # None → empty dict keeps test-only ``Daemon(...)`` constructions
@@ -148,6 +156,7 @@ class Daemon:
             clock=clock,
             max_state_attempts=config.max_state_attempts,
             registry=self._registry,
+            sandbox_scratch_root=self._sandbox_scratch_root,
         )
         # foreman#550: drains the merge_queue that Merging/SpecMerging enqueue
         # onto — nothing else does. ``projects`` reads ``self._registry.current``
@@ -161,6 +170,7 @@ class Daemon:
             clock=clock,
             qm=self._qm,
             bus=bus,
+            sandbox_scratch_root=self._sandbox_scratch_root,
         )
         # foreman#407: per-poll project clone refresh. Default is the no-op
         # ``_DisabledCloneRefresher`` sentinel so test-only ``Daemon(...)``

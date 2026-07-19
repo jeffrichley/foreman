@@ -12,6 +12,7 @@ from foreman.v4.config import (
     OperatorIdentity,
     ProjectConfig,
     ProjectOperatorOverride,
+    SandboxConfig,
     StorageConfig,
     V4Config,
     load_config,
@@ -1078,3 +1079,67 @@ def test_load_projects_extra_field_raises(tmp_path: Path):
     )
     with pytest.raises(ValidationError):
         load_projects(projects_path)
+
+
+# ---------------------------------------------------------------------------
+# foreman#job-sandbox-isolation Task 1: [sandbox] config block
+# ---------------------------------------------------------------------------
+
+
+def test_sandbox_defaults_off_when_block_absent(tmp_path: Path) -> None:
+    """A config without a [sandbox] block loads with the sandbox disabled
+    and every other field at its documented default — existing operator
+    configs continue to run role subprocesses unwrapped."""
+    toml = "[daemon]\n" + 'log_dir = "/tmp/logs"\n' + _APPS_TOML
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(toml, encoding="utf-8")
+    cfg = load_config(cfg_path)
+    assert cfg.sandbox.enabled is False
+    assert cfg.sandbox.allow_unsandboxed is False
+    assert cfg.sandbox.cache_dir == "/root/.cache/uv"
+    assert cfg.sandbox.scratch_root == "/foreman/repos/.scratch"
+    assert cfg.sandbox.bwrap_path == "bwrap"
+
+
+def test_sandbox_block_parses_and_rejects_unknown_key(tmp_path: Path) -> None:
+    """A [sandbox] block round-trips its values through load_config, and an
+    unrecognised key inside it raises ValidationError (extra='forbid')."""
+    toml = (
+        "[daemon]\n"
+        'log_dir = "/tmp/logs"\n' + _APPS_TOML + "[sandbox]\n"
+        "enabled = true\n"
+        "allow_unsandboxed = true\n"
+        'cache_dir = "/mnt/uv"\n'
+        'scratch_root = "/mnt/scratch"\n'
+    )
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(toml, encoding="utf-8")
+    cfg = load_config(cfg_path)
+    assert cfg.sandbox.enabled is True
+    assert cfg.sandbox.allow_unsandboxed is True
+    assert cfg.sandbox.cache_dir == "/mnt/uv"
+    assert cfg.sandbox.scratch_root == "/mnt/scratch"
+
+    bad_toml = "[daemon]\n" + 'log_dir = "/tmp/logs"\n' + _APPS_TOML + "[sandbox]\nbogus = 1\n"
+    bad_path = cfg_path.with_name("bad.toml")
+    bad_path.write_text(bad_toml, encoding="utf-8")
+    with pytest.raises(ValidationError):
+        load_config(bad_path)
+
+
+def test_sandbox_config_rejects_extra_field_directly() -> None:
+    """SandboxConfig itself sets extra='forbid', independent of the
+    TOML-loading path."""
+    with pytest.raises(ValidationError):
+        SandboxConfig(bogus=1)  # type: ignore[call-arg]
+
+
+def test_sandbox_scratch_root_defaults_onto_repos_volume() -> None:
+    """The per-job scratch defaults under the repos volume so ``git clone --local`` hardlinks.
+
+    A scratch dir on a different filesystem than the base repo makes the
+    local clone fail with "Invalid cross-device link" (hardlinks cannot
+    cross devices). Co-locating under /foreman/repos guarantees the free clone.
+    """
+    cfg = SandboxConfig()
+    assert cfg.scratch_root == "/foreman/repos/.scratch"

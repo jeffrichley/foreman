@@ -58,6 +58,21 @@ jobs:
         run: uv run --no-sync diff-cover coverage.xml --compare-branch=origin/${{ github.base_ref }} --fail-under=80
       - run: uv cache prune --ci
 
+  # foreman#555 — NOTE on the sandbox hermetic tests
+  # (packages/foreman/tests/v4/test_sandbox_integration.py):
+  # These need real bwrap + *unprivileged user namespaces*. Verified
+  # 2026-07-19 that GitHub-hosted runners disable unprivileged userns
+  # fleet-wide — bwrap's minimal userns probe FAILs on ubuntu-24.04 AND
+  # ubuntu-22.04, on the bare runner, and inside docker (default AND
+  # --privileged), even with kernel.apparmor_restrict_unprivileged_userns=0
+  # and kernel.unprivileged_userns_clone=1 set. So there is no hosted-runner
+  # configuration where they can run; they self-skip in CI by design.
+  # They ARE exercised where userns works: local dev under Docker/WSL2
+  # (a plain `uv run pytest .../test_sandbox_integration.py`) and the
+  # production daemon container (Docker default profile) — see the #556
+  # enabled-path dogfood. A self-hosted runner on a userns-capable host is
+  # the only way to add them to CI; deferred as not worth the infra now.
+
   # foreman#464 postmortem: a Dockerfile change (pinning bookworm-pgdg on a
   # base that had silently moved to trixie) merged green because the `check`
   # job runs `just check`, not `docker build` — the image only builds in

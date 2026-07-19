@@ -31,6 +31,7 @@ from foreman.v4.pg_backup import BackupScheduler
 from foreman.v4.poller import Poller
 from foreman.v4.repository import TicketRepository
 from foreman.v4.routing_git_provider import RoutingGitProvider
+from foreman.v4.sandbox import SandboxLauncher, SandboxUnavailableError, preflight
 from foreman.v4.subprocess_dispatcher import SubprocessRoleDispatcher
 from foreman.worktree import ensure_clone
 
@@ -173,6 +174,53 @@ def bootstrap_cli_context(
         pool_max=config.storage.pool_max,
     )
 
+    # foreman#job-sandbox-isolation Task 6: build the sandbox launcher and
+    # run the startup preflight BEFORE constructing the dispatcher. Fail
+    # closed by default — a host that can't create the bwrap sandbox
+    # refuses to start rather than silently running role subprocesses
+    # unwrapped. ``allow_unsandboxed`` is the deliberate local-dev escape
+    # hatch: downgrade to a loud warning and continue with launcher=None.
+    sandbox_launcher: SandboxLauncher | None = None
+    sandbox_scratch_root: Path | None = None
+    sandbox_projects: dict[str, ProjectConfig] | None = None
+    if config.sandbox.enabled:
+        # foreman#556: the project map lets the dispatcher resolve each
+        # project's base clone + repo to prep the private per-job clone.
+        # Built unconditionally here — independent of whether preflight
+        # below succeeds — so the allow_unsandboxed local-dev downgrade
+        # (which leaves sandbox_launcher None) never leaves this None
+        # while config.sandbox.enabled is True; re-enabling the sandbox
+        # later needs no further bootstrap change.
+        sandbox_projects = {pc.name: pc for pc in active_projects}
+        try:
+            preflight(bwrap_path=config.sandbox.bwrap_path)
+        except SandboxUnavailableError:
+            if not config.sandbox.allow_unsandboxed:
+                logger.error(
+                    "sandbox preflight failed and allow_unsandboxed is false; "
+                    "refusing to start. Fix the host's unprivileged user "
+                    "namespaces or set [sandbox].allow_unsandboxed for local dev."
+                )
+                raise
+            logger.warning(
+                "sandbox preflight FAILED but allow_unsandboxed=true: running "
+                "role subprocesses UNSANDBOXED (local-dev escape hatch). Every "
+                "dispatch is unprotected — do not use this in production."
+            )
+        else:
+            sandbox_launcher = SandboxLauncher(
+                cache_dir=config.sandbox.cache_dir,
+                bwrap_path=config.sandbox.bwrap_path,
+            )
+            sandbox_scratch_root = Path(config.sandbox.scratch_root)
+            logger.info(
+                "sandbox enabled: role subprocesses run in bwrap boxes",
+                extra={
+                    "cache_dir": config.sandbox.cache_dir,
+                    "scratch_root": config.sandbox.scratch_root,
+                },
+            )
+
     dispatcher = SubprocessRoleDispatcher(
         foreman_cli=foreman_cli or ["foreman"],
         identity=identity,
@@ -182,6 +230,9 @@ def bootstrap_cli_context(
         # streams nothing for this long, rather than burning the full
         # role_timeout_seconds on a silent hang.
         inactivity_timeout_seconds=config.role_inactivity_timeout_seconds,
+        sandbox=sandbox_launcher,
+        sandbox_scratch_root=sandbox_scratch_root,
+        sandbox_projects=sandbox_projects,
     )
 
     pollers: list[Poller] = []
@@ -306,6 +357,13 @@ def bootstrap_cli_context(
         backup_scheduler=backup_scheduler,
         projects_loader=projects_loader,
         git_provider_factory=git_provider_factory,
+        # foreman#556: same scratch root the dispatcher above got — a
+        # terminal landing (WorkerPool- or MergeCoordinator-driven) then
+        # reclaims the ticket's per-job sandbox scratch. Reuses the local
+        # already computed for the dispatcher rather than recomputing from
+        # config, and stays None whenever the sandbox is disabled or its
+        # preflight failed (sandbox_launcher stayed None too).
+        sandbox_scratch_root=sandbox_scratch_root,
     )
 
     return build_cli_context(
