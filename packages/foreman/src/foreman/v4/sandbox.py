@@ -80,6 +80,8 @@ class SandboxLauncher:
         scratch_dir: str,
         role_cmd: list[str],
         passthrough: Mapping[str, str] | None = None,
+        repo_bind: tuple[str, str] | None = None,
+        ro_file_binds: tuple[tuple[str, str], ...] = (),
     ) -> list[str]:
         """Return the ``bwrap`` argv wrapping ``role_cmd``.
 
@@ -96,6 +98,19 @@ class SandboxLauncher:
             passthrough: Extra non-secret env vars to forward
                 (state-instance id, session-resume ids, Claude config
                 dir). The dispatcher curates this allowlist.
+            repo_bind: ``(host_clone_path, box_repo_path)`` for the
+                daemon's private per-job clone, bind-mounted READ-WRITE at
+                ``box_repo_path`` — the exact in-box path the role's
+                ``ProjectConfig.local_clone_path`` names. The role's
+                normal ``git worktree add`` then links off this PRIVATE
+                ``.git``, not the shared base repo (which is never
+                mounted). ``None`` for pre-#556 / test callers.
+            ro_file_binds: ``(host_path, box_path)`` pairs bind-mounted
+                READ-ONLY — the ``FOREMAN_V4_CONFIG`` +
+                ``FOREMAN_PROJECTS_PATH`` TOML files the role loads via
+                ``load_v4_config`` / ``load_projects``. Small config
+                files, not the crown-jewel secrets in
+                :data:`DAEMON_NEVER_BIND`.
 
         Returns:
             The full argv: ``bwrap`` + namespace/mount/env flags + ``--``
@@ -169,6 +184,15 @@ class SandboxLauncher:
             scratch_dir,
             self.scratch_mount,
         ]
+        # RW: the daemon's private per-job clone, at the box path the
+        # role's config already names (so the role's worktree-add path is
+        # unchanged).
+        if repo_bind is not None:
+            host_clone, box_repo = repo_bind
+            argv += ["--bind", host_clone, box_repo]
+        # RO: the config + projects TOML the role loads at startup.
+        for host_file, box_file in ro_file_binds:
+            argv += ["--ro-bind", host_file, box_file]
         for extra in self.extra_ro_binds:
             argv += ["--ro-bind-try", extra, extra]
         for key in sorted(setenv):
