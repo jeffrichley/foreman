@@ -256,6 +256,34 @@ def test_preflight_passes_when_runner_returns_zero() -> None:
     assert "--unshare-user" in calls[0]
 
 
+def test_preflight_argv_mounts_the_os_exec_roots() -> None:
+    """The preflight probe must bind the same OS exec roots real jobs get,
+    or its own ``/bin/true`` payload can't find its ELF interpreter.
+
+    On a usr-merged image ``/bin``/``/lib``/``/lib64`` are symlinks into
+    ``/usr``; the box sees only what we bind, so binding ``/usr`` alone
+    leaves the dynamic loader absent and bwrap fails with a misleading
+    ``execvp /bin/true: No such file or directory`` (ENOENT names the
+    *binary*, but the missing file is the interpreter). ``build_argv`` got
+    these roots in #560 while ``preflight`` kept a ``/usr``-only argv — the
+    drift slipped past CI because the other preflight tests use a fake
+    runner that never execs bwrap, and the hermetic real-bwrap test
+    self-skips where userns is unavailable. Assert the loader-bearing binds
+    are present so the two mount plans can't silently diverge again."""
+    captured: list[list[str]] = []
+
+    def runner(argv: list[str]) -> tuple[int, str]:
+        captured.append(argv)
+        return 0, ""
+
+    preflight(bwrap_path="bwrap", runner=runner)
+    argv = captured[0]
+    assert _has_triple(argv, "--ro-bind", "/usr", "/usr")
+    assert _has_triple(argv, "--ro-bind", "/bin", "/bin")
+    assert _has_triple(argv, "--ro-bind", "/lib", "/lib")
+    assert _has_triple(argv, "--ro-bind-try", "/lib64", "/lib64")
+
+
 def test_preflight_fails_closed_when_runner_returns_nonzero() -> None:
     distinctive_stderr = "bwrap: setting up uid map: Permission denied"
 

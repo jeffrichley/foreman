@@ -41,6 +41,35 @@ DAEMON_NEVER_BIND: tuple[str, ...] = ("/run/secrets", "/root/.foreman", "/app/so
 # PATH here.
 SANDBOX_STD_PATH: str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
+# The read-only OS filesystem roots every sandbox needs so a dynamically
+# linked binary can find its ELF interpreter (ld-linux) and shared libs.
+# On a usr-merged image ``/bin``, ``/lib``, ``/lib64`` are symlinks into
+# ``/usr``, but the box sees only what we bind — binding ``/usr`` alone
+# leaves the loader absent and ``execvp`` fails with a misleading ENOENT
+# that names the *binary*, not the missing interpreter. ``build_argv`` and
+# ``preflight`` MUST share this list so the preflight probe proves the same
+# exec-root plan the real jobs use (they drifted once: #560 gave build_argv
+# these roots while preflight kept a /usr-only argv that couldn't exec its
+# own /bin/true). ``--ro-bind-try`` for /lib64 and /sbin: absent on some
+# arches/layouts, and bwrap must not hard-fail when they are.
+_OS_EXEC_ROOT_MOUNTS: tuple[str, ...] = (
+    "--ro-bind",
+    "/usr",
+    "/usr",
+    "--ro-bind",
+    "/bin",
+    "/bin",
+    "--ro-bind",
+    "/lib",
+    "/lib",
+    "--ro-bind-try",
+    "/lib64",
+    "/lib64",
+    "--ro-bind-try",
+    "/sbin",
+    "/sbin",
+)
+
 
 @dataclass(frozen=True)
 class SandboxLauncher:
@@ -168,21 +197,9 @@ class SandboxLauncher:
             # /proc/self/...; python subprocess/multiprocessing need it.
             "--proc",
             "/proc",
-            "--ro-bind",
-            "/usr",
-            "/usr",
-            "--ro-bind",
-            "/bin",
-            "/bin",
-            "--ro-bind",
-            "/lib",
-            "/lib",
-            "--ro-bind-try",
-            "/lib64",
-            "/lib64",
-            "--ro-bind-try",
-            "/sbin",
-            "/sbin",
+            # RO OS exec roots (shared with preflight — see
+            # _OS_EXEC_ROOT_MOUNTS) so binaries find their loader + libs.
+            *_OS_EXEC_ROOT_MOUNTS,
             "--ro-bind",
             "/etc/resolv.conf",
             "/etc/resolv.conf",
@@ -296,9 +313,10 @@ def preflight(
         "--unshare-ipc",
         "--unshare-uts",
         "--die-with-parent",
-        "--ro-bind",
-        "/usr",
-        "/usr",
+        # RO OS exec roots (shared with build_argv) so the /bin/true payload
+        # can find its ELF interpreter — binding /usr alone is not enough on
+        # a usr-merged image. See _OS_EXEC_ROOT_MOUNTS.
+        *_OS_EXEC_ROOT_MOUNTS,
         "--tmpfs",
         "/tmp",
         "--",
