@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 
@@ -47,6 +48,10 @@ from foreman.v4.cli.ps import cmd_ps
 from foreman.v4.cli.queue import cmd_queue
 from foreman.v4.cli.restore import cmd_restore
 from foreman.v4.cli.show import cmd_show
+
+if TYPE_CHECKING:
+    from foreman.v4.bootstrap import IdentityProvider
+    from foreman.v4.config import ProjectConfig, V4Config
 
 __version__ = "0.4.0"
 
@@ -171,6 +176,32 @@ _DEFAULT_CONFIG = Path.home() / ".foreman" / "v4" / "config.toml"
 _DEFAULT_PROJECTS_PATH = Path.home() / ".foreman" / "projects.toml"
 
 
+def _select_identity(
+    *, config: V4Config, projects: list[ProjectConfig], sandboxed: bool
+) -> tuple[IdentityProvider, bool]:
+    """Choose the identity provider and whether to run the startup clone loop.
+
+    Sandboxed role subprocesses use the injected GH_TOKEN (no PEM) and skip
+    the daemon-level clone loop; the daemon and unsandboxed runs use the
+    PEM-based registry and run the loop.
+
+    Returns:
+        ``(identity, run_startup_clone)``.
+    """
+    from foreman.v4.identity import EnvTokenIdentity, V4IdentityRegistry
+
+    if sandboxed:
+        return EnvTokenIdentity(), False
+    return (
+        V4IdentityRegistry(
+            apps=config.apps,
+            orchestrator=config.orchestrator,
+            installation_repo=projects[0].repo,
+        ),
+        True,
+    )
+
+
 def main() -> None:
     """Console-script entry point.
 
@@ -197,7 +228,6 @@ def main() -> None:
 
     from foreman.v4.bootstrap import bootstrap_cli_context
     from foreman.v4.config import load_config, load_projects
-    from foreman.v4.identity import V4IdentityRegistry
     from foreman.v4.pygithub_git_provider import PyGithubGitProvider
 
     config_path = Path(os.environ.get("FOREMAN_V4_CONFIG", _DEFAULT_CONFIG))
@@ -246,10 +276,9 @@ def main() -> None:
             "which repo to use for App installation lookup. Add at least one "
             "[[projects]] block to the projects file.",
         )
-    identity = V4IdentityRegistry(
-        apps=config.apps,
-        orchestrator=config.orchestrator,
-        installation_repo=projects[0].repo,
+    sandboxed = os.environ.get("FOREMAN_SANDBOXED") == "1"
+    identity, run_startup_clone = _select_identity(
+        config=config, projects=projects, sandboxed=sandboxed
     )
 
     def _git_factory(repo: str) -> PyGithubGitProvider:
@@ -258,9 +287,20 @@ def main() -> None:
         # access and rebuilds the Github client only when the token string
         # changes. Role-specific tokens still flow through
         # SubprocessRoleDispatcher; this factory is for the daemon's
-        # orchestrator read-path only.
+        # orchestrator read-path only. Under EnvTokenIdentity (sandboxed),
+        # this role="orchestrator" label is inert — the injected token is
+        # returned regardless of the role argument.
+        #
+        # mypy: PyGithubGitProvider.__init__ still types `identity` as the
+        # concrete V4IdentityRegistry, but only ever calls
+        # `identity.get_role_token(role)` — the same one-method contract
+        # as `foreman.v4.bootstrap.IdentityProvider`, which is the return
+        # type `_select_identity` actually produces (EnvTokenIdentity or
+        # V4IdentityRegistry). EnvTokenIdentity satisfies that contract at
+        # runtime; widening PyGithubGitProvider's signature to the
+        # Protocol is the real fix but is out of this task's file scope.
         return PyGithubGitProvider(
-            identity=identity,
+            identity=identity,  # type: ignore[arg-type]
             role="orchestrator",
             repo_full_name=repo,
         )
@@ -271,5 +311,6 @@ def main() -> None:
         git_provider_factory=_git_factory,
         projects=projects,
         projects_loader=lambda: load_projects(projects_path),
+        run_startup_clone=run_startup_clone,
     )
     app(obj=ctx)
