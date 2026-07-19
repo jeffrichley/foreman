@@ -38,30 +38,6 @@ jobs:
           python-version: "3.12"
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4
       - run: uv sync --locked --all-packages
-      # foreman#555: install bubblewrap AND enable unprivileged user
-      # namespaces so the sandbox hermetic tests
-      # (packages/foreman/tests/v4/test_sandbox_integration.py) actually run
-      # instead of self-skipping. GitHub's ubuntu-24.04 runners restrict
-      # unprivileged userns via AppArmor (kernel.apparmor_restrict_unprivileged_userns=1),
-      # which bwrap needs — installing bwrap alone leaves the tests skipping.
-      # (Production is unaffected: the daemon runs under Docker's default
-      # profile where nested userns works without this knob.)
-      - name: Install bubblewrap + enable unprivileged userns (sandbox hermetic tests)
-        run: |
-          sudo apt-get update && sudo apt-get install -y --no-install-recommends bubblewrap
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
-      - name: DIAGNOSTIC — why does userns fail on the runner? (temporary, foreman#555)
-        run: |
-          echo "== os =="; cat /etc/os-release | head -2
-          echo "== apparmor sysctl =="; sysctl kernel.apparmor_restrict_unprivileged_userns 2>&1 || echo "(absent)"
-          echo "== unprivileged_userns_clone =="; sysctl kernel.unprivileged_userns_clone 2>&1 || echo "(absent)"
-          echo "== bwrap probe on BARE runner (stderr shown) =="
-          bwrap --unshare-user --ro-bind /usr /usr --tmpfs /tmp -- /bin/true && echo "BARE: OK" || echo "BARE: FAIL rc=$?"
-          echo "== bwrap probe INSIDE docker (userns works locally this way) =="
-          docker run --rm ubuntu:24.04 sh -c 'apt-get update -qq && apt-get install -y -qq bubblewrap >/dev/null 2>&1; bwrap --unshare-user --ro-bind /usr /usr --tmpfs /tmp -- /bin/true && echo "DOCKER-DEFAULT: OK" || echo "DOCKER-DEFAULT: FAIL rc=$?"'
-          docker run --rm --privileged ubuntu:24.04 sh -c 'apt-get update -qq && apt-get install -y -qq bubblewrap >/dev/null 2>&1; bwrap --unshare-user --ro-bind /usr /usr --tmpfs /tmp -- /bin/true && echo "DOCKER-PRIVILEGED: OK" || echo "DOCKER-PRIVILEGED: FAIL rc=$?"'
-        continue-on-error: true
       - run: just check
       # Upload coverage to Codecov (account-wide GitHub App, tokenless).
       # Never reddens CI: fail_ci_if_error is false. coverage.xml is produced
@@ -81,6 +57,35 @@ jobs:
         if: github.event_name == 'pull_request'
         run: uv run --no-sync diff-cover coverage.xml --compare-branch=origin/${{ github.base_ref }} --fail-under=80
       - run: uv cache prune --ci
+
+  # foreman#555: the sandbox hermetic tests (test_sandbox_integration.py)
+  # need real bwrap + unprivileged user namespaces. GitHub's ubuntu-24.04
+  # runners block unprivileged userns via AppArmor even with the sysctls set
+  # (verified 2026-07-19: bwrap userns FAILs on the bare runner regardless),
+  # so on the main `check` job above they self-skip. ubuntu-22.04 predates
+  # that AppArmor restriction, so they actually run here. Production is a
+  # Docker container under the default profile where nested userns works.
+  sandbox-hermetic:
+    name: sandbox hermetic tests (real bwrap)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bubblewrap
+      - run: uv sync --locked --all-packages
+      - name: Run hermetic sandbox tests — fail if they SKIP (userns must work here)
+        run: |
+          out=$(uv run --no-sync pytest packages/foreman/tests/v4/test_sandbox_integration.py -rs -p no:cacheprovider --no-cov 2>&1)
+          echo "$out"
+          if echo "$out" | grep -qiE "[0-9]+ skipped"; then
+            echo "::error::sandbox hermetic tests SKIPPED — unprivileged userns unavailable on this runner"
+            exit 1
+          fi
+          echo "$out" | grep -qiE "[1-9][0-9]* passed" || { echo "::error::no sandbox tests passed"; exit 1; }
 
   # foreman#464 postmortem: a Dockerfile change (pinning bookworm-pgdg on a
   # base that had silently moved to trixie) merged green because the `check`
