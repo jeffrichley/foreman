@@ -98,6 +98,31 @@ def test_argv_marks_the_box_as_sandboxed() -> None:
     assert _has_triple(argv, "--setenv", "FOREMAN_SANDBOXED", "1")
 
 
+def test_argv_marks_the_box_as_ci() -> None:
+    """The box IS an automated integration runner, so it must present the
+    standard ``CI=true`` marker every mainstream CI sets. Without it, a
+    project's ``@pytest.mark.skipif(_is_ci())`` guards (meant to skip
+    dev-worktree-only checks in CI) do NOT fire in the box and those tests
+    fail — e.g. agent_core's ``test_core_hookspath_points_at_versioned_hooks``.
+    The box's gate (``just check``) must reproduce CI, so the box must look
+    like CI. Regression lock for the 2026-07-20 box-fidelity gap."""
+    argv = _argv()
+    assert _has_triple(argv, "--setenv", "CI", "true")
+
+
+def test_argv_binds_passwd_and_group_for_uid_resolution() -> None:
+    """``--unshare-user`` runs the box as uid 0, but with no ``/etc/passwd``
+    bound ``getpwuid(0)`` raises ``KeyError: uid not found`` — crashing any
+    tool that resolves the current user (``getpass.getuser``, ``pwd``,
+    ``os.path.expanduser``). Real CI runners have a resolvable uid; the box
+    must too. Binding ``/etc/passwd`` + ``/etc/group`` read-only closes the
+    gap. Regression lock for the 2026-07-20 box-fidelity gap (agent_core's
+    daemon-install CLI tests crashed on ``getpwuid()``)."""
+    argv = _argv()
+    assert _has_triple(argv, "--ro-bind", "/etc/passwd", "/etc/passwd")
+    assert _has_triple(argv, "--ro-bind", "/etc/group", "/etc/group")
+
+
 def test_argv_never_binds_daemon_secrets() -> None:
     argv = _argv()
     joined = " ".join(argv)

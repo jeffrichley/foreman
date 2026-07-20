@@ -177,6 +177,14 @@ class SandboxLauncher:
             # uv reads/writes the shared content-addressed cache here
             # (mounted read-write — see cache_dir docstring).
             "UV_CACHE_DIR": self.cache_mount,
+            # The box IS an automated integration runner, so it presents the
+            # standard marker every mainstream CI sets (GitHub Actions, GitLab,
+            # Travis, CircleCI). A project's gate (`just check`) must reproduce
+            # CI, and tests guarded by `skipif(os.environ.get("CI"))` — meant to
+            # skip dev-worktree-only checks in CI — only behave correctly when
+            # the box looks like CI. Not project-specific: it makes the box
+            # honest about what it is.
+            "CI": "true",
             "GH_TOKEN": role_token,
         }
         if passthrough:
@@ -210,6 +218,18 @@ class SandboxLauncher:
             "--ro-bind",
             "/etc/ssl/certs",
             "/etc/ssl/certs",
+            # /etc/passwd + /etc/group: `--unshare-user` runs the box as uid 0,
+            # and without a passwd entry `getpwuid(0)` raises `KeyError: uid not
+            # found`, crashing any tool that resolves the current user
+            # (getpass.getuser, pwd, os.path.expanduser). A real CI runner has a
+            # resolvable uid; the box must too. Load-bearing + POSIX-universal,
+            # so a hard bind (loud if ever absent) like resolv.conf above.
+            "--ro-bind",
+            "/etc/passwd",
+            "/etc/passwd",
+            "--ro-bind",
+            "/etc/group",
+            "/etc/group",
             "--ro-bind-try",
             "/etc/ca-certificates",
             "/etc/ca-certificates",
