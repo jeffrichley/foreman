@@ -2189,6 +2189,44 @@ def test_ensure_base_mirror_scrubs_token_from_origin_url(tmp_path: Path) -> None
     assert token not in origin_url
 
 
+def test_ensure_base_mirror_is_idempotent(tmp_path: Path) -> None:
+    """A second `ensure_base_mirror` call against an already-valid bare
+    mirror must hit the early-return branch (`if _is_bare_mirror(path):
+    return`) rather than recreate it — no `shutil.rmtree` + re-clone.
+
+    Proven two ways: (1) the mirror is still a bare repo after the second
+    call, and (2) a sentinel file written directly into the mirror
+    directory survives the second call — a recreate would `rmtree` the
+    directory before re-cloning, wiping the sentinel."""
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True)
+    base = tmp_path / "base"
+
+    ensure_base_mirror(repo_url=str(origin), clone_path=base)
+    is_bare = subprocess.run(
+        ["git", "-C", str(base), "rev-parse", "--is-bare-repository"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert is_bare == "true", "test setup: first call must produce a bare mirror"
+
+    # A recreate (rmtree + re-clone) would wipe this file; a true no-op won't.
+    sentinel = base / "sentinel.txt"
+    sentinel.write_text("still here\n")
+
+    ensure_base_mirror(repo_url=str(origin), clone_path=base)  # second call — must no-op
+
+    assert sentinel.exists(), "second call must not rmtree+re-clone an already-valid mirror"
+    is_bare_again = subprocess.run(
+        ["git", "-C", str(base), "rev-parse", "--is-bare-repository"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert is_bare_again == "true"
+
+
 # ----------------------------------------------------------------------
 # foreman#291 — fetch_origin_default_branch + per-dispatch defense in depth
 # ----------------------------------------------------------------------

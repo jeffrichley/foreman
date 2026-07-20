@@ -92,15 +92,15 @@ def bootstrap_cli_context(
     # same list that downstream consumers (pollers, Daemon, etc.) use.
     active_projects = projects if projects is not None else config.projects
 
-    # Startup auto-clone: ensure each project's local_clone_path exists and
-    # is a valid git clone before any poll or clone-refresh runs.
+    # Startup auto-clone: ensure each project's local_clone_path is a bare
+    # mirror clone before any poll or clone-refresh runs (ensure_base_mirror).
     # Uses the orchestrator App installation token (read-only; daemon-level
-    # operation, not tied to any role). Raises RuntimeError if a path exists
-    # but is not a git repo — daemon refuses to start with an actionable
-    # message. Idempotent: an existing valid clone is a no-op.
-    # Transient failures (network, auth, disk) are caught and logged as
-    # warnings so the daemon still starts; corrupt/non-git paths (RuntimeError)
-    # remain fatal with their existing actionable message.
+    # operation, not tied to any role). A legacy/non-mirror or corrupt base
+    # is silently removed and re-mirrored — the base holds no unique state,
+    # everything lives on GitHub — so this is safe to repeat. Idempotent: an
+    # existing valid bare mirror is a no-op. Transient failures (network,
+    # auth, disk-full) raise subprocess.CalledProcessError, which is caught
+    # below and logged as a warning so the daemon still starts.
     if run_startup_clone and active_projects:
         orch_token = identity.get_role_token("orchestrator")
         for pc in active_projects:
@@ -122,8 +122,8 @@ def bootstrap_cli_context(
             except subprocess.CalledProcessError as exc:
                 # Transient failure (network, auth, disk-full, repo-not-found).
                 # Log as warning and continue — the daemon must still start;
-                # the clone will be retried next restart or via ensure_clone
-                # in WorktreeManager when the first ticket runs.
+                # this project's base mirror is re-attempted on the next
+                # daemon restart.
                 logger.warning(
                     "startup: transient clone failure — skipping project",
                     extra={
