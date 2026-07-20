@@ -486,7 +486,7 @@ def test_worker_existing_impl_pr_with_clean_ci_emits_clean_outcome(
         ),
         patch("foreman.roles.worker.load_v4_config", return_value=cfg),
         patch("foreman.roles.worker.make_provider", return_value=mock_provider),
-        patch("foreman.roles.worker.V4IdentityRegistry", return_value=identity_registry),
+        patch("foreman.v4.identity.V4IdentityRegistry", return_value=identity_registry),
         patch.dict(
             "os.environ",
             {"FOREMAN_WORKTREES_ROOT": str(worktrees_root)},
@@ -539,7 +539,7 @@ def test_worker_existing_impl_pr_with_ci_in_flight_emits_blocked_outcome(
         ),
         patch("foreman.roles.worker.load_v4_config", return_value=cfg),
         patch("foreman.roles.worker.make_provider", return_value=mock_provider),
-        patch("foreman.roles.worker.V4IdentityRegistry", return_value=identity_registry),
+        patch("foreman.v4.identity.V4IdentityRegistry", return_value=identity_registry),
         patch.dict(
             "os.environ",
             {"FOREMAN_WORKTREES_ROOT": str(worktrees_root)},
