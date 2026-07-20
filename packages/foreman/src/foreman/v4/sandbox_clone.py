@@ -145,6 +145,13 @@ def prepare_sandbox_clone(
             tokenized_origin_url(repo_url, role_token),
         ]
     )
+    # Freshness chokepoint (foreman clone-freshness design): after the local
+    # hardlink clone (which reflects the base's snapshot) and the origin
+    # re-point, fetch the current remote so the box sees every ref another
+    # role may have just pushed. Blanket (all refs) — no branch to plumb, and
+    # only missing objects download since the base seeds the rest. FAIL-CLOSED:
+    # a fetch failure raises so the role never runs on a stale clone.
+    run(["git", "-C", str(dest_clone_path), "fetch", "origin"])
 
 
 def cleanup_ticket_scratch(
