@@ -320,15 +320,20 @@ def test_enabled_path_role_operates_in_private_clone(tmp_path: Path) -> None:
     commits in the clone, sees the base repo as INVISIBLE, and cannot write foreman."""
     from foreman.v4.sandbox_clone import prepare_sandbox_clone
 
-    # --- a real base git repo (stands in for /foreman/repos/<project>) ---
+    # --- a real bare origin + a base clone of it (stands in for GitHub +
+    # /foreman/repos/<project>). The base is a clone of the origin so that the
+    # chokepoint fetch prepare_sandbox_clone now performs (fetch origin) has a
+    # reachable remote to fetch from. ---
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
     base = tmp_path / "base"
-    base.mkdir()
-    subprocess.run(["git", "init", "-q", str(base)], check=True)
+    subprocess.run(["git", "clone", "-q", str(origin), str(base)], check=True)
     subprocess.run(["git", "-C", str(base), "config", "user.email", "t@t.t"], check=True)
     subprocess.run(["git", "-C", str(base), "config", "user.name", "t"], check=True)
     (base / "README.md").write_text("base\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(base), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(base), "commit", "-qm", "init"], check=True)
+    subprocess.run(["git", "-C", str(base), "push", "-q", "origin", "main"], check=True)
 
     # --- daemon preps the co-located private clone (same tmp fs → hardlinks) ---
     cache_dir = tmp_path / "cache"
@@ -340,7 +345,7 @@ def test_enabled_path_role_operates_in_private_clone(tmp_path: Path) -> None:
     prepare_sandbox_clone(
         base_clone_path=base,
         dest_clone_path=clone_dir,
-        repo_url="https://github.com/o/n.git",  # never contacted in this test
+        repo_url=str(origin),  # local bare origin — reachable by the chokepoint fetch
         role_token="ghs_TESTTOKEN",
     )
     # config file the box will load
