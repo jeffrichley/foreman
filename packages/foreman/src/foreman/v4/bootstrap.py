@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -190,7 +191,20 @@ def bootstrap_cli_context(
     sandbox_launcher: SandboxLauncher | None = None
     sandbox_scratch_root: Path | None = None
     sandbox_projects: dict[str, ProjectConfig] | None = None
-    if config.sandbox.enabled:
+    # foreman#role-identity hardening: a role subprocess already running
+    # inside a sandbox box (FOREMAN_SANDBOXED=1, set by SandboxLauncher
+    # when it execs the box — see subprocess_dispatcher.py) must NOT run
+    # this block. A boxed role never dispatches sub-roles, so it has no
+    # use for a SandboxLauncher or bot_metadata — and running preflight()
+    # here would be a nested bwrap-boot-inside-the-bwrap-box that, under
+    # fail-closed config (allow_unsandboxed=false), crashes the box
+    # before the role even runs. The in-box config still carries
+    # sandbox.enabled=true (it's the same config the daemon loaded), so
+    # the guard needs this second condition to tell "am I the daemon
+    # deciding whether to sandbox roles" apart from "am I already one of
+    # those sandboxed roles."
+    in_sandbox_box = os.environ.get("FOREMAN_SANDBOXED") == "1"
+    if config.sandbox.enabled and not in_sandbox_box:
         # foreman#556: the project map lets the dispatcher resolve each
         # project's base clone + repo to prep the private per-job clone.
         # Built unconditionally here — independent of whether preflight

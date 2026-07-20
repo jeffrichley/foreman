@@ -772,3 +772,76 @@ def test_bootstrap_threads_project_map_into_dispatcher_when_sandbox_enabled(
     project_cfg = sandbox_projects["foreman"]
     assert project_cfg.repo == "owner/foreman"
     assert project_cfg.local_clone_path == str(tmp_path / "foreman-clone")
+
+
+# ----------------------------------------------------------------------
+# foreman#role-identity hardening — skip the daemon sandbox setup block
+# entirely when bootstrap runs INSIDE a sandbox box.
+#
+# A boxed role subprocess runs the full main() -> bootstrap_cli_context
+# with the same in-box config the daemon loaded, so config.sandbox.enabled
+# is still True. Without a second guard, bootstrap would run a NESTED
+# preflight() (bwrap-boot-inside-the-bwrap-box) and build a SandboxLauncher
+# + bot_metadata the boxed role never uses — and a fail-closed nested
+# preflight failure would crash the box before the role runs. The box sets
+# FOREMAN_SANDBOXED=1 in its own environment (see sandbox.py), which is the
+# signal bootstrap_cli_context now checks.
+# ----------------------------------------------------------------------
+
+
+def test_bootstrap_skips_preflight_when_already_in_sandbox_box(
+    minimal_config_with_sandbox, fake_identity, fake_git_factory, monkeypatch
+):
+    """sandbox.enabled=True + FOREMAN_SANDBOXED=1 => preflight must NOT run
+    and the dispatcher must come up fully unsandboxed (sandbox=None,
+    bot_metadata=None). This is the boxed-role path: the box is already
+    sandboxed, so bootstrap must not attempt a nested preflight or build
+    daemon sandbox machinery it will never use."""
+    from foreman.v4 import bootstrap
+
+    monkeypatch.setenv("FOREMAN_SANDBOXED", "1")
+    cfg = minimal_config_with_sandbox(enabled=True, allow_unsandboxed=False)
+
+    def boom(**kwargs):
+        raise AssertionError("preflight must not run when already inside a sandbox box")
+
+    monkeypatch.setattr(bootstrap, "preflight", boom)
+    ctx = bootstrap.bootstrap_cli_context(
+        config=cfg,
+        identity=fake_identity,
+        git_provider_factory=fake_git_factory,
+    )
+    assert ctx is not None
+    dispatcher = ctx.dispatcher
+    assert dispatcher._sandbox is None  # type: ignore[attr-defined]
+    assert dispatcher._bot_metadata is None  # type: ignore[attr-defined]
+    assert dispatcher._sandbox_projects is None  # type: ignore[attr-defined]
+
+
+def test_bootstrap_daemon_still_sandboxes_when_not_in_box(
+    minimal_config_with_sandbox, fake_identity, fake_git_factory, monkeypatch
+):
+    """Control case for the FOREMAN_SANDBOXED gate above: sandbox.enabled=True
+    with FOREMAN_SANDBOXED unset (the daemon's own process, not a boxed role)
+    must still run preflight and build a real SandboxLauncher — proving the
+    new guard only skips setup when actually running in-box, not whenever
+    sandbox.enabled is True."""
+    from foreman.v4 import bootstrap
+
+    monkeypatch.delenv("FOREMAN_SANDBOXED", raising=False)
+    cfg = minimal_config_with_sandbox(enabled=True, allow_unsandboxed=False)
+
+    preflight_calls: list[dict[str, object]] = []
+
+    def fake_preflight(**kwargs):
+        preflight_calls.append(kwargs)
+
+    monkeypatch.setattr(bootstrap, "preflight", fake_preflight)
+    ctx = bootstrap.bootstrap_cli_context(
+        config=cfg,
+        identity=fake_identity,
+        git_provider_factory=fake_git_factory,
+    )
+    assert len(preflight_calls) == 1
+    dispatcher = ctx.dispatcher
+    assert dispatcher._sandbox is not None  # type: ignore[attr-defined]
