@@ -20,6 +20,7 @@ from foreman.v4.config import ProjectConfig, V4Config
 from foreman.v4.daemon import Daemon, DaemonConfig
 from foreman.v4.event_bus import EventBus
 from foreman.v4.git_provider import GitProvider
+from foreman.v4.identity import V4IdentityRegistry
 from foreman.v4.logging_config import configure_logging
 from foreman.v4.observers.event_archive import EventArchiveObserver
 from foreman.v4.observers.label_observability import LabelObservabilityObserver
@@ -32,7 +33,7 @@ from foreman.v4.poller import Poller
 from foreman.v4.repository import TicketRepository
 from foreman.v4.routing_git_provider import RoutingGitProvider
 from foreman.v4.sandbox import SandboxLauncher, SandboxUnavailableError, preflight
-from foreman.v4.subprocess_dispatcher import SubprocessRoleDispatcher
+from foreman.v4.subprocess_dispatcher import BotMetadata, SubprocessRoleDispatcher
 from foreman.worktree import ensure_clone
 
 logger = logging.getLogger(__name__)
@@ -227,6 +228,26 @@ def bootstrap_cli_context(
                 },
             )
 
+    # foreman#role-identity: the sandbox box has no PEM, so it can't mint
+    # its own bot slug/logins the way an unsandboxed role can via the
+    # PEM-backed registry. Build the static metadata here, daemon-side,
+    # from that same registry, and thread it into the dispatcher so it
+    # can inject it into the box's env. ``identity`` is typed to the
+    # narrow ``IdentityProvider`` Protocol (one method); the richer
+    # ``get_app_slug`` / ``get_role_bot_logins`` calls need the concrete
+    # ``V4IdentityRegistry``, which is what production always passes —
+    # narrow via isinstance rather than widening the Protocol. Only
+    # built when the sandbox is actually enabled; an unsandboxed
+    # dispatcher never needs it.
+    bot_metadata: BotMetadata | None = None
+    if sandbox_launcher is not None and isinstance(identity, V4IdentityRegistry):
+        bot_metadata = BotMetadata(
+            slug_by_role={
+                r: identity.get_app_slug(r) for r in ("planner", "reviewer", "fixer", "worker")
+            },
+            bot_logins=frozenset(identity.get_role_bot_logins()),
+        )
+
     dispatcher = SubprocessRoleDispatcher(
         foreman_cli=foreman_cli or ["foreman"],
         identity=identity,
@@ -239,6 +260,7 @@ def bootstrap_cli_context(
         sandbox=sandbox_launcher,
         sandbox_scratch_root=sandbox_scratch_root,
         sandbox_projects=sandbox_projects,
+        bot_metadata=bot_metadata,
     )
 
     pollers: list[Poller] = []

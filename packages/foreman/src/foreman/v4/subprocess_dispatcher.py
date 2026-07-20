@@ -55,6 +55,21 @@ from foreman.v4.sandbox_clone import prepare_sandbox_clone
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass(frozen=True)
+class BotMetadata:
+    """Static bot identity the daemon injects into a sandbox box (no PEM inside).
+
+    ``slug_by_role`` maps each role to its App bot slug (for commit
+    attribution); ``bot_logins`` is the set of ``<slug>[bot]`` logins (for
+    self-comment filtering). Built once daemon-side from the PEM-backed
+    registry; the box never fetches it.
+    """
+
+    slug_by_role: Mapping[str, str]
+    bot_logins: frozenset[str]
+
+
 _STDERR_PREFIX = "[stderr] "
 
 # Generous reader-thread join timeout. The pipes have to fully drain
@@ -332,6 +347,7 @@ class SubprocessRoleDispatcher:
         sandbox_scratch_root: Path | None = None,
         sandbox_projects: Mapping[str, ProjectConfig] | None = None,
         sandbox_clone_prep: Callable[..., None] | None = None,
+        bot_metadata: BotMetadata | None = None,
     ) -> None:
         self._foreman_cli = foreman_cli
         self._identity = identity
@@ -352,6 +368,11 @@ class SubprocessRoleDispatcher:
         # unit tests don't shell out to git.
         self._sandbox_projects = sandbox_projects
         self._sandbox_clone_prep = sandbox_clone_prep or prepare_sandbox_clone
+        # foreman#role-identity: static bot slug/logins the sandbox box
+        # needs PEM-free (SandboxIdentityRegistry reads them from the
+        # box's env). Built once daemon-side from the PEM-backed
+        # registry; required whenever the sandbox is enabled.
+        self._bot_metadata = bot_metadata
 
     def dispatch(
         self,
@@ -437,6 +458,11 @@ class SubprocessRoleDispatcher:
                     f"role={role}: sandbox enabled but no project map "
                     f"configured; cannot resolve the base clone to prep"
                 )
+            if self._bot_metadata is None:
+                raise RoleSubprocessError(
+                    f"role={role}: sandbox enabled but no bot metadata "
+                    f"configured; cannot inject the box's bot slug/logins"
+                )
             project_cfg = self._sandbox_projects.get(project)
             if project_cfg is None:
                 raise RoleSubprocessError(
@@ -494,6 +520,12 @@ class SubprocessRoleDispatcher:
                 )
                 if key in env
             }
+            # foreman#role-identity: the box's SandboxIdentityRegistry
+            # reads these directly out of its env — no PEM inside the
+            # box. Added ONLY on this sandbox branch; unsandboxed
+            # dispatch never sets them.
+            passthrough["FOREMAN_BOT_SLUG"] = self._bot_metadata.slug_by_role[role]
+            passthrough["FOREMAN_BOT_LOGINS"] = " ".join(sorted(self._bot_metadata.bot_logins))
             cmd = self._sandbox.build_argv(
                 role_token=env["GH_TOKEN"],
                 scratch_dir=str(wt_dir),

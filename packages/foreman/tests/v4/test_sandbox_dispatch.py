@@ -9,7 +9,14 @@ from unittest.mock import MagicMock
 import pytest
 
 from foreman.v4.sandbox import SandboxLauncher
-from foreman.v4.subprocess_dispatcher import _redact_cmd, _reject_never_bind_paths
+from foreman.v4.subprocess_dispatcher import BotMetadata, _redact_cmd, _reject_never_bind_paths
+
+_BOT_METADATA = BotMetadata(
+    slug_by_role={"worker": "worker-bot", "planner": "planner-bot"},
+    bot_logins=frozenset(
+        {"planner-bot[bot]", "reviewer-bot[bot]", "fixer-bot[bot]", "worker-bot[bot]"}
+    ),
+)
 
 
 def test_redact_masks_gh_token_after_setenv() -> None:
@@ -95,6 +102,7 @@ def test_dispatch_flag_on_creates_scratch_and_wraps(tmp_path: Path, monkeypatch)
         sandbox_scratch_root=scratch_root,
         sandbox_projects=projects,
         sandbox_clone_prep=lambda **kw: None,
+        bot_metadata=_BOT_METADATA,
     )
     out = d.dispatch(role="worker", project="foreman", issue_number=537, ticket_id=99)
     assert "FOREMAN_OUTCOME:" in out
@@ -175,6 +183,7 @@ def test_dispatch_flag_on_preps_clone_and_binds_repo_and_config(
         sandbox_scratch_root=scratch_root,
         sandbox_projects=projects,
         sandbox_clone_prep=fake_prep,
+        bot_metadata=_BOT_METADATA,
     )
     out = d.dispatch(role="worker", project="foreman", issue_number=537, ticket_id=99)
     assert "FOREMAN_OUTCOME:" in out
@@ -213,6 +222,96 @@ def test_dispatch_flag_on_preps_clone_and_binds_repo_and_config(
     key_idx = cmd.index("FOREMAN_PROJECTS_PATH")
     assert cmd[key_idx - 1] == "--setenv"
     assert cmd[key_idx + 1] == "/root/.foreman/projects.toml"
+
+
+def test_dispatch_flag_on_injects_bot_slug_and_logins(tmp_path: Path, monkeypatch) -> None:
+    """foreman#role-identity: the box's SandboxIdentityRegistry reads its
+    bot slug/logins from the env — the sandboxed argv must carry
+    ``--setenv FOREMAN_BOT_SLUG <role's slug>`` and
+    ``--setenv FOREMAN_BOT_LOGINS "<space-separated logins>"``."""
+    from foreman.v4 import subprocess_dispatcher as sd
+    from foreman.v4.config import ProjectConfig
+
+    captured: dict[str, object] = {}
+
+    class FakeProc:
+        def __init__(self, cmd, **kw):
+            captured["cmd"] = cmd
+            self.stdout = _StubStream(
+                'FOREMAN_OUTCOME:{"kind":"clean","confidence":"high","summary":"ok"}\n'
+            )
+            self.stderr = _StubStream("")
+            self.pid = 4321
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(sd.subprocess, "Popen", FakeProc)
+
+    identity = MagicMock()
+    identity.get_role_token.return_value = "ghs_TOK"
+    scratch_root = tmp_path / "scratch"
+    projects = {
+        "foreman": ProjectConfig(
+            name="foreman", repo="jeffrichley/foreman", local_clone_path="/foreman/repos/foreman"
+        )
+    }
+    bot_metadata = sd.BotMetadata(
+        slug_by_role={"planner": "my-slug"},
+        bot_logins=frozenset({"b[bot]", "a[bot]"}),
+    )
+    d = sd.SubprocessRoleDispatcher(
+        foreman_cli=["foreman"],
+        identity=identity,
+        log_dir=tmp_path / "logs",
+        sandbox=SandboxLauncher(cache_dir="/root/.cache/uv", bwrap_path="bwrap"),
+        sandbox_scratch_root=scratch_root,
+        sandbox_projects=projects,
+        sandbox_clone_prep=lambda **kw: None,
+        bot_metadata=bot_metadata,
+    )
+    out = d.dispatch(role="planner", project="foreman", issue_number=1, ticket_id=1)
+    assert "FOREMAN_OUTCOME:" in out
+    cmd = captured["cmd"]
+    slug_idx = cmd.index("FOREMAN_BOT_SLUG")
+    assert cmd[slug_idx - 1] == "--setenv"
+    assert cmd[slug_idx + 1] == "my-slug"
+    logins_idx = cmd.index("FOREMAN_BOT_LOGINS")
+    assert cmd[logins_idx - 1] == "--setenv"
+    assert cmd[logins_idx + 1] == "a[bot] b[bot]"
+
+
+def test_dispatch_flag_on_without_bot_metadata_raises(tmp_path: Path) -> None:
+    """foreman#role-identity: sandbox enabled but no ``bot_metadata`` configured
+    is a required-config error, mirroring the sibling ``sandbox_projects`` /
+    ``sandbox_scratch_root`` guards."""
+    from foreman.v4.config import ProjectConfig
+    from foreman.v4.subprocess_dispatcher import RoleSubprocessError, SubprocessRoleDispatcher
+
+    identity = MagicMock()
+    identity.get_role_token.return_value = "ghs_X"
+    projects = {
+        "foreman": ProjectConfig(
+            name="foreman", repo="jeffrichley/foreman", local_clone_path="/foreman/repos/foreman"
+        )
+    }
+    d = SubprocessRoleDispatcher(
+        foreman_cli=["foreman"],
+        identity=identity,
+        log_dir=tmp_path,
+        sandbox=SandboxLauncher(cache_dir="/c"),
+        sandbox_scratch_root=tmp_path / "s",
+        sandbox_projects=projects,
+    )
+    with pytest.raises(RoleSubprocessError, match="bot metadata"):
+        d.dispatch(role="planner", project="foreman", issue_number=1, ticket_id=1)
 
 
 def test_dispatch_flag_on_without_project_map_raises(tmp_path: Path) -> None:
@@ -286,6 +385,7 @@ def test_dispatch_flag_on_rejects_forbidden_path_before_reaching_bwrap(
         sandbox_scratch_root=tmp_path / "repos" / ".scratch",
         sandbox_projects=projects,
         sandbox_clone_prep=lambda **kw: None,
+        bot_metadata=_BOT_METADATA,
     )
     with pytest.raises(sd.RoleSubprocessError, match="never-bind"):
         d.dispatch(role="worker", project="foreman", issue_number=537, ticket_id=99)
