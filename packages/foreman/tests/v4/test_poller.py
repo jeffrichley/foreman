@@ -375,3 +375,50 @@ def test_cycle_hold_preserves_operator_hold():
     assert t1_after_clear.held_reason == "investigating", (
         "operator hold reason must still be 'investigating' after cycle clears"
     )
+
+
+def test_poller_does_not_reconcile_foreign_project_tickets():
+    """A per-project Poller must reconcile ONLY its own project's tickets.
+
+    Production wiring gives each Poller its own repo-locked GitProvider that
+    ignores the ``project=`` kwarg (unlike the project-aware fake here). With a
+    global, un-scoped open-ticket list, every Poller reconciled every OTHER
+    project's tickets through the wrong repo — reading empty blocker lists and
+    clobbering their ``depends_on`` to ``[]``, silently ungating ``blocked_by``
+    in any multi-project deployment.
+
+    This pins the fix: project "a"'s Poller reconciles its own ticket but
+    leaves project "b"'s ticket untouched. See foreman#568.
+    """
+    repo = InMemoryTicketRepository()
+
+    # Project "b" ticket #10, already correctly reconciled to depends_on=[9]
+    # by project b's own Poller.
+    ticket_b = repo.create_ticket(project="b", issue_number=10, now=_T0)
+    repo.set_ticket_dependencies(ticket_b.id, deps=[9])
+
+    # Project "a"'s repo-locked provider: it knows project a (issue #1 blocked
+    # by the still-open #2) and NOTHING about project b — so a cross-project
+    # read of b#10 returns [] (the production clobber value).
+    git_a = FakeGitProvider()
+    git_a.set_open_issues_with_label(project="a", label="foreman:plan", issue_numbers={1})
+    git_a.set_blocked_by(project="a", issue_number=1, blocked_by=[2])
+
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    poller_a = Poller(
+        repo=repo,
+        qm=qm,
+        git=git_a,
+        project="a",
+        trigger_label="foreman:plan",
+        clock=lambda: _T0,
+    )
+
+    poller_a.tick()
+
+    # Project a's own ticket IS reconciled (blocker #2 open → unmet dep).
+    ticket_a = repo.get_ticket_by_issue(project="a", issue_number=1)
+    assert repo.get_ticket_dependencies(ticket_a.id) == [2]
+
+    # Project b's ticket is UNTOUCHED — project a's Poller must not clobber it.
+    assert repo.get_ticket_dependencies(ticket_b.id) == [9]
