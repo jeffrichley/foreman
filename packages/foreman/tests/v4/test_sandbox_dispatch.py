@@ -288,6 +288,76 @@ def test_dispatch_flag_on_injects_bot_slug_and_logins(tmp_path: Path, monkeypatc
     assert cmd[logins_idx + 1] == "a[bot] b[bot]"
 
 
+def test_dispatch_flag_on_target_aware_role_injects_base_role_slug(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """foreman#role-identity regression: target-aware roles (``reviewer-spec``,
+    ``reviewer-impl``, ``fixer-spec``, ``fixer-impl``) must resolve
+    ``FOREMAN_BOT_SLUG`` via the BASE role, not the target-aware role — the
+    ``slug_by_role`` map built in bootstrap.py is keyed by the four base
+    roles only, so looking a target-aware role up directly raises
+    ``KeyError``."""
+    from foreman.v4 import subprocess_dispatcher as sd
+    from foreman.v4.config import ProjectConfig
+
+    captured: dict[str, object] = {}
+
+    class FakeProc:
+        def __init__(self, cmd, **kw):
+            captured["cmd"] = cmd
+            self.stdout = _StubStream(
+                'FOREMAN_OUTCOME:{"kind":"clean","confidence":"high","summary":"ok"}\n'
+            )
+            self.stderr = _StubStream("")
+            self.pid = 4321
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(sd.subprocess, "Popen", FakeProc)
+
+    identity = MagicMock()
+    identity.get_role_token.return_value = "ghs_TOK"
+    scratch_root = tmp_path / "scratch"
+    projects = {
+        "foreman": ProjectConfig(
+            name="foreman", repo="jeffrichley/foreman", local_clone_path="/foreman/repos/foreman"
+        )
+    }
+    bot_metadata = sd.BotMetadata(
+        slug_by_role={
+            "planner": "plan-slug",
+            "reviewer": "rev-slug",
+            "fixer": "fix-slug",
+            "worker": "work-slug",
+        },
+        bot_logins=frozenset({"x[bot]"}),
+    )
+    d = sd.SubprocessRoleDispatcher(
+        foreman_cli=["foreman"],
+        identity=identity,
+        log_dir=tmp_path / "logs",
+        sandbox=SandboxLauncher(cache_dir="/root/.cache/uv", bwrap_path="bwrap"),
+        sandbox_scratch_root=scratch_root,
+        sandbox_projects=projects,
+        sandbox_clone_prep=lambda **kw: None,
+        bot_metadata=bot_metadata,
+    )
+    out = d.dispatch(role="reviewer-spec", project="foreman", issue_number=1, ticket_id=1)
+    assert "FOREMAN_OUTCOME:" in out
+    cmd = captured["cmd"]
+    slug_idx = cmd.index("FOREMAN_BOT_SLUG")
+    assert cmd[slug_idx - 1] == "--setenv"
+    assert cmd[slug_idx + 1] == "rev-slug"
+
+
 def test_dispatch_flag_on_without_bot_metadata_raises(tmp_path: Path) -> None:
     """foreman#role-identity: sandbox enabled but no ``bot_metadata`` configured
     is a required-config error, mirroring the sibling ``sandbox_projects`` /

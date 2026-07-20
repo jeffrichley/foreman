@@ -524,7 +524,7 @@ class SubprocessRoleDispatcher:
             # reads these directly out of its env — no PEM inside the
             # box. Added ONLY on this sandbox branch; unsandboxed
             # dispatch never sets them.
-            passthrough["FOREMAN_BOT_SLUG"] = self._bot_metadata.slug_by_role[role]
+            passthrough["FOREMAN_BOT_SLUG"] = self._bot_metadata.slug_by_role[role_base]
             passthrough["FOREMAN_BOT_LOGINS"] = " ".join(sorted(self._bot_metadata.bot_logins))
             cmd = self._sandbox.build_argv(
                 role_token=env["GH_TOKEN"],
