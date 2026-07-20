@@ -134,6 +134,30 @@ def test_scratch_and_cache_are_both_writable(tmp_path: Path) -> None:
     )
     assert r.returncode == 0 and "cached" in r.stdout
 
+
+def test_box_resolves_uid_and_presents_as_ci(tmp_path: Path) -> None:
+    """A real box must (1) resolve its own uid and (2) look like CI.
+
+    ``--unshare-user`` runs the box as uid 0; without ``/etc/passwd`` bound,
+    ``id -un`` (libc ``getpwuid``) fails with "cannot find name for user ID
+    0" — the same crash that took down agent_core's daemon-install CLI tests.
+    And ``CI`` must be ``true`` so ``skipif(_is_ci())`` guards behave as in a
+    real runner. Regression lock for the 2026-07-20 box-fidelity gap that
+    stalled every agent_core impl ticket at needs_help."""
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    scratch_dir = tmp_path / "scratch"
+    scratch_dir.mkdir()
+
+    r = _run_in_box(
+        ["/bin/sh", "-c", 'id -un && printf "CI=%s\\n" "$CI"'],
+        cache_dir=cache_dir,
+        scratch_dir=scratch_dir,
+    )
+    assert r.returncode == 0, r.stderr  # getpwuid(0) resolved — /etc/passwd bound
+    assert "root" in r.stdout  # uid 0 → name
+    assert "CI=true" in r.stdout
+
     # cache write ALSO succeeds — the mount is read-write by design so
     # jobs can warm the shared, content-addressed uv cache for later runs.
     r = _run_in_box(
