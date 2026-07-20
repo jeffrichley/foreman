@@ -112,10 +112,18 @@ class Poller:
         # We need the full list twice: once to reconcile deps, once to build the
         # edge map for cycle detection.  Materialise it so the two passes share
         # the same snapshot.
+        # Scope to THIS poller's project. ``list_open_tickets`` is not
+        # project-scoped, but each per-project Poller holds a GitProvider
+        # locked to its own repo (the ``project=`` kwarg is ignored by the
+        # concrete PyGithub impl). Reconciling another project's ticket here
+        # would read blocked_by against the WRONG repo and clobber its
+        # depends_on to [] — silently ungating blocked_by across projects
+        # (foreman#568).
         open_tickets = [
             t
             for t in self._repo.list_open_tickets()
-            if t.current_state not in _TERMINAL_STATES
+            if t.project == self._project
+            and t.current_state not in _TERMINAL_STATES
             and not (t.next_action_at is not None and t.next_action_at > now)
         ]
 
