@@ -695,6 +695,33 @@ def test_bootstrap_warns_and_continues_when_allow_unsandboxed(
     assert dispatcher._sandbox is None  # type: ignore[attr-defined]
 
 
+def test_bootstrap_enables_writable_claude_session_env(
+    minimal_config_with_sandbox, fake_identity, fake_git_factory, monkeypatch
+):
+    """sandbox.enabled => the launcher overlays a writable tmpfs at
+    ``$CLAUDE_CONFIG_DIR/session-env``.
+
+    The box RO-binds the whole Claude config dir, but Claude Code's Bash tool
+    must ``mkdir`` a per-session dir under ``session-env`` on every shell
+    invocation. Without a writable overlay that fails with ``EROFS`` and breaks
+    the Bash tool for any role that commits. Regression lock for the 2026-07-20
+    sandbox dogfood (a fixer that could edit the spec but not ``git commit``)."""
+    from foreman.v4 import bootstrap
+
+    monkeypatch.delenv("FOREMAN_SANDBOXED", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/root/.claude-container")
+    monkeypatch.setattr(bootstrap, "preflight", lambda **kw: None)
+    cfg = minimal_config_with_sandbox(enabled=True, allow_unsandboxed=False)
+    ctx = bootstrap.bootstrap_cli_context(
+        config=cfg,
+        identity=fake_identity,
+        git_provider_factory=fake_git_factory,
+    )
+    launcher = ctx.dispatcher._sandbox  # type: ignore[attr-defined]
+    assert launcher is not None
+    assert launcher.claude_writable_session_dir == "/root/.claude-container/session-env"
+
+
 def test_bootstrap_disabled_sandbox_skips_preflight(
     minimal_config_with_sandbox, fake_identity, fake_git_factory, monkeypatch
 ):

@@ -229,9 +229,19 @@ def bootstrap_cli_context(
                 "dispatch is unprotected — do not use this in production."
             )
         else:
+            # Claude Code's Bash tool creates a per-session dir under
+            # ``$CLAUDE_CONFIG_DIR/session-env`` on every shell invocation. The
+            # box RO-binds the whole Claude config dir, so that mkdir fails with
+            # ``EROFS: read-only file system`` and the Bash tool breaks for any
+            # role that runs a shell command (e.g. a fixer's ``git commit``).
+            # Overlay a writable tmpfs at just that subpath — proven necessary
+            # by the 2026-07-20 sandbox dogfood (a fixer that could edit but
+            # not commit). Ephemeral is fine: session-env is per-run state.
+            _claude_config_dir = os.environ.get("CLAUDE_CONFIG_DIR", "/root/.claude-container")
             sandbox_launcher = SandboxLauncher(
                 cache_dir=config.sandbox.cache_dir,
                 bwrap_path=config.sandbox.bwrap_path,
+                claude_writable_session_dir=f"{_claude_config_dir}/session-env",
             )
             sandbox_scratch_root = Path(config.sandbox.scratch_root)
             logger.info(
