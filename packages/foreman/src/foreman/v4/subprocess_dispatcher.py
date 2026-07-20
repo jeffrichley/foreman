@@ -500,12 +500,18 @@ class SubprocessRoleDispatcher:
                 repo_url=f"https://github.com/{project_cfg.repo}.git",
                 role_token=env["GH_TOKEN"],
             )
-            # Curated non-secret passthrough allowlist (positive defense):
-            # only these keys cross into the box, plus GH_TOKEN handled by
-            # the launcher. Everything else in the daemon env is dropped by
-            # bwrap --clearenv. foreman#556 carry-forward (Task 2 review):
+            # Curated passthrough allowlist (positive defense): only these
+            # keys cross into the box, plus GH_TOKEN handled by the launcher.
+            # Everything else in the daemon env is dropped by bwrap
+            # --clearenv. foreman#556 carry-forward (Task 2 review):
             # FOREMAN_PROJECTS_PATH joins FOREMAN_V4_CONFIG here so the
             # role's own ``load_projects`` call resolves the in-box path.
+            # ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN are the role's LLM
+            # credential — whichever the deployment uses (an OAuth token from
+            # ``claude setup-token`` is CLAUDE_CODE_OAUTH_TOKEN). The box runs
+            # Claude Code, so it MUST receive it; without it the SDK fails
+            # authentication inside the box. Secret-ish (like GH_TOKEN); the
+            # planned LLM-proxy is the future hardening that keeps it out.
             passthrough = {
                 key: env[key]
                 for key in (
@@ -516,6 +522,7 @@ class SubprocessRoleDispatcher:
                     "FOREMAN_PROJECTS_PATH",
                     "CLAUDE_CONFIG_DIR",
                     "ANTHROPIC_API_KEY",
+                    "CLAUDE_CODE_OAUTH_TOKEN",
                     "LANG",
                 )
                 if key in env

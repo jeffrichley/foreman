@@ -288,6 +288,67 @@ def test_dispatch_flag_on_injects_bot_slug_and_logins(tmp_path: Path, monkeypatc
     assert cmd[logins_idx + 1] == "a[bot] b[bot]"
 
 
+def test_dispatch_flag_on_forwards_claude_oauth_token(tmp_path: Path, monkeypatch) -> None:
+    """The box runs Claude Code, so the role's LLM credential must cross into
+    it. When the deployment authenticates via CLAUDE_CODE_OAUTH_TOKEN (an
+    OAuth token from ``claude setup-token``), the sandboxed argv must carry
+    ``--setenv CLAUDE_CODE_OAUTH_TOKEN <token>`` — otherwise bwrap --clearenv
+    drops it and the Anthropic SDK fails authentication inside the box. This
+    is the gap the 2026-07-20 keystone dogfood surfaced."""
+    from foreman.v4 import subprocess_dispatcher as sd
+    from foreman.v4.config import ProjectConfig
+
+    captured: dict[str, object] = {}
+
+    class FakeProc:
+        def __init__(self, cmd, **kw):
+            captured["cmd"] = cmd
+            self.stdout = _StubStream(
+                'FOREMAN_OUTCOME:{"kind":"clean","confidence":"high","summary":"ok"}\n'
+            )
+            self.stderr = _StubStream("")
+            self.pid = 4321
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(sd.subprocess, "Popen", FakeProc)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-TESTTOKEN")
+
+    identity = MagicMock()
+    identity.get_role_token.return_value = "ghs_TOK"
+    projects = {
+        "foreman": ProjectConfig(
+            name="foreman", repo="jeffrichley/foreman", local_clone_path="/foreman/repos/foreman"
+        )
+    }
+    bot_metadata = sd.BotMetadata(
+        slug_by_role={"planner": "my-slug"}, bot_logins=frozenset({"a[bot]"})
+    )
+    d = sd.SubprocessRoleDispatcher(
+        foreman_cli=["foreman"],
+        identity=identity,
+        log_dir=tmp_path / "logs",
+        sandbox=SandboxLauncher(cache_dir="/root/.cache/uv", bwrap_path="bwrap"),
+        sandbox_scratch_root=tmp_path / "scratch",
+        sandbox_projects=projects,
+        sandbox_clone_prep=lambda **kw: None,
+        bot_metadata=bot_metadata,
+    )
+    d.dispatch(role="planner", project="foreman", issue_number=1, ticket_id=1)
+    cmd = captured["cmd"]
+    tok_idx = cmd.index("CLAUDE_CODE_OAUTH_TOKEN")
+    assert cmd[tok_idx - 1] == "--setenv"
+    assert cmd[tok_idx + 1] == "sk-ant-oat01-TESTTOKEN"
+
+
 def test_dispatch_flag_on_target_aware_role_injects_base_role_slug(
     tmp_path: Path, monkeypatch
 ) -> None:
