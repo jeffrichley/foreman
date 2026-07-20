@@ -105,10 +105,8 @@ def bootstrap_cli_context(
         orch_token = identity.get_role_token("orchestrator")
         for pc in active_projects:
             clone_path = Path(pc.local_clone_path)
-            if (clone_path / ".git").exists():
-                continue  # already a valid clone — skip, no log
             logger.info(
-                "startup: cloning missing project repo",
+                "startup: ensuring project base mirror",
                 extra={
                     "project": pc.name,
                     "repo": pc.repo,
@@ -136,32 +134,6 @@ def bootstrap_cli_context(
                     },
                 )
                 continue
-            # Scrub the embedded token from the cloned remote URL so it is
-            # not persisted verbatim in .git/config (mirrors the discipline
-            # used by push_branch to avoid token leakage in git config).
-            # Guard: only run if the clone actually produced a .git directory
-            # (ensure_clone may be stubbed in tests and produce no on-disk
-            # artifact — calling git against a non-existent cwd would crash).
-            if (clone_path / ".git").exists():
-                try:
-                    subprocess.run(
-                        [
-                            "git",
-                            "remote",
-                            "set-url",
-                            "origin",
-                            f"https://github.com/{pc.repo}.git",
-                        ],
-                        cwd=clone_path,
-                        check=True,
-                        capture_output=True,
-                    )
-                except subprocess.CalledProcessError:
-                    # Best-effort: failure to scrub the URL is not fatal.
-                    logger.warning(
-                        "startup: could not scrub token from remote URL",
-                        extra={"project": pc.name, "clone_path": str(clone_path)},
-                    )
             logger.info(
                 "startup: project repo cloned",
                 extra={

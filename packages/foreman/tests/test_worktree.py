@@ -2133,6 +2133,61 @@ def test_ensure_base_mirror_recreates_a_non_mirror_base(tmp_path: Path) -> None:
     assert not (base / "junk.txt").exists()  # working tree gone
 
 
+def test_ensure_base_mirror_scrubs_token_from_origin_url(tmp_path: Path) -> None:
+    """ensure_base_mirror scrubs the embedded orchestrator token from the
+    mirror's persisted ``origin`` remote URL immediately after cloning.
+
+    A bare mirror has no ``.git`` subdirectory, so the caller-side guard
+    ``if (clone_path / ".git").exists(): git remote set-url ...`` that
+    scrubbed the token for ordinary working clones silently never fired
+    for a mirror — the token would sit at rest in the mirror's config
+    forever. The scrub now lives inside ``ensure_base_mirror`` itself so
+    it always runs, regardless of caller.
+
+    Real HTTPS endpoints aren't reachable in a test, so ``subprocess.run``
+    is spied to intercept only the ``git clone --mirror`` call: it first
+    asserts the token WAS embedded in the URL handed to git (proving the
+    normal embedding still happens), then redirects the actual clone to a
+    real local bare ``origin.git`` so a genuine mirror lands on disk. The
+    scrub call (``git remote set-url origin <repo_url>``) is left
+    un-mocked — it runs for real against that on-disk mirror — so the
+    final assertion reads real git config, not a mock.
+    """
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True)
+
+    repo_url = "https://github.com/owner/repo.git"  # the tokenless URL
+    token = "fake-token-xyz"
+    expected_clone_url = f"https://x-access-token:{token}@github.com/owner/repo.git"
+    base = tmp_path / "base"
+
+    real_run = subprocess.run
+
+    def spy_run(cmd: Any, *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        if isinstance(cmd, list) and cmd[:3] == ["git", "clone", "--mirror"]:
+            assert cmd[3] == expected_clone_url, (
+                f"token must be embedded in the clone URL; got {cmd[3]!r}"
+            )
+            # Redirect the network-bound clone to the real local origin so a
+            # genuine mirror lands on disk for the scrub-and-verify below.
+            redirected = ["git", "clone", "--mirror", str(origin), cmd[4]]
+            return real_run(redirected, **kwargs)
+        return real_run(cmd, *args, **kwargs)
+
+    with patch("foreman.worktree.subprocess.run", side_effect=spy_run):
+        ensure_base_mirror(repo_url=repo_url, clone_path=base, token=token)
+
+    result = subprocess.run(
+        ["git", "-C", str(base), "remote", "get-url", "origin"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    origin_url = result.stdout.strip()
+    assert origin_url == repo_url
+    assert token not in origin_url
+
+
 # ----------------------------------------------------------------------
 # foreman#291 — fetch_origin_default_branch + per-dispatch defense in depth
 # ----------------------------------------------------------------------

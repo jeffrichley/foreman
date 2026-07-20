@@ -158,21 +158,38 @@ def ensure_base_mirror(*, repo_url: str, clone_path: Path, token: str | None = N
     re-clone fails, the exception propagates rather than leaving a
     half-migrated base on disk.
 
+    Token scrub: when a fresh mirror is cloned with ``token`` set, the
+    token is embedded in the clone URL so git can authenticate — but
+    that URL is exactly what git persists verbatim into the mirror's
+    ``config`` as ``remote.origin.url``. Immediately after a successful
+    clone we run ``git remote set-url origin <repo_url>`` (the
+    token-LESS URL) so the orchestrator token never sits at rest in the
+    mirror's config. This mirrors the discipline used elsewhere (e.g.
+    ``push_branch``) to avoid token leakage in git config, and matters
+    more here than for :func:`ensure_clone`'s working clones because a
+    bare mirror has no ``.git`` subdirectory for a caller to key a
+    "clone succeeded, now scrub" check off of — the scrub has to live
+    inside this function to always run.
+
     Args:
         repo_url: Remote URL (HTTPS or SSH). Authentication via
             PATH-resolved credentials / ssh agent / app-token URL
-            rewriting as per the caller's existing convention.
+            rewriting as per the caller's existing convention. Also
+            the URL the mirror's ``origin`` remote is reset to after a
+            fresh clone, so it must already be token-less.
         clone_path: Local filesystem path where the mirror should live.
         token: Optional GitHub App installation token. When set and
             ``repo_url`` starts with ``"https://"``, the token is
             embedded in the clone URL as
             ``https://x-access-token:<token>@...`` so git authenticates
             without a credential helper. Non-HTTPS URLs (local paths,
-            ``file://``, SSH) pass through unchanged.
+            ``file://``, SSH) pass through unchanged. Scrubbed from the
+            mirror's ``origin`` remote immediately after cloning.
 
     Raises:
         OSError: if removing an existing non-mirror ``clone_path`` fails.
-        subprocess.CalledProcessError: if ``git clone --mirror`` fails.
+        subprocess.CalledProcessError: if ``git clone --mirror`` or the
+            post-clone token-scrub ``git remote set-url`` fails.
     """
     if clone_path.exists() and not _is_bare_mirror(clone_path):
         # Legacy working clone (or a corrupt dir): the base holds no unique
@@ -187,6 +204,13 @@ def ensure_base_mirror(*, repo_url: str, clone_path: Path, token: str | None = N
         clone_url = f"https://x-access-token:{token}@" + repo_url[len("https://") :]
     subprocess.run(
         ["git", "clone", "--mirror", clone_url, str(clone_path)],
+        check=True,
+        capture_output=True,
+    )
+    # Scrub the embedded token from the mirror's persisted remote URL —
+    # see the token-scrub note in the docstring above.
+    subprocess.run(
+        ["git", "-C", str(clone_path), "remote", "set-url", "origin", repo_url],
         check=True,
         capture_output=True,
     )
