@@ -170,7 +170,7 @@ def test_role_v4_loads_project_from_projects_path_when_cfg_empty(
     with (
         patch(f"foreman.roles.{module}.load_v4_config", return_value=_empty_projects_config()),
         patch(f"foreman.roles.{module}.load_v4_projects", return_value=_loaded_projects()),
-        patch(f"foreman.roles.{module}.V4IdentityRegistry", side_effect=_fake_registry),
+        patch("foreman.v4.identity.V4IdentityRegistry", side_effect=_fake_registry),
         patch.dict("os.environ", {"FOREMAN_PROJECTS_PATH": str(_projects_file)}),
     ):
         with pytest.raises(_RegistrySentinel):
@@ -268,7 +268,7 @@ def test_role_v4_uses_cfg_projects_when_populated(
     with (
         patch(f"foreman.roles.{module}.load_v4_config", return_value=_populated_projects_config()),
         patch(f"foreman.roles.{module}.load_v4_projects", load_projects_spy),
-        patch(f"foreman.roles.{module}.V4IdentityRegistry", side_effect=_fake_registry),
+        patch("foreman.v4.identity.V4IdentityRegistry", side_effect=_fake_registry),
     ):
         with pytest.raises(_RegistrySentinel):
             entry(**kwargs)

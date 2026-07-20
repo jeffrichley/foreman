@@ -49,6 +49,7 @@ from foreman.roles import (
     build_role_resources,
     emit_transient_provider_outcome,
     handle_unhandled_role_exception,
+    role_identity,
 )
 from foreman.roles._escalation_comment import post_escalation_comment
 from foreman.roles._pr_lookup import find_open_pr_by_head_branch
@@ -308,7 +309,6 @@ async def _run_planner_core(
             registry=identity_registry,
             role="planner",
             app_id=config.apps.planner.app_id,
-            private_key_path=config.apps.planner.private_key_path,
         )
 
         issue = host.get_issue(actual_repo_slug, issue_number)
@@ -614,11 +614,7 @@ def _run_planner_for_v4(*, project: str, issue_number: int) -> _V4PlannerResult:
         )
     )
     provider = make_provider()
-    registry = V4IdentityRegistry(
-        apps=cfg.apps,
-        orchestrator=cfg.orchestrator,
-        installation_repo=project_cfg.repo,
-    )
+    registry = role_identity(cfg, installation_repo=project_cfg.repo)
     core_result = asyncio.run(
         _run_planner_core(
             issue_url=issue_url,

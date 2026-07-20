@@ -4,12 +4,12 @@ This package also exposes the shared defensive-exception helper used by all
 four role runners — see :func:`handle_unhandled_role_exception`.
 
 It also exposes :func:`build_role_resources` — the v4-native identity-
-resource helper that mints a fresh installation token via
-:class:`foreman.v4.identity.V4IdentityRegistry`, fetches the bot's
-App metadata (still needed for v3-era commit attribution + push URL
-construction in :class:`foreman.git_hosts.github.GitHubProvider`), and
-returns the ``(host, token, client)`` trio the role bodies thread
-through worktree creation + GitHub side effects.
+resource helper that mints a fresh installation token and looks up the
+bot's slug via the identity registry (still needed for v3-era commit
+attribution + push URL construction in
+:class:`foreman.git_hosts.github.GitHubProvider`), and returns the
+``(host, token, client)`` trio the role bodies thread through worktree
+creation + GitHub side effects.
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ from typing import Any
 
 from github import Auth, Github
 
-from foreman.auth import fetch_app_metadata
 from foreman.git_host import BotIdentity, GitHostProvider
 from foreman.git_hosts.github import GitHubProvider
 from foreman.providers import ProviderTransientError
@@ -207,12 +206,31 @@ def emit_transient_provider_outcome(exc: ProviderTransientError) -> int:
     return 0
 
 
+def role_identity(config: Any, *, installation_repo: str) -> Any:
+    """Return the identity registry a role subprocess should use.
+
+    Sandboxed (``FOREMAN_SANDBOXED=1``) -> :class:`SandboxIdentityRegistry`
+    (env-backed, no PEM). Otherwise the PEM-based
+    :class:`~foreman.v4.identity.V4IdentityRegistry`.
+    """
+    import os
+
+    from foreman.v4.identity import SandboxIdentityRegistry, V4IdentityRegistry
+
+    if os.environ.get("FOREMAN_SANDBOXED") == "1":
+        return SandboxIdentityRegistry()
+    return V4IdentityRegistry(
+        apps=config.apps,
+        orchestrator=config.orchestrator,
+        installation_repo=installation_repo,
+    )
+
+
 def build_role_resources(
     *,
     registry: Any,
     role: str,
     app_id: int,
-    private_key_path: str,
 ) -> tuple[GitHostProvider, str, Github]:
     """Build the trio of role-side identity resources from a v4 registry.
 
@@ -222,9 +240,10 @@ def build_role_resources(
       commit/push/PR/comment side effects. The :class:`BotIdentity`
       carries the bot's slug + numeric id (still required for v3-era
       commit attribution via ``GIT_AUTHOR_*`` env vars and for the
-      tokenized HTTPS push URL inside :class:`GitHubProvider`); these
-      come from :func:`fetch_app_metadata` against the App credentials
-      threaded in by the caller from ``V4Config.apps.<role>``.
+      tokenized HTTPS push URL inside :class:`GitHubProvider`); the
+      slug comes from :meth:`registry.get_app_slug` and the numeric id
+      is the ``app_id`` threaded in by the caller from
+      ``V4Config.apps.<role>``.
     * ``token`` — the role's current installation-token string, used by
       :class:`~foreman.worktree.WorktreeManager` for ``GH_TOKEN`` env
       injection on its git subprocesses.
@@ -234,19 +253,22 @@ def build_role_resources(
 
     ``registry`` is typed ``Any`` so tests can inject any duck-typed
     object that satisfies the production contract. Real callers pass a
-    :class:`V4IdentityRegistry`.
+    :class:`V4IdentityRegistry` or (roles-layer extension, Task 6) a
+    :class:`~foreman.v4.identity.SandboxIdentityRegistry`.
 
-    Production contract: ``registry.get_role_token(role) -> str``. The
-    helper mints a fresh :class:`Github` client and uses
-    :func:`fetch_app_metadata` (HTTP fetch to GitHub) to build the
-    :class:`BotIdentity`.
+    Production contract: ``registry.get_role_token(role) -> str`` and
+    ``registry.get_app_slug(role) -> str``. The helper mints a fresh
+    :class:`Github` client and sources the bot's slug from the registry
+    rather than a direct ``GET /app`` fetch — this is what lets the
+    helper run PEM-free inside a sandboxed role subprocess, where the
+    registry resolves the slug from injected env vars instead of App
+    credentials.
 
-    ``app_id`` + ``private_key_path`` come from
-    ``V4Config.apps.<role>`` at the call site — v4's per-role App
-    credentials are top-level (not nested under per-project blocks the
-    way v3 stored them), so the role function reads them off the
-    V4Config and threads them in here rather than this helper rooting
-    through a project shape.
+    ``app_id`` comes from ``V4Config.apps.<role>`` at the call site —
+    v4's per-role App credentials are top-level (not nested under
+    per-project blocks the way v3 stored them), so the role function
+    reads it off the V4Config and threads it in here rather than this
+    helper rooting through a project shape.
 
     Test-fake discipline (Wren's standing feedback on fakes mirroring
     real APIs strictly): tests should
@@ -259,7 +281,7 @@ def build_role_resources(
     """
     token = registry.get_role_token(role)
     client = Github(auth=Auth.Token(token))
-    meta = fetch_app_metadata(app_id, private_key_path)
-    identity = BotIdentity(slug=meta.slug, user_id=meta.app_id, token=token)
+    slug = registry.get_app_slug(role)
+    identity = BotIdentity(slug=slug, user_id=app_id, token=token)
     host = GitHubProvider(identity=identity, client=client)
     return host, token, client

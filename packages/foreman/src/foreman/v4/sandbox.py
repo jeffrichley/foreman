@@ -162,6 +162,10 @@ class SandboxLauncher:
             "PATH": SANDBOX_STD_PATH,
             "HOME": "/root",
             "PYTHONUNBUFFERED": "1",
+            # Marks the box as sandboxed so foreman's CLI entrypoint uses the
+            # injected GH_TOKEN (EnvTokenIdentity) and skips the daemon clone
+            # loop — no PEM is available in the box.
+            "FOREMAN_SANDBOXED": "1",
             # Keep the job's Python off the daemon's user site-packages so
             # `import foreman` cannot resolve there by accident.
             "PYTHONNOUSERSITE": "1",

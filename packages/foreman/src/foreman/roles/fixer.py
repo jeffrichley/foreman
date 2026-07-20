@@ -52,6 +52,7 @@ from foreman.roles import (
     build_role_resources,
     emit_transient_provider_outcome,
     handle_unhandled_role_exception,
+    role_identity,
 )
 from foreman.roles._escalation_comment import post_escalation_comment
 from foreman.roles._prompt_helpers import (
@@ -459,7 +460,6 @@ async def _run_fixer_core(
             registry=identity_registry,
             role="fixer",
             app_id=config.apps.fixer.app_id,
-            private_key_path=config.apps.fixer.private_key_path,
         )
 
         repo: Repository = fixer_client.get_repo(actual_repo_slug)
@@ -938,16 +938,11 @@ def _run_fixer_for_v4(*, project: str, issue_number: int, target: str) -> _V4Fix
     # lookup early-fails before ``make_provider`` + ``asyncio.run``
     # spin up, which is cheaper than letting ``run_fixer`` raise
     # mid-setup.
-    registry = V4IdentityRegistry(
-        apps=cfg.apps,
-        orchestrator=cfg.orchestrator,
-        installation_repo=project_cfg.repo,
-    )
+    registry = role_identity(cfg, installation_repo=project_cfg.repo)
     _host, _token, fixer_client = build_role_resources(
         registry=registry,
         role="fixer",
         app_id=cfg.apps.fixer.app_id,
-        private_key_path=cfg.apps.fixer.private_key_path,
     )
     repo: Repository = fixer_client.get_repo(project_cfg.repo)
     owner = project_cfg.repo.split("/", 1)[0]

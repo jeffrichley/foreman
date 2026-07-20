@@ -18,10 +18,11 @@ from github import Github, GithubException
 
 from foreman.git_host import CommentRef
 from foreman.v4.git_provider import PRNotFoundError, PRState, RequiredCheckState
-from foreman.v4.identity import V4IdentityRegistry
 
 if TYPE_CHECKING:
     from github.Repository import Repository
+
+    from foreman.v4.bootstrap import IdentityProvider
 
 
 def _resolve_merge_method(
@@ -97,7 +98,7 @@ class PyGithubGitProvider:
     def __init__(
         self,
         *,
-        identity: V4IdentityRegistry,
+        identity: IdentityProvider,
         role: str,
         repo_full_name: str,
     ) -> None:
@@ -106,10 +107,14 @@ class PyGithubGitProvider:
         Parameters
         ----------
         identity:
-            :class:`~foreman.v4.identity.V4IdentityRegistry` that owns
-            token freshness. ``_gh`` delegates to
-            ``identity.get_role_token(role)`` on every access; the
-            registry decides when to mint a fresh installation token.
+            Any :class:`~foreman.v4.bootstrap.IdentityProvider` — the
+            one-method ``get_role_token(role)`` contract. ``_gh``
+            delegates to ``identity.get_role_token(role)`` on every
+            access; the implementation decides when to mint (or simply
+            return) a fresh token. Production passes
+            :class:`~foreman.v4.identity.V4IdentityRegistry` (App
+            installation tokens) or, under the sandboxed role path,
+            ``EnvTokenIdentity`` (a pre-injected token).
         role:
             Role name whose token is used for GitHub API calls, e.g.
             ``"orchestrator"``.

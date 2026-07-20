@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -20,6 +21,7 @@ from foreman.v4.config import ProjectConfig, V4Config
 from foreman.v4.daemon import Daemon, DaemonConfig
 from foreman.v4.event_bus import EventBus
 from foreman.v4.git_provider import GitProvider
+from foreman.v4.identity import V4IdentityRegistry
 from foreman.v4.logging_config import configure_logging
 from foreman.v4.observers.event_archive import EventArchiveObserver
 from foreman.v4.observers.label_observability import LabelObservabilityObserver
@@ -32,7 +34,7 @@ from foreman.v4.poller import Poller
 from foreman.v4.repository import TicketRepository
 from foreman.v4.routing_git_provider import RoutingGitProvider
 from foreman.v4.sandbox import SandboxLauncher, SandboxUnavailableError, preflight
-from foreman.v4.subprocess_dispatcher import SubprocessRoleDispatcher
+from foreman.v4.subprocess_dispatcher import BotMetadata, SubprocessRoleDispatcher
 from foreman.worktree import ensure_clone
 
 logger = logging.getLogger(__name__)
@@ -59,6 +61,7 @@ def bootstrap_cli_context(
     foreman_cli: list[str] | None = None,
     projects: list[ProjectConfig] | None = None,
     projects_loader: Callable[[], list[ProjectConfig]] | None = None,
+    run_startup_clone: bool = True,
 ) -> CliContext:
     """Build the full v4 object graph from config.
 
@@ -75,6 +78,11 @@ def bootstrap_cli_context(
     ``projects_loader`` — a zero-arg callable stored on the Daemon for
     hot-reload on SIGHUP.  Production passes
     ``lambda: load_projects(projects_path)``; tests may omit it.
+
+    ``run_startup_clone`` — when False, skip the daemon-level all-projects
+    clone-maintenance loop (and the orchestrator-token mint it needs). Set
+    False for a sandboxed role subprocess, whose private clone the daemon
+    already prepped and which has no PEM to mint with.
     """
     configure_logging(log_dir=Path(config.log_dir), level=config.log_level)
 
@@ -93,7 +101,7 @@ def bootstrap_cli_context(
     # Transient failures (network, auth, disk) are caught and logged as
     # warnings so the daemon still starts; corrupt/non-git paths (RuntimeError)
     # remain fatal with their existing actionable message.
-    if active_projects:
+    if run_startup_clone and active_projects:
         orch_token = identity.get_role_token("orchestrator")
         for pc in active_projects:
             clone_path = Path(pc.local_clone_path)
@@ -183,7 +191,20 @@ def bootstrap_cli_context(
     sandbox_launcher: SandboxLauncher | None = None
     sandbox_scratch_root: Path | None = None
     sandbox_projects: dict[str, ProjectConfig] | None = None
-    if config.sandbox.enabled:
+    # foreman#role-identity hardening: a role subprocess already running
+    # inside a sandbox box (FOREMAN_SANDBOXED=1, set by SandboxLauncher
+    # when it execs the box — see subprocess_dispatcher.py) must NOT run
+    # this block. A boxed role never dispatches sub-roles, so it has no
+    # use for a SandboxLauncher or bot_metadata — and running preflight()
+    # here would be a nested bwrap-boot-inside-the-bwrap-box that, under
+    # fail-closed config (allow_unsandboxed=false), crashes the box
+    # before the role even runs. The in-box config still carries
+    # sandbox.enabled=true (it's the same config the daemon loaded), so
+    # the guard needs this second condition to tell "am I the daemon
+    # deciding whether to sandbox roles" apart from "am I already one of
+    # those sandboxed roles."
+    in_sandbox_box = os.environ.get("FOREMAN_SANDBOXED") == "1"
+    if config.sandbox.enabled and not in_sandbox_box:
         # foreman#556: the project map lets the dispatcher resolve each
         # project's base clone + repo to prep the private per-job clone.
         # Built unconditionally here — independent of whether preflight
@@ -221,6 +242,26 @@ def bootstrap_cli_context(
                 },
             )
 
+    # foreman#role-identity: the sandbox box has no PEM, so it can't mint
+    # its own bot slug/logins the way an unsandboxed role can via the
+    # PEM-backed registry. Build the static metadata here, daemon-side,
+    # from that same registry, and thread it into the dispatcher so it
+    # can inject it into the box's env. ``identity`` is typed to the
+    # narrow ``IdentityProvider`` Protocol (one method); the richer
+    # ``get_app_slug`` / ``get_role_bot_logins`` calls need the concrete
+    # ``V4IdentityRegistry``, which is what production always passes —
+    # narrow via isinstance rather than widening the Protocol. Only
+    # built when the sandbox is actually enabled; an unsandboxed
+    # dispatcher never needs it.
+    bot_metadata: BotMetadata | None = None
+    if sandbox_launcher is not None and isinstance(identity, V4IdentityRegistry):
+        bot_metadata = BotMetadata(
+            slug_by_role={
+                r: identity.get_app_slug(r) for r in ("planner", "reviewer", "fixer", "worker")
+            },
+            bot_logins=frozenset(identity.get_role_bot_logins()),
+        )
+
     dispatcher = SubprocessRoleDispatcher(
         foreman_cli=foreman_cli or ["foreman"],
         identity=identity,
@@ -233,6 +274,7 @@ def bootstrap_cli_context(
         sandbox=sandbox_launcher,
         sandbox_scratch_root=sandbox_scratch_root,
         sandbox_projects=sandbox_projects,
+        bot_metadata=bot_metadata,
     )
 
     pollers: list[Poller] = []
