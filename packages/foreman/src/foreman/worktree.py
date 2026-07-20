@@ -54,21 +54,54 @@ class ImplWorktreeRebaseConflictError(Exception):
     """
 
 
+def _is_bare_mirror(path: Path) -> bool:
+    """Report whether ``path`` is a bare git repository.
+
+    Args:
+        path: Filesystem path to probe.
+
+    Returns:
+        ``True`` if ``path`` exists and ``git rev-parse
+        --is-bare-repository`` succeeds there and prints ``"true"``;
+        ``False`` otherwise (including when ``path`` doesn't exist or
+        isn't a git repository at all).
+    """
+    if not path.exists():
+        return False
+    result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--is-bare-repository"],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
 def ensure_clone(*, repo_url: str, clone_path: Path, token: str | None = None) -> None:
-    """Ensure ``clone_path`` is a valid git clone of ``repo_url``.
+    """Ensure ``clone_path`` is a bare mirror clone of ``repo_url``.
 
     First-run helper for the container: when the ``foreman-repos`` Docker
     volume is empty, ``clone_path`` doesn't exist yet, and the daemon
     must clone the project from origin before any worktree-add can
-    happen. Idempotent: if ``clone_path`` already contains a ``.git``
-    directory, this is a no-op so existing host-side clones aren't
-    re-fetched on every daemon restart.
+    happen. The base is a **bare mirror** (``git clone --mirror`` —
+    objects and refs, no working tree, no local branches) so that a
+    ``git worktree add`` off this base can never inherit a stale local
+    branch left over from a prior run.
+
+    Idempotent: if ``clone_path`` already is a bare mirror, this is a
+    no-op so existing host-side clones aren't re-fetched on every daemon
+    restart. If ``clone_path`` exists but is *not* a bare mirror (a
+    legacy working clone from before this migration, or any other
+    non-mirror directory), it is removed and re-cloned as a mirror — the
+    base holds no unique state, everything lives on GitHub, so this
+    migration is safe to repeat. Fail-closed: if removal or the
+    re-clone fails, the exception propagates rather than leaving a
+    half-migrated base on disk.
 
     Args:
         repo_url: Remote URL (HTTPS or SSH). Authentication via
             PATH-resolved credentials / ssh agent / app-token URL
             rewriting as per the caller's existing convention.
-        clone_path: Local filesystem path where the clone should live.
+        clone_path: Local filesystem path where the mirror should live.
         token: Optional GitHub App installation token. When set and
             ``repo_url`` starts with ``"https://"``, the token is
             embedded in the clone URL as
@@ -77,25 +110,22 @@ def ensure_clone(*, repo_url: str, clone_path: Path, token: str | None = None) -
             ``file://``, SSH) pass through unchanged.
 
     Raises:
-        RuntimeError: if ``clone_path`` exists but is not a git
-            repository (no ``.git`` directory). The operator must remove
-            or repair the path manually before restarting the daemon.
-        subprocess.CalledProcessError: if ``git clone`` fails.
+        OSError: if removing an existing non-mirror ``clone_path`` fails.
+        subprocess.CalledProcessError: if ``git clone --mirror`` fails.
     """
-    if clone_path.exists() and not (clone_path / ".git").exists():
-        raise RuntimeError(
-            f"ensure_clone: {clone_path} exists but is not a git "
-            f"repository (no .git directory). Remove the path or repair it "
-            f"manually before restarting the daemon."
-        )
-    if (clone_path / ".git").exists():
+    if clone_path.exists() and not _is_bare_mirror(clone_path):
+        # Legacy working clone (or a corrupt dir): the base holds no unique
+        # state — everything is on GitHub — so recreate it as a mirror.
+        # Fail-closed: a failed removal must not leave a half-migrated base.
+        shutil.rmtree(clone_path)
+    if _is_bare_mirror(clone_path):
         return
     clone_path.parent.mkdir(parents=True, exist_ok=True)
     clone_url = repo_url
     if token is not None and repo_url.startswith("https://"):
         clone_url = f"https://x-access-token:{token}@" + repo_url[len("https://") :]
     subprocess.run(
-        ["git", "clone", clone_url, str(clone_path)],
+        ["git", "clone", "--mirror", clone_url, str(clone_path)],
         check=True,
         capture_output=True,
     )
