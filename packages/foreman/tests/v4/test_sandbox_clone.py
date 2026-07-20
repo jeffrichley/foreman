@@ -5,6 +5,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from foreman.v4.sandbox_clone import (
     cleanup_ticket_scratch,
     prepare_sandbox_clone,
@@ -213,3 +215,65 @@ def test_cleanup_removes_all_role_job_dirs_for_ticket(tmp_path: Path) -> None:
     assert not (root / "foreman" / "worker-42").exists()
     assert (root / "foreman" / "worker-7").exists()  # untouched
     assert len(removed) == 3
+
+
+@pytest.mark.xfail(
+    reason="fixed in the next commit: prepare_sandbox_clone blanket fetch", strict=True
+)
+def test_repro_406_box_from_stale_base_lacks_pushed_commit(tmp_path: Path) -> None:
+    """REPRO of #406: prepare_sandbox_clone clones from the base and re-points
+    origin, but does NOT fetch — so a commit pushed to origin after the base
+    was cloned is absent in the box, and `git diff origin/main...<sha>` fails
+    (exit 128). This test FAILS today and passes once Task 2 adds the fetch."""
+    import subprocess
+
+    from foreman.v4 import sandbox_clone
+
+    def git(*args: str, cwd: Path) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    # stand-in origin (bare) with a main branch + one commit
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(origin), str(seed)], check=True)
+    subprocess.run(["git", "-C", str(seed), "config", "user.email", "t@t.t"], check=True)
+    subprocess.run(["git", "-C", str(seed), "config", "user.name", "t"], check=True)
+    (seed / "a.txt").write_text("a\n")
+    git("add", "-A", cwd=seed)
+    git("commit", "-qm", "init", cwd=seed)
+    git("push", "-q", "origin", "main", cwd=seed)
+
+    # daemon base clone (co-located so --local hardlinks) — stale snapshot
+    base = tmp_path / "base"
+    subprocess.run(["git", "clone", str(origin), str(base)], check=True)
+
+    # a prior role pushes a NEW commit to origin AFTER the base was cloned
+    (seed / "b.txt").write_text("b\n")
+    git("add", "-A", cwd=seed)
+    git("commit", "-qm", "role-A change", cwd=seed)
+    new_sha = git("rev-parse", "HEAD", cwd=seed)
+    git("push", "-q", "origin", "main", cwd=seed)
+
+    # next role's box, via the current prepare flow (origin re-pointed at the
+    # real origin path here since there's no token auth in the test)
+    dest = tmp_path / "scratch" / "box"
+    sandbox_clone.prepare_sandbox_clone(
+        base_clone_path=base,
+        dest_clone_path=dest,
+        repo_url=str(origin),
+        role_token="ghs_UNUSED",
+        runner=lambda argv: subprocess.run(argv, check=True, capture_output=True, text=True),
+    )
+    # BUG: the box lacks new_sha, so a diff against it fails (git exit 128)
+    result = subprocess.run(
+        ["git", "-C", str(dest), "diff", f"origin/main...{new_sha}"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"box is stale: diff against pushed commit failed (rc={result.returncode}): "
+        f"{result.stderr.strip()}"
+    )
