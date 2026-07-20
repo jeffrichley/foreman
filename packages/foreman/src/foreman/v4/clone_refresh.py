@@ -12,8 +12,13 @@ the next worktree creation re-fetched.
 This module re-introduces the refresh as a daemon-loop component: it is
 injected into the :class:`~foreman.v4.daemon.Daemon`, ``tick()``-ed once
 per ``tick_once()`` call, and reuses the surviving
-:func:`foreman.worktree.fetch_origin_default_branch` helper rather than
-re-implementing fetch logic.
+:func:`foreman.worktree.fetch_mirror` helper rather than re-implementing
+fetch logic. As of foreman#406 the daemon's shared base clone is a bare
+mirror (see :func:`foreman.worktree.ensure_base_mirror`), so the refresher
+warms the WHOLE mirror (all refs) rather than only the default branch —
+correctness for any single dispatch still comes from the per-box
+chokepoint fetch in :func:`foreman.v4.sandbox_clone.prepare_sandbox_clone`,
+so this refresh remains perf-only and best-effort.
 
 Two resilience properties matter:
 
@@ -37,15 +42,15 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from foreman.worktree import fetch_origin_default_branch
+from foreman.worktree import fetch_mirror
 
 # Routes through the ``foreman.v4`` JSON-lines handler wired by
 # ``configure_logging`` (see ``foreman.v4.logging_config``).
 _log = logging.getLogger(__name__)
 
 # Type of the fetch callable the refresher invokes per project. Matches
-# the signature of ``foreman.worktree.fetch_origin_default_branch`` so the
-# real helper is the production default and a fake can be injected in tests.
+# the signature of ``foreman.worktree.fetch_mirror`` so the real helper is
+# the production default and a fake can be injected in tests.
 FetchFn = Callable[..., None]
 
 
@@ -82,8 +87,7 @@ class CloneRefresher:
     walks every registered project and, for any whose last successful
     refresh was longer than ``interval_seconds`` ago (or never), calls
     ``fetch`` against that project's clone path. The default ``fetch`` is
-    :func:`foreman.worktree.fetch_origin_default_branch`; tests inject a
-    fake.
+    :func:`foreman.worktree.fetch_mirror`; tests inject a fake.
     """
 
     def __init__(
@@ -92,7 +96,7 @@ class CloneRefresher:
         clone_paths: dict[str, Path],
         interval_seconds: float,
         clock: Callable[[], dt.datetime],
-        fetch: FetchFn = fetch_origin_default_branch,
+        fetch: FetchFn = fetch_mirror,
     ) -> None:
         self._clone_paths = clone_paths
         self._interval_seconds = interval_seconds
@@ -110,7 +114,7 @@ class CloneRefresher:
         *,
         interval_seconds: float,
         clock: Callable[[], dt.datetime],
-        fetch: FetchFn = fetch_origin_default_branch,
+        fetch: FetchFn = fetch_mirror,
     ) -> CloneRefresher | _DisabledCloneRefresher:
         """Build a refresher from a ``project name -> clone path`` map.
 
@@ -147,8 +151,8 @@ class CloneRefresher:
             try:
                 self._fetch(clone_path)
             except Exception:
-                # fetch_origin_default_branch is itself best-effort
-                # (network failures are logged + swallowed inside), so an
+                # fetch_mirror is itself best-effort (network failures are
+                # logged + swallowed inside), so an
                 # exception escaping here is something more structural — a
                 # missing clone dir, a bad path. Log per-project and keep
                 # going; do NOT advance the throttle clock so the next tick

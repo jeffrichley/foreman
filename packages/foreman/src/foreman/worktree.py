@@ -969,6 +969,28 @@ def fetch_origin_default_branch(
     _fetch_origin_branch(clone_path, default, role_token=role_token)
 
 
+def fetch_mirror(clone_path: Path) -> None:
+    """Best-effort refresh of a bare-mirror base clone: fetch ALL refs.
+
+    Used by the daemon's throttled ``CloneRefresher`` (foreman#407) to keep
+    the mirror's object store warm so each box's clone-prep fetch is a
+    small delta. Perf only — correctness comes from the per-box chokepoint
+    fetch (see :func:`foreman.v4.sandbox_clone.prepare_sandbox_clone`), so
+    a failure here is logged and swallowed rather than raised.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(clone_path), "remote", "update", "--prune"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(
+            f"[foreman.worktree] warning: mirror refresh failed in {clone_path}: "
+            f"{result.stderr.strip()}",
+            file=sys.stderr,
+        )
+
+
 def fetch_origin_branch(
     clone_path: Path,
     branch: str,

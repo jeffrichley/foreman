@@ -16,6 +16,7 @@ from foreman.worktree import (
     _origin_branch_exists,
     ensure_base_mirror,
     ensure_clone,
+    fetch_mirror,
     fetch_origin_default_branch,
 )
 
@@ -2270,6 +2271,47 @@ def test_fetch_origin_default_branch_refreshes_origin_default(tmp_path: Path) ->
     assert refreshed_origin_tip != baseline_origin_tip, (
         "After fetch_origin_default_branch, client's origin/main must track the new upstream tip"
     )
+
+
+# ----------------------------------------------------------------------
+# CloneRefresher whole-mirror refresh — fetch_mirror
+# ----------------------------------------------------------------------
+
+
+def test_fetch_mirror_updates_all_refs(tmp_path: Path) -> None:
+    """``fetch_mirror`` runs ``git remote update --prune`` against a bare
+    mirror base clone, pulling down refs for branches that did not exist
+    at clone time (unlike ``fetch_origin_default_branch``, which only
+    tracks the default branch)."""
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(origin), str(seed)], check=True)
+    subprocess.run(["git", "-C", str(seed), "config", "user.email", "t@t.t"], check=True)
+    subprocess.run(["git", "-C", str(seed), "config", "user.name", "t"], check=True)
+    (seed / "a.txt").write_text("a\n")
+    subprocess.run(["git", "-C", str(seed), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-qm", "init"], check=True)
+    subprocess.run(["git", "-C", str(seed), "push", "-q", "origin", "main"], check=True)
+
+    base = tmp_path / "base"
+    ensure_base_mirror(repo_url=str(origin), clone_path=base)  # bare mirror at main
+
+    # push a new branch to origin, then refresh the mirror
+    subprocess.run(["git", "-C", str(seed), "checkout", "-qb", "feature"], check=True)
+    (seed / "b.txt").write_text("b\n")
+    subprocess.run(["git", "-C", str(seed), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-qm", "feat"], check=True)
+    subprocess.run(["git", "-C", str(seed), "push", "-q", "origin", "feature"], check=True)
+
+    fetch_mirror(base)
+    # mirror now has the feature ref
+    r = subprocess.run(
+        ["git", "-C", str(base), "rev-parse", "--verify", "refs/heads/feature"],
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stderr
 
 
 # ----------------------------------------------------------------------
