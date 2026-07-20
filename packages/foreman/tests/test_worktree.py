@@ -14,6 +14,7 @@ from foreman.worktree import (
     WorktreeManager,
     _fetch_origin_branch,
     _origin_branch_exists,
+    ensure_base_mirror,
     ensure_clone,
     fetch_origin_default_branch,
 )
@@ -1969,9 +1970,8 @@ def test_attach_impl_threads_role_token_into_git_subprocess_envs(
 
 def test_ensure_clone_creates_clone_when_missing(tmp_path: Path) -> None:
     """When the configured local_clone_path doesn't exist, ensure_clone
-    must `git clone --mirror <repo_url>` into it as a bare mirror. Used
-    by the container's first boot when the foreman-repos volume is
-    empty.
+    must `git clone <repo_url>` into it. Used by the container's first
+    boot when the foreman-repos volume is empty.
 
     We stub the actual clone with a local bare repo so the test doesn't
     hit the network."""
@@ -2002,48 +2002,52 @@ def test_ensure_clone_creates_clone_when_missing(tmp_path: Path) -> None:
     target = tmp_path / "repos" / "myproject"
     assert not target.exists(), "precondition: target must be missing"
 
-    from foreman.worktree import ensure_clone
-
     ensure_clone(repo_url=str(origin), clone_path=target)
 
     assert target.exists(), "clone directory should exist after ensure_clone"
-    is_bare = subprocess.run(
-        ["git", "-C", str(target), "rev-parse", "--is-bare-repository"],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    assert is_bare == "true", "should be a bare mirror clone, not a working clone"
+    assert (target / ".git").exists(), "should be a real git clone, not just a dir"
     # Should NOT re-clone on second call (idempotent)
-    first_mtime = (target / "HEAD").stat().st_mtime
+    first_mtime = (target / ".git").stat().st_mtime
     ensure_clone(repo_url=str(origin), clone_path=target)
-    second_mtime = (target / "HEAD").stat().st_mtime
+    second_mtime = (target / ".git").stat().st_mtime
     assert first_mtime == second_mtime, "ensure_clone must be idempotent on second call"
 
 
-def test_ensure_clone_migrates_a_plain_non_git_dir(tmp_path: Path) -> None:
-    """ensure_clone no longer raises when clone_path exists but isn't a git
-    repository at all — the raise-on-foreign-dir guard (foreman#476)
-    predates the bare-mirror migration. A plain non-git directory is now
-    treated the same as any other non-mirror base: removed and recreated
-    as a bare mirror, rather than requiring manual operator cleanup."""
+def test_ensure_clone_produces_a_working_clone_not_a_mirror(tmp_path: Path) -> None:
+    """ensure_clone must always produce an ordinary working clone (has a
+    `.git` dir, is-bare-repository is false) — never a bare mirror.
+
+    This is the sandboxed-role safety property: `ensure_clone` also runs
+    against a role's private per-job clone inside the sandbox box (via
+    `WorktreeManager.attach`/`attach_impl`), which needs a real working
+    tree to `git worktree add` from. Only `ensure_base_mirror` may
+    produce a bare mirror, and it must never be called on that path."""
     origin = tmp_path / "origin.git"
     subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True)
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "stray.txt").write_text("not a git repo\n")
-    assert target.exists() and not (target / ".git").exists(), "test setup: plain dir"
+    target = tmp_path / "clone"
 
     ensure_clone(repo_url=str(origin), clone_path=target)
 
+    assert (target / ".git").exists(), "must be a working clone with a .git dir"
     is_bare = subprocess.run(
         ["git", "-C", str(target), "rev-parse", "--is-bare-repository"],
         capture_output=True,
         text=True,
         check=True,
     ).stdout.strip()
-    assert is_bare == "true"
-    assert not (target / "stray.txt").exists(), "stray content should be gone after migration"
+    assert is_bare == "false", "ensure_clone must never produce a bare mirror"
+
+
+def test_ensure_clone_raises_on_non_git_dir(tmp_path: Path) -> None:
+    """ensure_clone raises RuntimeError when the target path already exists
+    but has no .git directory — protects against silently overwriting or
+    cloning into an unknown directory at local_clone_path (foreman#476)."""
+    target = tmp_path / "target"
+    target.mkdir()
+    assert target.exists() and not (target / ".git").exists(), "test setup: plain dir"
+
+    with pytest.raises(RuntimeError, match="not a git repository"):
+        ensure_clone(repo_url="/irrelevant/url", clone_path=target)
 
 
 def test_ensure_clone_token_embedded_in_clone_url(tmp_path: Path) -> None:
@@ -2066,10 +2070,7 @@ def test_ensure_clone_token_embedded_in_clone_url(tmp_path: Path) -> None:
 
     def spy_run(cmd: Any, *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
         if isinstance(cmd, list) and len(cmd) >= 3 and cmd[0] == "git" and cmd[1] == "clone":
-            # cmd is ["git", "clone", "--mirror", <url>, <path>]; the URL is
-            # the first non-flag argument after "clone".
-            url_arg = next(arg for arg in cmd[2:] if not arg.startswith("-"))
-            captured_clone_urls.append(url_arg)
+            captured_clone_urls.append(cmd[2])
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=b"", stderr=b"")
 
     with patch("foreman.worktree.subprocess.run", side_effect=spy_run):
@@ -2088,14 +2089,14 @@ def test_ensure_clone_token_embedded_in_clone_url(tmp_path: Path) -> None:
     assert actual_built == expected_auth_url
 
 
-def test_ensure_clone_creates_bare_mirror(tmp_path: Path) -> None:
-    """ensure_clone creates the base clone as a bare mirror (objects + refs,
-    no working tree, no local branches) so that per-ticket worktrees added
-    from it can never inherit stale local branches."""
+def test_ensure_base_mirror_creates_bare_mirror(tmp_path: Path) -> None:
+    """ensure_base_mirror creates the daemon's base clone as a bare mirror
+    (objects + refs, no working tree, no local branches) so that per-ticket
+    worktrees added from it can never inherit stale local branches."""
     origin = tmp_path / "origin.git"
     subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True)
     base = tmp_path / "base"
-    ensure_clone(repo_url=str(origin), clone_path=base)
+    ensure_base_mirror(repo_url=str(origin), clone_path=base)
     # a bare mirror: no working tree, is-bare true, has no local branch checkout
     is_bare = subprocess.run(
         ["git", "-C", str(base), "rev-parse", "--is-bare-repository"],
@@ -2107,11 +2108,12 @@ def test_ensure_clone_creates_bare_mirror(tmp_path: Path) -> None:
     assert not (base / ".git").exists()  # a mirror IS the git dir
 
 
-def test_ensure_clone_recreates_a_non_mirror_base(tmp_path: Path) -> None:
-    """ensure_clone migrates a legacy non-mirror base (a working clone, or
-    any other non-bare-mirror directory) by removing it and re-cloning as a
-    bare mirror. The base holds no unique state — everything lives on
-    GitHub — so this migration is safe and idempotent."""
+def test_ensure_base_mirror_recreates_a_non_mirror_base(tmp_path: Path) -> None:
+    """ensure_base_mirror migrates a legacy non-mirror base (a working
+    clone, or any other non-bare-mirror directory) by removing it and
+    re-cloning as a bare mirror. The base holds no unique state —
+    everything lives on GitHub — so this migration is safe and
+    idempotent."""
     origin = tmp_path / "origin.git"
     subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True)
     base = tmp_path / "base"
@@ -2119,7 +2121,7 @@ def test_ensure_clone_recreates_a_non_mirror_base(tmp_path: Path) -> None:
     subprocess.run(["git", "clone", str(origin), str(base)], check=True)
     (base / "junk.txt").write_text("junk\n")
     assert (base / ".git").exists()  # working clone
-    ensure_clone(repo_url=str(origin), clone_path=base)  # migrates
+    ensure_base_mirror(repo_url=str(origin), clone_path=base)  # migrates
     is_bare = subprocess.run(
         ["git", "-C", str(base), "rev-parse", "--is-bare-repository"],
         capture_output=True,

@@ -77,15 +77,76 @@ def _is_bare_mirror(path: Path) -> bool:
 
 
 def ensure_clone(*, repo_url: str, clone_path: Path, token: str | None = None) -> None:
-    """Ensure ``clone_path`` is a bare mirror clone of ``repo_url``.
+    """Ensure ``clone_path`` is a valid git clone of ``repo_url``.
 
     First-run helper for the container: when the ``foreman-repos`` Docker
     volume is empty, ``clone_path`` doesn't exist yet, and the daemon
     must clone the project from origin before any worktree-add can
-    happen. The base is a **bare mirror** (``git clone --mirror`` —
+    happen. Idempotent: if ``clone_path`` already contains a ``.git``
+    directory, this is a no-op so existing host-side clones aren't
+    re-fetched on every daemon restart.
+
+    This produces an ordinary **working** clone — safe to call on a
+    sandboxed role's private per-job clone (see
+    :meth:`WorktreeManager.attach`, :meth:`WorktreeManager.attach_impl`),
+    which itself needs a working tree to run ``git worktree add`` from.
+    For the daemon's shared base clone, use :func:`ensure_base_mirror`
+    instead.
+
+    Args:
+        repo_url: Remote URL (HTTPS or SSH). Authentication via
+            PATH-resolved credentials / ssh agent / app-token URL
+            rewriting as per the caller's existing convention.
+        clone_path: Local filesystem path where the clone should live.
+        token: Optional GitHub App installation token. When set and
+            ``repo_url`` starts with ``"https://"``, the token is
+            embedded in the clone URL as
+            ``https://x-access-token:<token>@...`` so git authenticates
+            without a credential helper. Non-HTTPS URLs (local paths,
+            ``file://``, SSH) pass through unchanged.
+
+    Raises:
+        RuntimeError: if ``clone_path`` exists but is not a git
+            repository (no ``.git`` directory). The operator must remove
+            or repair the path manually before restarting the daemon.
+        subprocess.CalledProcessError: if ``git clone`` fails.
+    """
+    if clone_path.exists() and not (clone_path / ".git").exists():
+        raise RuntimeError(
+            f"ensure_clone: {clone_path} exists but is not a git "
+            f"repository (no .git directory). Remove the path or repair it "
+            f"manually before restarting the daemon."
+        )
+    if (clone_path / ".git").exists():
+        return
+    clone_path.parent.mkdir(parents=True, exist_ok=True)
+    clone_url = repo_url
+    if token is not None and repo_url.startswith("https://"):
+        clone_url = f"https://x-access-token:{token}@" + repo_url[len("https://") :]
+    subprocess.run(
+        ["git", "clone", clone_url, str(clone_path)],
+        check=True,
+        capture_output=True,
+    )
+
+
+def ensure_base_mirror(*, repo_url: str, clone_path: Path, token: str | None = None) -> None:
+    """Ensure ``clone_path`` is a bare mirror clone of ``repo_url``.
+
+    For the **daemon's shared base clone only** — the single on-disk
+    clone that per-ticket worktrees (:class:`WorktreeManager`) and
+    sandboxed per-job clones (``foreman.v4.sandbox_clone``) are created
+    from. The base is a **bare mirror** (``git clone --mirror`` —
     objects and refs, no working tree, no local branches) so that a
     ``git worktree add`` off this base can never inherit a stale local
     branch left over from a prior run.
+
+    Do **not** call this on a working clone (e.g. a sandboxed role's
+    private per-job clone via :func:`ensure_clone`): a bare mirror has
+    no working tree, so it cannot itself be the target of further
+    ``git worktree add`` operations that need file contents checked
+    out, and running this against an in-use working clone would delete
+    it out from under whatever is using it.
 
     Idempotent: if ``clone_path`` already is a bare mirror, this is a
     no-op so existing host-side clones aren't re-fetched on every daemon

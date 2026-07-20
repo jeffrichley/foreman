@@ -35,7 +35,7 @@ from foreman.v4.repository import TicketRepository
 from foreman.v4.routing_git_provider import RoutingGitProvider
 from foreman.v4.sandbox import SandboxLauncher, SandboxUnavailableError, preflight
 from foreman.v4.subprocess_dispatcher import BotMetadata, SubprocessRoleDispatcher
-from foreman.worktree import ensure_clone
+from foreman.worktree import ensure_base_mirror
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +116,7 @@ def bootstrap_cli_context(
                 },
             )
             try:
-                ensure_clone(
+                ensure_base_mirror(
                     repo_url=f"https://github.com/{pc.repo}.git",
                     clone_path=clone_path,
                     token=orch_token,
