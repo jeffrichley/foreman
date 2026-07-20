@@ -374,3 +374,82 @@ def test_enabled_path_role_operates_in_private_clone(tmp_path: Path) -> None:
     assert "BASE_VISIBLE" not in r.stdout
     assert "FOREMAN_RO" in r.stdout
     assert "FOREMAN_WRITABLE" not in r.stdout
+
+
+def test_two_role_handoff_box_sees_prior_role_commit(tmp_path: Path) -> None:
+    """The clone-freshness keystone: role B's box, prepared after role A pushed,
+    must see A's commit and diff it cleanly (reproduces #406's exit-128 against
+    the pre-fix flow). Runs a real bwrap box; self-skips off userns.
+
+    Correction vs. the originating brief's draft: the brief's snippet built
+    the daemon's shared base clone with ``foreman.worktree.ensure_clone``
+    (an ordinary working clone). Task 3 landed
+    ``foreman.worktree.ensure_base_mirror`` instead — the base is now a
+    **bare mirror** (no working tree, no stale local branches to leak into
+    worktrees cut from it; see that function's docstring). This test builds
+    the base with ``ensure_base_mirror`` to match the real daemon flow.
+
+    Also, the private clone is bound into the box at a distinct in-box path
+    (``/repo``, matching ``test_enabled_path_role_operates_in_private_clone``
+    above) rather than reusing the host's ``tmp_path``-derived path as the
+    brief's draft did — the host tmp dir normally lives under ``/tmp``, which
+    ``build_argv`` already tmpfs-mounts for the box, so binding a second,
+    unrelated source there at the identical path is avoidable path-collision
+    risk with no benefit over a dedicated in-box path.
+    """
+    from foreman.v4 import sandbox_clone
+    from foreman.worktree import ensure_base_mirror
+
+    def git(*a: str, cwd: Path) -> str:
+        return subprocess.run(
+            ["git", *a], cwd=cwd, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    def runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(argv, check=True, capture_output=True, text=True)
+
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(origin), str(seed)], check=True)
+    git("config", "user.email", "t@t.t", cwd=seed)
+    git("config", "user.name", "t", cwd=seed)
+    (seed / "a.txt").write_text("a\n")
+    git("add", "-A", cwd=seed)
+    git("commit", "-qm", "init", cwd=seed)
+    git("push", "-q", "origin", "main", cwd=seed)
+
+    base = tmp_path / "base"
+    ensure_base_mirror(repo_url=str(origin), clone_path=base)  # bare mirror
+
+    # role A pushes a new commit to origin
+    (seed / "b.txt").write_text("b\n")
+    git("add", "-A", cwd=seed)
+    git("commit", "-qm", "role A", cwd=seed)
+    new_sha = git("rev-parse", "HEAD", cwd=seed)
+    git("push", "-q", "origin", "main", cwd=seed)
+
+    # role B's box, via the chokepoint (fetches origin)
+    dest = tmp_path / "scratch" / "box"
+    sandbox_clone.prepare_sandbox_clone(
+        base_clone_path=base,
+        dest_clone_path=dest,
+        repo_url=str(origin),
+        role_token="ghs_UNUSED",
+        runner=runner,
+    )
+
+    # inside a REAL box, run the reviewer's diff shape against A's commit —
+    # the private clone is bound RW at a dedicated in-box path (see docstring).
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    box_repo = "/repo"
+    launcher = SandboxLauncher(cache_dir=str(cache_dir))
+    argv = launcher.build_argv(
+        role_token="ghs_UNUSED",
+        scratch_dir=str(tmp_path / "scratch"),
+        role_cmd=["git", "-C", box_repo, "diff", f"origin/main...{new_sha}"],
+        repo_bind=(str(dest), box_repo),
+    )
+    r = subprocess.run(argv, capture_output=True, text=True, check=False)
+    assert r.returncode == 0, f"box could not diff prior-role commit: {r.stderr[-400:]}"
