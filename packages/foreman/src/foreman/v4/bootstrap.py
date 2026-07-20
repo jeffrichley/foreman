@@ -35,7 +35,7 @@ from foreman.v4.repository import TicketRepository
 from foreman.v4.routing_git_provider import RoutingGitProvider
 from foreman.v4.sandbox import SandboxLauncher, SandboxUnavailableError, preflight
 from foreman.v4.subprocess_dispatcher import BotMetadata, SubprocessRoleDispatcher
-from foreman.worktree import ensure_clone
+from foreman.worktree import ensure_base_mirror
 
 logger = logging.getLogger(__name__)
 
@@ -92,23 +92,21 @@ def bootstrap_cli_context(
     # same list that downstream consumers (pollers, Daemon, etc.) use.
     active_projects = projects if projects is not None else config.projects
 
-    # Startup auto-clone: ensure each project's local_clone_path exists and
-    # is a valid git clone before any poll or clone-refresh runs.
+    # Startup auto-clone: ensure each project's local_clone_path is a bare
+    # mirror clone before any poll or clone-refresh runs (ensure_base_mirror).
     # Uses the orchestrator App installation token (read-only; daemon-level
-    # operation, not tied to any role). Raises RuntimeError if a path exists
-    # but is not a git repo — daemon refuses to start with an actionable
-    # message. Idempotent: an existing valid clone is a no-op.
-    # Transient failures (network, auth, disk) are caught and logged as
-    # warnings so the daemon still starts; corrupt/non-git paths (RuntimeError)
-    # remain fatal with their existing actionable message.
+    # operation, not tied to any role). A legacy/non-mirror or corrupt base
+    # is silently removed and re-mirrored — the base holds no unique state,
+    # everything lives on GitHub — so this is safe to repeat. Idempotent: an
+    # existing valid bare mirror is a no-op. Transient failures (network,
+    # auth, disk-full) raise subprocess.CalledProcessError, which is caught
+    # below and logged as a warning so the daemon still starts.
     if run_startup_clone and active_projects:
         orch_token = identity.get_role_token("orchestrator")
         for pc in active_projects:
             clone_path = Path(pc.local_clone_path)
-            if (clone_path / ".git").exists():
-                continue  # already a valid clone — skip, no log
             logger.info(
-                "startup: cloning missing project repo",
+                "startup: ensuring project base mirror",
                 extra={
                     "project": pc.name,
                     "repo": pc.repo,
@@ -116,7 +114,7 @@ def bootstrap_cli_context(
                 },
             )
             try:
-                ensure_clone(
+                ensure_base_mirror(
                     repo_url=f"https://github.com/{pc.repo}.git",
                     clone_path=clone_path,
                     token=orch_token,
@@ -124,8 +122,8 @@ def bootstrap_cli_context(
             except subprocess.CalledProcessError as exc:
                 # Transient failure (network, auth, disk-full, repo-not-found).
                 # Log as warning and continue — the daemon must still start;
-                # the clone will be retried next restart or via ensure_clone
-                # in WorktreeManager when the first ticket runs.
+                # this project's base mirror is re-attempted on the next
+                # daemon restart.
                 logger.warning(
                     "startup: transient clone failure — skipping project",
                     extra={
@@ -136,32 +134,6 @@ def bootstrap_cli_context(
                     },
                 )
                 continue
-            # Scrub the embedded token from the cloned remote URL so it is
-            # not persisted verbatim in .git/config (mirrors the discipline
-            # used by push_branch to avoid token leakage in git config).
-            # Guard: only run if the clone actually produced a .git directory
-            # (ensure_clone may be stubbed in tests and produce no on-disk
-            # artifact — calling git against a non-existent cwd would crash).
-            if (clone_path / ".git").exists():
-                try:
-                    subprocess.run(
-                        [
-                            "git",
-                            "remote",
-                            "set-url",
-                            "origin",
-                            f"https://github.com/{pc.repo}.git",
-                        ],
-                        cwd=clone_path,
-                        check=True,
-                        capture_output=True,
-                    )
-                except subprocess.CalledProcessError:
-                    # Best-effort: failure to scrub the URL is not fatal.
-                    logger.warning(
-                        "startup: could not scrub token from remote URL",
-                        extra={"project": pc.name, "clone_path": str(clone_path)},
-                    )
             logger.info(
                 "startup: project repo cloned",
                 extra={

@@ -14,7 +14,9 @@ from foreman.worktree import (
     WorktreeManager,
     _fetch_origin_branch,
     _origin_branch_exists,
+    ensure_base_mirror,
     ensure_clone,
+    fetch_mirror,
     fetch_origin_default_branch,
 )
 
@@ -2001,8 +2003,6 @@ def test_ensure_clone_creates_clone_when_missing(tmp_path: Path) -> None:
     target = tmp_path / "repos" / "myproject"
     assert not target.exists(), "precondition: target must be missing"
 
-    from foreman.worktree import ensure_clone
-
     ensure_clone(repo_url=str(origin), clone_path=target)
 
     assert target.exists(), "clone directory should exist after ensure_clone"
@@ -2012,6 +2012,31 @@ def test_ensure_clone_creates_clone_when_missing(tmp_path: Path) -> None:
     ensure_clone(repo_url=str(origin), clone_path=target)
     second_mtime = (target / ".git").stat().st_mtime
     assert first_mtime == second_mtime, "ensure_clone must be idempotent on second call"
+
+
+def test_ensure_clone_produces_a_working_clone_not_a_mirror(tmp_path: Path) -> None:
+    """ensure_clone must always produce an ordinary working clone (has a
+    `.git` dir, is-bare-repository is false) — never a bare mirror.
+
+    This is the sandboxed-role safety property: `ensure_clone` also runs
+    against a role's private per-job clone inside the sandbox box (via
+    `WorktreeManager.attach`/`attach_impl`), which needs a real working
+    tree to `git worktree add` from. Only `ensure_base_mirror` may
+    produce a bare mirror, and it must never be called on that path."""
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True)
+    target = tmp_path / "clone"
+
+    ensure_clone(repo_url=str(origin), clone_path=target)
+
+    assert (target / ".git").exists(), "must be a working clone with a .git dir"
+    is_bare = subprocess.run(
+        ["git", "-C", str(target), "rev-parse", "--is-bare-repository"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert is_bare == "false", "ensure_clone must never produce a bare mirror"
 
 
 def test_ensure_clone_raises_on_non_git_dir(tmp_path: Path) -> None:
@@ -2063,6 +2088,143 @@ def test_ensure_clone_token_embedded_in_clone_url(tmp_path: Path) -> None:
     expected_auth_url = f"https://x-access-token:{token}@github.com/o/r.git"
     actual_built = f"https://x-access-token:{token}@" + https_url[len("https://") :]
     assert actual_built == expected_auth_url
+
+
+def test_ensure_base_mirror_creates_bare_mirror(tmp_path: Path) -> None:
+    """ensure_base_mirror creates the daemon's base clone as a bare mirror
+    (objects + refs, no working tree, no local branches) so that per-ticket
+    worktrees added from it can never inherit stale local branches."""
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True)
+    base = tmp_path / "base"
+    ensure_base_mirror(repo_url=str(origin), clone_path=base)
+    # a bare mirror: no working tree, is-bare true, has no local branch checkout
+    is_bare = subprocess.run(
+        ["git", "-C", str(base), "rev-parse", "--is-bare-repository"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert is_bare == "true"
+    assert not (base / ".git").exists()  # a mirror IS the git dir
+
+
+def test_ensure_base_mirror_recreates_a_non_mirror_base(tmp_path: Path) -> None:
+    """ensure_base_mirror migrates a legacy non-mirror base (a working
+    clone, or any other non-bare-mirror directory) by removing it and
+    re-cloning as a bare mirror. The base holds no unique state —
+    everything lives on GitHub — so this migration is safe and
+    idempotent."""
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True)
+    base = tmp_path / "base"
+    # simulate a legacy working clone with a stray local branch
+    subprocess.run(["git", "clone", str(origin), str(base)], check=True)
+    (base / "junk.txt").write_text("junk\n")
+    assert (base / ".git").exists()  # working clone
+    ensure_base_mirror(repo_url=str(origin), clone_path=base)  # migrates
+    is_bare = subprocess.run(
+        ["git", "-C", str(base), "rev-parse", "--is-bare-repository"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert is_bare == "true"
+    assert not (base / ".git").exists()
+    assert not (base / "junk.txt").exists()  # working tree gone
+
+
+def test_ensure_base_mirror_scrubs_token_from_origin_url(tmp_path: Path) -> None:
+    """ensure_base_mirror scrubs the embedded orchestrator token from the
+    mirror's persisted ``origin`` remote URL immediately after cloning.
+
+    A bare mirror has no ``.git`` subdirectory, so the caller-side guard
+    ``if (clone_path / ".git").exists(): git remote set-url ...`` that
+    scrubbed the token for ordinary working clones silently never fired
+    for a mirror — the token would sit at rest in the mirror's config
+    forever. The scrub now lives inside ``ensure_base_mirror`` itself so
+    it always runs, regardless of caller.
+
+    Real HTTPS endpoints aren't reachable in a test, so ``subprocess.run``
+    is spied to intercept only the ``git clone --mirror`` call: it first
+    asserts the token WAS embedded in the URL handed to git (proving the
+    normal embedding still happens), then redirects the actual clone to a
+    real local bare ``origin.git`` so a genuine mirror lands on disk. The
+    scrub call (``git remote set-url origin <repo_url>``) is left
+    un-mocked — it runs for real against that on-disk mirror — so the
+    final assertion reads real git config, not a mock.
+    """
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True)
+
+    repo_url = "https://github.com/owner/repo.git"  # the tokenless URL
+    token = "fake-token-xyz"
+    expected_clone_url = f"https://x-access-token:{token}@github.com/owner/repo.git"
+    base = tmp_path / "base"
+
+    real_run = subprocess.run
+
+    def spy_run(cmd: Any, *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        if isinstance(cmd, list) and cmd[:3] == ["git", "clone", "--mirror"]:
+            assert cmd[3] == expected_clone_url, (
+                f"token must be embedded in the clone URL; got {cmd[3]!r}"
+            )
+            # Redirect the network-bound clone to the real local origin so a
+            # genuine mirror lands on disk for the scrub-and-verify below.
+            redirected = ["git", "clone", "--mirror", str(origin), cmd[4]]
+            return real_run(redirected, **kwargs)
+        return real_run(cmd, *args, **kwargs)
+
+    with patch("foreman.worktree.subprocess.run", side_effect=spy_run):
+        ensure_base_mirror(repo_url=repo_url, clone_path=base, token=token)
+
+    result = subprocess.run(
+        ["git", "-C", str(base), "remote", "get-url", "origin"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    origin_url = result.stdout.strip()
+    assert origin_url == repo_url
+    assert token not in origin_url
+
+
+def test_ensure_base_mirror_is_idempotent(tmp_path: Path) -> None:
+    """A second `ensure_base_mirror` call against an already-valid bare
+    mirror must hit the early-return branch (`if _is_bare_mirror(path):
+    return`) rather than recreate it — no `shutil.rmtree` + re-clone.
+
+    Proven two ways: (1) the mirror is still a bare repo after the second
+    call, and (2) a sentinel file written directly into the mirror
+    directory survives the second call — a recreate would `rmtree` the
+    directory before re-cloning, wiping the sentinel."""
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True)
+    base = tmp_path / "base"
+
+    ensure_base_mirror(repo_url=str(origin), clone_path=base)
+    is_bare = subprocess.run(
+        ["git", "-C", str(base), "rev-parse", "--is-bare-repository"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert is_bare == "true", "test setup: first call must produce a bare mirror"
+
+    # A recreate (rmtree + re-clone) would wipe this file; a true no-op won't.
+    sentinel = base / "sentinel.txt"
+    sentinel.write_text("still here\n")
+
+    ensure_base_mirror(repo_url=str(origin), clone_path=base)  # second call — must no-op
+
+    assert sentinel.exists(), "second call must not rmtree+re-clone an already-valid mirror"
+    is_bare_again = subprocess.run(
+        ["git", "-C", str(base), "rev-parse", "--is-bare-repository"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert is_bare_again == "true"
 
 
 # ----------------------------------------------------------------------
@@ -2147,6 +2309,47 @@ def test_fetch_origin_default_branch_refreshes_origin_default(tmp_path: Path) ->
     assert refreshed_origin_tip != baseline_origin_tip, (
         "After fetch_origin_default_branch, client's origin/main must track the new upstream tip"
     )
+
+
+# ----------------------------------------------------------------------
+# CloneRefresher whole-mirror refresh — fetch_mirror
+# ----------------------------------------------------------------------
+
+
+def test_fetch_mirror_updates_all_refs(tmp_path: Path) -> None:
+    """``fetch_mirror`` runs ``git remote update --prune`` against a bare
+    mirror base clone, pulling down refs for branches that did not exist
+    at clone time (unlike ``fetch_origin_default_branch``, which only
+    tracks the default branch)."""
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(origin), str(seed)], check=True)
+    subprocess.run(["git", "-C", str(seed), "config", "user.email", "t@t.t"], check=True)
+    subprocess.run(["git", "-C", str(seed), "config", "user.name", "t"], check=True)
+    (seed / "a.txt").write_text("a\n")
+    subprocess.run(["git", "-C", str(seed), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-qm", "init"], check=True)
+    subprocess.run(["git", "-C", str(seed), "push", "-q", "origin", "main"], check=True)
+
+    base = tmp_path / "base"
+    ensure_base_mirror(repo_url=str(origin), clone_path=base)  # bare mirror at main
+
+    # push a new branch to origin, then refresh the mirror
+    subprocess.run(["git", "-C", str(seed), "checkout", "-qb", "feature"], check=True)
+    (seed / "b.txt").write_text("b\n")
+    subprocess.run(["git", "-C", str(seed), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-qm", "feat"], check=True)
+    subprocess.run(["git", "-C", str(seed), "push", "-q", "origin", "feature"], check=True)
+
+    fetch_mirror(base)
+    # mirror now has the feature ref
+    r = subprocess.run(
+        ["git", "-C", str(base), "rev-parse", "--verify", "refs/heads/feature"],
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stderr
 
 
 # ----------------------------------------------------------------------

@@ -30,6 +30,21 @@ def _init_repo_with_commit(repo_path: Path) -> None:
     subprocess.run(["git", "-C", str(repo_path), "commit", "-q", "-m", "init"], check=True)
 
 
+def _real_git_faking_fetch(argv: list[str]) -> subprocess.CompletedProcess[str]:
+    """Runner for the real-git (no-fake-runner) tests below: runs every call
+    through the real ``subprocess.run`` EXCEPT the freshness chokepoint's
+    ``fetch`` — that would hit the tests' bogus ``https://github.com/o/n.git``
+    origin over the real network (unreachable/flaky in CI, and orthogonal to
+    what these tests assert: the hardlink clone + tokenized origin re-point).
+    Real-git fetch behavior against a genuine reachable remote is proven
+    separately by the #406 repro test below, which fetches from a real local
+    bare repo.
+    """
+    if argv[:1] == ["git"] and "fetch" in argv:
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    return subprocess.run(argv, check=True, capture_output=True, text=True)
+
+
 def test_clone_argv_is_local_clone() -> None:
     # Brief-snippet fix: hardcoded POSIX literals broke on Windows dev
     # boxes, where str(Path("/foreman/...")) renders with backslashes.
@@ -97,7 +112,12 @@ def test_prepare_skips_clone_when_present_but_always_refreshes_origin(tmp_path: 
         runner=fake_runner,
     )
     assert not any(c[:3] == ["git", "clone", "--local"] for c in calls)
-    assert calls[-1][-1] == "https://x-access-token:ghs_NEW@github.com/o/n.git"
+    # set-url is no longer necessarily the last call — the freshness
+    # chokepoint fetch now runs after it — so locate it explicitly rather
+    # than assuming calls[-1].
+    set_url_call = next(c for c in calls if c[3:5] == ["remote", "set-url"])
+    assert set_url_call[-1] == "https://x-access-token:ghs_NEW@github.com/o/n.git"
+    assert any("fetch" in c for c in calls), "the chokepoint must attempt a fetch"
 
 
 def test_prepare_sandbox_clone_real_git_creates_hardlinked_clone_and_repoints_origin(
@@ -121,6 +141,7 @@ def test_prepare_sandbox_clone_real_git_creates_hardlinked_clone_and_repoints_or
         dest_clone_path=dest,
         repo_url="https://github.com/o/n.git",
         role_token="ghs_REAL",
+        runner=_real_git_faking_fetch,
     )
 
     assert (dest / ".git").exists()
@@ -164,12 +185,14 @@ def test_prepare_sandbox_clone_real_git_idempotent_reentry_refreshes_origin(
         dest_clone_path=dest,
         repo_url="https://github.com/o/n.git",
         role_token="ghs_OLD",
+        runner=_real_git_faking_fetch,
     )
     prepare_sandbox_clone(
         base_clone_path=base,
         dest_clone_path=dest,
         repo_url="https://github.com/o/n.git",
         role_token="ghs_NEW",
+        runner=_real_git_faking_fetch,
     )
 
     origin = subprocess.run(
@@ -213,3 +236,94 @@ def test_cleanup_removes_all_role_job_dirs_for_ticket(tmp_path: Path) -> None:
     assert not (root / "foreman" / "worker-42").exists()
     assert (root / "foreman" / "worker-7").exists()  # untouched
     assert len(removed) == 3
+
+
+def test_repro_406_box_from_stale_base_lacks_pushed_commit(tmp_path: Path) -> None:
+    """REPRO of #406: prepare_sandbox_clone clones from the base and re-points
+    origin, but does NOT fetch — so a commit pushed to origin after the base
+    was cloned is absent in the box, and `git diff origin/main...<sha>` fails
+    (exit 128). This test FAILS today and passes once Task 2 adds the fetch."""
+    import subprocess
+
+    from foreman.v4 import sandbox_clone
+
+    def git(*args: str, cwd: Path) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    # stand-in origin (bare) with a main branch + one commit
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(origin), str(seed)], check=True)
+    subprocess.run(["git", "-C", str(seed), "config", "user.email", "t@t.t"], check=True)
+    subprocess.run(["git", "-C", str(seed), "config", "user.name", "t"], check=True)
+    (seed / "a.txt").write_text("a\n")
+    git("add", "-A", cwd=seed)
+    git("commit", "-qm", "init", cwd=seed)
+    git("push", "-q", "origin", "main", cwd=seed)
+
+    # daemon base clone (co-located so --local hardlinks) — stale snapshot
+    base = tmp_path / "base"
+    subprocess.run(["git", "clone", str(origin), str(base)], check=True)
+
+    # a prior role pushes a NEW commit to origin AFTER the base was cloned
+    (seed / "b.txt").write_text("b\n")
+    git("add", "-A", cwd=seed)
+    git("commit", "-qm", "role-A change", cwd=seed)
+    new_sha = git("rev-parse", "HEAD", cwd=seed)
+    git("push", "-q", "origin", "main", cwd=seed)
+
+    # next role's box, via the current prepare flow (origin re-pointed at the
+    # real origin path here since there's no token auth in the test)
+    dest = tmp_path / "scratch" / "box"
+    sandbox_clone.prepare_sandbox_clone(
+        base_clone_path=base,
+        dest_clone_path=dest,
+        repo_url=str(origin),
+        role_token="ghs_UNUSED",
+        runner=lambda argv: subprocess.run(argv, check=True, capture_output=True, text=True),
+    )
+    # BUG: the box lacks new_sha, so a diff against it fails (git exit 128)
+    result = subprocess.run(
+        ["git", "-C", str(dest), "diff", f"origin/main...{new_sha}"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"box is stale: diff against pushed commit failed (rc={result.returncode}): "
+        f"{result.stderr.strip()}"
+    )
+
+
+def test_prepare_sandbox_clone_raises_when_fetch_fails(tmp_path: Path) -> None:
+    """The chokepoint fetch is fail-closed: a fetch failure must raise, never
+    let the role run on stale refs."""
+    import subprocess
+
+    import pytest
+
+    from foreman.v4 import sandbox_clone
+
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        # let clone + set-url succeed; fail the fetch
+        if argv[:1] == ["git"] and "fetch" in argv:
+            raise subprocess.CalledProcessError(1, argv, stderr="boom")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    # dest lives under tmp_path (not a fake "/dest") so prepare_sandbox_clone's
+    # real dest_clone_path.parent.mkdir() call is harmless — only the git
+    # invocations themselves are faked via `runner`.
+    with pytest.raises(subprocess.CalledProcessError):
+        sandbox_clone.prepare_sandbox_clone(
+            base_clone_path=tmp_path / "base",
+            dest_clone_path=tmp_path / "dest",
+            repo_url="https://github.com/o/n.git",
+            role_token="ghs_X",
+            runner=runner,
+        )
+    assert any("fetch" in a for a in calls), "the chokepoint must attempt a fetch"

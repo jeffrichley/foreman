@@ -54,6 +54,28 @@ class ImplWorktreeRebaseConflictError(Exception):
     """
 
 
+def _is_bare_mirror(path: Path) -> bool:
+    """Report whether ``path`` is a bare git repository.
+
+    Args:
+        path: Filesystem path to probe.
+
+    Returns:
+        ``True`` if ``path`` exists and ``git rev-parse
+        --is-bare-repository`` succeeds there and prints ``"true"``;
+        ``False`` otherwise (including when ``path`` doesn't exist or
+        isn't a git repository at all).
+    """
+    if not path.exists():
+        return False
+    result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--is-bare-repository"],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
 def ensure_clone(*, repo_url: str, clone_path: Path, token: str | None = None) -> None:
     """Ensure ``clone_path`` is a valid git clone of ``repo_url``.
 
@@ -63,6 +85,13 @@ def ensure_clone(*, repo_url: str, clone_path: Path, token: str | None = None) -
     happen. Idempotent: if ``clone_path`` already contains a ``.git``
     directory, this is a no-op so existing host-side clones aren't
     re-fetched on every daemon restart.
+
+    This produces an ordinary **working** clone — safe to call on a
+    sandboxed role's private per-job clone (see
+    :meth:`WorktreeManager.attach`, :meth:`WorktreeManager.attach_impl`),
+    which itself needs a working tree to run ``git worktree add`` from.
+    For the daemon's shared base clone, use :func:`ensure_base_mirror`
+    instead.
 
     Args:
         repo_url: Remote URL (HTTPS or SSH). Authentication via
@@ -96,6 +125,92 @@ def ensure_clone(*, repo_url: str, clone_path: Path, token: str | None = None) -
         clone_url = f"https://x-access-token:{token}@" + repo_url[len("https://") :]
     subprocess.run(
         ["git", "clone", clone_url, str(clone_path)],
+        check=True,
+        capture_output=True,
+    )
+
+
+def ensure_base_mirror(*, repo_url: str, clone_path: Path, token: str | None = None) -> None:
+    """Ensure ``clone_path`` is a bare mirror clone of ``repo_url``.
+
+    For the **daemon's shared base clone only** — the single on-disk
+    clone that per-ticket worktrees (:class:`WorktreeManager`) and
+    sandboxed per-job clones (``foreman.v4.sandbox_clone``) are created
+    from. The base is a **bare mirror** (``git clone --mirror`` —
+    objects and refs, no working tree, no local branches) so that a
+    ``git worktree add`` off this base can never inherit a stale local
+    branch left over from a prior run.
+
+    Do **not** call this on a working clone (e.g. a sandboxed role's
+    private per-job clone via :func:`ensure_clone`): a bare mirror has
+    no working tree, so it cannot itself be the target of further
+    ``git worktree add`` operations that need file contents checked
+    out, and running this against an in-use working clone would delete
+    it out from under whatever is using it.
+
+    Idempotent: if ``clone_path`` already is a bare mirror, this is a
+    no-op so existing host-side clones aren't re-fetched on every daemon
+    restart. If ``clone_path`` exists but is *not* a bare mirror (a
+    legacy working clone from before this migration, or any other
+    non-mirror directory), it is removed and re-cloned as a mirror — the
+    base holds no unique state, everything lives on GitHub, so this
+    migration is safe to repeat. Fail-closed: if removal or the
+    re-clone fails, the exception propagates rather than leaving a
+    half-migrated base on disk.
+
+    Token scrub: when a fresh mirror is cloned with ``token`` set, the
+    token is embedded in the clone URL so git can authenticate — but
+    that URL is exactly what git persists verbatim into the mirror's
+    ``config`` as ``remote.origin.url``. Immediately after a successful
+    clone we run ``git remote set-url origin <repo_url>`` (the
+    token-LESS URL) so the orchestrator token never sits at rest in the
+    mirror's config. This mirrors the discipline used elsewhere (e.g.
+    ``push_branch``) to avoid token leakage in git config, and matters
+    more here than for :func:`ensure_clone`'s working clones because a
+    bare mirror has no ``.git`` subdirectory for a caller to key a
+    "clone succeeded, now scrub" check off of — the scrub has to live
+    inside this function to always run.
+
+    Args:
+        repo_url: Remote URL (HTTPS or SSH). Authentication via
+            PATH-resolved credentials / ssh agent / app-token URL
+            rewriting as per the caller's existing convention. Also
+            the URL the mirror's ``origin`` remote is reset to after a
+            fresh clone, so it must already be token-less.
+        clone_path: Local filesystem path where the mirror should live.
+        token: Optional GitHub App installation token. When set and
+            ``repo_url`` starts with ``"https://"``, the token is
+            embedded in the clone URL as
+            ``https://x-access-token:<token>@...`` so git authenticates
+            without a credential helper. Non-HTTPS URLs (local paths,
+            ``file://``, SSH) pass through unchanged. Scrubbed from the
+            mirror's ``origin`` remote immediately after cloning.
+
+    Raises:
+        OSError: if removing an existing non-mirror ``clone_path`` fails.
+        subprocess.CalledProcessError: if ``git clone --mirror`` or the
+            post-clone token-scrub ``git remote set-url`` fails.
+    """
+    if clone_path.exists() and not _is_bare_mirror(clone_path):
+        # Legacy working clone (or a corrupt dir): the base holds no unique
+        # state — everything is on GitHub — so recreate it as a mirror.
+        # Fail-closed: a failed removal must not leave a half-migrated base.
+        shutil.rmtree(clone_path)
+    if _is_bare_mirror(clone_path):
+        return
+    clone_path.parent.mkdir(parents=True, exist_ok=True)
+    clone_url = repo_url
+    if token is not None and repo_url.startswith("https://"):
+        clone_url = f"https://x-access-token:{token}@" + repo_url[len("https://") :]
+    subprocess.run(
+        ["git", "clone", "--mirror", clone_url, str(clone_path)],
+        check=True,
+        capture_output=True,
+    )
+    # Scrub the embedded token from the mirror's persisted remote URL —
+    # see the token-scrub note in the docstring above.
+    subprocess.run(
+        ["git", "-C", str(clone_path), "remote", "set-url", "origin", repo_url],
         check=True,
         capture_output=True,
     )
@@ -852,6 +967,28 @@ def fetch_origin_default_branch(
     """
     default = _resolve_default_branch(clone_path, role_token=role_token)
     _fetch_origin_branch(clone_path, default, role_token=role_token)
+
+
+def fetch_mirror(clone_path: Path) -> None:
+    """Best-effort refresh of a bare-mirror base clone: fetch ALL refs.
+
+    Used by the daemon's throttled ``CloneRefresher`` (foreman#407) to keep
+    the mirror's object store warm so each box's clone-prep fetch is a
+    small delta. Perf only — correctness comes from the per-box chokepoint
+    fetch (see :func:`foreman.v4.sandbox_clone.prepare_sandbox_clone`), so
+    a failure here is logged and swallowed rather than raised.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(clone_path), "remote", "update", "--prune"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(
+            f"[foreman.worktree] warning: mirror refresh failed in {clone_path}: "
+            f"{result.stderr.strip()}",
+            file=sys.stderr,
+        )
 
 
 def fetch_origin_branch(

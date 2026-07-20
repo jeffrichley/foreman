@@ -369,36 +369,36 @@ def test_bootstrap_uses_postgres_when_engine_postgres(monkeypatch, tmp_path: Pat
 # ----------------------------------------------------------------------
 # foreman#476 — startup auto-clone loop
 #
-# bootstrap_cli_context now calls ensure_clone for each project whose
-# local_clone_path doesn't exist (or exists but has no .git). The
-# autouse fixture below stubs ensure_clone so the existing tests are
-# not affected by the new startup step (the paths they pass don't exist
-# on disk and would trigger a real clone attempt without the stub).
+# bootstrap_cli_context now calls ensure_base_mirror for each active
+# project, unconditionally (idempotency lives inside ensure_base_mirror
+# itself — see test_worktree.py). The autouse fixture below stubs
+# ensure_base_mirror so the existing tests are not affected by the new
+# startup step (the paths they pass don't exist on disk and would
+# trigger a real clone attempt without the stub).
 # ----------------------------------------------------------------------
 
 
 @pytest.fixture(autouse=True)
-def _stub_ensure_clone(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stub ``foreman.v4.bootstrap.ensure_clone`` to a no-op MagicMock so
-    existing bootstrap tests are not broken by the startup clone loop added
-    in foreman#476. Tests that need to assert clone behaviour override this
-    fixture with their own ``monkeypatch.setattr`` call."""
-    monkeypatch.setattr("foreman.v4.bootstrap.ensure_clone", MagicMock())
+def _stub_ensure_base_mirror(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub ``foreman.v4.bootstrap.ensure_base_mirror`` to a no-op MagicMock
+    so existing bootstrap tests are not broken by the startup clone loop
+    added in foreman#476. Tests that need to assert clone behaviour override
+    this fixture with their own ``monkeypatch.setattr`` call."""
+    monkeypatch.setattr("foreman.v4.bootstrap.ensure_base_mirror", MagicMock())
 
 
 def test_bootstrap_clones_missing_project_at_startup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ensure_clone is called at bootstrap for each project whose
-    local_clone_path doesn't exist on disk, using the orchestrator token
-    and the full HTTPS GitHub URL (foreman#476).
+    """ensure_base_mirror is called at bootstrap for each active project,
+    using the orchestrator token and the full HTTPS GitHub URL (foreman#476).
 
     Production always ships config.projects=[] (issue #477 template change)
     and passes projects via the ``projects=`` kwarg. The test mirrors that
     real call path so the assert exercises the ``active_projects`` branch,
     not the dead ``config.projects`` branch."""
-    mock_ensure_clone = MagicMock()
-    monkeypatch.setattr("foreman.v4.bootstrap.ensure_clone", mock_ensure_clone)
+    mock_ensure_base_mirror = MagicMock()
+    monkeypatch.setattr("foreman.v4.bootstrap.ensure_base_mirror", mock_ensure_base_mirror)
 
     pc = ProjectConfig(
         name="voice",
@@ -423,28 +423,36 @@ def test_bootstrap_clones_missing_project_at_startup(
         projects=[pc],
     )
 
-    mock_ensure_clone.assert_called_once_with(
+    mock_ensure_base_mirror.assert_called_once_with(
         repo_url="https://github.com/owner/voice.git",
         clone_path=Path(str(tmp_path / "voice")),
         token="ghp_TOKEN",
     )
 
 
-def test_bootstrap_skips_clone_for_existing_valid_clone(
+def test_bootstrap_calls_ensure_base_mirror_even_when_local_git_dir_exists(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ensure_clone is NOT called when local_clone_path already contains a
-    .git directory — the startup loop's idempotency fast-path fires and the
-    orchestrator token is never minted (foreman#476).
+    """ensure_base_mirror is called unconditionally at bootstrap — even when
+    local_clone_path already contains a (legacy, working-clone) ``.git``
+    directory (foreman#476, revised).
+
+    Bootstrap no longer prechecks ``(clone_path / ".git").exists()`` before
+    deciding whether to call ensure_base_mirror: that check never matches a
+    bare mirror (mirrors have no ``.git`` subdir) and would silently skip
+    the startup call forever. Idempotency (and safe migration of a legacy
+    working clone into a mirror) now lives entirely inside
+    ``ensure_base_mirror`` itself — see
+    ``test_worktree.py::test_ensure_base_mirror_is_idempotent``.
 
     Uses the production call path: config.projects=[], project via ``projects=``
     kwarg (mirrors issue #477 / #503 template change)."""
-    # Simulate an existing valid clone by creating the .git directory.
+    # A legacy working-clone marker — must NOT short-circuit the call.
     git_dir = tmp_path / "voice" / ".git"
     git_dir.mkdir(parents=True)
 
-    mock_ensure_clone = MagicMock()
-    monkeypatch.setattr("foreman.v4.bootstrap.ensure_clone", mock_ensure_clone)
+    mock_ensure_base_mirror = MagicMock()
+    monkeypatch.setattr("foreman.v4.bootstrap.ensure_base_mirror", mock_ensure_base_mirror)
 
     pc = ProjectConfig(
         name="voice",
@@ -468,30 +476,35 @@ def test_bootstrap_skips_clone_for_existing_valid_clone(
         projects=[pc],
     )
 
-    mock_ensure_clone.assert_not_called()
+    mock_ensure_base_mirror.assert_called_once_with(
+        repo_url="https://github.com/owner/voice.git",
+        clone_path=Path(str(tmp_path / "voice")),
+        token="ghp_TOKEN",
+    )
 
 
 def test_bootstrap_survives_transient_clone_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A CalledProcessError from ensure_clone is caught and logged; the daemon
-    still starts (bootstrap_cli_context returns normally) and subsequent
-    projects in the list are still processed (foreman#476 graceful-degrade).
+    """A CalledProcessError from ensure_base_mirror is caught and logged; the
+    daemon still starts (bootstrap_cli_context returns normally) and
+    subsequent projects in the list are still processed (foreman#476
+    graceful-degrade).
 
     Scenario: two projects, the first clone fails transiently, the second
     succeeds. bootstrap_cli_context must:
     - NOT raise
-    - call ensure_clone for BOTH projects
+    - call ensure_base_mirror for BOTH projects
     - still return a valid CliContext (daemon can start)."""
     call_order: list[str] = []
 
-    def fake_ensure_clone(*, repo_url: str, clone_path: Path, token: str) -> None:
+    def fake_ensure_base_mirror(*, repo_url: str, clone_path: Path, token: str) -> None:
         call_order.append(repo_url)
         if "owner/failing" in repo_url:
             raise subprocess.CalledProcessError(128, ["git", "clone"])
         # second project succeeds — no-op is fine
 
-    monkeypatch.setattr("foreman.v4.bootstrap.ensure_clone", fake_ensure_clone)
+    monkeypatch.setattr("foreman.v4.bootstrap.ensure_base_mirror", fake_ensure_base_mirror)
 
     pc_fail = ProjectConfig(
         name="failing",
@@ -513,8 +526,8 @@ def test_bootstrap_survives_transient_clone_failure(
         projects=[],
     )
     # Must not raise — daemon starts despite the transient clone failure.
-    # The token-scrub subprocess.run is guarded by (clone_path / ".git").exists(),
-    # which is False here (fake_ensure_clone creates no on-disk artifacts).
+    # The token-scrub now happens inside ensure_base_mirror itself, so
+    # bootstrap has nothing left to do on failure besides log + continue.
     ctx = bootstrap_cli_context(
         config=config,
         identity=_stub_identity(),

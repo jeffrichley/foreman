@@ -10,9 +10,11 @@ per-project failures.
 from __future__ import annotations
 
 import datetime as dt
+import inspect
 from pathlib import Path
 
 from foreman.v4.clone_refresh import CloneRefresher
+from foreman.worktree import fetch_mirror
 
 
 class _RecordingFetch:
@@ -42,6 +44,18 @@ def _refresher(
         fetch=fetch,
         clock=clock,
     )
+
+
+def test_default_fetch_is_fetch_mirror() -> None:
+    """foreman#406: the base clone is now a bare mirror, so the
+    refresher's production default must warm the WHOLE mirror (all refs)
+    rather than only ``origin/<default-branch>``."""
+    init_default = inspect.signature(CloneRefresher.__init__).parameters["fetch"].default
+    from_projects_default = (
+        inspect.signature(CloneRefresher.from_projects).parameters["fetch"].default
+    )
+    assert init_default is fetch_mirror
+    assert from_projects_default is fetch_mirror
 
 
 def test_first_tick_fetches_every_project() -> None:
