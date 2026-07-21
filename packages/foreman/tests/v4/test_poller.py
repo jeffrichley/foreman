@@ -422,3 +422,42 @@ def test_poller_does_not_reconcile_foreign_project_tickets():
 
     # Project b's ticket is UNTOUCHED — project a's Poller must not clobber it.
     assert repo.get_ticket_dependencies(ticket_b.id) == [9]
+
+
+def test_one_bad_ticket_reconcile_does_not_abort_the_project_sweep():
+    """A per-ticket reconcile failure must not starve the rest of the project.
+
+    compute_unmet_dependencies makes live GitHub reads that can raise; without
+    per-ticket isolation one poison ticket aborts tick() before Pass 3, and —
+    because the ticket order is stable — re-aborts identically every tick,
+    permanently starving every other ticket in the project. Adversarial review
+    finding #2.
+    """
+    repo = InMemoryTicketRepository()
+    t_bad = repo.create_ticket(project="p", issue_number=99, now=_T0)
+    t_good = repo.create_ticket(project="p", issue_number=1, now=_T0)
+
+    class _RaisingGit(FakeGitProvider):
+        def read_blocked_by(self, *, project: str, issue_number: int) -> list[int]:
+            if issue_number == 99:
+                raise RuntimeError("GitHub 500 on blocked_by read")
+            return super().read_blocked_by(project=project, issue_number=issue_number)
+
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    poller = Poller(
+        repo=repo,
+        qm=qm,
+        git=_RaisingGit(),
+        project="p",
+        trigger_label="foreman:plan",
+        clock=lambda: _T0,
+    )
+
+    poller.tick()  # must NOT raise despite #99 failing in reconcile
+
+    dequeued_ids: set[int] = set()
+    while (item := qm.dequeue()) is not None:
+        dequeued_ids.add(item.ticket_id)
+    # The healthy ticket still reached Pass 3 and was enqueued.
+    assert t_good.id in dequeued_ids
+    assert t_bad.id in dequeued_ids  # the poison ticket itself is not lost either

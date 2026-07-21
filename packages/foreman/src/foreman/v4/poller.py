@@ -20,6 +20,7 @@ A real daemon calls tick() on a cadence; tests call it manually.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from collections.abc import Callable
 
 from foreman.v4.dependency_reconciler import compute_unmet_dependencies, find_cycles
@@ -27,6 +28,8 @@ from foreman.v4.git_provider import GitProvider
 from foreman.v4.queue_manager import QueueManager
 from foreman.v4.repository import TicketAlreadyExistsError, TicketRepository
 from foreman.v4.work import WorkItem
+
+_log = logging.getLogger(__name__)
 
 # foreman#443: ``ImplApproved`` was removed — it polls each tick to
 # detect the human merge, so the Poller must re-enqueue it (same as
@@ -135,11 +138,27 @@ class Poller:
         # (list_unmet_dependencies → depends_on verbatim) skips tickets whose
         # deps are non-empty.
         for ticket in open_tickets:
-            unmet = compute_unmet_dependencies(
-                project=ticket.project,
-                issue_number=ticket.issue_number,
-                provider=self._git,
-            )
+            try:
+                unmet = compute_unmet_dependencies(
+                    project=ticket.project,
+                    issue_number=ticket.issue_number,
+                    provider=self._git,
+                )
+            except Exception:
+                # compute_unmet_dependencies makes live GitHub reads (blocked_by
+                # + state_reason) that can raise (rate-limit, 5xx, transient
+                # 404). Isolate per-ticket: one poison ticket must NOT abort the
+                # whole sweep — list_open_tickets is stable-ordered, so an
+                # unhandled raise here would re-abort identically every tick and
+                # permanently starve every other ticket in the project (Pass 3
+                # never runs). Log, leave this ticket's deps unchanged, continue.
+                _log.exception(
+                    "reconcile: failed to compute deps for %s#%s; leaving "
+                    "depends_on unchanged and continuing the sweep",
+                    ticket.project,
+                    ticket.issue_number,
+                )
+                continue
             self._repo.set_ticket_dependencies(ticket.id, deps=unmet)
 
         # -- Pass 2: cycle detection among tracked tickets (Task 6, foreman#524). --
