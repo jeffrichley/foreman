@@ -1159,3 +1159,49 @@ def test_reconcile_entry_drain_publishes_state_exited_event_for_merge_queued():
     assert len(exited) == 1
     assert exited[0].ticket_id == ticket.id
     assert repo.get_ticket(ticket.id).current_state == "Done"
+
+
+def test_raising_attempt_merge_escalates_and_lets_queue_drain(monkeypatch):
+    """A head entry whose attempt_merge always RAISES must escalate to NeedsHelp
+    after MAX_ATTEMPTS ticks and be dequeued, so the entry behind it drains.
+
+    The MAX_ATTEMPTS bound previously advanced only on a BLOCKED outcome, never
+    on a raise, so a persistently-raising head wedged the whole project queue
+    forever. Adversarial review finding #3.
+    """
+    from foreman.v4 import merge_coordinator as mc_mod
+
+    repo, git = _fake()
+    poison = _seed_ticket_in_merge_queue(repo, git, issue_number=1, pr=10, kind="impl")
+    behind = _seed_ticket_in_merge_queue(
+        repo,
+        git,
+        issue_number=2,
+        pr=11,
+        kind="impl",
+        mergeable=True,
+        ci_passing=True,
+        mergeable_state="clean",
+    )
+    coord = _coordinator(repo, git)
+
+    real_attempt_merge = mc_mod.attempt_merge
+
+    def _boom(*a, **kw):
+        raise RuntimeError("GitHub 403 merging a check-blocked PR")
+
+    monkeypatch.setattr(mc_mod, "attempt_merge", _boom)
+
+    # Ticks 1..MAX_ATTEMPTS: the poison head is retried, then escalated.
+    for _ in range(MergeCoordinator.MAX_ATTEMPTS):
+        coord.tick()
+
+    assert repo.get_ticket(poison.id).current_state == "NeedsHelp"
+    head = repo.head_merge_entry("p")
+    assert head is not None and head.pr_number == 11  # behind entry now at head
+
+    # Restore a working merge: the previously-blocked entry now drains.
+    monkeypatch.setattr(mc_mod, "attempt_merge", real_attempt_merge)
+    coord.tick()
+    assert repo.get_ticket(behind.id).current_state == "Done"
+    assert repo.head_merge_entry("p") is None  # queue fully drained

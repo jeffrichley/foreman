@@ -270,12 +270,35 @@ class MergeCoordinator:
         if entry.status != "merging":
             self._repo.mark_merge_active(entry.id)
         ctx = self._ctx_for(entry)
-        outcome = attempt_merge(
-            ctx,
-            pr_number=entry.pr_number,
-            on_merge_success=self._on_merge_success(ctx, entry),
-            pre_merge_guard=None,
-        )
+        try:
+            outcome = attempt_merge(
+                ctx,
+                pr_number=entry.pr_number,
+                on_merge_success=self._on_merge_success(ctx, entry),
+                pre_merge_guard=None,
+            )
+        except Exception:
+            # A raised attempt_merge (GitHub 403 on a check-blocked PR, a 5xx,
+            # a bug) is otherwise caught only by the daemon's per-project tick
+            # guard and retried at the head FOREVER: the MAX_ATTEMPTS bound is
+            # advanced only on a BLOCKED outcome, never on a raise, and FIFO
+            # one-entry-per-tick means every ticket behind this poison head
+            # sits in MergeQueued indefinitely (a restart re-raises the same
+            # condition). Count the raise toward the bound and escalate to
+            # NeedsHelp (which dequeues) so the queue drains. Adversarial review
+            # finding #3.
+            attempts = self._repo.increment_merge_attempts(entry.id)
+            _log.exception(
+                "merge-coordinator: attempt_merge raised for %s PR #%s "
+                "(attempt %s/%s)",
+                project,
+                entry.pr_number,
+                attempts,
+                self.MAX_ATTEMPTS,
+            )
+            if attempts >= self.MAX_ATTEMPTS:
+                self._route(ctx, entry, "NeedsHelp")
+            return
         if outcome.kind == OutcomeKind.CLEAN:
             self._route(ctx, entry, self._post_merge_state(entry))
         elif outcome.kind == OutcomeKind.BLOCKED:
