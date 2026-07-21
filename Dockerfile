@@ -43,7 +43,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gettext-base \
         just \
         bubblewrap \
+        procps jq iproute2 less \
     && rm -rf /var/lib/apt/lists/*
+# Operator/debug utilities (slim base ships none of these):
+#   procps   — ps/top/free/pgrep/pkill: "is a worker actually alive?" (the daemon
+#              tracks its own jobs, but ad-hoc process inspection needs this;
+#              /proc-only debugging is painful)
+#   jq       — the daemon's logs and CLI output are structured JSON
+#   iproute2 — ss: what's listening / connected (bus HTTP host, postgres)
+#   less     — a pager for reading logs/config in an exec session
 # gettext-base provides ``envsubst``; the entrypoint uses it to expand
 # ${FOREMAN_*_APP_ID} placeholders in /etc/foreman/config.toml.template
 # into the runtime V4Config file at $FOREMAN_V4_CONFIG.
