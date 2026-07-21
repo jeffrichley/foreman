@@ -289,8 +289,7 @@ class MergeCoordinator:
             # finding #3.
             attempts = self._repo.increment_merge_attempts(entry.id)
             _log.exception(
-                "merge-coordinator: attempt_merge raised for %s PR #%s "
-                "(attempt %s/%s)",
+                "merge-coordinator: attempt_merge raised for %s PR #%s (attempt %s/%s)",
                 project,
                 entry.pr_number,
                 attempts,
