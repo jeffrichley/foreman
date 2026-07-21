@@ -23,19 +23,27 @@ import typer
 
 
 def cmd_gate_update(ctx: typer.Context) -> None:
-    """Exit 75 (defer) when the board is busy; exit 0 (allow) when idle.
+    """Exit 75 (defer) while a role job is in flight; exit 0 (allow) otherwise.
+
+    "Busy" means a role subprocess is actually RUNNING — the only thing a
+    redeploy (which kills the daemon and its --die-with-parent children) would
+    destroy. It must NOT mean "any non-terminal ticket exists": a ``NeedsHelp``
+    ticket is parked awaiting a human, and a ``Queued`` ticket only awaits
+    dispatch — neither is live work, and blocking on them let a single lingering
+    NeedsHelp ticket defer every auto-deploy indefinitely (foreman idle-gate
+    review). Gate on in-flight state-instances (open role jobs) instead.
 
     Fail-open on any repository error so a guard bug never wedges the
     deploy pipeline.
     """
     try:
-        open_tickets = ctx.obj.repo.list_open_tickets()
+        in_flight = ctx.obj.repo.list_in_flight_state_instances()
     except Exception as exc:
         typer.echo(
             f"WARNING: gate-update check failed ({exc!r}); allowing update (fail-open)",
             err=True,
         )
         sys.exit(0)
-    if open_tickets:
+    if in_flight:
         raise typer.Exit(code=75)
-    # Idle — fall through; typer exits 0.
+    # No role job running — fall through; typer exits 0.
