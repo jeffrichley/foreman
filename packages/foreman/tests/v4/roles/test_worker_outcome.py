@@ -301,3 +301,60 @@ def test_adopt_existing_pr_ci_still_running():
             final_outcome="incomplete",
         )
     assert (pr_url, check_passed, salvaged) == ("https://x/pull/7", False, True)
+
+
+# --- foreman#575: a green-but-BEHIND impl PR must advance, not loop ---
+
+from foreman.roles.worker import _existing_impl_pr_checks_passed  # noqa: E402
+
+
+def test_existing_impl_pr_checks_passed_true_for_clean():
+    """``clean`` is GitHub's all-green state → checks passed."""
+    assert _existing_impl_pr_checks_passed("clean") is True
+
+
+def test_existing_impl_pr_checks_passed_true_for_unstable():
+    """``unstable`` = required checks passed, an optional one failed → still green."""
+    assert _existing_impl_pr_checks_passed("unstable") is True
+
+
+def test_existing_impl_pr_checks_passed_true_for_behind():
+    """``behind`` = checks PASSED, base merely advanced → must advance (foreman#575).
+
+    The pre-fix behavior excluded ``behind`` and pinned a green-but-behind PR
+    in an infinite worker re-dispatch loop; the MergeCoordinator's
+    BehindBranchHealer (downstream) rebases it once the ticket advances.
+    """
+    assert _existing_impl_pr_checks_passed("behind") is True
+
+
+def test_existing_impl_pr_checks_passed_false_for_blocked():
+    """``blocked`` = a required check is pending/failed → keep polling (ci_in_flight)."""
+    assert _existing_impl_pr_checks_passed("blocked") is False
+
+
+def test_existing_impl_pr_checks_passed_false_for_dirty():
+    """``dirty`` = a real merge conflict → not check-passed."""
+    assert _existing_impl_pr_checks_passed("dirty") is False
+
+
+def test_existing_impl_pr_checks_passed_false_for_unknown():
+    """``unknown`` = GitHub hasn't computed mergeability yet → keep polling, don't advance."""
+    assert _existing_impl_pr_checks_passed("unknown") is False
+
+
+def test_adopt_existing_behind_pr_advances():
+    """foreman#575: an adopted BEHIND impl PR advances (check_passed True), not loops."""
+    with patch(
+        "foreman.roles.worker.find_open_pr_by_head_branch",
+        return_value=_fake_pr(mergeable_state="behind"),
+    ):
+        pr_url, check_passed, salvaged = _maybe_adopt_existing_impl_pr(
+            MagicMock(),
+            owner="o",
+            branch="b",
+            current_pr_url=None,
+            current_check_pass=False,
+            final_outcome="incomplete",
+        )
+    assert (pr_url, check_passed, salvaged) == ("https://x/pull/7", True, True)

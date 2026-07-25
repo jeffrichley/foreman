@@ -1443,8 +1443,10 @@ async def _run_worker_core(
                 # worktree was freshly created from origin/<dev_base>
                 # for this dispatch. The PR's ``mergeable_state`` is
                 # the answer we actually want; ``"clean"`` / ``"unstable"``
-                # mean CI is green, anything else means still in flight
-                # or failing.
+                # (and ``"behind"`` — green checks, stale base) advance,
+                # anything else means still in flight or failing. See
+                # ``_existing_impl_pr_checks_passed`` (foreman#575) for why
+                # ``behind`` must advance rather than loop here.
                 _log.info(
                     "Worker BLOCKED retry: existing impl PR #%d found "
                     "for branch %r; skipping push+create_pull",
@@ -1452,8 +1454,8 @@ async def _run_worker_core(
                     impl_branch_name,
                 )
                 pr_url = existing_impl_pr.html_url
-                final_did_check_pass = (
-                    existing_impl_pr.mergeable_state in CI_PASSING_MERGEABLE_STATES
+                final_did_check_pass = _existing_impl_pr_checks_passed(
+                    existing_impl_pr.mergeable_state
                 )
         elif final_outcome == "spec_invalid":
             # D6: post the spec_invalid_reason as a comment on the SPEC PR
@@ -1682,6 +1684,29 @@ class _V4WorkerResult:
         self.details: dict[str, object] = details if details is not None else {}
 
 
+def _existing_impl_pr_checks_passed(mergeable_state: str) -> bool:
+    """True if an already-open impl PR's checks passed — ``behind`` counts as green.
+
+    Decides whether the worker advances the ticket to ImplReview
+    (``ci_passing``) or re-dispatches while CI runs (``ci_in_flight``), based on
+    an EXISTING impl PR's GitHub ``mergeable_state``. ``clean``/``unstable`` are
+    the merge-ready green states (:data:`CI_PASSING_MERGEABLE_STATES`).
+
+    ``behind`` is ALSO green: its required checks passed; the branch is merely
+    out of date with a base that advanced after the PR opened. Bringing it
+    current is the ``MergeCoordinator.BehindBranchHealer``'s job
+    (``update_branch`` on the merge path), NOT a reason to hold the ticket in
+    ``Implementing``. Excluding ``behind`` here (the pre-fix behavior) pinned a
+    green-but-behind PR in an infinite worker re-dispatch loop — the healer
+    lives downstream on the merge path and can never be reached while the worker
+    loops upstream (foreman#575). ``behind`` is deliberately NOT added to
+    :data:`CI_PASSING_MERGEABLE_STATES` itself: the merge gate
+    (``merge_helper.attempt_merge``'s ``state.mergeable and state.ci_passing``)
+    must stay strict, or it would attempt to merge a behind PR GitHub rejects.
+    """
+    return mergeable_state in CI_PASSING_MERGEABLE_STATES or mergeable_state == "behind"
+
+
 def _maybe_adopt_existing_impl_pr(
     repo: Repository,
     *,
@@ -1717,7 +1742,7 @@ def _maybe_adopt_existing_impl_pr(
         existing.number,
         branch,
     )
-    check_passed = existing.mergeable_state in CI_PASSING_MERGEABLE_STATES
+    check_passed = _existing_impl_pr_checks_passed(existing.mergeable_state)
     return existing.html_url, check_passed, True
 
 
