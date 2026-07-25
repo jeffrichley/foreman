@@ -40,6 +40,21 @@ from foreman.worktree import WorktreeManager
 # Poller each tick without any special retry handling.
 _RETRYABLE_TERMINALS = frozenset({"NeedsHelp", "Failed"})
 
+# foreman#576: states an operator may NOT set directly via set-state/skip.
+# ``MergeQueued`` has a mandatory entry side-effect — ``enqueue_for_merge``
+# inserts the ``merge_queue`` row that the MergeCoordinator drains — performed
+# only by ``MergingState``/``SpecMerging`` before they route here. A bare
+# ``set_ticket_state`` to ``MergeQueued`` sets current_state WITHOUT that row,
+# orphaning the ticket: the coordinator's ``head_merge_entry`` returns None for
+# an empty queue, so the ticket sits forever while same-repo peers that DID
+# enqueue could merge past it. Refuse and redirect to the enqueueing states so
+# state and queue can never desync.
+_ENQUEUE_ONLY_STATES = frozenset({"MergeQueued"})
+
+#: Operator hint appended to the refusal — the states that reach ``MergeQueued``
+#: correctly (each runs ``enqueue_for_merge``).
+_ENQUEUE_STATE_HINT = "use 'Merging' (impl) or 'SpecMerging' (spec), which enqueue properly"
+
 
 @dataclass(frozen=True, slots=True)
 class ResetPlan:
@@ -534,6 +549,14 @@ def cmd_set_state(
     if state not in STATE_REGISTRY:
         typer.echo(f"unknown state: {state}", err=True)
         raise typer.Exit(code=1)
+    if state in _ENQUEUE_ONLY_STATES:
+        typer.echo(
+            f"refusing to set-state {ticket_id} to {state}: it requires a "
+            f"merge_queue row this command does not create (would orphan the "
+            f"ticket, foreman#576) — {_ENQUEUE_STATE_HINT}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
     repo.set_ticket_state(ticket_id, state, now=dt.datetime.now(dt.UTC))
     typer.echo(f"ticket {ticket_id} moved {ticket.current_state} -> {state}")
 
@@ -568,6 +591,14 @@ def cmd_skip(
     repo, _ = _resolve(ctx, ticket_id)
     if next_state not in STATE_REGISTRY:
         typer.echo(f"unknown state: {next_state}", err=True)
+        raise typer.Exit(code=1)
+    if next_state in _ENQUEUE_ONLY_STATES:
+        typer.echo(
+            f"refusing to skip {ticket_id} to {next_state}: it requires a "
+            f"merge_queue row this command does not create (would orphan the "
+            f"ticket, foreman#576) — {_ENQUEUE_STATE_HINT}",
+            err=True,
+        )
         raise typer.Exit(code=1)
     repo.set_ticket_state(ticket_id, next_state, now=dt.datetime.now(dt.UTC))
     typer.echo(f"ticket {ticket_id} skipped to {next_state}")
