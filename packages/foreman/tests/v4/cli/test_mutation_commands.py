@@ -225,6 +225,40 @@ def test_skip_targets_next_state():
     assert repo.get_ticket(tid).current_state == "ImplReview"
 
 
+def test_set_state_refuses_merge_queued():
+    """foreman#576: `set-state <id> MergeQueued` is refused — it would orphan the ticket.
+
+    ``MergeQueued`` requires the ``enqueue_for_merge`` side-effect (a
+    merge_queue row) that only ``Merging``/``SpecMerging`` perform. A bare
+    state set leaves the ticket parked with no queue row, so the
+    MergeCoordinator never processes it. Refuse and redirect to ``Merging``.
+    """
+    repo, tid = _make()
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["set-state", str(tid), "MergeQueued"],
+        obj=build_cli_context(repo=repo),
+    )
+    assert result.exit_code != 0
+    assert repo.get_ticket(tid).current_state == "Planning"  # unchanged
+    assert "Merging" in result.output  # redirect hint
+
+
+def test_skip_refuses_merge_queued():
+    """foreman#576: `skip <id> MergeQueued` is refused for the same reason as set-state."""
+    repo, tid = _make()
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["skip", str(tid), "MergeQueued"],
+        obj=build_cli_context(repo=repo),
+    )
+    assert result.exit_code != 0
+    assert repo.get_ticket(tid).current_state == "Planning"  # unchanged
+    assert "Merging" in result.output
+
+
 def test_discover_collects_full_state_when_everything_present():
     from foreman.v4.cli.mutations import ResetPlan, _discover
     from foreman.v4.git_provider import FakeGitProvider, PRState
