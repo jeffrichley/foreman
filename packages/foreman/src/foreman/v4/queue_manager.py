@@ -7,8 +7,8 @@ late-stage work drains before early-stage work fills the pipeline.
 Five filters apply at dequeue time, in order:
 
   1. ticket already in flight (per-ticket FIFO serialization)
-  2. ticket parked in MergeQueued — coordinator-driven, not worker-driven
-     (foreman#550)
+  2. ticket in a state that declares ``dispatch_priority = None`` —
+     coordinator-driven or terminal, never worker-driven (foreman#550)
   3. ticket held by an operator
   4. ticket has unmet dependencies
   5. project per-concurrency cap exceeded (issue #472)
@@ -27,27 +27,69 @@ import itertools
 import threading
 
 from foreman.v4.repository import TicketRepository
+from foreman.v4.states.registry import STATE_DISPATCH_PRIORITY
 from foreman.v4.work import WorkItem
 
-_STATE_PRIORITY = {
-    "Merging": 1,
-    # foreman#416: SpecMerging is a fast non-role merge state (like
-    # Merging) that should drain promptly so the spec PR lands and the
-    # build can start — same top priority tier as Merging.
-    "SpecMerging": 1,
-    "ImplReview": 2,
-    "Implementing": 3,
-    "ImplFix": 3,
-    "SpecReview": 4,
-    "SpecFix": 4,
-    "Planning": 5,
-    "Queued": 6,
-}
-_DEFAULT_PRIORITY = 99
+# foreman#589 draws a line between two different "no priority" cases, because
+# they need opposite handling:
+#
+#   * A REGISTERED state that declares no priority is a CODE defect. It is
+#     unrepresentable — ``states/registry.py`` raises at import, so it can
+#     never reach this module. That is what killed the old ``_DEFAULT_PRIORITY
+#     = 99`` sentinel, under which ImplApproved silently sorted last.
+#
+#   * A state name that is not in the registry at all is a DATA condition — a
+#     row written by an older schema, a rename, a hand-edited DB. It must NOT
+#     raise here. ``Poller._enqueue_open_tickets`` loops over every open
+#     ticket, so one bad row would abort the pass and starve every ticket
+#     behind it. The system already handles this correctly: the item is
+#     dispatched, the worker fails to build a state for it, and the ticket is
+#     parked in NeedsHelp where a human can see it (asserted by
+#     ``test_worker_crash_before_context_built_still_parks_ticket``). So an
+#     unknown state sorts LAST but stays dispatchable — fail-visible per
+#     ticket, rather than fail-loud for the whole queue.
+
+#: Heap sort key for a state that declares ``dispatch_priority = None``. Such
+#: items are filtered at dequeue regardless; this only keeps them from sitting
+#: in front of real work. It is NOT a priority anyone chose.
+_UNDISPATCHED_SORT_KEY = 1 << 30
+
+#: Heap sort key for a state name absent from the registry. Ordered behind
+#: every real priority but ahead of the undispatched block, so the item still
+#: reaches a worker and gets parked.
+_UNKNOWN_STATE_SORT_KEY = 1 << 29
 
 
-def _priority_for(state_name: str) -> int:
-    return _STATE_PRIORITY.get(state_name, _DEFAULT_PRIORITY)
+def _is_worker_dispatched(state_name: str) -> bool:
+    """Report whether the WorkerPool may run ``state_name``.
+
+    Args:
+        state_name: Name of the state, as stored on the ticket.
+
+    Returns:
+        ``False`` only for a registered state that declares
+        ``dispatch_priority = None`` (terminal or coordinator-driven). An
+        unregistered name returns ``True`` so the worker can park the ticket.
+    """
+    if state_name not in STATE_DISPATCH_PRIORITY:
+        return True
+    return STATE_DISPATCH_PRIORITY[state_name] is not None
+
+
+def _sort_key_for(state_name: str) -> int:
+    """Return the heap sort key for ``state_name``.
+
+    Args:
+        state_name: Name of the state, as stored on the ticket.
+
+    Returns:
+        The state's declared priority, or one of the two trailing sentinels
+        for undispatched and unregistered states respectively.
+    """
+    priority = STATE_DISPATCH_PRIORITY.get(state_name)
+    if state_name not in STATE_DISPATCH_PRIORITY:
+        return _UNKNOWN_STATE_SORT_KEY
+    return _UNDISPATCHED_SORT_KEY if priority is None else priority
 
 
 class QueueManager:
@@ -97,7 +139,7 @@ class QueueManager:
                 return
             heapq.heappush(
                 self._heap,
-                (_priority_for(item.state_name), next(self._counter), item),
+                (_sort_key_for(item.state_name), next(self._counter), item),
             )
             self._queued.add(item)
 
@@ -126,11 +168,14 @@ class QueueManager:
                     _, _, candidate = entry
                     if candidate.ticket_id in self._in_flight_tickets:
                         continue  # per-ticket FIFO — wait for prior
-                    # foreman#550: a MergeQueued ticket is coordinator-driven,
-                    # not worker-driven — it consumes no worker slot. Checked
-                    # directly off the WorkItem (no repo round-trip needed)
-                    # since state_name travels with the candidate.
-                    if candidate.state_name == "MergeQueued":
+                    # foreman#550: a coordinator-driven state consumes no
+                    # worker slot. Checked directly off the WorkItem (no repo
+                    # round-trip needed) since state_name travels with the
+                    # candidate. foreman#589 replaced a literal "MergeQueued"
+                    # comparison with the declared priority, so a new
+                    # undispatched state is excluded by declaring it rather
+                    # than by remembering to edit this loop.
+                    if not _is_worker_dispatched(candidate.state_name):
                         continue
                     ticket = self._repo.get_ticket(candidate.ticket_id)
                     if ticket.is_held:
