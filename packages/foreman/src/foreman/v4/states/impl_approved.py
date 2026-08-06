@@ -38,6 +38,12 @@ class ImplApprovedState(TicketState):
     """Polling wait: impl approved, detecting human merge."""
 
     state_name = "ImplApproved"
+    # foreman#589: top tier. ImplApproved is strictly more done than
+    # ImplReview and is a fast non-role poll into Merging — same reasoning
+    # as SpecMerging (#416). Previously absent from the queue's table and
+    # so dispatched LAST, behind freshly-Queued work, which starved the
+    # most-done ticket whenever the global cap was saturated.
+    dispatch_priority = 1
 
     def _pr_number_for(self, ctx: StateContext) -> int:
         """Resolve the impl PR number from the ticket's outcome history.

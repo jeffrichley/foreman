@@ -30,6 +30,9 @@ class MergeQueuedState(TicketState):
     """Parked state: the MergeCoordinator (not the WorkerPool) drives merges from here."""
 
     state_name = "MergeQueued"
+    # foreman#550: coordinator-driven, never worker-dispatched — the
+    # QueueManager skips any state whose priority is None.
+    dispatch_priority = None
 
     def execute(self, ctx: StateContext) -> Outcome:
         """Defensive no-op: re-park with BLOCKED if ever dispatched.

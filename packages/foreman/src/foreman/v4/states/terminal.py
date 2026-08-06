@@ -31,15 +31,21 @@ class DoneState(_TerminalState):
     """Happy-path terminal: the impl PR merged and the ticket is complete."""
 
     state_name = "Done"
+    # Terminal: never worker-dispatched.
+    dispatch_priority = None
 
 
 class FailedState(_TerminalState):
     """Terminal failure with no human-actionable recovery path."""
 
     state_name = "Failed"
+    # Terminal: never worker-dispatched.
+    dispatch_priority = None
 
 
 class NeedsHelpState(_TerminalState):
     """Terminal-pending-human holding pen; resumed via ``foreman resume``."""
 
     state_name = "NeedsHelp"
+    # Terminal: never worker-dispatched.
+    dispatch_priority = None

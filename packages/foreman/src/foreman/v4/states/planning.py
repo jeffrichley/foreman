@@ -11,6 +11,7 @@ class PlanningState(RoleDispatchState):
     """Dispatch the Planner role to produce the ticket's spec."""
 
     state_name = "Planning"
+    dispatch_priority = 5
     role = "planner"
 
     def next_state_for(self, outcome: Outcome) -> TicketState | None:

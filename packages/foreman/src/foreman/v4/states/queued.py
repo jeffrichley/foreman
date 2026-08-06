@@ -10,6 +10,7 @@ class QueuedState(TicketState):
     """Entry state for newly created tickets; advances directly to Planning."""
 
     state_name = "Queued"
+    dispatch_priority = 6
 
     def execute(self, ctx: StateContext) -> Outcome:
         """Return a CLEAN outcome unconditionally — Queued has no work to do."""

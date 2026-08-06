@@ -78,6 +78,7 @@ class MergingState(TicketState):
     """Guard the impl PR's base ref, then hand it off to the merge coordinator's queue."""
 
     state_name = "Merging"
+    dispatch_priority = 1
 
     def _pr_number_for(self, ctx: StateContext) -> int:
         pr = ctx.repo.latest_pr_number_for_ticket(ctx.ticket.id)

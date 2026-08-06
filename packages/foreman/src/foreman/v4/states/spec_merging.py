@@ -55,6 +55,9 @@ class SpecMerging(TicketState):
     """Enqueue the approved spec PR for the coordinator to merge."""
 
     state_name = "SpecMerging"
+    # foreman#416: a fast non-role merge state — top tier so the spec PR
+    # lands promptly and the build can start.
+    dispatch_priority = 1
 
     def _pr_number_for(self, ctx: StateContext) -> int:
         """Resolve the spec PR number from the ticket's prior outcomes.
