@@ -11,6 +11,7 @@ class SpecFixState(RoleDispatchState):
     """Dispatch fixer-spec on a spec-review NEEDS_FIX outcome."""
 
     state_name = "SpecFix"
+    dispatch_priority = 4
     role = "fixer-spec"
 
     def next_state_for(self, outcome: Outcome) -> TicketState | None:

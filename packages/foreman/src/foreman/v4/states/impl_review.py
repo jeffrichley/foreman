@@ -26,6 +26,7 @@ class ImplReviewState(RoleDispatchState):
     """Dispatch reviewer-impl; the CLEAN outcome is gated in ``next_state``."""
 
     state_name = "ImplReview"
+    dispatch_priority = 2
     role = "reviewer-impl"
 
     def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:

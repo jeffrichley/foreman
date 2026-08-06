@@ -17,6 +17,7 @@ class ImplementingState(RoleDispatchState):
     """Dispatch the Worker role to open or update the ticket's impl PR."""
 
     state_name = "Implementing"
+    dispatch_priority = 3
     role = "worker"
 
     def next_state_for(self, outcome: Outcome) -> TicketState | None:

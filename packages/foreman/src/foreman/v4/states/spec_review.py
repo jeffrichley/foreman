@@ -27,6 +27,7 @@ class SpecReviewState(RoleDispatchState):
     """Dispatch reviewer-spec; a CLEAN spec advances to SpecMerging."""
 
     state_name = "SpecReview"
+    dispatch_priority = 4
     role = "reviewer-spec"
 
     def verify(self, ctx: StateContext, outcome: Outcome) -> None:

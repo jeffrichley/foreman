@@ -311,3 +311,79 @@ def test_mark_done_releases_per_project_slot(repo):
     qm.mark_done(first)
     second = qm.dequeue()
     assert second is not None  # slot released
+
+
+# --- foreman#589: dispatch priority is declared per state, never defaulted ---
+
+
+def test_impl_approved_dequeued_before_queued(repo):
+    """The most-done ticket wins the slot.
+
+    Regression guard for foreman#589: ImplApproved was absent from the
+    QueueManager's hand-maintained priority table and fell through to a
+    sentinel 99, so it sorted BEHIND freshly-Queued work and starved
+    whenever the global cap was saturated. Fails on the pre-fix code.
+    """
+    fresh = _ticket(repo, 1, state="Queued")
+    almost_done = _ticket(repo, 2, state="ImplApproved")
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    qm.enqueue(WorkItem(ticket_id=fresh, state_name="Queued", project="p"))
+    qm.enqueue(WorkItem(ticket_id=almost_done, state_name="ImplApproved", project="p"))
+    first = qm.dequeue()
+    assert first is not None and first.ticket_id == almost_done
+
+
+def test_impl_approved_dequeued_before_impl_review(repo):
+    """ImplApproved is strictly more done than ImplReview and outranks it."""
+    reviewing = _ticket(repo, 1, state="ImplReview")
+    approved = _ticket(repo, 2, state="ImplApproved")
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    qm.enqueue(WorkItem(ticket_id=reviewing, state_name="ImplReview", project="p"))
+    qm.enqueue(WorkItem(ticket_id=approved, state_name="ImplApproved", project="p"))
+    first = qm.dequeue()
+    assert first is not None and first.ticket_id == approved
+
+
+def test_undispatched_state_is_skipped_not_dispatched(repo):
+    """A None-priority state is filtered out; the next candidate still runs.
+
+    foreman#589 replaced a literal ``== "MergeQueued"`` comparison with the
+    state's declared priority, so this also guards that generalization.
+    """
+    parked = _ticket(repo, 1, state="MergeQueued")
+    runnable = _ticket(repo, 2, state="Planning")
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    qm.enqueue(WorkItem(ticket_id=parked, state_name="MergeQueued", project="p"))
+    qm.enqueue(WorkItem(ticket_id=runnable, state_name="Planning", project="p"))
+    first = qm.dequeue()
+    assert first is not None and first.ticket_id == runnable
+    assert qm.dequeue() is None  # the parked item is never handed out
+
+
+def test_unknown_state_still_dispatches_so_the_worker_can_park_it(repo):
+    """An unregistered state name must not blow up the queue.
+
+    foreman#589 removed the priority fallback for *registered* states, but an
+    unknown name is a DATA condition, not a code defect — a row from an older
+    schema, a rename, a hand-edited DB. ``Poller._enqueue_open_tickets`` loops
+    over every open ticket, so raising here would abort the pass and starve
+    every ticket behind the bad row. Instead the item stays dispatchable and
+    the worker parks the ticket in NeedsHelp (see
+    ``test_worker_crash_before_context_built_still_parks_ticket``).
+    """
+    tid = _ticket(repo, 1, state="Planning")
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    item = WorkItem(ticket_id=tid, state_name="NoSuchState", project="p")
+    qm.enqueue(item)  # must not raise
+    assert qm.dequeue() == item
+
+
+def test_unknown_state_sorts_behind_every_real_priority(repo):
+    """Unknown states run last, so they never displace well-formed work."""
+    mystery = _ticket(repo, 1, state="Planning")
+    real = _ticket(repo, 2, state="Queued")  # priority 6 — the weakest real one
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    qm.enqueue(WorkItem(ticket_id=mystery, state_name="NoSuchState", project="p"))
+    qm.enqueue(WorkItem(ticket_id=real, state_name="Queued", project="p"))
+    first = qm.dequeue()
+    assert first is not None and first.ticket_id == real

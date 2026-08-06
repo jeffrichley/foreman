@@ -11,6 +11,7 @@ class ImplFixState(RoleDispatchState):
     """Dispatch fixer-impl on an impl-review NEEDS_FIX outcome."""
 
     state_name = "ImplFix"
+    dispatch_priority = 3
     role = "fixer-impl"
 
     def next_state_for(self, outcome: Outcome) -> TicketState | None:

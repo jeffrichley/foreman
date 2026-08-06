@@ -19,7 +19,7 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from foreman.v4.event_bus import EventBus
 from foreman.v4.events import (
@@ -332,6 +332,18 @@ class TicketState(ABC):
 
     #: Display name; defaults to the class name minus 'State' suffix.
     state_name: str = ""
+
+    #: Worker dispatch priority — lower runs first; ``None`` means this state
+    #: is never worker-dispatched (terminal states, and coordinator-driven
+    #: :class:`~foreman.v4.states.merge_queued.MergeQueuedState`).
+    #:
+    #: Priority descends with pipeline depth so the most-done ticket drains
+    #: first. Every state in ``STATE_REGISTRY`` MUST set this in its own class
+    #: body; ``states/registry.py`` raises at import if one does not, so a new
+    #: state cannot silently inherit a value nobody chose. That check is the
+    #: point of the attribute living here rather than in a table beside the
+    #: queue: an undeclared priority is an error, never a default (foreman#589).
+    dispatch_priority: ClassVar[int | None] = None
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
