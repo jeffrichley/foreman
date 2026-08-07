@@ -56,6 +56,13 @@ FOREMAN_SOURCE_REPO = "jeffrichley/foreman"
 _DEFAULT_CONFIG = Path.home() / ".foreman" / "v4" / "config.toml"
 _DEFAULT_PROJECTS_PATH = Path.home() / ".foreman" / "projects.toml"
 
+# GitHub statuses that will not clear on a retry: the token lacks the
+# scope, or the repo does not resolve. Both mean webhook coverage is
+# unknown indefinitely, which must not be reported as healthy. Everything
+# else (network, 5xx) is treated as transient — see the WARN branch in
+# ``_check_webhook_coverage``.
+_UNRECOVERABLE_STATUSES = frozenset({401, 403, 404})
+
 
 def _check_image_fresh() -> int:
     """Compare the stamped IMAGE_SHA env var against ``origin/main``.
@@ -167,8 +174,14 @@ def _check_webhook_coverage(
       - ``projects`` is empty (nothing to check).
 
     WARN condition (exit 0):
-      - ``GithubException`` raised while fetching hooks (network error,
-        403 insufficient permissions, 404 repo not found).
+      - A transient ``GithubException`` (network error, 5xx) while
+        fetching hooks. It clears on the next run.
+
+    UNVERIFIABLE condition (exit 1):
+      - A ``GithubException`` with a status in
+        ``_UNRECOVERABLE_STATUSES`` (401/403 insufficient scope, 404 repo
+        not found). Coverage cannot be determined and will stay that way
+        until someone acts, so it must not read as healthy.
 
     MISSING condition (exit 1):
       - A project has no active hook whose ``config.url`` matches
@@ -204,10 +217,25 @@ def _check_webhook_coverage(
             hooks = repo.get_hooks()
             has_match = any(h.active and h.config.get("url") == receiver_url for h in hooks)
         except GithubException as exc:
-            typer.echo(
-                f"[doctor] webhook-coverage: WARN — could not fetch hooks for "
-                f"{pc.repo} ({exc.status} {exc.data})",
-            )
+            if exc.status in _UNRECOVERABLE_STATUSES:
+                # A permissions or not-found failure does not clear on its
+                # own: coverage stays unknown for every future run. Exiting
+                # 0 here would make "coverage confirmed" and "coverage
+                # unknown forever" the same machine-readable signal — which
+                # is the invisible-gap defect this check exists to close,
+                # moved one layer up. Listing hooks needs repo-admin scope,
+                # so this is the most likely real failure, not a corner case.
+                typer.echo(
+                    f"[doctor] webhook-coverage: UNVERIFIABLE — cannot check "
+                    f"{pc.repo} ({exc.status} {exc.data})",
+                )
+                exit_code = 1
+            else:
+                # Transient (network, 5xx): retry next run, do not fail.
+                typer.echo(
+                    f"[doctor] webhook-coverage: WARN — could not fetch hooks for "
+                    f"{pc.repo} ({exc.status} {exc.data})",
+                )
             continue
 
         if has_match:
@@ -229,8 +257,9 @@ def cmd_doctor(ctx: typer.Context) -> None:
 
     Each check prints its own status line and contributes to the exit
     code. The command exits with code 1 if any check reported confirmed-
-    bad state (e.g., STALE image); 0 otherwise (including SKIPPED and
-    WARN conditions — see module docstring rationale).
+    bad state (e.g., STALE image) or a state it could not verify and
+    never will without intervention (UNVERIFIABLE webhook coverage);
+    0 otherwise (including SKIPPED and WARN — see module docstring).
     """
     # The ctx parameter is unused for this initial check, but every
     # future check that reads V4Config (e.g., GitHub Apps token expiry)
@@ -254,6 +283,13 @@ def cmd_doctor(ctx: typer.Context) -> None:
             typer.echo(
                 "[doctor] webhook-coverage: WARN — could not load V4 config; skipping check",
             )
+    else:
+        # Say so. Without this the check emits NOTHING when the config is
+        # absent — not a skip, not a warning, no line at all — and a silent
+        # check is indistinguishable from a passing one.
+        typer.echo(
+            f"[doctor] webhook-coverage: SKIPPED — no V4 config at {config_path}",
+        )
 
     if config is not None:
         projects_path = Path(os.environ.get("FOREMAN_PROJECTS_PATH", str(_DEFAULT_PROJECTS_PATH)))

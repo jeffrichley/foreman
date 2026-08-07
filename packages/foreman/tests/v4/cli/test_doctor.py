@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import subprocess
 
+import pytest
 from typer.testing import CliRunner
 
 from foreman.v4.cli import app
@@ -234,20 +235,147 @@ def test_check_webhook_coverage_missing_when_no_matching_hook(capsys) -> None:
     assert "myproj" in captured.out or "org/myproj" in captured.out
 
 
-def test_check_webhook_coverage_warn_on_github_exception(capsys) -> None:
-    """GithubException during hook fetch → exit 0, WARN (not 1)."""
-    receiver = "https://my.receiver.example.com/webhook"
-    config = _make_config(inbound=InboundConfig(receiver_url=receiver))
-    projects = [_make_project("myproj", "org/myproj")]
+def _factory_raising(status: int):
+    """A github factory whose get_hooks raises GithubException(status)."""
 
     def factory():
         github = MagicMock()
         github.get_repo.return_value.get_hooks.side_effect = GithubException(
-            403, {"message": "Must have admin rights"}, None
+            status, {"message": "boom"}, None
         )
         return github
 
-    exit_code = _check_webhook_coverage(config, projects, github_factory=factory)
+    return factory
+
+
+def test_check_webhook_coverage_warns_but_passes_on_a_transient_failure(capsys) -> None:
+    """A 500 clears on the next run, so it must not fail the check."""
+    receiver = "https://my.receiver.example.com/webhook"
+    config = _make_config(inbound=InboundConfig(receiver_url=receiver))
+    projects = [_make_project("myproj", "org/myproj")]
+
+    exit_code = _check_webhook_coverage(config, projects, github_factory=_factory_raising(500))
     assert exit_code == 0
     captured = capsys.readouterr()
     assert "WARN" in captured.out
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+def test_check_webhook_coverage_fails_when_coverage_is_unknowable(status: int, capsys) -> None:
+    """A permissions/not-found failure never clears, so it must not read as healthy.
+
+    This is the criterion the check exists for. Listing hooks needs repo-admin
+    scope, so a token that loses it produces this forever — and exiting 0 would
+    make "coverage confirmed" and "coverage unknown indefinitely" the same
+    machine-readable signal, which is the original invisible-gap defect one
+    layer up.
+    """
+    receiver = "https://my.receiver.example.com/webhook"
+    config = _make_config(inbound=InboundConfig(receiver_url=receiver))
+    projects = [_make_project("myproj", "org/myproj")]
+
+    exit_code = _check_webhook_coverage(config, projects, github_factory=_factory_raising(status))
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "UNVERIFIABLE" in captured.out
+    assert "WARN" not in captured.out
+
+
+def test_transient_and_persistent_failures_do_not_share_an_exit_code() -> None:
+    """The whole point: the two outcomes must be distinguishable by a program."""
+    receiver = "https://my.receiver.example.com/webhook"
+    config = _make_config(inbound=InboundConfig(receiver_url=receiver))
+    projects = [_make_project("myproj", "org/myproj")]
+
+    transient = _check_webhook_coverage(config, projects, github_factory=_factory_raising(502))
+    persistent = _check_webhook_coverage(config, projects, github_factory=_factory_raising(403))
+    assert transient != persistent
+
+
+# ── cmd_doctor: the check must always say what it did ────────────────────
+
+
+def _stub_image_fresh_ok(monkeypatch) -> None:
+    """Make the image-fresh check a clean SKIPPED so it never masks the assertion."""
+    monkeypatch.delenv("IMAGE_SHA", raising=False)
+
+
+def test_doctor_says_so_when_there_is_no_v4_config(monkeypatch, tmp_path) -> None:
+    """A missing config must SKIP out loud.
+
+    Before this, an absent config produced no webhook-coverage line at all —
+    not a skip, not a warning, nothing. A check that emits nothing when it
+    does not run is indistinguishable from a check that ran and passed.
+    """
+    _stub_image_fresh_ok(monkeypatch)
+    monkeypatch.setenv("FOREMAN_V4_CONFIG", str(tmp_path / "definitely-absent.toml"))
+
+    result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "webhook-coverage" in result.output
+    assert "SKIPPED" in result.output
+
+
+def test_doctor_warns_when_the_v4_config_is_unreadable(monkeypatch, tmp_path) -> None:
+    """A config that exists but will not parse warns rather than failing silently."""
+    _stub_image_fresh_ok(monkeypatch)
+    bad = tmp_path / "config.toml"
+    bad.write_text("this is not = valid [ toml")
+    monkeypatch.setenv("FOREMAN_V4_CONFIG", str(bad))
+
+    result = CliRunner().invoke(app, ["doctor"])
+    assert "webhook-coverage: WARN" in result.output
+    assert "could not load V4 config" in result.output
+
+
+def test_doctor_warns_when_projects_cannot_be_loaded(monkeypatch, tmp_path) -> None:
+    """A readable config plus an unloadable projects file warns and keeps going."""
+    _stub_image_fresh_ok(monkeypatch)
+    cfg = _make_config(inbound=InboundConfig(receiver_url="https://r.example.com/hook"))
+    monkeypatch.setenv("FOREMAN_V4_CONFIG", str(tmp_path / "config.toml"))
+    (tmp_path / "config.toml").write_text("")
+    monkeypatch.setattr("foreman.v4.config.load_config", lambda _p: cfg)
+    monkeypatch.setenv("FOREMAN_PROJECTS_PATH", str(tmp_path / "projects.toml"))
+
+    def _boom(_path):
+        raise OSError("projects.toml is gone")
+
+    monkeypatch.setattr("foreman.v4.config.load_projects", _boom)
+
+    result = CliRunner().invoke(app, ["doctor"])
+    assert "webhook-coverage: WARN" in result.output
+    assert "could not load projects" in result.output
+
+
+def test_doctor_warns_when_no_projects_are_configured(monkeypatch, tmp_path) -> None:
+    """An empty projects list means zero coverage checked — say it."""
+    _stub_image_fresh_ok(monkeypatch)
+    cfg = _make_config(inbound=InboundConfig(receiver_url="https://r.example.com/hook"))
+    monkeypatch.setenv("FOREMAN_V4_CONFIG", str(tmp_path / "config.toml"))
+    (tmp_path / "config.toml").write_text("")
+    monkeypatch.setattr("foreman.v4.config.load_config", lambda _p: cfg)
+    monkeypatch.setattr("foreman.v4.config.load_projects", lambda _p: [])
+
+    result = CliRunner().invoke(app, ["doctor"])
+    assert "webhook-coverage: WARN" in result.output
+    assert "no projects configured" in result.output
+
+
+def test_doctor_warns_when_the_orchestrator_token_cannot_be_minted(monkeypatch, tmp_path) -> None:
+    """A missing PEM must not take the daemon down — WARN and continue."""
+    _stub_image_fresh_ok(monkeypatch)
+    cfg = _make_config(inbound=InboundConfig(receiver_url="https://r.example.com/hook"))
+    monkeypatch.setenv("FOREMAN_V4_CONFIG", str(tmp_path / "config.toml"))
+    (tmp_path / "config.toml").write_text("")
+    monkeypatch.setattr("foreman.v4.config.load_config", lambda _p: cfg)
+    monkeypatch.setattr("foreman.v4.config.load_projects", lambda _p: [_make_project()])
+
+    class _Boom:
+        def __init__(self, **_kwargs):
+            raise FileNotFoundError("private key missing")
+
+    monkeypatch.setattr("foreman.v4.identity.V4IdentityRegistry", _Boom)
+
+    result = CliRunner().invoke(app, ["doctor"])
+    assert "webhook-coverage: WARN" in result.output
+    assert "could not mint orchestrator" in result.output
