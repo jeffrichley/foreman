@@ -286,3 +286,54 @@ def test_impl_approved_blocked_does_not_count_toward_runaway_cap() -> None:
             f"poll {poll_n}: expected ImplApproved, got {result.state_name!r} "
             "(runaway cap may have tripped)"
         )
+
+
+# ---------------------------------------------------------------------------
+# Backoff: BLOCKED sets next_action_at; CLEAN/NEEDS_HELP clear it (foreman#583)
+# ---------------------------------------------------------------------------
+
+
+def test_impl_approved_blocked_sets_next_action_at() -> None:
+    """BLOCKED self-loop must stamp next_action_at with a 5-minute suspension."""
+    from foreman.v4.states.impl_approved import HUMAN_POLL_INTERVAL_SECONDS
+
+    pr = PRState(merged=False, closed=False, mergeable=False, ci_passing=False)
+    ctx, repo, _git = _ctx(pr)
+    state = ImplApprovedState()
+    outcome = state.execute(ctx)
+    assert outcome.kind == OutcomeKind.BLOCKED
+    state.next_state(ctx, outcome)
+    expected = ctx.clock() + dt.timedelta(seconds=HUMAN_POLL_INTERVAL_SECONDS)
+    assert repo.get_ticket(ctx.ticket.id).next_action_at == expected
+
+
+def test_impl_approved_clean_clears_next_action_at() -> None:
+    """CLEAN (merged) must clear any pre-existing next_action_at suspension."""
+    pr = PRState(merged=True, closed=True, mergeable=False, ci_passing=False)
+    ctx, repo, _git = _ctx(pr)
+    # Pre-seed a suspension so we can verify it is cleared.
+    future = ctx.clock() + dt.timedelta(seconds=300)
+    repo.set_next_action_at(ctx.ticket.id, when=future)
+    assert repo.get_ticket(ctx.ticket.id).next_action_at == future  # sanity
+
+    state = ImplApprovedState()
+    outcome = state.execute(ctx)
+    assert outcome.kind == OutcomeKind.CLEAN
+    state.next_state(ctx, outcome)
+    assert repo.get_ticket(ctx.ticket.id).next_action_at is None
+
+
+def test_impl_approved_needs_help_clears_next_action_at() -> None:
+    """NEEDS_HELP (closed-without-merge) must clear any pre-existing next_action_at."""
+    pr = PRState(merged=False, closed=True, mergeable=False, ci_passing=False)
+    ctx, repo, _git = _ctx(pr)
+    # Pre-seed a suspension so we can verify it is cleared.
+    future = ctx.clock() + dt.timedelta(seconds=300)
+    repo.set_next_action_at(ctx.ticket.id, when=future)
+    assert repo.get_ticket(ctx.ticket.id).next_action_at == future  # sanity
+
+    state = ImplApprovedState()
+    outcome = state.execute(ctx)
+    assert outcome.kind == OutcomeKind.NEEDS_HELP
+    state.next_state(ctx, outcome)
+    assert repo.get_ticket(ctx.ticket.id).next_action_at is None
