@@ -11,7 +11,8 @@ Close the race condition documented in [#599](https://github.com/jeffrichley/for
 - [ ] `gate-update` leaves the drain lease set when it returns **idle** (exits 0), so no new state-instance can open in the window before SIGTERM arrives.
 - [ ] The drain lease has a TTL (default 300 s). An expired lease is treated as absent — a failed or abandoned update never permanently wedges dispatch (fail-open preserved).
 - [ ] All three existing exit paths in `test_gate_update.py` continue to pass.
-- [ ] `_repository_contract.py` gains contract tests for `acquire_drain_lease`, `release_drain_lease`, and the `DrainLeaseActiveError` guard in `open_state_instance`; both `InMemoryTicketRepository` and `PostgresTicketRepository` pass them.
+- [ ] The drain lease is released (best-effort) when the new daemon starts, so dispatch resumes immediately after a successful idle redeploy rather than waiting for the TTL to expire.
+- [ ] `_repository_contract.py` gains four contract tests covering `acquire_drain_lease`, `release_drain_lease`, the `DrainLeaseActiveError` guard in `open_state_instance`, and the ordering invariant (active drain + non-existent ticket raises `DrainLeaseActiveError`, not `TicketNotFoundError`); both `InMemoryTicketRepository` and `PostgresTicketRepository` pass all four.
 - [ ] `just check` exits zero.
 
 ## Approach
@@ -52,7 +53,7 @@ CREATE TABLE IF NOT EXISTS drain_lease (
 
 `InMemoryTicketRepository.open_state_instance` adds the identical guard (checking `_drain_lease_expires_at` against `now`) so the contract suite covers both implementations.
 
-The exception raised is `DrainLeaseActiveError(LookupError)`, defined in `repository.py` alongside the other domain errors. When `WorkerPool._run_transition` sees it, the existing `_escalate_crashed_transition` path parks the ticket in `NeedsHelp` via `set_ticket_state` — the same path any other unexpected exception in `_run_transition` takes. This is safe: the SIGTERM will arrive within seconds, the daemon will restart, and `crash_recovery` will close any open instances exactly as it did in the race shown in the issue.
+The exception raised is `DrainLeaseActiveError(LookupError)`, defined in `repository.py` alongside the other domain errors. When `WorkerPool._run_transition` sees it, the existing `_escalate_crashed_transition` path parks the ticket in `NeedsHelp` via `set_ticket_state` — the same path any other unexpected exception in `_run_transition` takes. This is safe: because `DrainLeaseActiveError` fires before any row is inserted, no state-instance exists for `crash_recovery` to close (unlike the original race, where rows 14863/14864 were opened before SIGTERM and then closed by `crash_recovery`). The ticket lands in NeedsHelp; once the new daemon starts and clears the drain lease during `_reconcile_startup`, `foreman retry` resumes it normally.
 
 ### Modified `cmd_gate_update` flow
 
@@ -71,7 +72,7 @@ When `release_drain_lease` itself raises on the deferred path, the exception is 
 
 ### TTL and fail-open preservation
 
-TTL = 300 s (5 minutes). Watchtower's timeout for lifecycle hooks defaults to 60 s. If `gate-update` exits 0 and the daemon never receives a SIGTERM (hook ran at the wrong time, Watchtower bug), the lease expires automatically within 5 minutes and dispatch resumes unblocked — the existing fail-open property is preserved.
+TTL = 300 s (5 minutes). In the normal redeploy path, the new daemon calls `repo.release_drain_lease()` during `_reconcile_startup` (see sub-request 6), so dispatch resumes immediately after the container restarts — the TTL is not reached in the common case. The TTL is the safety valve for the abandoned-update case: if `gate-update` exits 0 but no new daemon ever starts (image pull failure, Watchtower bug), the lease expires automatically within 5 minutes and dispatch resumes unblocked — the existing fail-open property is preserved. Watchtower's lifecycle hook timeout defaults to 60 s, well inside the 300 s TTL.
 
 An expired lease in `open_state_instance` is treated as absent: `expires_at <= now` → proceed normally.
 
@@ -91,11 +92,13 @@ The "Watchtower idle-gate" table in `docs/RUNBOOK.md` (line 375) currently says 
 
 5. **Rewrite `cmd_gate_update`** (`v4/cli/gate_update.py`): replace the single `try/except` with the four-step flow described in Approach. The `except Exception` wraps `acquire_drain_lease` + `list_in_flight_state_instances`. Release the lease on defer; swallow any release failure. Update the module docstring to describe the drain lease.
 
-6. **Extend `_repository_contract.py`**: add four contract tests — `test_drain_lease_blocks_open_state_instance`, `test_drain_lease_releases_correctly`, `test_expired_drain_lease_does_not_block`, and `test_drain_lease_blocks_open_state_instance_invalid_ticket` (active drain + a ticket_id that does not exist in the repo → `open_state_instance` raises `DrainLeaseActiveError`, not `TicketNotFoundError`). All four run against both `InMemoryTicketRepository` and `PostgresTicketRepository`. The fourth test catches any implementation that places the drain check after the ticket-existence check.
+6. **Release drain lease on daemon startup** (`daemon.py`): in `_reconcile_startup`, after the existing crash-recovery logic closes orphaned state-instance rows, call `repo.release_drain_lease()` best-effort — catch any exception, log a WARNING, and continue. This signals that the new daemon has taken over and dispatch may resume immediately without waiting for the TTL to expire. The call must come AFTER orphan cleanup so that any state-instance opened in the pre-SIGTERM window is already closed before dispatch unblocks.
 
-7. **Extend `test_gate_update.py`**: (a) update `_RaisingRepo` to add `acquire_drain_lease(self, *, now: dt.datetime, ttl_seconds: int = 300) -> None: raise RuntimeError("DB is down")` as an explicit method so that `test_gate_update_error_exits_0_and_warns` continues to test "DB unreachable at lease acquisition" rather than silently testing "method not found via `__getattr__`"; (b) add `test_gate_update_idle_leaves_lease_active` (repo has no in-flight work → gate exits 0 → `repo.is_drain_lease_active(now=now)` is True) and (c) add `test_gate_update_busy_releases_lease` (repo has in-flight work → gate exits 75 → `repo.is_drain_lease_active(now=now)` is False).
+7. **Extend `_repository_contract.py`**: add four contract tests — `test_drain_lease_blocks_open_state_instance`, `test_drain_lease_releases_correctly`, `test_expired_drain_lease_does_not_block`, and `test_drain_lease_blocks_open_state_instance_invalid_ticket` (active drain + a ticket_id that does not exist in the repo → `open_state_instance` raises `DrainLeaseActiveError`, not `TicketNotFoundError`). All four run against both `InMemoryTicketRepository` and `PostgresTicketRepository`. The fourth test catches any implementation that places the drain check after the ticket-existence check.
 
-8. **Update `docs/RUNBOOK.md`** "Watchtower idle-gate" subsection: correct the table row from "≥1 open (non-terminal) ticket" to "≥1 in-flight role job (open state-instance)"; add a "Drain lease" paragraph explaining the lease, TTL, and that `is_drain_lease_active` can be queried via `psql` (`SELECT * FROM drain_lease;`) to diagnose a stuck board.
+8. **Extend `test_gate_update.py`**: (a) update `_RaisingRepo` to add `acquire_drain_lease(self, *, now: dt.datetime, ttl_seconds: int = 300) -> None: raise RuntimeError("DB is down")` as an explicit method so that `test_gate_update_error_exits_0_and_warns` continues to test "DB unreachable at lease acquisition" rather than silently testing "method not found via `__getattr__`"; (b) add `test_gate_update_idle_leaves_lease_active` (repo has no in-flight work → gate exits 0 → `repo.is_drain_lease_active(now=now)` is True) and (c) add `test_gate_update_busy_releases_lease` (repo has in-flight work → gate exits 75 → `repo.is_drain_lease_active(now=now)` is False).
+
+9. **Update `docs/RUNBOOK.md`** "Watchtower idle-gate" subsection: correct the table row from "≥1 open (non-terminal) ticket" to "≥1 in-flight role job (open state-instance)"; add a "Drain lease" paragraph explaining the lease, TTL, the startup release, and that `is_drain_lease_active` can be queried via `psql` (`SELECT * FROM drain_lease;`) to diagnose a stuck board.
 
 ## File-level changes
 
@@ -105,6 +108,7 @@ The "Watchtower idle-gate" table in `docs/RUNBOOK.md` (line 375) currently says 
 | `packages/foreman/src/foreman/v4/repository.py` | Add `DrainLeaseActiveError`; add three drain-lease methods to `TicketRepository` Protocol; add drain-lease state and methods to `InMemoryTicketRepository`; guard `InMemoryTicketRepository.open_state_instance` with lease check. |
 | `packages/foreman/src/foreman/v4/postgres_repository.py` | Add `acquire_drain_lease`, `release_drain_lease`, `is_drain_lease_active` implementations; guard `open_state_instance` with lease check (same connection). |
 | `packages/foreman/src/foreman/v4/cli/gate_update.py` | Rewrite `cmd_gate_update` with four-step drain-lease flow; update module docstring. |
+| `packages/foreman/src/foreman/v4/daemon.py` | Call `repo.release_drain_lease()` (best-effort) in `_reconcile_startup` after crash orphans are closed, so dispatch resumes immediately after a successful idle redeploy. |
 | `packages/foreman/tests/v4/_repository_contract.py` | Add four drain-lease contract tests; the fourth (`test_drain_lease_blocks_open_state_instance_invalid_ticket`) enforces the ordering required by sub-request 4 (drain check must precede ticket-existence check in `open_state_instance` for both implementations). |
 | `packages/foreman/tests/v4/cli/test_gate_update.py` | `_RaisingRepo` gains an explicit `acquire_drain_lease(self, *, now, ttl_seconds=300) -> None: raise RuntimeError("DB is down")` method so `test_gate_update_error_exits_0_and_warns` continues to test DB-unreachability not missing-method; add `test_gate_update_idle_leaves_lease_active` and `test_gate_update_busy_releases_lease`. |
 | `docs/RUNBOOK.md` | Correct in-flight description; add drain-lease paragraph under "Watchtower idle-gate". |
