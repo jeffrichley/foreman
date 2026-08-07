@@ -36,8 +36,13 @@ from __future__ import annotations
 
 import os
 import subprocess
+from collections.abc import Callable
+from pathlib import Path
 
 import typer
+from github import Auth, Github, GithubException
+
+from foreman.v4.config import ProjectConfig, V4Config
 
 # Foreman's own source-of-truth repo — the one whose ``main`` the
 # daemon image is built from. Hardcoded module-level constant (not
@@ -45,6 +50,11 @@ import typer
 # daemon MANAGES, not the source of the daemon image. Matches the
 # convention for ``_DEFAULT_CONFIG`` in ``cli/__init__.py``.
 FOREMAN_SOURCE_REPO = "jeffrichley/foreman"
+
+# Default paths — mirrors the constants in foreman.v4.cli.init to avoid
+# circular imports.
+_DEFAULT_CONFIG = Path.home() / ".foreman" / "v4" / "config.toml"
+_DEFAULT_PROJECTS_PATH = Path.home() / ".foreman" / "projects.toml"
 
 
 def _check_image_fresh() -> int:
@@ -133,6 +143,87 @@ def _check_image_fresh() -> int:
     return 1
 
 
+def _check_webhook_coverage(
+    config: V4Config,
+    projects: list[ProjectConfig],
+    *,
+    github_factory: Callable[[], Github] | None = None,
+) -> int:
+    """Check that every project in ``projects`` has an active GitHub webhook.
+
+    Returns 0 on SKIPPED/OK/WARN; 1 on confirmed-missing hook.
+
+    The ``github_factory`` is a zero-arg callable that returns a
+    ``Github`` client pre-authenticated with an appropriate token.
+    ``cmd_doctor`` always passes a closure that captures a pre-minted
+    orchestrator token; tests pass their own fake factory. The parameter
+    accepts ``None`` as a sentinel so callers can also omit it — the
+    function returns SKIPPED immediately before using it when
+    ``config.inbound`` is absent or ``receiver_url`` is empty.
+
+    SKIPPED conditions (exit 0):
+      - ``config.inbound is None`` or ``config.inbound.receiver_url`` is
+        empty (webhook-coverage is unconfigured).
+      - ``projects`` is empty (nothing to check).
+
+    WARN condition (exit 0):
+      - ``GithubException`` raised while fetching hooks (network error,
+        403 insufficient permissions, 404 repo not found).
+
+    MISSING condition (exit 1):
+      - A project has no active hook whose ``config.url`` matches
+        ``receiver_url``.
+
+    OK condition (exit 0):
+      - All projects have at least one active matching hook.
+    """
+    # SKIPPED: inbound block absent or receiver_url empty.
+    if not config.inbound or not config.inbound.receiver_url:
+        typer.echo(
+            "[doctor] webhook-coverage: SKIPPED — [inbound].receiver_url not configured",
+        )
+        return 0
+
+    # SKIPPED: no projects to check.
+    if not projects:
+        typer.echo(
+            "[doctor] webhook-coverage: SKIPPED — no projects configured",
+        )
+        return 0
+
+    receiver_url = config.inbound.receiver_url
+    # github_factory is guaranteed non-None here (caller always provides
+    # one when inbound is configured).
+    assert github_factory is not None, "github_factory must be provided when inbound is set"
+    gh = github_factory()
+
+    exit_code = 0
+    for pc in projects:
+        try:
+            repo = gh.get_repo(pc.repo)
+            hooks = repo.get_hooks()
+            has_match = any(h.active and h.config.get("url") == receiver_url for h in hooks)
+        except GithubException as exc:
+            typer.echo(
+                f"[doctor] webhook-coverage: WARN — could not fetch hooks for "
+                f"{pc.repo} ({exc.status} {exc.data})",
+            )
+            continue
+
+        if has_match:
+            typer.echo(
+                f"[doctor] webhook-coverage: OK — {pc.name} ({pc.repo}) has active hook",
+            )
+        else:
+            typer.echo(
+                f"[doctor] webhook-coverage: MISSING — {pc.name} ({pc.repo}) "
+                f"has no active webhook pointing at {receiver_url}",
+            )
+            exit_code = 1
+
+    return exit_code
+
+
 def cmd_doctor(ctx: typer.Context) -> None:
     """Run a sequence of deployment-health checks.
 
@@ -149,6 +240,64 @@ def cmd_doctor(ctx: typer.Context) -> None:
 
     overall_exit = 0
     overall_exit |= _check_image_fresh()
+
+    # Webhook-coverage check (issue #590): load config + projects, mint
+    # orchestrator token, and check each project for an active hook.
+    config_path = Path(os.environ.get("FOREMAN_V4_CONFIG", str(_DEFAULT_CONFIG)))
+    config: V4Config | None = None
+    if config_path.exists():
+        try:
+            from foreman.v4.config import load_config
+
+            config = load_config(config_path)
+        except Exception:
+            typer.echo(
+                "[doctor] webhook-coverage: WARN — could not load V4 config; skipping check",
+            )
+
+    if config is not None:
+        projects_path = Path(os.environ.get("FOREMAN_PROJECTS_PATH", str(_DEFAULT_PROJECTS_PATH)))
+        projects: list[ProjectConfig] | None = None
+        try:
+            from foreman.v4.config import load_projects
+
+            projects = load_projects(projects_path)
+        except Exception:
+            typer.echo(
+                "[doctor] webhook-coverage: WARN — could not load projects; skipping check",
+            )
+
+        if projects is not None:
+            if not projects:
+                typer.echo(
+                    "[doctor] webhook-coverage: WARN — no projects configured; skipping check",
+                )
+            else:
+                # Mint the orchestrator token using the first project's repo
+                # (valid in the single-org deployment model documented in
+                # identity.py — any project's repo works for the
+                # installation-id lookup).
+                try:
+                    from foreman.v4.identity import V4IdentityRegistry
+
+                    identity = V4IdentityRegistry(
+                        apps=config.apps,
+                        orchestrator=config.orchestrator,
+                        installation_repo=projects[0].repo,
+                    )
+                    orch_token = identity.get_role_token("orchestrator")
+                    github_factory = lambda: Github(auth=Auth.Token(orch_token))  # noqa: E731
+                    overall_exit |= _check_webhook_coverage(
+                        config, projects, github_factory=github_factory
+                    )
+                except Exception as exc:
+                    # Any failure minting the orchestrator token (GithubException,
+                    # FileNotFoundError for missing PEM, network error, etc.)
+                    # degrades gracefully to WARN — the daemon is not blocked.
+                    typer.echo(
+                        f"[doctor] webhook-coverage: WARN — could not mint orchestrator "
+                        f"token ({type(exc).__name__}: {exc}); skipping check",
+                    )
 
     if overall_exit != 0:
         raise typer.Exit(code=overall_exit)

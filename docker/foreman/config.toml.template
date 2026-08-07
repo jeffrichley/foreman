@@ -98,3 +98,17 @@ enabled = ${FOREMAN_SANDBOX_ENABLED}
 # Edit that file and run `foreman daemon reload` to add, remove, or
 # rename a tracked repo — no image rebuild or container restart needed.
 # See docker/foreman/projects.toml.example for the file format.
+
+# [inbound] — optional webhook receiver URL (issue #590).
+# When set, foreman derives the expected webhook set from projects.toml and
+# flags any project lacking an active hook pointing at this URL:
+#   - `foreman doctor` runs a webhook-coverage check on demand.
+#   - The daemon logs ERROR at startup for any project missing the hook.
+#   - `foreman init <project>` installs the webhook idempotently.
+# Requires the orchestrator GitHub App to have `administration: read`
+# (to list hooks) and `administration: write` (to install them).
+# Leave this block commented out if you do not use the inbound notification
+# path — all webhook-coverage checks are SKIPPED when the block is absent.
+#
+# [inbound]
+# receiver_url = "https://your.tailscale-funnel-or-public-url/webhook"

@@ -15,6 +15,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
+from github import Auth, Github
+
 from foreman.v4.cli.context import CliContext, build_cli_context
 from foreman.v4.clone_refresh import CloneRefresher
 from foreman.v4.config import ProjectConfig, V4Config
@@ -142,6 +144,38 @@ def bootstrap_cli_context(
                     "clone_path": str(clone_path),
                 },
             )
+
+        # issue #590: webhook coverage check — only when config.inbound is set.
+        # Uses the orch_token already minted for the clone loop above. Runs
+        # inside the ``if run_startup_clone and active_projects:`` guard so
+        # orch_token is guaranteed bound. When run_startup_clone=False (the
+        # sandboxed-role-subprocess path) this block is skipped entirely.
+        if config.inbound is not None:
+            receiver_url = config.inbound.receiver_url
+            gh = Github(auth=Auth.Token(orch_token))
+            for pc in active_projects:
+                try:
+                    hooks = list(gh.get_repo(pc.repo).get_hooks())
+                    has_match = any(h.active and h.config.get("url") == receiver_url for h in hooks)
+                except Exception:
+                    # Transient network / auth failure — log and continue.
+                    # The doctor check provides the authoritative WARN/MISSING
+                    # signal; startup logging is best-effort.
+                    logger.warning(
+                        "startup: could not fetch webhooks for project",
+                        extra={"project": pc.name, "repo": pc.repo},
+                    )
+                    continue
+                if has_match:
+                    logger.info(
+                        "startup: webhook coverage OK",
+                        extra={"project": pc.name, "repo": pc.repo},
+                    )
+                else:
+                    logger.error(
+                        "startup: webhook MISSING — project has no active inbound webhook",
+                        extra={"project": pc.name, "repo": pc.repo, "receiver_url": receiver_url},
+                    )
 
     repo: TicketRepository
     from foreman.v4.postgres_repository import PostgresTicketRepository

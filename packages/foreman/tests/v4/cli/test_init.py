@@ -352,3 +352,181 @@ def test_init_uses_v4_config_apps_and_orchestrator():
     assert config.projects[0].name == "algokit"
     assert config.projects[0].repo == "jeffrichley/algokit"
     assert config.projects[0].local_clone_path == "/tmp/algokit"
+
+
+# ---------------------------------------------------------------------------
+# issue #590: _ensure_webhook and the cmd_init webhook path tests (SR 11)
+# ---------------------------------------------------------------------------
+
+from unittest.mock import MagicMock  # noqa: E402
+
+from foreman.v4.cli.init import _ensure_webhook  # noqa: E402
+
+
+def _v4_config_toml_with_inbound(tmp_path: Path, inbound_url: str | None = None) -> Path:
+    """Build a V4Config TOML with optional [inbound] block."""
+    log_dir = tmp_path / "logs"
+    base = f"""\
+[daemon]
+log_dir = "{log_dir.as_posix()}"
+
+[storage]
+engine = "postgres"
+dsn = "postgresql://test/test"
+
+[apps.planner]
+app_id = 12345
+private_key_path = "/tmp/fake.pem"
+
+[apps.reviewer]
+app_id = 12345
+private_key_path = "/tmp/fake.pem"
+
+[apps.fixer]
+app_id = 12345
+private_key_path = "/tmp/fake.pem"
+
+[apps.worker]
+app_id = 12345
+private_key_path = "/tmp/fake.pem"
+
+[orchestrator]
+app_id = 99999
+private_key_path = "/tmp/fake-orch.pem"
+
+[operator.supervisor]
+name = "Test Supervisor"
+email = "sup@example.com"
+
+[operator.signer]
+name = "Test Signer"
+email = "sign@example.com"
+"""
+    if inbound_url is not None:
+        base += f'\n[inbound]\nreceiver_url = "{inbound_url}"\n'
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(base, encoding="utf-8")
+    return cfg_path
+
+
+def _make_fake_hook(url: str, active: bool = True) -> MagicMock:
+    h = MagicMock()
+    h.active = active
+    h.config = {"url": url}
+    return h
+
+
+def test_ensure_webhook_returns_existed_when_active_hook_exists() -> None:
+    """_ensure_webhook returns (False, True) when an active matching hook already exists."""
+    receiver = "https://my.funnel.example.com/webhook"
+    client = MagicMock()
+    client.get_repo.return_value.get_hooks.return_value = [_make_fake_hook(receiver, active=True)]
+
+    created, existed = _ensure_webhook(client, "owner/repo", receiver)
+    assert created is False
+    assert existed is True
+    # create_hook must NOT be called
+    client.get_repo.return_value.create_hook.assert_not_called()
+
+
+def test_ensure_webhook_creates_hook_when_absent() -> None:
+    """_ensure_webhook returns (True, False) and calls create_hook when no matching hook exists."""
+    receiver = "https://my.funnel.example.com/webhook"
+    client = MagicMock()
+    # Return a hook with a different URL — no match.
+    client.get_repo.return_value.get_hooks.return_value = [
+        _make_fake_hook("https://other.url/hook", active=True)
+    ]
+    client.get_repo.return_value.create_hook.return_value = MagicMock()
+
+    created, existed = _ensure_webhook(client, "owner/repo", receiver)
+    assert created is True
+    assert existed is False
+    client.get_repo.return_value.create_hook.assert_called_once()
+
+
+def test_cmd_init_webhook_skipped_when_inbound_none(tmp_path: Path, monkeypatch) -> None:
+    """When config.inbound is None, the Webhook summary line reports skipped
+    and no hook API is called."""
+    project_cfg = ProjectConfig(
+        name="algokit",
+        repo="jeffrichley/algokit",
+        local_clone_path=str(tmp_path / "algokit"),
+    )
+    cfg_path = _v4_config_toml_with_inbound(tmp_path, inbound_url=None)
+    proj_path = _projects_toml(tmp_path, projects=[project_cfg])
+    monkeypatch.setenv("FOREMAN_V4_CONFIG", str(cfg_path))
+    monkeypatch.setenv("FOREMAN_PROJECTS_PATH", str(proj_path))
+
+    hook_api_calls = []
+
+    calls: dict[str, Any] = {}
+    _stub_helpers(monkeypatch, calls=calls)
+
+    # Patch _ensure_webhook to record whether it was called.
+    def fake_ensure_webhook(client, repo_slug, receiver_url):
+        hook_api_calls.append((repo_slug, receiver_url))
+        return (False, True)
+
+    monkeypatch.setattr("foreman.v4.cli.init._ensure_webhook", fake_ensure_webhook)
+
+    result = CliRunner().invoke(app, ["init", "algokit"])
+    assert result.exit_code == 0, result.output
+    assert not hook_api_calls, "_ensure_webhook must not be called when inbound is None"
+    assert "Webhook:" in result.output
+    # Must contain a "skipped" or "no inbound" indicator
+    assert "skipped" in result.output.lower() or "no inbound" in result.output.lower()
+
+
+def test_cmd_init_webhook_existed_when_hook_already_present(tmp_path: Path, monkeypatch) -> None:
+    """When config.inbound is set and a matching hook exists, summary shows 'existed'."""
+    receiver = "https://my.funnel.example.com/webhook"
+    project_cfg = ProjectConfig(
+        name="algokit",
+        repo="jeffrichley/algokit",
+        local_clone_path=str(tmp_path / "algokit"),
+    )
+    cfg_path = _v4_config_toml_with_inbound(tmp_path, inbound_url=receiver)
+    proj_path = _projects_toml(tmp_path, projects=[project_cfg])
+    monkeypatch.setenv("FOREMAN_V4_CONFIG", str(cfg_path))
+    monkeypatch.setenv("FOREMAN_PROJECTS_PATH", str(proj_path))
+
+    calls: dict[str, Any] = {}
+    _stub_helpers(monkeypatch, calls=calls)
+
+    def fake_ensure_webhook(client, repo_slug, receiver_url):
+        return (False, True)  # existed
+
+    monkeypatch.setattr("foreman.v4.cli.init._ensure_webhook", fake_ensure_webhook)
+
+    result = CliRunner().invoke(app, ["init", "algokit"])
+    assert result.exit_code == 0, result.output
+    assert "Webhook:" in result.output
+    assert "existed" in result.output.lower()
+
+
+def test_cmd_init_webhook_created_when_hook_absent(tmp_path: Path, monkeypatch) -> None:
+    """When config.inbound is set and no matching hook exists, summary shows 'created'."""
+    receiver = "https://my.funnel.example.com/webhook"
+    project_cfg = ProjectConfig(
+        name="algokit",
+        repo="jeffrichley/algokit",
+        local_clone_path=str(tmp_path / "algokit"),
+    )
+    cfg_path = _v4_config_toml_with_inbound(tmp_path, inbound_url=receiver)
+    proj_path = _projects_toml(tmp_path, projects=[project_cfg])
+    monkeypatch.setenv("FOREMAN_V4_CONFIG", str(cfg_path))
+    monkeypatch.setenv("FOREMAN_PROJECTS_PATH", str(proj_path))
+
+    calls: dict[str, Any] = {}
+    _stub_helpers(monkeypatch, calls=calls)
+
+    def fake_ensure_webhook(client, repo_slug, receiver_url):
+        return (True, False)  # created
+
+    monkeypatch.setattr("foreman.v4.cli.init._ensure_webhook", fake_ensure_webhook)
+
+    result = CliRunner().invoke(app, ["init", "algokit"])
+    assert result.exit_code == 0, result.output
+    assert "Webhook:" in result.output
+    assert "created" in result.output.lower()

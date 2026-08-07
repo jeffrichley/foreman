@@ -111,3 +111,143 @@ def test_doctor_image_fresh_warn_on_subprocess_timeout(monkeypatch) -> None:
     result = CliRunner().invoke(app, ["doctor"])
     assert result.exit_code == 0, result.output
     assert "image-fresh: WARN" in result.output
+
+
+# ---------------------------------------------------------------------------
+# issue #590: _check_webhook_coverage tests
+# ---------------------------------------------------------------------------
+
+from unittest.mock import MagicMock  # noqa: E402
+
+from github import GithubException  # noqa: E402
+
+from foreman.v4.cli.doctor import _check_webhook_coverage  # noqa: E402
+from foreman.v4.config import (  # noqa: E402
+    AppCredentials,
+    AppsConfig,
+    InboundConfig,
+    OperatorConfig,
+    OperatorIdentity,
+    OrchestratorConfig,
+    ProjectConfig,
+    StorageConfig,
+    V4Config,
+)
+
+
+def _make_config(inbound: InboundConfig | None = None) -> V4Config:
+    """Build a minimal V4Config for webhook-coverage tests."""
+    creds = AppCredentials(app_id=1, private_key_path="/dev/null")
+    return V4Config(
+        log_dir="/tmp/logs",
+        apps=AppsConfig(planner=creds, reviewer=creds, fixer=creds, worker=creds),
+        orchestrator=OrchestratorConfig(app_id=9, private_key_path="/dev/null"),
+        operator=OperatorConfig(
+            supervisor=OperatorIdentity(name="Sup", email="sup@example.com"),
+            signer=OperatorIdentity(name="Sign", email="sign@example.com"),
+        ),
+        storage=StorageConfig(engine="postgres", dsn="postgresql://test/test"),
+        inbound=inbound,
+    )
+
+
+def _make_project(name: str = "proj", repo: str = "owner/proj") -> ProjectConfig:
+    return ProjectConfig(name=name, repo=repo, local_clone_path=f"/tmp/{name}")
+
+
+def _fake_hook(url: str, active: bool = True) -> MagicMock:
+    """Build a fake PyGithub hook object."""
+    hook = MagicMock()
+    hook.active = active
+    hook.config = {"url": url}
+    return hook
+
+
+def test_check_webhook_coverage_skipped_when_inbound_none() -> None:
+    """When config.inbound is None, returns 0 (SKIPPED) immediately — no github calls."""
+    config = _make_config(inbound=None)
+    projects = [_make_project()]
+    called = []
+
+    def factory():
+        called.append(True)
+        return MagicMock()
+
+    exit_code = _check_webhook_coverage(config, projects, github_factory=factory)
+    assert exit_code == 0
+    assert not called, "github_factory should not be called when inbound is None"
+
+
+def test_check_webhook_coverage_skipped_when_receiver_url_empty() -> None:
+    """When receiver_url is the empty string, returns 0 (SKIPPED) — same as absent."""
+    config = _make_config(inbound=InboundConfig(receiver_url=""))
+    projects = [_make_project()]
+    called = []
+
+    def factory():
+        called.append(True)
+        return MagicMock()
+
+    exit_code = _check_webhook_coverage(config, projects, github_factory=factory)
+    assert exit_code == 0
+    assert not called, "github_factory should not be called when receiver_url is empty"
+
+
+def test_check_webhook_coverage_ok_when_all_projects_have_active_hook(
+    capsys,
+) -> None:
+    """All projects have an active hook with matching URL → exit 0, OK per project."""
+    receiver = "https://my.receiver.example.com/webhook"
+    config = _make_config(inbound=InboundConfig(receiver_url=receiver))
+    projects = [_make_project("alpha", "org/alpha"), _make_project("beta", "org/beta")]
+
+    def factory():
+        github = MagicMock()
+        github.get_repo.return_value.get_hooks.return_value = [_fake_hook(receiver, active=True)]
+        return github
+
+    exit_code = _check_webhook_coverage(config, projects, github_factory=factory)
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "webhook-coverage" in captured.out
+    assert "OK" in captured.out
+
+
+def test_check_webhook_coverage_missing_when_no_matching_hook(capsys) -> None:
+    """Project has no active hook with receiver URL → exit 1, MISSING line."""
+    receiver = "https://my.receiver.example.com/webhook"
+    config = _make_config(inbound=InboundConfig(receiver_url=receiver))
+    projects = [_make_project("myproj", "org/myproj")]
+
+    def factory():
+        github = MagicMock()
+        # Active hook but different URL
+        github.get_repo.return_value.get_hooks.return_value = [
+            _fake_hook("https://other.url.com/hook", active=True)
+        ]
+        return github
+
+    exit_code = _check_webhook_coverage(config, projects, github_factory=factory)
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "MISSING" in captured.out
+    assert "myproj" in captured.out or "org/myproj" in captured.out
+
+
+def test_check_webhook_coverage_warn_on_github_exception(capsys) -> None:
+    """GithubException during hook fetch → exit 0, WARN (not 1)."""
+    receiver = "https://my.receiver.example.com/webhook"
+    config = _make_config(inbound=InboundConfig(receiver_url=receiver))
+    projects = [_make_project("myproj", "org/myproj")]
+
+    def factory():
+        github = MagicMock()
+        github.get_repo.return_value.get_hooks.side_effect = GithubException(
+            403, {"message": "Must have admin rights"}, None
+        )
+        return github
+
+    exit_code = _check_webhook_coverage(config, projects, github_factory=factory)
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "WARN" in captured.out

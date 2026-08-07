@@ -1143,3 +1143,35 @@ def test_sandbox_scratch_root_defaults_onto_repos_volume() -> None:
     """
     cfg = SandboxConfig()
     assert cfg.scratch_root == "/foreman/repos/.scratch"
+
+
+# ---------------------------------------------------------------------------
+# issue #590: [inbound] config block — webhook receiver URL
+# ---------------------------------------------------------------------------
+
+
+def test_inbound_block_absent_loads_with_none(tmp_path: Path) -> None:
+    """A config without an [inbound] block loads cleanly with inbound=None.
+
+    Backward-compatible: every existing operator config that lacks [inbound]
+    continues to load without any change — the field defaults to None.
+    """
+    toml = "[daemon]\n" + 'log_dir = "/tmp/logs"\n' + _APPS_TOML
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(toml, encoding="utf-8")
+    cfg = load_config(cfg_path)
+    assert cfg.inbound is None
+
+
+def test_inbound_block_receiver_url_round_trips(tmp_path: Path) -> None:
+    """A config with [inbound].receiver_url populates V4Config.inbound.receiver_url."""
+    toml = (
+        "[daemon]\n"
+        'log_dir = "/tmp/logs"\n' + _APPS_TOML + "[inbound]\n"
+        'receiver_url = "https://my.funnel.example.com/webhook"\n'
+    )
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(toml, encoding="utf-8")
+    cfg = load_config(cfg_path)
+    assert cfg.inbound is not None
+    assert cfg.inbound.receiver_url == "https://my.funnel.example.com/webhook"

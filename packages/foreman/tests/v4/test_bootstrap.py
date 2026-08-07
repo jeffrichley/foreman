@@ -885,3 +885,169 @@ def test_bootstrap_daemon_still_sandboxes_when_not_in_box(
     assert len(preflight_calls) == 1
     dispatcher = ctx.dispatcher
     assert dispatcher._sandbox is not None  # type: ignore[attr-defined]
+
+
+# ----------------------------------------------------------------------
+# issue #590 — startup webhook coverage log
+#
+# bootstrap_cli_context, inside the ``if run_startup_clone and
+# active_projects:`` guard, checks each project's GitHub webhooks when
+# config.inbound is set and logs ERROR (missing) or INFO (covered) per
+# project. When config.inbound is None, the block is a no-op.
+# ----------------------------------------------------------------------
+
+
+def _make_hook(url: str, active: bool = True) -> MagicMock:
+    """Build a fake PyGithub hook with a config dict."""
+    h = MagicMock()
+    h.active = active
+    h.config = {"url": url}
+    return h
+
+
+def test_bootstrap_startup_webhook_check_noop_when_inbound_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """When config.inbound is None, the startup webhook check block must be
+    a complete no-op — no logger.error or logger.info calls that reference
+    webhook coverage, and Github must not be called."""
+    import logging
+
+    gh_factory_called = []
+
+    class _FakeGithub:
+        def __init__(self, **kwargs):
+            gh_factory_called.append(True)
+
+    monkeypatch.setattr("foreman.v4.bootstrap.Github", _FakeGithub)
+
+    pc = ProjectConfig(name="proj", repo="owner/proj", local_clone_path=str(tmp_path / "proj"))
+    config = V4Config(
+        log_dir=str(tmp_path / "logs"),
+        apps=_apps_config(),
+        orchestrator=_orchestrator_config(),
+        operator=_operator_config(),
+        storage=_storage_config(),
+        inbound=None,
+    )
+
+    logger = logging.getLogger("foreman.v4.bootstrap")
+    logger.addHandler(caplog.handler)
+    try:
+        bootstrap_cli_context(
+            config=config,
+            identity=_stub_identity(),
+            git_provider_factory=lambda repo: _stub_git_factory(),
+            projects=[pc],
+            run_startup_clone=True,
+        )
+    finally:
+        logger.removeHandler(caplog.handler)
+
+    assert not gh_factory_called, "Github must not be instantiated when inbound is None"
+    assert not any(
+        r.levelno in (logging.ERROR,) and "webhook" in r.message.lower() for r in caplog.records
+    ), "no ERROR-level webhook log when inbound is None"
+
+
+def test_bootstrap_startup_webhook_check_logs_info_when_all_covered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """When config.inbound is set and all projects have active matching hooks,
+    logger.info is called once per project (no ERROR)."""
+    import logging
+
+    from foreman.v4.config import InboundConfig
+
+    receiver = "https://receiver.example.com/webhook"
+
+    def fake_github_cls(**kwargs):
+        gh = MagicMock()
+        gh.get_repo.return_value.get_hooks.return_value = [_make_hook(receiver, active=True)]
+        return gh
+
+    monkeypatch.setattr("foreman.v4.bootstrap.Github", fake_github_cls)
+
+    pc = ProjectConfig(name="proj", repo="owner/proj", local_clone_path=str(tmp_path / "proj"))
+    config = V4Config(
+        log_dir=str(tmp_path / "logs"),
+        apps=_apps_config(),
+        orchestrator=_orchestrator_config(),
+        operator=_operator_config(),
+        storage=_storage_config(),
+        inbound=InboundConfig(receiver_url=receiver),
+    )
+
+    logger = logging.getLogger("foreman.v4.bootstrap")
+    logger.addHandler(caplog.handler)
+    caplog.set_level(logging.INFO, logger="foreman.v4.bootstrap")
+    try:
+        bootstrap_cli_context(
+            config=config,
+            identity=_stub_identity(),
+            git_provider_factory=lambda repo: _stub_git_factory(),
+            projects=[pc],
+            run_startup_clone=True,
+        )
+    finally:
+        logger.removeHandler(caplog.handler)
+
+    webhook_info = [
+        r for r in caplog.records if "webhook" in r.message.lower() and r.levelno == logging.INFO
+    ]
+    webhook_error = [
+        r for r in caplog.records if "webhook" in r.message.lower() and r.levelno == logging.ERROR
+    ]
+    assert webhook_info, "expected at least one INFO log for a covered project"
+    assert not webhook_error, "no ERROR log expected when all projects are covered"
+
+
+def test_bootstrap_startup_webhook_check_logs_error_when_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """When config.inbound is set and a project has no matching hook,
+    logger.error is called for that project."""
+    import logging
+
+    from foreman.v4.config import InboundConfig
+
+    receiver = "https://receiver.example.com/webhook"
+
+    def fake_github_cls(**kwargs):
+        gh = MagicMock()
+        # Return hooks with a different URL — no match.
+        gh.get_repo.return_value.get_hooks.return_value = [
+            _make_hook("https://other.url/hook", active=True)
+        ]
+        return gh
+
+    monkeypatch.setattr("foreman.v4.bootstrap.Github", fake_github_cls)
+
+    pc = ProjectConfig(name="proj", repo="owner/proj", local_clone_path=str(tmp_path / "proj"))
+    config = V4Config(
+        log_dir=str(tmp_path / "logs"),
+        apps=_apps_config(),
+        orchestrator=_orchestrator_config(),
+        operator=_operator_config(),
+        storage=_storage_config(),
+        inbound=InboundConfig(receiver_url=receiver),
+    )
+
+    logger = logging.getLogger("foreman.v4.bootstrap")
+    logger.addHandler(caplog.handler)
+    caplog.set_level(logging.DEBUG, logger="foreman.v4.bootstrap")
+    try:
+        bootstrap_cli_context(
+            config=config,
+            identity=_stub_identity(),
+            git_provider_factory=lambda repo: _stub_git_factory(),
+            projects=[pc],
+            run_startup_clone=True,
+        )
+    finally:
+        logger.removeHandler(caplog.handler)
+
+    webhook_error = [
+        r for r in caplog.records if "webhook" in r.message.lower() and r.levelno == logging.ERROR
+    ]
+    assert webhook_error, "expected ERROR log for a project missing the webhook"
