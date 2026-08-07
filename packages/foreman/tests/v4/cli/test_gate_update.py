@@ -23,13 +23,21 @@ from foreman.v4.repository import InMemoryTicketRepository
 
 
 class _RaisingRepo:
-    """Minimal fake that raises on list_in_flight_state_instances()."""
+    """Minimal fake that raises on acquire_drain_lease() to simulate DB-unreachable.
+
+    An explicit ``acquire_drain_lease`` method is required so that
+    ``test_gate_update_error_exits_0_and_warns`` exercises "DB unreachable
+    at lease acquisition" rather than "method not found via __getattr__".
+    """
+
+    def acquire_drain_lease(self, *, now: dt.datetime, ttl_seconds: int = 300) -> None:
+        raise RuntimeError("DB is down")
 
     def list_in_flight_state_instances(self) -> list[StateInstanceRecord]:
         raise RuntimeError("DB is down")
 
-    # TicketRepository is a Protocol — we only need to satisfy the call site
-    # cmd_gate_update uses, which is list_in_flight_state_instances().
+    # TicketRepository is a Protocol — we only need to satisfy the call sites
+    # cmd_gate_update uses.
     def __getattr__(self, name: str) -> Any:
         raise AttributeError(name)
 
@@ -89,8 +97,8 @@ def test_gate_update_parked_needs_help_ticket_is_not_busy() -> None:
 
 
 def test_gate_update_error_exits_0_and_warns() -> None:
-    """When list_open_tickets() raises, gate-update must exit 0 (fail-open) and
-    emit a line containing 'WARNING' to stderr."""
+    """When acquire_drain_lease() raises (DB unreachable), gate-update must exit 0
+    (fail-open) and emit a line containing 'WARNING' to stderr."""
     # CliRunner (typer.testing) mixes stderr into output by default.
     runner = CliRunner()
     result = runner.invoke(
@@ -100,3 +108,32 @@ def test_gate_update_error_exits_0_and_warns() -> None:
     )
     assert result.exit_code == 0
     assert "WARNING" in result.output
+
+
+def test_gate_update_idle_leaves_lease_active() -> None:
+    """With no in-flight work, gate-update exits 0 and leaves the drain lease set.
+
+    The lease must remain active so no new state-instance can be opened in
+    the window between gate-update returning and SIGTERM arriving.
+    """
+    now = dt.datetime(2026, 6, 26, 12, 0, 0)
+    repo = _idle_repo()
+    runner = CliRunner()
+    result = runner.invoke(app, ["gate-update"], obj=build_cli_context(repo=repo))
+    assert result.exit_code == 0
+    assert repo.is_drain_lease_active(now=now)
+
+
+def test_gate_update_busy_releases_lease() -> None:
+    """With in-flight work, gate-update exits 75 and releases the drain lease.
+
+    The lease must NOT remain set after a deferred poll — a busy deferral
+    that leaves the lease active would silently block dispatch until the
+    TTL expires.
+    """
+    now = dt.datetime(2026, 6, 26, 12, 0, 0)
+    repo = _busy_repo()
+    runner = CliRunner()
+    result = runner.invoke(app, ["gate-update"], obj=build_cli_context(repo=repo))
+    assert result.exit_code == 75
+    assert not repo.is_drain_lease_active(now=now)

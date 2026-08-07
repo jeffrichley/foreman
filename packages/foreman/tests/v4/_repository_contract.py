@@ -15,6 +15,7 @@ import pytest
 
 from foreman.v4.outcome import OutcomeKind
 from foreman.v4.repository import (
+    DrainLeaseActiveError,
     StateInstanceNotFoundError,
     TicketAlreadyExistsError,
     TicketNotFoundError,
@@ -678,3 +679,57 @@ class RepositoryContract:
         assert head is not None
         assert head.id == e.id
         assert head.status == "queued"
+
+    # --- Drain lease (foreman#599) ---
+
+    def test_drain_lease_blocks_open_state_instance(self, repo: TicketRepository) -> None:
+        """With an active drain lease, open_state_instance raises DrainLeaseActiveError."""
+        now = _now()
+        t = repo.create_ticket(project="p", issue_number=1, now=now)
+        repo.acquire_drain_lease(now=now, ttl_seconds=300)
+        assert repo.is_drain_lease_active(now=now)
+        with pytest.raises(DrainLeaseActiveError):
+            repo.open_state_instance(ticket_id=t.id, state_name="Planning", sequence=1, now=now)
+
+    def test_drain_lease_releases_correctly(self, repo: TicketRepository) -> None:
+        """Releasing the lease allows open_state_instance to proceed."""
+        now = _now()
+        t = repo.create_ticket(project="p", issue_number=1, now=now)
+        repo.acquire_drain_lease(now=now, ttl_seconds=300)
+        assert repo.is_drain_lease_active(now=now)
+        repo.release_drain_lease()
+        assert not repo.is_drain_lease_active(now=now)
+        # open_state_instance must succeed after release
+        inst = repo.open_state_instance(ticket_id=t.id, state_name="Planning", sequence=1, now=now)
+        assert inst.id > 0
+
+    def test_expired_drain_lease_does_not_block(self, repo: TicketRepository) -> None:
+        """An expired lease is treated as absent — open_state_instance proceeds normally."""
+        acquired_at = _now()
+        # Acquire a lease with a 1-second TTL.
+        repo.acquire_drain_lease(now=acquired_at, ttl_seconds=1)
+        # Advance the clock past the TTL.
+        now_after_ttl = acquired_at + dt.timedelta(seconds=2)
+        assert not repo.is_drain_lease_active(now=now_after_ttl)
+        t = repo.create_ticket(project="p", issue_number=1, now=acquired_at)
+        # open_state_instance must succeed because the lease is expired.
+        inst = repo.open_state_instance(
+            ticket_id=t.id, state_name="Planning", sequence=1, now=now_after_ttl
+        )
+        assert inst.id > 0
+
+    def test_drain_lease_blocks_open_state_instance_invalid_ticket(
+        self, repo: TicketRepository
+    ) -> None:
+        """Active drain + non-existent ticket → DrainLeaseActiveError, not TicketNotFoundError.
+
+        This test enforces the ordering invariant required by sub-request 4:
+        the drain-lease check MUST precede the ticket-existence check in
+        open_state_instance.  An implementation that checks the ticket first
+        and the lease second would raise TicketNotFoundError here instead.
+        """
+        now = _now()
+        repo.acquire_drain_lease(now=now, ttl_seconds=300)
+        with pytest.raises(DrainLeaseActiveError):
+            # ticket_id=9999 does not exist, but the drain check fires first.
+            repo.open_state_instance(ticket_id=9999, state_name="Planning", sequence=1, now=now)

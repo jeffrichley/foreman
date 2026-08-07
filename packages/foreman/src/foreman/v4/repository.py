@@ -27,6 +27,18 @@ class StateInstanceNotFoundError(LookupError):
     """No state-instance exists with the given id."""
 
 
+class DrainLeaseActiveError(LookupError):
+    """A drain lease is active — dispatch is blocked until it expires or is released.
+
+    Raised by ``open_state_instance`` when an unexpired drain lease is
+    present in the repository, preventing any new state-instance row from
+    being inserted.  The drain lease is set by ``gate-update`` before it
+    checks for in-flight work; it holds until the new daemon starts and
+    calls ``release_drain_lease()``, or until the TTL expires (default
+    300 s).
+    """
+
+
 class TicketAlreadyExistsError(ValueError):
     """A ticket with this (project, issue_number) is already tracked."""
 
@@ -326,6 +338,38 @@ class TicketRepository(Protocol):
         """
         ...
 
+    # --- Drain lease (foreman#599) ---
+
+    def acquire_drain_lease(self, *, now: dt.datetime, ttl_seconds: int = 300) -> None:
+        """Acquire (or refresh) the drain lease, setting it to expire in ``ttl_seconds``.
+
+        Idempotent: if a lease already exists (active or expired), it is
+        overwritten with a fresh expiry.  Called by ``gate-update`` BEFORE
+        re-checking in-flight work so any ``open_state_instance`` call that
+        arrives after this returns is blocked.
+        """
+        ...
+
+    def release_drain_lease(self) -> None:
+        """Release the drain lease so dispatch can resume immediately.
+
+        Called by ``gate-update`` when it defers (exits 75 — board busy) so
+        the lease does not block dispatch until the TTL expires.  Also called
+        during ``_reconcile_startup`` so the new daemon unblocks dispatch
+        immediately after the successful idle redeploy.
+
+        No-op if no lease exists.
+        """
+        ...
+
+    def is_drain_lease_active(self, *, now: dt.datetime) -> bool:
+        """Return True iff a drain lease exists and has not yet expired.
+
+        An expired lease (``expires_at <= now``) is treated as absent and
+        returns False.
+        """
+        ...
+
     # --- Merge queue (foreman#550) ---
 
     def enqueue_merge(
@@ -417,6 +461,8 @@ class InMemoryTicketRepository:
         self._events: list[dict[str, Any]] = []
         self._merge_queue: list[MergeQueueEntry] = []
         self._next_merge_entry_id = 1
+        # foreman#599: drain lease expires_at timestamp; None means no lease.
+        self._drain_lease_expires_at: dt.datetime | None = None
 
     # --- Ticket CRUD ---
 
@@ -559,15 +605,18 @@ class InMemoryTicketRepository:
     def open_state_instance(
         self, *, ticket_id: int, state_name: str, sequence: int, now: dt.datetime
     ) -> StateInstanceRecord:
-        """Verify the ticket exists, then create and store a new state-instance row.
+        """Verify no drain lease is active, verify the ticket exists, then create a row.
 
-        The new row's lifecycle fields (``execute_started_at``,
-        ``outcome_kind``, etc.) all start empty; subsequent ``mark_*``
-        and ``record_failure`` calls fill them in as the state runs.
+        The drain-lease check MUST come before the ticket-existence check —
+        an active drain with a non-existent ticket_id must raise
+        ``DrainLeaseActiveError``, not ``TicketNotFoundError``.
 
         Raises:
+            DrainLeaseActiveError: an unexpired drain lease is active.
             TicketNotFoundError: ``ticket_id`` does not exist.
         """
+        if self.is_drain_lease_active(now=now):
+            raise DrainLeaseActiveError("drain lease is active — dispatch is blocked")
         self.get_ticket(ticket_id)  # raise if missing
         instance = StateInstanceRecord(
             id=self._next_instance_id,
@@ -779,6 +828,22 @@ class InMemoryTicketRepository:
         ``depends_on`` contains issue numbers of untracked GitHub issues.
         """
         return list(self.get_ticket(ticket_id).depends_on)
+
+    # --- Drain lease (foreman#599) ---
+
+    def acquire_drain_lease(self, *, now: dt.datetime, ttl_seconds: int = 300) -> None:
+        """Set (or refresh) the drain lease to expire ``ttl_seconds`` from ``now``."""
+        self._drain_lease_expires_at = now + dt.timedelta(seconds=ttl_seconds)
+
+    def release_drain_lease(self) -> None:
+        """Clear the drain lease so dispatch can resume immediately."""
+        self._drain_lease_expires_at = None
+
+    def is_drain_lease_active(self, *, now: dt.datetime) -> bool:
+        """Return True iff the lease exists and ``expires_at > now``."""
+        if self._drain_lease_expires_at is None:
+            return False
+        return self._drain_lease_expires_at > now
 
     # --- Merge queue (foreman#550) ---
 

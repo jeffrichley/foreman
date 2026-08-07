@@ -36,6 +36,7 @@ from foreman.v4.records import (
     TicketRecord,
 )
 from foreman.v4.repository import (
+    DrainLeaseActiveError,
     MergeQueueEntry,
     StateInstanceNotFoundError,
     TicketAlreadyExistsError,
@@ -359,19 +360,32 @@ class PostgresTicketRepository:
     def open_state_instance(
         self, *, ticket_id: int, state_name: str, sequence: int, now: dt.datetime
     ) -> StateInstanceRecord:
-        """Insert a new journal row, checking ticket existence before the insert.
+        """Insert a new journal row, checking drain lease then ticket existence.
 
-        The ``ticket_id`` foreign key would itself reject an insert for
-        an unknown ticket, but that failure surfaces as a generic FK
-        violation; a preceding existence check lets this raise the clean
-        `TicketNotFoundError` the contract expects instead.
+        The drain-lease check MUST come before the ticket-existence check —
+        an active drain with a non-existent ticket_id must raise
+        ``DrainLeaseActiveError``, not ``TicketNotFoundError``.
+
+        All three checks (lease, ticket existence, insert) run in the same
+        connection so no concurrent state can slip in between.
         """
+        ts = _to_db(now)
         with self._pool.connection() as conn:
-            # FK enforces ticket existence; surface a clean error first.
+            # 1. Check drain lease FIRST (before ticket-existence check).
+            # SELECT with expires_at > %s handles the TTL check in the DB.
+            lease_active = conn.execute(
+                "SELECT 1 FROM drain_lease WHERE id = 1 AND expires_at > %s",
+                (_to_db(now),),
+            ).fetchone()
+            if lease_active is not None:
+                conn.rollback()
+                raise DrainLeaseActiveError("drain lease is active — dispatch is blocked")
+            # 2. FK enforces ticket existence; surface a clean error first.
             exists = conn.execute("SELECT 1 FROM tickets WHERE id = %s", (ticket_id,)).fetchone()
             if exists is None:
                 conn.rollback()
                 raise TicketNotFoundError(str(ticket_id))
+            # 3. Insert the state-instance row.
             row = conn.execute(
                 """
                 INSERT INTO state_instances
@@ -379,7 +393,7 @@ class PostgresTicketRepository:
                 VALUES (%s, %s, %s, %s)
                 RETURNING *
                 """,
-                (ticket_id, state_name, sequence, _to_db(now)),
+                (ticket_id, state_name, sequence, ts),
             ).fetchone()
             conn.commit()
             assert row is not None
@@ -649,6 +663,45 @@ class PostgresTicketRepository:
         ``depends_on`` contains issue numbers of untracked GitHub issues.
         """
         return list(self.get_ticket(ticket_id).depends_on)
+
+    # --- Drain lease (foreman#599) ---
+
+    def acquire_drain_lease(self, *, now: dt.datetime, ttl_seconds: int = 300) -> None:
+        """UPSERT the singleton drain_lease row with a fresh TTL.
+
+        Idempotent: any existing lease (active or expired) is overwritten.
+        The UPSERT guarantees the row is always present after this call.
+        """
+        acquired_ts = _to_db(now)
+        expires_ts = _to_db(now + dt.timedelta(seconds=ttl_seconds))
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO drain_lease (id, acquired_at, expires_at)
+                VALUES (1, %s, %s)
+                ON CONFLICT (id) DO UPDATE
+                    SET acquired_at = EXCLUDED.acquired_at,
+                        expires_at  = EXCLUDED.expires_at
+                """,
+                (acquired_ts, expires_ts),
+            )
+            conn.commit()
+
+    def release_drain_lease(self) -> None:
+        """Delete the singleton drain_lease row (best-effort — no error if absent)."""
+        with self._pool.connection() as conn:
+            conn.execute("DELETE FROM drain_lease WHERE id = 1")
+            conn.commit()
+
+    def is_drain_lease_active(self, *, now: dt.datetime) -> bool:
+        """Return True iff the drain_lease row exists and ``expires_at > now``."""
+        now_ts = _to_db(now)
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT expires_at FROM drain_lease WHERE id = 1 AND expires_at > %s",
+                (now_ts,),
+            ).fetchone()
+        return row is not None
 
     # --- Merge queue (foreman#550) ---
 

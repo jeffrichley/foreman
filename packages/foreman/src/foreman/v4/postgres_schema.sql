@@ -77,3 +77,14 @@ CREATE TABLE IF NOT EXISTS merge_queue (
     enqueued_at   TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS merge_queue_project_order ON merge_queue (project, enqueued_at);
+
+-- Drain lease (foreman#599): singleton row that gate-update sets before
+-- re-checking in-flight work.  open_state_instance refuses to insert while
+-- this row exists and has not expired.  The CHECK (id = 1) constraint
+-- enforces singleton semantics; UPSERT ON CONFLICT makes acquire idempotent.
+CREATE TABLE IF NOT EXISTS drain_lease (
+    id          INTEGER PRIMARY KEY DEFAULT 1,
+    acquired_at TIMESTAMPTZ NOT NULL,
+    expires_at  TIMESTAMPTZ NOT NULL,
+    CHECK (id = 1)
+);

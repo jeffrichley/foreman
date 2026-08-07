@@ -372,8 +372,8 @@ container **before** stopping and recreating it for a new image digest.
 
 | Board state | `foreman gate-update` exit code | Watchtower action |
 |---|---|---|
-| ≥1 open (non-terminal) ticket | **75** (EX_TEMPFAIL) | Defer restart to the next poll cycle |
-| No open tickets (idle) | **0** | Allow restart — pulls new image |
+| ≥1 in-flight role job (open state-instance) | **75** (EX_TEMPFAIL) | Defer restart to the next poll cycle |
+| No in-flight role jobs (idle) | **0** | Allow restart — pulls new image |
 | Repository unreachable / any error | **0** (fail-open) | Allow restart + WARNING printed to stderr |
 
 The fail-open design is intentional: a bug in the hook must never
@@ -422,6 +422,40 @@ docker inspect foreman-daemon \
   --format '{{index .Config.Labels "com.centurylinklabs.watchtower.lifecycle.pre-update"}}'
 # Expected output: foreman gate-update
 ```
+
+**Drain lease (foreman#599):**
+
+To close the race between the gate returning idle and the SIGTERM arriving,
+`gate-update` acquires a **drain lease** in PostgreSQL before re-checking
+for in-flight work.  While the lease is active, `open_state_instance`
+refuses to insert new state-instance rows — preventing the dispatcher from
+starting new work in the 2–3 second window between the hook exit and
+SIGTERM.
+
+The lease has a 5-minute TTL (default 300 s).  In the normal redeploy path,
+the newly started daemon releases the lease during `_reconcile_startup`
+(after closing any crash-orphaned rows from the previous process), so
+dispatch resumes immediately rather than waiting for the TTL.  The TTL is
+the safety valve for the abandoned-update case: if the new container fails
+to start, the board unblocks automatically within 5 minutes.
+
+If a redeploy fails and the board appears stuck (no new work dispatching
+despite tickets in `Queued` state), check whether a stale drain lease is
+the cause:
+
+```bash
+# Inside the daemon container or via psql on the host:
+psql "$DATABASE_URL" -c "SELECT * FROM drain_lease;"
+```
+
+If a stale row is present and the daemon is running normally (the new image
+is live), you can clear it manually:
+
+```bash
+psql "$DATABASE_URL" -c "DELETE FROM drain_lease;"
+```
+
+This is safe — the daemon immediately resumes dispatch on its next tick.
 
 ---
 
