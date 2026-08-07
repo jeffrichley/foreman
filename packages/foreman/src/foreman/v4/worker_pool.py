@@ -22,6 +22,7 @@ from __future__ import annotations
 import concurrent.futures
 import datetime as dt
 import logging
+import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -105,6 +106,7 @@ class WorkerPool:
             max_workers=qm.max_in_flight,
             thread_name_prefix="foreman-worker",
         )
+        self._shutting_down: threading.Event = threading.Event()
 
     def tick(self) -> int:
         """Submit every dispatchable WorkItem to the executor. Returns count submitted."""
@@ -141,6 +143,15 @@ class WorkerPool:
             future.add_done_callback(_on_done_log)
             submitted += 1
 
+    def set_shutting_down(self) -> None:
+        """Block new state-instance dispatch. Called by Daemon.stop() on SIGTERM.
+
+        Safe to call from a signal handler — threading.Event.set() is
+        async-signal-safe. After this fires, any _run_transition call that
+        has not yet reached open_state_instance returns immediately.
+        """
+        self._shutting_down.set()
+
     def _log_exception(
         self,
         future: concurrent.futures.Future[Any],
@@ -156,6 +167,12 @@ class WorkerPool:
             )
 
     def _run_transition(self, item: WorkItem) -> None:
+        if self._shutting_down.is_set():
+            _LOG.info(
+                "ticket %s: dispatch skipped, daemon is shutting down",
+                item.ticket_id,
+            )
+            return
         ctx: StateContext | None = None
         try:
             ticket = self._repo.get_ticket(item.ticket_id)

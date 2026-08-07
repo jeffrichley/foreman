@@ -475,3 +475,45 @@ def test_tick_once_isolates_a_failing_merge_coordinator():
     daemon._merge_coordinator.tick = boom  # type: ignore[method-assign]
     daemon.tick_once()  # must not raise
     boom.assert_called_once()
+
+
+def test_daemon_stop_prevents_new_state_instances():
+    """daemon.stop() must propagate the shutting-down flag to the pool.
+
+    After stop(), a tick_once() call must not open any new state-instance
+    rows — the flag fires before open_state_instance is reached.
+    """
+    repo = InMemoryTicketRepository()
+    git = FakeGitProvider()
+    git.set_open_issues_with_label(
+        project="p",
+        label="foreman:plan",
+        issue_numbers={1},
+    )
+
+    def clock() -> dt.datetime:
+        return dt.datetime(2026, 8, 7, 12, 0, 0)
+
+    poller = Poller(
+        repo=repo,
+        qm=None,
+        git=git,
+        project="p",
+        trigger_label="foreman:plan",
+        clock=clock,
+    )
+    daemon = Daemon(
+        repo=repo,
+        git=git,
+        dispatcher=FakeRoleDispatcher(responses={}),
+        pollers=[poller],
+        config=DaemonConfig(tick_seconds=0, max_in_flight=4),
+        clock=clock,
+    )
+    daemon.stop()
+    daemon.tick_once()
+
+    ticket = repo.get_ticket_by_issue(project="p", issue_number=1)
+    assert repo.list_state_instances_for_ticket(ticket.id) == [], (
+        "stop() must set the shutting-down flag so no state-instance row is opened"
+    )

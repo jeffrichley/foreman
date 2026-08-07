@@ -324,3 +324,74 @@ def test_dispatch_resumes_once_the_drain_lease_is_released():
         )
     finally:
         pool.shutdown(wait=True)
+
+
+def test_shutting_down_blocks_new_state_instances():
+    """After set_shutting_down(), dispatch must not open new state-instance rows.
+
+    Models test_drain_lease_defers_dispatch_without_parking_the_ticket
+    exactly, replacing the DB-backed lease with the process-local
+    shutting-down flag.  The ticket must be left untouched — not
+    NeedsHelp — because a SIGTERM during a redeploy is not a crash.
+    """
+    repo = InMemoryTicketRepository()
+    now = dt.datetime(2026, 8, 7, 12, 0, 0)
+    ticket = repo.create_ticket(project="p", issue_number=1, now=now)
+    repo.set_ticket_state(ticket.id, "ImplApproved", now=now)
+
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    pool = WorkerPool(
+        repo=repo,
+        qm=qm,
+        dispatcher=FakeRoleDispatcher(responses={}),
+        git=None,
+        bus=None,
+        clock=lambda: now,
+    )
+    pool.set_shutting_down()
+    try:
+        qm.enqueue(WorkItem(ticket_id=ticket.id, state_name="ImplApproved", project="p"))
+        pool.tick()
+        _wait_until_idle(qm)
+
+        assert repo.get_ticket(ticket.id).current_state == "ImplApproved", (
+            "a shutdown block must leave the ticket where it was"
+        )
+        assert repo.get_ticket(ticket.id).current_state != "NeedsHelp"
+        assert repo.list_state_instances_for_ticket(ticket.id) == [], (
+            "no state-instance row should exist — shutdown blocks before the insert"
+        )
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_dispatch_proceeds_before_shutting_down_is_set():
+    """Without calling set_shutting_down(), normal dispatch still opens a row.
+
+    Regression lock: guards against accidentally setting the flag at
+    WorkerPool construction time.
+    """
+    repo = InMemoryTicketRepository()
+    now = dt.datetime(2026, 8, 7, 12, 0, 0)
+    ticket = repo.create_ticket(project="p", issue_number=1, now=now)
+    repo.set_ticket_state(ticket.id, "Planning", now=now)
+
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    pool = WorkerPool(
+        repo=repo,
+        qm=qm,
+        dispatcher=FakeRoleDispatcher(responses={("planner", "p", 1): _canned("clean")}),
+        git=None,
+        bus=None,
+        clock=lambda: now,
+    )
+    try:
+        qm.enqueue(WorkItem(ticket_id=ticket.id, state_name="Planning", project="p"))
+        pool.tick()
+        _wait_until_idle(qm)
+
+        assert repo.list_state_instances_for_ticket(ticket.id) != [], (
+            "dispatch must open a state-instance row when flag is not set"
+        )
+    finally:
+        pool.shutdown(wait=True)
