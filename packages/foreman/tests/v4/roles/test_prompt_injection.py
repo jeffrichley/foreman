@@ -926,3 +926,215 @@ async def test_worker_does_not_fetch_comments(tmp_path: Path) -> None:
     # construction; the explicit ``assert_not_called`` makes the
     # contract observable in CI.
     mock_host.get_issue_comments.assert_not_called()
+
+
+# ---------------------------------------------------------------------
+# foreman#586 — load_project_instructions receives wt_path, not bare mirror
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_planner_load_instructions_receives_wt_path(
+    tmp_path: Path,
+) -> None:
+    """foreman#586 regression pin (Planner): ``load_project_instructions``
+    must be called with the checked-out worktree path (``wt_path``),
+    not ``Path(project.local_clone_path)`` (the bare mirror base).
+
+    Bare mirrors have no working tree so the loader always returned
+    ``None`` even when ``.foreman/INSTRUCTIONS.md`` was committed.
+    """
+    cfg = _build_v4_config(
+        project_repo="testowner/myrepo",
+        local_clone_path=str(tmp_path / "clone"),
+    )
+    Path(tmp_path / "clone").mkdir(parents=True, exist_ok=True)
+    worktrees_root = tmp_path / "worktrees"
+    wt_path = worktrees_root / "myrepo" / "issue-586"
+    wt_path.mkdir(parents=True, exist_ok=True)
+
+    issue_ref = IssueRef(
+        number=586,
+        title="test: wt_path instruction loading",
+        body="See #586.",
+        labels=[],
+        repo_slug="testowner/myrepo",
+    )
+    mock_host = MagicMock()
+    mock_host.get_issue.return_value = issue_ref
+    mock_host.get_default_branch.return_value = "main"
+    mock_host.get_issue_comments.return_value = []
+    mock_host.open_pull_request.return_value = _build_planner_pr_ref()
+
+    identity_registry = MagicMock()
+    identity_registry.get_role_bot_logins.return_value = _ALL_ROLE_BOT_LOGINS
+
+    mock_wt_mgr = MagicMock()
+    mock_wt_mgr.create.return_value = wt_path
+
+    mock_provider = MagicMock()
+    mock_provider.run_agent = AsyncMock(return_value=(_build_planner_output(), UsageInfo()))
+
+    mock_load = MagicMock(return_value=None)
+
+    with (
+        patch("foreman.roles.planner.WorktreeManager", return_value=mock_wt_mgr),
+        patch(
+            "foreman.roles.planner.build_role_resources",
+            return_value=(mock_host, "fake-token", MagicMock()),
+        ),
+        patch("foreman.roles.planner.load_project_instructions", new=mock_load),
+        patch(
+            "foreman.roles.planner.log_planner_run",
+            return_value=Path("/tmp/fake-stats.jsonl"),
+        ),
+    ):
+        await _run_planner_core(
+            issue_url="https://github.com/testowner/myrepo/issues/586",
+            config=cfg,
+            project_name="p",
+            worktrees_root=worktrees_root,
+            provider=mock_provider,
+            identity_registry=identity_registry,
+        )
+
+    # foreman#586: the argument must be the worktree path, not the bare mirror.
+    assert mock_load.call_args[0][0] == wt_path
+
+
+@pytest.mark.asyncio
+async def test_reviewer_on_spec_load_instructions_receives_wt_path(
+    tmp_path: Path,
+) -> None:
+    """foreman#586 regression pin (Reviewer-on-spec): ``load_project_instructions``
+    must be called with ``wt_path`` (the checked-out worktree), not
+    ``Path(project.local_clone_path)`` (the bare mirror base).
+    """
+    cfg = _build_v4_config(
+        project_repo="testowner/myrepo",
+        local_clone_path=str(tmp_path / "clone"),
+    )
+    Path(tmp_path / "clone").mkdir(parents=True, exist_ok=True)
+    worktrees_root = tmp_path / "worktrees"
+    wt_path = worktrees_root / "myrepo" / "issue-586"
+    wt_path.mkdir(parents=True, exist_ok=True)
+
+    mock_repo, mock_pr, fake_issue = _build_reviewer_mocks(
+        head_ref="foreman/issue-586",
+        seeded_comments=[],
+    )
+    mock_client = MagicMock()
+    mock_client.get_repo.return_value = mock_repo
+
+    mock_host = MagicMock()
+    identity_registry = MagicMock()
+    identity_registry.get_role_bot_logins.return_value = _ALL_ROLE_BOT_LOGINS
+
+    mock_wt_mgr = MagicMock()
+    mock_wt_mgr.attach.return_value = wt_path
+    mock_wt_mgr.attach_impl.return_value = wt_path
+
+    mock_provider = MagicMock()
+    mock_provider.run_agent = AsyncMock(return_value=(_build_reviewer_output(), UsageInfo()))
+
+    mock_load = MagicMock(return_value=None)
+
+    with (
+        patch("foreman.roles.reviewer.WorktreeManager", return_value=mock_wt_mgr),
+        patch(
+            "foreman.roles.reviewer.build_role_resources",
+            return_value=(mock_host, "fake-token", mock_client),
+        ),
+        patch("foreman.roles.reviewer._get_pr_diff", return_value=""),
+        patch("foreman.roles.reviewer._read_spec_doc", return_value="# Spec\n"),
+        patch("foreman.roles.reviewer.load_project_instructions", new=mock_load),
+        patch(
+            "foreman.roles.reviewer.log_reviewer_run",
+            return_value=Path("/tmp/fake-stats.jsonl"),
+        ),
+    ):
+        await _run_reviewer_core(
+            pr_url="https://github.com/testowner/myrepo/pull/1234",
+            config=cfg,
+            project_name="p",
+            worktrees_root=worktrees_root,
+            provider=mock_provider,
+            identity_registry=identity_registry,
+        )
+
+    # foreman#586: the argument must be the worktree path, not the bare mirror.
+    assert mock_load.call_args[0][0] == wt_path
+
+
+@pytest.mark.asyncio
+async def test_fixer_on_spec_load_instructions_receives_wt_path(
+    tmp_path: Path,
+) -> None:
+    """foreman#586 regression pin (Fixer-on-spec): ``load_project_instructions``
+    must be called with ``wt_path`` (the checked-out worktree), not
+    ``Path(project.local_clone_path)`` (the bare mirror base).
+    """
+    cfg = _build_v4_config(
+        project_repo="testowner/myrepo",
+        local_clone_path=str(tmp_path / "clone"),
+    )
+    Path(tmp_path / "clone").mkdir(parents=True, exist_ok=True)
+    worktrees_root = tmp_path / "worktrees"
+    wt_path = worktrees_root / "myrepo" / "issue-586"
+    wt_path.mkdir(parents=True, exist_ok=True)
+
+    mock_repo, mock_pr, fake_issue = _build_fixer_mocks(seeded_comments=[])
+    mock_client = MagicMock()
+    mock_client.get_repo.return_value = mock_repo
+
+    mock_host = MagicMock()
+    identity_registry = MagicMock()
+    identity_registry.get_role_bot_logins.return_value = _ALL_ROLE_BOT_LOGINS
+
+    mock_wt_mgr = MagicMock()
+    mock_wt_mgr.attach.return_value = wt_path
+    mock_wt_mgr.attach_impl.return_value = wt_path
+
+    mock_provider = MagicMock()
+    mock_provider.run_agent = AsyncMock(return_value=(_build_fixer_output(), UsageInfo()))
+
+    mock_load = MagicMock(return_value=None)
+
+    with (
+        patch("foreman.roles.fixer.WorktreeManager", return_value=mock_wt_mgr),
+        patch(
+            "foreman.roles.fixer.build_role_resources",
+            return_value=(mock_host, "fake-token", mock_client),
+        ),
+        patch("foreman.roles.fixer._find_role_pr", return_value=mock_pr),
+        patch(
+            "foreman.roles.fixer._latest_reviewer_review_comment",
+            return_value="reviewer prose",
+        ),
+        patch(
+            "foreman.roles.fixer._extract_findings_from_review_comment",
+            return_value=[],
+        ),
+        patch("foreman.roles.fixer._read_spec_doc", return_value="# Spec\n"),
+        patch("foreman.roles.fixer.load_project_instructions", new=mock_load),
+        patch(
+            "foreman.roles.fixer.log_fixer_run",
+            return_value=Path("/tmp/fake-stats.jsonl"),
+        ),
+        patch(
+            "foreman.roles.worker._ensure_provenance_trailers",
+            return_value=None,
+        ),
+    ):
+        await _run_fixer_core(
+            issue_url="https://github.com/testowner/myrepo/issues/586",
+            config=cfg,
+            project_name="p",
+            worktrees_root=worktrees_root,
+            provider=mock_provider,
+            identity_registry=identity_registry,
+            target="spec_pr",
+        )
+
+    # foreman#586: the argument must be the worktree path, not the bare mirror.
+    assert mock_load.call_args[0][0] == wt_path

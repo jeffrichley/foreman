@@ -344,7 +344,7 @@ async def _run_planner_core(
         # worktrees share with the parent repo, leaking the bot identity
         # into subsequent human commits.
 
-        instructions = load_project_instructions(Path(project.local_clone_path))
+        instructions = load_project_instructions(wt_path)
 
         system_prompt = _load_planner_prompt()
         user_prompt = _build_user_prompt(
