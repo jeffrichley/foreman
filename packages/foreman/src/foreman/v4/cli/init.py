@@ -32,6 +32,43 @@ from foreman.init import (
 from foreman.v4.config import load_config, load_projects
 from foreman.v4.identity import V4IdentityRegistry
 
+
+def _ensure_webhook(
+    client: Github,
+    repo_slug: str,
+    receiver_url: str,
+) -> tuple[bool, bool]:
+    """Idempotently install a GitHub webhook for ``receiver_url`` on ``repo_slug``.
+
+    Scans the repo's existing hooks for one whose ``config.url`` matches
+    ``receiver_url`` and is active. If found, returns ``(False, True)``
+    (existed). If not found, creates a new ``web`` hook and returns
+    ``(True, False)`` (created).
+
+    Args:
+        client: A PyGithub ``Github`` client authenticated with a token
+            that has ``administration:read`` + ``administration:write``
+            permissions on ``repo_slug``.
+        repo_slug: ``"owner/name"`` full repo slug.
+        receiver_url: The webhook target URL (the inbound receiver).
+
+    Returns:
+        ``(created, existed)`` — exactly one of the two booleans is ``True``.
+    """
+    repo = client.get_repo(repo_slug)
+    for hook in repo.get_hooks():
+        if hook.active and hook.config.get("url") == receiver_url:
+            return (False, True)
+    # No active matching hook found — create one.
+    repo.create_hook(
+        "web",
+        {"url": receiver_url, "content_type": "json"},
+        events=["*"],
+        active=True,
+    )
+    return (True, False)
+
+
 # Default check-command threaded into the instructions template. Matches
 # v3's ``foreman.init._DEFAULT_CHECK_COMMAND`` and ``foreman.roles.worker
 # ._DEFAULT_CHECK_COMMAND`` — same default on both ends of the pipeline.
@@ -143,6 +180,16 @@ def cmd_init(
         for role in _ROLE_NAMES
     ]
 
+    # issue #590: webhook installation — idempotent; only when inbound is configured.
+    webhook_status: str
+    if config.inbound and config.inbound.receiver_url:
+        webhook_created, webhook_existed = _ensure_webhook(
+            admin_client, project_cfg.repo, config.inbound.receiver_url
+        )
+        webhook_status = "created" if webhook_created else "existed"
+    else:
+        webhook_status = "skipped — no inbound URL configured"
+
     # Print a human-readable summary. Shape mirrors v3 init's output
     # without the v3-config-write footer (v4 doesn't write to a config
     # file — V4Config is the source of truth, hand-edited by the
@@ -158,6 +205,7 @@ def cmd_init(
         f"  Instructions:  {instructions_path} "
         f"({'written' if instructions_written else 'preserved'})",
     )
+    typer.echo(f"  Webhook:       {webhook_status}")
     if instructions_dirty_warning:
         typer.echo(f"  WARNING: {instructions_dirty_warning}")
     typer.echo("\n  Bot verifications:")
