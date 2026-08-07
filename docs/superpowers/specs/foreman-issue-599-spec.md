@@ -105,8 +105,8 @@ The "Watchtower idle-gate" table in `docs/RUNBOOK.md` (line 375) currently says 
 | `packages/foreman/src/foreman/v4/repository.py` | Add `DrainLeaseActiveError`; add three drain-lease methods to `TicketRepository` Protocol; add drain-lease state and methods to `InMemoryTicketRepository`; guard `InMemoryTicketRepository.open_state_instance` with lease check. |
 | `packages/foreman/src/foreman/v4/postgres_repository.py` | Add `acquire_drain_lease`, `release_drain_lease`, `is_drain_lease_active` implementations; guard `open_state_instance` with lease check (same connection). |
 | `packages/foreman/src/foreman/v4/cli/gate_update.py` | Rewrite `cmd_gate_update` with four-step drain-lease flow; update module docstring. |
-| `packages/foreman/tests/v4/_repository_contract.py` | Add three drain-lease contract tests. |
-| `packages/foreman/tests/v4/cli/test_gate_update.py` | Add `test_gate_update_idle_leaves_lease_active` and `test_gate_update_busy_releases_lease`. |
+| `packages/foreman/tests/v4/_repository_contract.py` | Add four drain-lease contract tests; the fourth (`test_drain_lease_blocks_open_state_instance_invalid_ticket`) enforces the ordering required by sub-request 4 (drain check must precede ticket-existence check in `open_state_instance` for both implementations). |
+| `packages/foreman/tests/v4/cli/test_gate_update.py` | `_RaisingRepo` gains an explicit `acquire_drain_lease(self, *, now, ttl_seconds=300) -> None: raise RuntimeError("DB is down")` method so `test_gate_update_error_exits_0_and_warns` continues to test DB-unreachability not missing-method; add `test_gate_update_idle_leaves_lease_active` and `test_gate_update_busy_releases_lease`. |
 | `docs/RUNBOOK.md` | Correct in-flight description; add drain-lease paragraph under "Watchtower idle-gate". |
 
 ## Alternatives considered
