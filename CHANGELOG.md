@@ -1,5 +1,67 @@
 # Changelog
 
+## [0.3.0](https://github.com/jeffrichley/foreman/compare/v0.2.0...v0.3.0) (2026-08-07)
+
+
+### Features
+
+* add a GitHub-aware ticket dependency graph (level-triggered reconciler) ([#527](https://github.com/jeffrichley/foreman/issues/527)) ([99f9a25](https://github.com/jeffrichley/foreman/commit/99f9a25c8691cf397b08429c6ae7295f6c424b5a))
+* **backup:** add pg_dump backup/restore DR story for foreman-pg-data volume ([#464](https://github.com/jeffrichley/foreman/issues/464)) ([3b3f2df](https://github.com/jeffrichley/foreman/commit/3b3f2df5fc1cf1cc3426bb23ed94af7535584b9a))
+* **bootstrap:** auto-clone missing project repos at daemon startup ([#505](https://github.com/jeffrichley/foreman/issues/505)) ([a4fcee6](https://github.com/jeffrichley/foreman/commit/a4fcee67d80f2f336b36137ad42dd814b8b31a85))
+* **cli:** add gate-update watchtower pre-update lifecycle hook ([#459](https://github.com/jeffrichley/foreman/issues/459)) ([83b624c](https://github.com/jeffrichley/foreman/commit/83b624c86803a9becfdf6c8f5c2f5fd0ff0246c8)), closes [#412](https://github.com/jeffrichley/foreman/issues/412)
+* **config:** move [[projects]] to host-mounted hot-reloadable file ([#503](https://github.com/jeffrichley/foreman/issues/503)) ([068a6aa](https://github.com/jeffrichley/foreman/commit/068a6aaee208c959f9573e9cf8caab1ea661f17d))
+* **docker:** env-toggle for the bubblewrap sandbox (FOREMAN_SANDBOX_ENABLED) ([#561](https://github.com/jeffrichley/foreman/issues/561)) ([cbd267b](https://github.com/jeffrichley/foreman/commit/cbd267b36a9b9d46d65e4ea34d4ae81945e37eb0))
+* **gate-update:** add drain lease to close idle-check/SIGTERM race ([#601](https://github.com/jeffrichley/foreman/issues/601)) ([7484c6e](https://github.com/jeffrichley/foreman/commit/7484c6e0446ca95b99e8f3a2152e58809b81e376))
+* **impl_approved:** back off human-gated polling to 5-minute intervals ([#597](https://github.com/jeffrichley/foreman/issues/597)) ([ad5a635](https://github.com/jeffrichley/foreman/commit/ad5a6354fdc83434b5bfd39253c0913d7a72d4fb))
+* **inbound:** derive webhook coverage from projects.toml and flag gaps ([#593](https://github.com/jeffrichley/foreman/issues/593)) ([046040e](https://github.com/jeffrichley/foreman/commit/046040ed2346e32aa3ffac811c398a9737b5aef1))
+* no-output watchdog + first-turn instrumentation for role subprocesses ([#483](https://github.com/jeffrichley/foreman/issues/483)) ([#516](https://github.com/jeffrichley/foreman/issues/516)) ([32482c2](https://github.com/jeffrichley/foreman/commit/32482c29a2e4fcad8434534f0636d1da751d0861))
+* **observer:** scrub sibling terminal labels on Done completion ([#488](https://github.com/jeffrichley/foreman/issues/488)) ([7656bae](https://github.com/jeffrichley/foreman/commit/7656bae6caff74d4db629f24e4f7149869fb9ab0))
+* **queue:** add per-project max_in_flight cap to QueueManager ([#474](https://github.com/jeffrichley/foreman/issues/474)) ([cec3a3b](https://github.com/jeffrichley/foreman/commit/cec3a3bedba66e1c212827fc5fa2193d63b7074a))
+* **v4:** complete sandbox enabled-path — private per-job clone ([#556](https://github.com/jeffrichley/foreman/issues/556)) ([8e33ea2](https://github.com/jeffrichley/foreman/commit/8e33ea27ef9705686e09eb8ae0e7c59021d1215b))
+* **v4:** granular merge-state routing — CI-failed PRs go to ImplFix, not infinite BLOCKED ([#317](https://github.com/jeffrichley/foreman/issues/317)) ([#549](https://github.com/jeffrichley/foreman/issues/549)) ([98e6daa](https://github.com/jeffrichley/foreman/commit/98e6daa7606eb8c55e8f28083912bedb95b29eb7))
+* **v4:** parallelise across repos — per-repo in-flight cap replaces global pin ([#539](https://github.com/jeffrichley/foreman/issues/539)) ([22be8f1](https://github.com/jeffrichley/foreman/commit/22be8f1f4d05975ce090757e02793ab768d27b55))
+* **v4:** per-repo FIFO merge coordinator ([#550](https://github.com/jeffrichley/foreman/issues/550)) ([ed76837](https://github.com/jeffrichley/foreman/commit/ed768372ba184003c922c93e0ac6d91c2d497eee))
+* **v4:** sandbox clone-freshness — base-as-mirror + fail-closed fetch chokepoint ([#567](https://github.com/jeffrichley/foreman/issues/567)) ([f3aa241](https://github.com/jeffrichley/foreman/commit/f3aa2418ae43dc0d256d5ae33c55cedcd1059abe))
+* **v4:** sandbox role subprocesses with bubblewrap (ships flag-off) ([#557](https://github.com/jeffrichley/foreman/issues/557)) ([5422c46](https://github.com/jeffrichley/foreman/commit/5422c46880996e7c49fbe77196e5b5c3044ef059))
+* **v4:** sandboxed-role identity — PEM-free auth inside the bubblewrap box ([#564](https://github.com/jeffrichley/foreman/issues/564)) ([162eae6](https://github.com/jeffrichley/foreman/commit/162eae63bd8afea516523501d7e9ca4b878077c3))
+* **worker_pool:** block dispatch after SIGTERM via _shutting_down flag ([#605](https://github.com/jeffrichley/foreman/issues/605)) ([fa1129f](https://github.com/jeffrichley/foreman/commit/fa1129f2eab862d6827a940013c6828b56e8d261))
+* **worker:** rebase impl worktree onto current origin/&lt;base&gt; before check ([#513](https://github.com/jeffrichley/foreman/issues/513)) ([f081d59](https://github.com/jeffrichley/foreman/commit/f081d591ca5caa2593eab557f396e32a1ba29ea4))
+
+
+### Bug Fixes
+
+* **ci:** restore coverage floor to 80 (canon set 85 unauthorized; unblocks foreman loop) ([#492](https://github.com/jeffrichley/foreman/issues/492)) ([69fb40d](https://github.com/jeffrichley/foreman/commit/69fb40d2a795ef174a2a36dab28d5e31d7fdf2ba))
+* **config:** catch tomllib.TOMLDecodeError in startup and reload guards ([#515](https://github.com/jeffrichley/foreman/issues/515)) ([017274e](https://github.com/jeffrichley/foreman/commit/017274e9df7af1df719841d9b633ebb63b36147f)), closes [#509](https://github.com/jeffrichley/foreman/issues/509)
+* **daemon:** disable no-output watchdog + persist uv cache ([#523](https://github.com/jeffrichley/foreman/issues/523)) ([e538b4e](https://github.com/jeffrichley/foreman/commit/e538b4ebd18c2424d97958dbf9fd357a1475ad1a))
+* **docker:** derive PGDG apt suite from base image codename ([#467](https://github.com/jeffrichley/foreman/issues/467)) ([f6b0c39](https://github.com/jeffrichley/foreman/commit/f6b0c3976b4c0549063658c86f9ec86d329a1480))
+* **git-host:** explicit-lease force push so pushes over a token URL land ([#512](https://github.com/jeffrichley/foreman/issues/512)) ([24807ab](https://github.com/jeffrichley/foreman/commit/24807abbc26a7a33a1f68cf6a0a0fbddd8ff091d))
+* **git-host:** use --force-with-lease in push_branch to survive Fixer rebases ([#498](https://github.com/jeffrichley/foreman/issues/498)) ([fd60fe4](https://github.com/jeffrichley/foreman/commit/fd60fe4d4bd6b477bcb6f09f5699ce27ec0abb43))
+* **github:** normalize PR-title casing at creation so pr-title-lint can't block ([#541](https://github.com/jeffrichley/foreman/issues/541)) ([10bd859](https://github.com/jeffrichley/foreman/commit/10bd8593cba8f6f0211a5d953810a485091a3696))
+* **github:** use --force-with-lease in push_branch to survive Fixer rebases ([#499](https://github.com/jeffrichley/foreman/issues/499)) ([2d56131](https://github.com/jeffrichley/foreman/commit/2d561315d812dfd58d98b26e7b8476007a324fe1))
+* **impl-approved:** back off human-gated polling to 5-minute interval ([#596](https://github.com/jeffrichley/foreman/issues/596)) ([4c26037](https://github.com/jeffrichley/foreman/commit/4c260374015bd03933a6563be84bdb098ae6f2f3))
+* **providers:** forward SDK envelopes to role stdout so the watchdog sees liveness ([#519](https://github.com/jeffrichley/foreman/issues/519)) ([#520](https://github.com/jeffrichley/foreman/issues/520)) ([6ded822](https://github.com/jeffrichley/foreman/commit/6ded822b123ee1edc113d8017f5e05549ff0196f))
+* **reset:** refuse on closed issues by default, add --force-reopen ([#514](https://github.com/jeffrichley/foreman/issues/514)) ([2badf2d](https://github.com/jeffrichley/foreman/commit/2badf2dab36696715359ac9ce1d4ebfc482847a8))
+* **roles:** pass wt_path to load_project_instructions, not bare mirror ([#595](https://github.com/jeffrichley/foreman/issues/595)) ([1d71647](https://github.com/jeffrichley/foreman/commit/1d716475fc6ccc35ee1e907ebf2beb8e9359e824))
+* unclog merge flow — advance behind PRs ([#575](https://github.com/jeffrichley/foreman/issues/575)) + guard set-state into MergeQueued ([#576](https://github.com/jeffrichley/foreman/issues/576)) ([8dc6bd3](https://github.com/jeffrichley/foreman/commit/8dc6bd3876cf367f8c830a1c3e93173be95350f2))
+* **v4:** advance impl worker to ImplReview when a PR exists, not NeedsHelp ([#538](https://github.com/jeffrichley/foreman/issues/538)) ([c7cebf0](https://github.com/jeffrichley/foreman/commit/c7cebf02e5bbb190da9b29a5b570101d6f0a62ca))
+* **v4:** auto-rerun flaky failed required-checks before blocking merge ([#537](https://github.com/jeffrichley/foreman/issues/537)) ([9ad1092](https://github.com/jeffrichley/foreman/commit/9ad1092100691634d0f42d34d0829c6a66f4e610))
+* **v4:** correct blocked_by URL to issue-scoped path + swallow 404 ([#529](https://github.com/jeffrichley/foreman/issues/529)) ([91ed6e2](https://github.com/jeffrichley/foreman/commit/91ed6e2df3164cdf2fc5d11235bd9114b6777754))
+* **v4:** crash-recovery-core trio — max_in_flight guard (I4), worker-crash escalation ([#454](https://github.com/jeffrichley/foreman/issues/454)), resume-fresh fallback ([#461](https://github.com/jeffrichley/foreman/issues/461)) ([#462](https://github.com/jeffrichley/foreman/issues/462)) ([19482a2](https://github.com/jeffrichley/foreman/commit/19482a2eeadeabfb28451466c38b0fc2ec2d2d27))
+* **v4:** declare dispatch priority per state — ImplApproved no longer dispatched last ([#591](https://github.com/jeffrichley/foreman/issues/591)) ([91dc722](https://github.com/jeffrichley/foreman/commit/91dc722d586087b98159fbcd4e70002767bb026b))
+* **v4:** forward CLAUDE_CODE_OAUTH_TOKEN into the sandbox box ([#565](https://github.com/jeffrichley/foreman/issues/565)) ([a78596c](https://github.com/jeffrichley/foreman/commit/a78596c6bc85b34f7f6ec0712449518a7bc7b0e1))
+* **v4:** gate-update defers only on in-flight jobs, not parked tickets ([#572](https://github.com/jeffrichley/foreman/issues/572)) ([478ef39](https://github.com/jeffrichley/foreman/commit/478ef393a5ebb38fdb1c8661c33085faf8125edf))
+* **v4:** isolate tick failures so one poller error can't kill the daemon (I1) ([#540](https://github.com/jeffrichley/foreman/issues/540)) ([27404e0](https://github.com/jeffrichley/foreman/commit/27404e0b5c6b3a9c6a80407c08c517c3d17edf10))
+* **v4:** make the sandbox box a faithful CI runner (CI marker + uid resolution) ([#570](https://github.com/jeffrichley/foreman/issues/570)) ([57e609d](https://github.com/jeffrichley/foreman/commit/57e609d18c946500920aadb41d0aac65e147c727))
+* **v4:** mount /dev, /proc, ld.so.cache in the sandbox box ([#556](https://github.com/jeffrichley/foreman/issues/556) dogfood) ([54262de](https://github.com/jeffrichley/foreman/commit/54262de6bd53a8528c2dfd2124f987dd3ae8ea8e))
+* **v4:** pipeline resilience — isolate poller reconcile + escalate a raising merge head (review [#2](https://github.com/jeffrichley/foreman/issues/2), [#3](https://github.com/jeffrichley/foreman/issues/3)) ([#571](https://github.com/jeffrichley/foreman/issues/571)) ([d71be9a](https://github.com/jeffrichley/foreman/commit/d71be9ad639b41748f3c8e2c837d4f4105c0f764))
+* **v4:** preflight must mount OS exec roots (sandbox canary crash-loop) ([#563](https://github.com/jeffrichley/foreman/issues/563)) ([a0ef15a](https://github.com/jeffrichley/foreman/commit/a0ef15aa8c2586c97dc4c0dfb8691bd76dedd31c))
+* **v4:** scope poller reconcile to its own project ([#568](https://github.com/jeffrichley/foreman/issues/568)) ([#569](https://github.com/jeffrichley/foreman/issues/569)) ([c1ecfb4](https://github.com/jeffrichley/foreman/commit/c1ecfb474769d8fe379ce2ced1ebe132893194ac))
+* **v4:** stamp merge-queued label + unify state-label naming to kebab-case ([#552](https://github.com/jeffrichley/foreman/issues/552)) ([5e641bf](https://github.com/jeffrichley/foreman/commit/5e641bfedcdf4e6aa60a6448394a8b53a25a4a11))
+* **v4:** swallow bare GithubException 404 in remove_labels ([#534](https://github.com/jeffrichley/foreman/issues/534)) ([ffbeeca](https://github.com/jeffrichley/foreman/commit/ffbeecaef8ed247f2d8132a9722a08a0c75b9676))
+* **v4:** writable session-env tmpfs so Claude's Bash tool works in-box ([#566](https://github.com/jeffrichley/foreman/issues/566)) ([ba17670](https://github.com/jeffrichley/foreman/commit/ba176708001d03229aaa60a0e912e6a884e29707))
+* **worker-pool:** stop new state-instance dispatch after SIGTERM ([#604](https://github.com/jeffrichley/foreman/issues/604)) ([48d5a2d](https://github.com/jeffrichley/foreman/commit/48d5a2d675307b1ede76a536396f8cd9cf29d3c4))
+* **worktree:** auto-refresh stale worktrees + remote branches at role start ([#501](https://github.com/jeffrichley/foreman/issues/501)) ([13f2edb](https://github.com/jeffrichley/foreman/commit/13f2edb753b612898445849e5dcf1202a7f0f969))
+
 ## [0.2.0](https://github.com/jeffrichley/foreman/compare/v0.1.0...v0.2.0) (2026-06-26)
 
 
