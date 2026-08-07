@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any
 from foreman.v4.event_bus import EventBus
 from foreman.v4.git_provider import GitProvider
 from foreman.v4.queue_manager import QueueManager
-from foreman.v4.repository import TicketRepository
+from foreman.v4.repository import DrainLeaseActiveError, TicketRepository
 from foreman.v4.role_dispatcher import RoleDispatcher
 from foreman.v4.state import StateContext, escalate_to_needs_help
 from foreman.v4.states.registry import build_state
@@ -184,6 +184,33 @@ class WorkerPool:
                 sandbox_scratch_root=self._sandbox_scratch_root,
             )
             state.transition(ctx)
+        except DrainLeaseActiveError:
+            # NOT a crash — the drain lease is the guard working on its
+            # expected path, and a redeploy is a routine event. Escalating
+            # here would park a healthy ticket in NeedsHelp on every
+            # redeploy that catches a dispatch attempt, turning something
+            # that self-heals today (crash_recovery closes the orphan and
+            # the restarted daemon re-drives it — measured 2026-08-07, an
+            # interrupted merge completed 18s later untouched) into work
+            # that waits for a human.
+            #
+            # Worse, the documented recovery would be `foreman retry`, which
+            # on a NeedsHelp ticket holding an approved green PR can reset it
+            # to Planning and orphan the merged spec (agent_core#373 ->
+            # duplicate #416, 2026-07-17). ImplApproved is the most frequent
+            # dispatcher, so that is the likely shape here, not a corner case.
+            #
+            # No row was inserted — open_state_instance raises before the
+            # INSERT — so there is nothing to close. Leave current_state
+            # untouched and return; the Poller re-enqueues on the next tick.
+            # Unlike the #454 case below, this loop is bounded and
+            # self-clearing: the lease is released at daemon startup, and
+            # expires on its TTL even if that never happens.
+            _LOG.info(
+                "ticket %s: dispatch deferred, drain lease active (redeploy in progress)",
+                item.ticket_id,
+            )
+            return
         except Exception:
             # foreman#454: a transition that raises OUTSIDE transition()'s own
             # per-phase handlers (a repo error in next_state /

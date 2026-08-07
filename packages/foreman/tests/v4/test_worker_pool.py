@@ -248,3 +248,79 @@ def test_same_ticket_serialized_across_concurrent_submissions():
         # Ensure cleanup even if an assertion above failed mid-flight.
         release.set()
         pool.shutdown(wait=True)
+
+
+def test_drain_lease_defers_dispatch_without_parking_the_ticket():
+    """A redeploy must not convert a healthy ticket into human-gated work.
+
+    The drain lease is the guard working on its expected path, not a crash.
+    Escalating it would park a ticket in NeedsHelp on every redeploy that
+    catches a dispatch attempt — and the documented recovery, ``foreman
+    retry``, can reset a NeedsHelp ticket holding an approved PR back to
+    Planning (agent_core#373 -> duplicate #416). The ticket must be left
+    exactly where it was.
+    """
+    repo = InMemoryTicketRepository()
+    now = dt.datetime(2026, 8, 7, 12, 0, 0)
+    ticket = repo.create_ticket(project="p", issue_number=1, now=now)
+    repo.set_ticket_state(ticket.id, "ImplApproved", now=now)
+    repo.acquire_drain_lease(now=now, ttl_seconds=300)
+
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    pool = WorkerPool(
+        repo=repo,
+        qm=qm,
+        dispatcher=FakeRoleDispatcher(responses={}),
+        git=None,
+        bus=None,
+        clock=lambda: now,
+    )
+    try:
+        qm.enqueue(WorkItem(ticket_id=ticket.id, state_name="ImplApproved", project="p"))
+        pool.tick()
+        _wait_until_idle(qm)
+
+        assert repo.get_ticket(ticket.id).current_state == "ImplApproved", (
+            "a drain-lease block must leave the ticket where it was"
+        )
+        assert repo.get_ticket(ticket.id).current_state != "NeedsHelp"
+        assert repo.list_state_instances_for_ticket(ticket.id) == [], (
+            "no state-instance row should exist — the lease blocks before the insert"
+        )
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_dispatch_resumes_once_the_drain_lease_is_released():
+    """The deferral must clear on its own — a blocked ticket is not stuck."""
+    repo = InMemoryTicketRepository()
+    now = dt.datetime(2026, 8, 7, 12, 0, 0)
+    ticket = repo.create_ticket(project="p", issue_number=1, now=now)
+    repo.set_ticket_state(ticket.id, "Planning", now=now)
+    repo.acquire_drain_lease(now=now, ttl_seconds=300)
+
+    qm = QueueManager(repo=repo, max_in_flight=4)
+    pool = WorkerPool(
+        repo=repo,
+        qm=qm,
+        dispatcher=FakeRoleDispatcher(responses={}),
+        git=None,
+        bus=None,
+        clock=lambda: now,
+    )
+    try:
+        qm.enqueue(WorkItem(ticket_id=ticket.id, state_name="Planning", project="p"))
+        pool.tick()
+        _wait_until_idle(qm)
+        assert repo.list_state_instances_for_ticket(ticket.id) == []
+
+        # Startup release (or TTL expiry) unblocks dispatch.
+        repo.release_drain_lease()
+        qm.enqueue(WorkItem(ticket_id=ticket.id, state_name="Planning", project="p"))
+        pool.tick()
+        _wait_until_idle(qm)
+        assert repo.list_state_instances_for_ticket(ticket.id) != [], (
+            "dispatch must resume once the lease clears"
+        )
+    finally:
+        pool.shutdown(wait=True)
