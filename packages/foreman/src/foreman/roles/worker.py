@@ -1093,7 +1093,7 @@ async def _run_worker_core(
             check_command=check_command, cwd=wt_path, role_token=worker_token
         )
 
-        instructions = load_project_instructions(Path(project.local_clone_path))
+        instructions = load_project_instructions(wt_path)
 
         system_prompt = _load_worker_prompt()
         user_prompt = _build_user_prompt(

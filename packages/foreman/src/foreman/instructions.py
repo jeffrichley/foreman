@@ -27,12 +27,18 @@ INSTRUCTIONS_RELPATH = Path(".foreman") / "INSTRUCTIONS.md"
 
 
 def load_project_instructions(clone_path: Path) -> str | None:
-    """Load ``.foreman/INSTRUCTIONS.md`` from the project's local clone.
+    """Load ``.foreman/INSTRUCTIONS.md`` from the role's checked-out worktree.
 
     Args:
-        clone_path: Path to the project's local clone (the directory the
-            role dispatcher's worktree is branched from). The instructions
-            file is read relative to this path.
+        clone_path: Path to a **checked-out worktree**, not the bare mirror
+            base (``project.local_clone_path``). Bare mirrors hold git
+            objects only — no file is ever present on disk there — so
+            passing a bare mirror path always returns ``None`` even when
+            ``.foreman/INSTRUCTIONS.md`` is committed. Use the ``wt_path``
+            value returned by ``WorktreeManager.create``,
+            ``WorktreeManager.attach``, or ``WorktreeManager.attach_impl``
+            as the argument. The instructions file is read relative to this
+            path.
 
     Returns:
         The file's contents as a UTF-8 string when present, or ``None``
