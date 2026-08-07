@@ -530,7 +530,7 @@ async def _run_reviewer_core(
             wt_path, base_branch=base_branch, head_sha=head_sha, role_token=reviewer_token
         )
         spec_doc_content = _read_spec_doc(wt_path, issue_number)
-        instructions = load_project_instructions(Path(project.local_clone_path))
+        instructions = load_project_instructions(wt_path)
 
         # foreman#328: comments belong only on the issue→spec contract.
         # Fetch them only for spec_pr; impl_pr passes ``[]`` so the

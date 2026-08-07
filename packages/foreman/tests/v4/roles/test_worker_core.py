@@ -918,3 +918,107 @@ async def test_worker_escalates_cleanly_on_rebase_conflict(
 
     # post_escalation_comment must be called with structured conflict info
     mock_post_escalation.assert_called_once()
+
+
+# ---------------------------------------------------------------------
+# foreman#586 — load_project_instructions receives wt_path, not bare mirror
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_worker_load_instructions_receives_wt_path(
+    tmp_path: Path,
+) -> None:
+    """foreman#586 regression pin (Worker): ``load_project_instructions``
+    must be called with the checked-out worktree path (``wt_path``),
+    not ``Path(project.local_clone_path)`` (the bare mirror base).
+
+    Bare mirrors have no working tree so the loader always returned
+    ``None`` even when ``.foreman/INSTRUCTIONS.md`` was committed.
+    """
+    worktrees_root = tmp_path / "worktrees"
+    impl_wt_path = worktrees_root / "myrepo" / "impl-586"
+    impl_wt_path.mkdir(parents=True, exist_ok=True)
+
+    cfg = _build_v4_config(
+        project_repo="testowner/myrepo",
+        local_clone_path=str(tmp_path / "clone"),
+    )
+    Path(tmp_path / "clone").mkdir(parents=True, exist_ok=True)
+
+    identity_registry = MagicMock()
+
+    mock_wt_mgr = MagicMock()
+    mock_wt_mgr.create_impl.return_value = ImplWorktreeResult(path=impl_wt_path, base_branch="main")
+
+    mock_pr = MagicMock()
+    mock_pr.html_url = "https://github.com/testowner/myrepo/pull/9586"
+    mock_pr.number = 9586
+    mock_repo = MagicMock()
+    mock_repo.create_pull.return_value = mock_pr
+    mock_repo.get_pulls.return_value = []
+
+    mock_issue = MagicMock()
+    mock_issue.title = "test issue"
+    mock_issue.body = "test body"
+    mock_issue.labels = []
+    mock_repo.get_issue.return_value = mock_issue
+
+    mock_client = MagicMock()
+    mock_client.get_repo.return_value = mock_repo
+
+    mock_host = MagicMock()
+
+    fake_worker_output = WorkerOutput(
+        outcome="implemented",
+        work_comment="implemented for test",
+        pr_title="feat(test): fake impl",
+        pr_body="fake impl PR body",
+        commits_made=[
+            CommitMade(
+                sha="deadbeef",
+                summary="feat(test): fake impl",
+                files_changed=["packages/foo/bar.py"],
+            ),
+        ],
+        implemented_sub_requests=[],
+        skipped_sub_requests=[],
+        did_check_pass=True,
+        check_output_summary="",
+        confidence="high",
+    )
+    mock_provider = MagicMock()
+    mock_provider.run_agent = AsyncMock(return_value=(fake_worker_output, UsageInfo()))
+
+    mock_load = MagicMock(return_value=None)
+
+    with (
+        patch("foreman.roles.worker.WorktreeManager", return_value=mock_wt_mgr),
+        patch(
+            "foreman.roles.worker.build_role_resources",
+            return_value=(mock_host, "fake-token", mock_client),
+        ),
+        patch("foreman.roles.worker._run_check_command", return_value=(0, set(), "")),
+        patch(
+            "foreman.roles.worker._read_spec_doc_from_branch",
+            return_value="# Spec\nfake spec content\n",
+        ),
+        patch("foreman.roles.worker._sanitize_head_commit_auto_close", return_value=False),
+        patch("foreman.roles.worker._verify_impl_branch_remote_state", return_value=None),
+        patch("foreman.roles.worker.load_project_instructions", new=mock_load),
+        patch(
+            "foreman.roles.worker.log_worker_run",
+            return_value=Path("/tmp/fake-stats.jsonl"),
+        ),
+    ):
+        await _run_worker_core(
+            issue_url="https://github.com/testowner/myrepo/issues/586",
+            config=cfg,
+            project_name="p",
+            worktrees_root=worktrees_root,
+            provider=mock_provider,
+            identity_registry=identity_registry,
+        )
+
+    # foreman#586: the argument must be the worktree path, not the bare mirror.
+    assert mock_load.call_args[0][0] == impl_wt_path
