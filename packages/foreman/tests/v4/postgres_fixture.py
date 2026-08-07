@@ -18,6 +18,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from psycopg import sql as pgsql
 
 # Windows dev boxes: testcontainers' Ryuk reaper sidecar fails its port-
 # mapping lookup under Docker Desktop, erroring every Postgres test. The
@@ -75,8 +76,32 @@ def postgres_dsn() -> Iterator[str]:
 
 @pytest.fixture()
 def clean_postgres_dsn(postgres_dsn: str) -> Iterator[str]:
+    """Empty every table in the schema before each test.
+
+    The table list is READ FROM THE DATABASE, not hand-maintained here. A
+    literal list is a copy of the schema's table set, and it drifts the
+    moment a table is added — silently, because a table that is never
+    truncated produces no error, just state leaking into later tests.
+
+    That is not hypothetical: ``drain_lease`` (foreman#599) was added to
+    ``postgres_schema.sql`` and not to the list that used to live here. The
+    contract tests acquire a 300-second lease and two of them never release
+    it, so the leaked row then made ``open_state_instance`` raise
+    ``DrainLeaseActiveError`` for every later test in the session — four
+    failures in ``test_postgres_repository.py`` that pass in isolation and
+    fail in a full run.
+    """
     with psycopg.connect(postgres_dsn, autocommit=True) as conn:
-        conn.execute(
-            "TRUNCATE tickets, state_instances, events, merge_queue RESTART IDENTITY CASCADE"
-        )
+        tables = [
+            row[0]
+            for row in conn.execute(
+                "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+            ).fetchall()
+        ]
+        if tables:
+            conn.execute(
+                pgsql.SQL("TRUNCATE {} RESTART IDENTITY CASCADE").format(
+                    pgsql.SQL(", ").join(pgsql.Identifier(t) for t in tables)
+                )
+            )
     yield postgres_dsn
