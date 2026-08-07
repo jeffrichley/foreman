@@ -382,6 +382,28 @@ class BackupConfig(BaseModel):
     retention_weekly: int = Field(default=4, ge=0)
 
 
+class InboundConfig(BaseModel):
+    """GitHub webhook receiver URL (issue #590).
+
+    Optional ``[inbound]`` block that tells foreman the canonical URL of
+    the public-facing webhook receiver (the "wren" system) so the daemon
+    can check that every managed project has an active GitHub webhook
+    pointing at it.
+
+    When absent (the default), all webhook-coverage checks are SKIPPED —
+    backward-compatible with existing operator configs that don't use the
+    inbound notification path.
+
+    Attributes:
+        receiver_url: The public URL the GitHub webhook ``push`` / PR
+            events must target. Example:
+            ``https://your.tailscale-funnel-or-public-url/webhook``
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    receiver_url: str
+
+
 class SandboxConfig(BaseModel):
     """Bubblewrap job-isolation settings (foreman#job-sandbox-isolation).
 
@@ -507,6 +529,12 @@ class V4Config(BaseModel):
     """foreman#job-sandbox-isolation: bubblewrap isolation for role
     subprocesses. Optional with a default — existing operator configs
     without a ``[sandbox]`` block load and default to ``enabled=False``."""
+    inbound: InboundConfig | None = Field(default=None)
+    """issue #590: optional inbound webhook receiver URL config. When
+    absent, all webhook-coverage checks are SKIPPED — backward-compatible
+    with existing operator configs that don't use the inbound notification
+    path. When set, ``foreman doctor`` checks each project for an active
+    GitHub webhook pointing at ``inbound.receiver_url``."""
 
 
 class ProjectRegistry:
@@ -568,6 +596,8 @@ def load_config(path: Path) -> V4Config:
         payload["backup"] = raw["backup"]
     if "sandbox" in raw:
         payload["sandbox"] = raw["sandbox"]
+    if "inbound" in raw:
+        payload["inbound"] = raw["inbound"]
     return V4Config.model_validate(payload)
 
 
