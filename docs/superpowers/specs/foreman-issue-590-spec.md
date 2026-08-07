@@ -71,7 +71,11 @@ The orchestrator GitHub App needs **`administration: read`** permission to call 
 
 9. **Add tests for `_check_webhook_coverage`** to `packages/foreman/tests/v4/cli/test_doctor.py`: (a) SKIPPED when `config.inbound is None`; (a2) SKIPPED when `config.inbound.receiver_url` is the empty string `""` (empty URL must produce SKIPPED, not MISSING); (b) OK when all projects have an active matching webhook, (c) MISSING + exit 1 when a project's hooks don't match, (d) WARN + exit 0 on `GithubException`.
 
-10. **Run `just check`** and verify exit zero.
+10. **Add tests for the `bootstrap_cli_context` startup webhook log** to `packages/foreman/tests/v4/test_bootstrap.py`: (a) when `config.inbound is None` the new webhook-check block is a no-op (no `logger.error` / `logger.info` calls related to webhook coverage); (b) when `config.inbound` is set and all projects have an active matching webhook, `logger.info` is called once per project; (c) when `config.inbound` is set and a project's hooks do not match the `receiver_url`, `logger.error` is called for that project. In all cases the guard `run_startup_clone=True` and `active_projects` non-empty must be satisfied; use a fake `Github` factory (or `unittest.mock`) to avoid real network calls.
+
+11. **Add tests for `_ensure_webhook` and the `cmd_init` webhook path** to `packages/foreman/tests/v4/cli/test_init.py`: (a) when `config.inbound is None`, the summary output contains a `Webhook: skipped` (or equivalent "no inbound URL configured") line and no GitHub hook API is called; (b) when `config.inbound` is set and an active matching webhook already exists, `_ensure_webhook` returns `(False, True)` and the summary output contains `Webhook: existed`; (c) when `config.inbound` is set and no matching webhook exists, `_ensure_webhook` returns `(True, False)` and the summary output contains `Webhook: created`. Use `unittest.mock` to stub the PyGithub client; do not make real network calls.
+
+12. **Run `just check`** and verify exit zero.
 
 ## File-level changes
 
@@ -84,6 +88,8 @@ The orchestrator GitHub App needs **`administration: read`** permission to call 
 | `docker/foreman/config.toml.template` | Add commented-out `[inbound]` example block. |
 | `packages/foreman/tests/v4/test_config.py` | Add `InboundConfig` load tests (optional block, populated block). |
 | `packages/foreman/tests/v4/cli/test_doctor.py` | Add `_check_webhook_coverage` tests (SKIPPED, OK, MISSING, WARN). |
+| `packages/foreman/tests/v4/test_bootstrap.py` | Add startup webhook log tests (inbound absent = no-op, all hooks match = logger.info, missing hook = logger.error). |
+| `packages/foreman/tests/v4/cli/test_init.py` | Add `_ensure_webhook` and `cmd_init` webhook path tests (inbound absent = skipped, hook exists = existed, hook absent = created). |
 
 ## Alternatives considered
 
