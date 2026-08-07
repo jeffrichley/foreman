@@ -424,9 +424,27 @@ class Daemon:
         state_instances row, but closing tickets' in-flight state first
         keeps the two reconcile passes in the same "oldest first" order the
         rest of the daemon's startup sequencing follows.
+
+        foreman#599: after closing orphaned state-instance rows, release the
+        drain lease so dispatch resumes immediately after a successful idle
+        redeploy rather than waiting for the 300-second TTL to expire.  The
+        release MUST come AFTER orphan cleanup so that any state-instance
+        opened in the pre-SIGTERM window is already closed before the lease
+        is cleared and the dispatcher is allowed to run again.  The call is
+        best-effort — a failed release is logged as a WARNING and does not
+        prevent the daemon from starting; the lease will expire on its own.
         """
         reconcile_on_startup(self._repo, clock=self._clock)
         self._merge_coordinator.reconcile_on_startup()
+        # foreman#599: best-effort drain-lease release so dispatch resumes
+        # immediately after a successful idle redeploy.
+        try:
+            self._repo.release_drain_lease()
+        except Exception:
+            _log.warning(
+                "startup: failed to release drain lease; dispatch will resume after TTL expires",
+                exc_info=True,
+            )
 
     def run_forever(self) -> None:
         """Main loop. Returns when ``stop()`` is called."""
