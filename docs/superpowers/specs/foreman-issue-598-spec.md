@@ -85,7 +85,7 @@ The acceptance criterion explicitly rejects "a signal handler is registered" ass
 
 ## Sub-requests (topologically sorted)
 
-1. **`worker_pool.py` — add `_shutting_down` field and `set_shutting_down()` method.** In `WorkerPool.__init__`, after the executor construction, add:
+1. **`worker_pool.py` — add `_shutting_down` field and `set_shutting_down()` method.** First, ensure `import threading` is present in the module-level imports (the current imports are `concurrent.futures`, `datetime`, `logging`, `collections.abc`, and `typing` — `threading` is absent and must be added). Then, in `WorkerPool.__init__`, after the executor construction, add:
    ```python
    self._shutting_down: threading.Event = threading.Event()
    ```
@@ -134,7 +134,7 @@ The acceptance criterion explicitly rejects "a signal handler is registered" ass
 
 | File | Change |
 |---|---|
-| `packages/foreman/src/foreman/v4/worker_pool.py` | Add `_shutting_down: threading.Event` to `__init__`; add `set_shutting_down()` method; add `_shutting_down.is_set()` guard at the top of `_run_transition`. |
+| `packages/foreman/src/foreman/v4/worker_pool.py` | Add `import threading` to module-level imports; add `_shutting_down: threading.Event` to `__init__`; add `set_shutting_down()` method; add `_shutting_down.is_set()` guard at the top of `_run_transition`. |
 | `packages/foreman/src/foreman/v4/daemon.py` | In `Daemon.stop()`, add `self._pool.set_shutting_down()` call after `self._stop.set()`; update docstring. |
 | `packages/foreman/tests/v4/test_worker_pool.py` | Add `test_shutting_down_blocks_new_state_instances` and `test_dispatch_proceeds_before_shutting_down_is_set`. |
 | `packages/foreman/tests/v4/test_daemon.py` | Add `test_daemon_stop_prevents_new_state_instances`. |
