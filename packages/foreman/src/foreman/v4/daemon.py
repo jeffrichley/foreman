@@ -467,12 +467,16 @@ class Daemon:
             self.shutdown(wait=True)
 
     def stop(self) -> None:
-        """Signal the loop to exit at the next tick boundary.
+        """Signal the loop to exit and block new state-instance dispatch.
 
-        Safe to call from a signal handler — threading.Event.set() is
-        async-signal-safe.
+        Sets both ``_stop`` (exits the run_forever loop after the current
+        tick) and ``_pool._shutting_down`` (causes any in-progress or
+        subsequent ``_run_transition`` call to abort before calling
+        ``open_state_instance``). Both are ``threading.Event.set()`` calls
+        and are therefore async-signal-safe.
         """
         self._stop.set()
+        self._pool.set_shutting_down()
 
     def shutdown(self, *, wait: bool = True) -> None:
         """Drain the WorkerPool. Idempotent — safe to call more than once.
