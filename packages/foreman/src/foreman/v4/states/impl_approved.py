@@ -36,7 +36,16 @@ from foreman.v4.state import StateContext, TicketState
 from foreman.v4.states.merge_helper import close_originating_issue
 
 # foreman#583: back off human-gated polling to 5-minute intervals.
-# Reduces 2,160+ role instances per ticket (one every ~36s) to ~25/day.
+# ImplApproved waits on a human to merge, so polling it at the dispatch
+# cadence (~36s) spends a role instance every 36 seconds to re-ask a
+# question only a person can answer. Measured 2026-08-07: 65 of the day's
+# 136 state instances — 48% of all foreman activity — were ImplApproved
+# polls, against 4 completed tickets.
+#
+# 36s -> 300s is an 8.3x reduction: ~2,400/day per waiting ticket becomes
+# ~288/day. Still not free, which is why the interval is a named constant
+# rather than a literal — raising it further is a one-line change if the
+# residual volume turns out to matter.
 HUMAN_POLL_INTERVAL_SECONDS: int = 300
 
 
