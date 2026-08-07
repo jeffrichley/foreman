@@ -28,10 +28,25 @@ only cost — it frees the worker slot immediately (no long-poll).
 
 from __future__ import annotations
 
+import datetime as dt
+
 from foreman.v4.outcome import Outcome, OutcomeArtifacts, OutcomeConfidence, OutcomeKind
 from foreman.v4.repository import MissingPRNumberError
 from foreman.v4.state import StateContext, TicketState
 from foreman.v4.states.merge_helper import close_originating_issue
+
+# foreman#583: back off human-gated polling to 5-minute intervals.
+# ImplApproved waits on a human to merge, so polling it at the dispatch
+# cadence (~36s) spends a role instance every 36 seconds to re-ask a
+# question only a person can answer. Measured 2026-08-07: 65 of the day's
+# 136 state instances — 48% of all foreman activity — were ImplApproved
+# polls, against 4 completed tickets.
+#
+# 36s -> 300s is an 8.3x reduction: ~2,400/day per waiting ticket becomes
+# ~288/day. Still not free, which is why the interval is a named constant
+# rather than a literal — raising it further is a one-line change if the
+# residual volume turns out to matter.
+HUMAN_POLL_INTERVAL_SECONDS: int = 300
 
 
 class ImplApprovedState(TicketState):
@@ -109,14 +124,28 @@ class ImplApprovedState(TicketState):
         )
 
     def next_state(self, ctx: StateContext, outcome: Outcome) -> TicketState | None:
-        """Route the polling outcome to Done, a self-loop, or NeedsHelp."""
+        """Route the polling outcome to Done, a self-loop, or NeedsHelp.
+
+        On BLOCKED (human hasn't merged yet), stamps ``next_action_at`` so the
+        Poller defers the next poll by ``HUMAN_POLL_INTERVAL_SECONDS`` —
+        reducing busy-wait from one role instance per tick to ~25/day (foreman#583).
+
+        On CLEAN and NEEDS_HELP, clears any pending suspension so the resolved
+        ticket is not held in limbo by a stale ``next_action_at`` value.
+        """
         from foreman.v4.states.terminal import DoneState, NeedsHelpState
 
         if outcome.kind == OutcomeKind.CLEAN:
+            ctx.repo.clear_next_action_at(ctx.ticket.id)
             return DoneState()
         if outcome.kind == OutcomeKind.BLOCKED:
+            ctx.repo.set_next_action_at(
+                ctx.ticket.id,
+                when=ctx.clock() + dt.timedelta(seconds=HUMAN_POLL_INTERVAL_SECONDS),
+            )
             return ImplApprovedState()
         if outcome.kind == OutcomeKind.NEEDS_HELP:
+            ctx.repo.clear_next_action_at(ctx.ticket.id)
             return NeedsHelpState()
         # Defensive fall-through: any unexpected outcome kind routes to
         # NeedsHelp so an operator can sort it out.
