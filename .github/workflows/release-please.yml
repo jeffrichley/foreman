@@ -28,7 +28,7 @@ jobs:
       # must be set. Copy from a sibling agent-core-style repo if you
       # already have the App installed there, or see
       # references/workflow_dispatch_lesson.md for App setup walkthrough.
-      - uses: actions/create-github-app-token@v1
+      - uses: actions/create-github-app-token@v3
         id: app-token
         with:
           app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
