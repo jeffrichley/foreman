@@ -83,10 +83,23 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _launcher(cache_dir: Path) -> SandboxLauncher:
+    """A launcher that does not depend on the host's home layout.
+
+    The production default ``extra_ro_binds`` names the daemon container's
+    ``/root/.claude`` dirs. On a host where the test user cannot stat
+    ``/root`` (any non-root CI runner, where ``/root`` is mode 700), bwrap's
+    ``--ro-bind-try`` gets EACCES, not ENOENT, and aborts the whole box.
+    These tests exercise the mount plan, not the Claude config, so they bind
+    none.
+    """
+    return SandboxLauncher(cache_dir=str(cache_dir), extra_ro_binds=())
+
+
 def _run_in_box(
     role_cmd: list[str], *, cache_dir: Path, scratch_dir: Path
 ) -> subprocess.CompletedProcess[str]:
-    launcher = SandboxLauncher(cache_dir=str(cache_dir))
+    launcher = _launcher(cache_dir)
     argv = launcher.build_argv(
         role_token="ghs_TESTTOKEN",
         scratch_dir=str(scratch_dir),
@@ -198,7 +211,7 @@ def test_sandbox_identity_resolves_token_with_no_pem(tmp_path: Path) -> None:
     cache_dir.mkdir()
     scratch_dir = tmp_path / "scratch"
     scratch_dir.mkdir()
-    launcher = SandboxLauncher(cache_dir=str(cache_dir))
+    launcher = _launcher(cache_dir)
     probe = (
         "import os;"
         "assert not os.path.exists('/run/secrets'), 'PEM dir leaked into box';"
@@ -321,7 +334,7 @@ def test_sandboxed_dispatch_log_banner_redacts_gh_token(tmp_path: Path) -> None:
         foreman_cli=["/bin/sh", "-c", script],
         identity=identity,
         log_dir=log_dir,
-        sandbox=SandboxLauncher(cache_dir=str(cache_dir)),
+        sandbox=_launcher(cache_dir),
         sandbox_scratch_root=scratch_root,
     )
 
@@ -377,7 +390,7 @@ def test_enabled_path_role_operates_in_private_clone(tmp_path: Path) -> None:
     config_file.write_text("log_dir = '/tmp'\n", encoding="utf-8")
 
     box_repo = "/foreman/repos/proj"
-    launcher = SandboxLauncher(cache_dir=str(cache_dir))
+    launcher = _launcher(cache_dir)
     script = (
         # config file is readable at its RO mount
         f"cat {config_file} >/dev/null && "
@@ -473,7 +486,7 @@ def test_two_role_handoff_box_sees_prior_role_commit(tmp_path: Path) -> None:
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
     box_repo = "/repo"
-    launcher = SandboxLauncher(cache_dir=str(cache_dir))
+    launcher = _launcher(cache_dir)
     argv = launcher.build_argv(
         role_token="ghs_UNUSED",
         scratch_dir=str(tmp_path / "scratch"),
