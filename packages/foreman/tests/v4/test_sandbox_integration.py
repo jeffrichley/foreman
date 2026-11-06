@@ -29,8 +29,11 @@ test_sandbox_dispatch.py already covers for the pure argv-shape case).
 from __future__ import annotations
 
 import json
+import os
+import pwd
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -83,10 +86,51 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _launcher(cache_dir: Path, extra_ro_binds: tuple[str, ...] = ()) -> SandboxLauncher:
+    """A launcher that does not depend on the host's home layout.
+
+    The production default ``extra_ro_binds`` names the daemon container's
+    ``/root/.claude`` dirs. On a host where the test user cannot stat
+    ``/root`` (any non-root CI runner, where ``/root`` is mode 700), bwrap's
+    ``--ro-bind-try`` gets EACCES, not ENOENT, and aborts the whole box.
+    These tests exercise the mount plan, not the Claude config, so they bind
+    only what the caller names.
+    """
+    return SandboxLauncher(cache_dir=str(cache_dir), extra_ro_binds=extra_ro_binds)
+
+
+def _this_python_binds() -> tuple[str, ...]:
+    """Host paths that let the box run the interpreter running this test.
+
+    In the daemon container foreman is installed under ``/usr``, which every
+    box binds. On a dev or CI host it lives in a venv (and, editable, in the
+    source checkout) outside ``/usr``. Binding the venv, its base
+    interpreter and foreman's source root read-only lets ``sys.executable``
+    import foreman in the box on any host.
+
+    The venv's ``bin/python`` symlink and ``pyvenv.cfg`` ``home`` name the
+    base interpreter by the path the venv was made with, which can be an
+    alias of ``sys.base_prefix`` (uv links ``cpython-3.12-<platform>`` to
+    ``cpython-3.12.N-<platform>``). bwrap follows a symlinked bind source,
+    so binding that alias path too makes the link resolve in the box.
+    """
+    import foreman
+
+    binds = [sys.prefix, sys.base_prefix]
+    cfg = Path(sys.prefix) / "pyvenv.cfg"
+    if cfg.is_file():
+        for line in cfg.read_text(encoding="utf-8").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "home":
+                binds.append(str(Path(value.strip()).parent))
+    binds.append(str(Path(foreman.__file__).resolve().parent.parent))
+    return tuple(dict.fromkeys(binds))
+
+
 def _run_in_box(
     role_cmd: list[str], *, cache_dir: Path, scratch_dir: Path
 ) -> subprocess.CompletedProcess[str]:
-    launcher = SandboxLauncher(cache_dir=str(cache_dir))
+    launcher = _launcher(cache_dir)
     argv = launcher.build_argv(
         role_token="ghs_TESTTOKEN",
         scratch_dir=str(scratch_dir),
@@ -138,9 +182,11 @@ def test_scratch_and_cache_are_both_writable(tmp_path: Path) -> None:
 def test_box_resolves_uid_and_presents_as_ci(tmp_path: Path) -> None:
     """A real box must (1) resolve its own uid and (2) look like CI.
 
-    ``--unshare-user`` runs the box as uid 0; without ``/etc/passwd`` bound,
-    ``id -un`` (libc ``getpwuid``) fails with "cannot find name for user ID
-    0" — the same crash that took down agent_core's daemon-install CLI tests.
+    ``--unshare-user`` maps the caller's uid into the box (uid 0 in the
+    daemon container, ``runner`` on a CI host); without ``/etc/passwd``
+    bound, ``id -un`` (libc ``getpwuid``) fails with "cannot find name for
+    user ID 0" — the same crash that took down agent_core's daemon-install
+    CLI tests.
     And ``CI`` must be ``true`` so ``skipif(_is_ci())`` guards behave as in a
     real runner. Regression lock for the 2026-07-20 box-fidelity gap that
     stalled every agent_core impl ticket at needs_help."""
@@ -154,8 +200,8 @@ def test_box_resolves_uid_and_presents_as_ci(tmp_path: Path) -> None:
         cache_dir=cache_dir,
         scratch_dir=scratch_dir,
     )
-    assert r.returncode == 0, r.stderr  # getpwuid(0) resolved — /etc/passwd bound
-    assert "root" in r.stdout  # uid 0 → name
+    assert r.returncode == 0, r.stderr  # getpwuid resolved — /etc/passwd bound
+    assert pwd.getpwuid(os.getuid()).pw_name in r.stdout.splitlines()  # uid → name
     assert "CI=true" in r.stdout
 
     # cache write ALSO succeeds — the mount is read-write by design so
@@ -198,7 +244,7 @@ def test_sandbox_identity_resolves_token_with_no_pem(tmp_path: Path) -> None:
     cache_dir.mkdir()
     scratch_dir = tmp_path / "scratch"
     scratch_dir.mkdir()
-    launcher = SandboxLauncher(cache_dir=str(cache_dir))
+    launcher = _launcher(cache_dir, extra_ro_binds=_this_python_binds())
     probe = (
         "import os;"
         "assert not os.path.exists('/run/secrets'), 'PEM dir leaked into box';"
@@ -209,7 +255,7 @@ def test_sandbox_identity_resolves_token_with_no_pem(tmp_path: Path) -> None:
     argv = launcher.build_argv(
         role_token="ghs_INJECTED_TESTTOKEN",
         scratch_dir=str(scratch_dir),
-        role_cmd=["python", "-c", probe],
+        role_cmd=[sys.executable, "-c", probe],
     )
     r = subprocess.run(argv, capture_output=True, text=True, check=False)
     assert r.returncode == 0, r.stderr
@@ -321,7 +367,7 @@ def test_sandboxed_dispatch_log_banner_redacts_gh_token(tmp_path: Path) -> None:
         foreman_cli=["/bin/sh", "-c", script],
         identity=identity,
         log_dir=log_dir,
-        sandbox=SandboxLauncher(cache_dir=str(cache_dir)),
+        sandbox=_launcher(cache_dir),
         sandbox_scratch_root=scratch_root,
     )
 
@@ -377,7 +423,7 @@ def test_enabled_path_role_operates_in_private_clone(tmp_path: Path) -> None:
     config_file.write_text("log_dir = '/tmp'\n", encoding="utf-8")
 
     box_repo = "/foreman/repos/proj"
-    launcher = SandboxLauncher(cache_dir=str(cache_dir))
+    launcher = _launcher(cache_dir)
     script = (
         # config file is readable at its RO mount
         f"cat {config_file} >/dev/null && "
@@ -473,7 +519,7 @@ def test_two_role_handoff_box_sees_prior_role_commit(tmp_path: Path) -> None:
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
     box_repo = "/repo"
-    launcher = SandboxLauncher(cache_dir=str(cache_dir))
+    launcher = _launcher(cache_dir)
     argv = launcher.build_argv(
         role_token="ghs_UNUSED",
         scratch_dir=str(tmp_path / "scratch"),
