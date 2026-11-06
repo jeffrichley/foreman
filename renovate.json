@@ -6,13 +6,16 @@
     ":dependencyDashboard"
   ],
   "timezone": "America/New_York",
-  "schedule": ["before 6am"],
   "labels": ["dependencies"],
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "automerge": false
+  },
   "platformAutomerge": false,
   "packageRules": [
     {
       "description": "Group all non-major updates into one PR and auto-merge once CI is green.",
-      "matchUpdateTypes": ["minor", "patch", "digest", "pin", "lockFileMaintenance"],
+      "matchUpdateTypes": ["minor", "patch", "digest", "pin", "pinDigest", "lockFileMaintenance"],
       "groupName": "non-major dependencies",
       "automerge": true
     },
@@ -20,6 +23,11 @@
       "description": "Majors get their own PR and require human review (they can break at runtime even when CI is green).",
       "matchUpdateTypes": ["major"],
       "automerge": false
+    },
+    {
+      "description": "Python itself moves only by a deliberate change to .python-version, CI, requires-python and mypy together.",
+      "matchDepNames": ["python"],
+      "enabled": false
     }
   ]
 }
