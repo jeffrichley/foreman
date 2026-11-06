@@ -107,11 +107,24 @@ def _this_python_binds() -> tuple[str, ...]:
     source checkout) outside ``/usr``. Binding the venv, its base
     interpreter and foreman's source root read-only lets ``sys.executable``
     import foreman in the box on any host.
+
+    The venv's ``bin/python`` symlink and ``pyvenv.cfg`` ``home`` name the
+    base interpreter by the path the venv was made with, which can be an
+    alias of ``sys.base_prefix`` (uv links ``cpython-3.12-<platform>`` to
+    ``cpython-3.12.N-<platform>``). bwrap follows a symlinked bind source,
+    so binding that alias path too makes the link resolve in the box.
     """
     import foreman
 
-    foreman_root = Path(foreman.__file__).resolve().parent.parent
-    return tuple(dict.fromkeys([sys.prefix, sys.base_prefix, str(foreman_root)]))
+    binds = [sys.prefix, sys.base_prefix]
+    cfg = Path(sys.prefix) / "pyvenv.cfg"
+    if cfg.is_file():
+        for line in cfg.read_text(encoding="utf-8").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "home":
+                binds.append(str(Path(value.strip()).parent))
+    binds.append(str(Path(foreman.__file__).resolve().parent.parent))
+    return tuple(dict.fromkeys(binds))
 
 
 def _run_in_box(
