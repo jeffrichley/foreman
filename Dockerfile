@@ -68,10 +68,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # releases (it moved bookworm -> trixie, which broke a hardcoded `bookworm-pgdg`
 # line with apt exit 100 — unmet deps against the newer base). Derive the
 # codename from /etc/os-release so the repo always tracks the live base.
-RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-        | gpg --dearmor -o /usr/share/keyrings/postgresql-archive-keyring.gpg \
-    && . /etc/os-release \
-    && echo "deb [signed-by=/usr/share/keyrings/postgresql-archive-keyring.gpg] \
+#
+# foreman#619: the PGDG signing key is vendored, not fetched. Fetching it from
+# www.postgresql.org at build time failed a PR build when that host dropped the
+# TLS connection mid-download (curl exit 56, empty key, gpg exit 2). The key
+# (fingerprint B97B 0AFC AA1A 47F0 44F2 44A0 7FCC 7D46 ACCC 4CF8) has no
+# expiry; apt reads an armored .asc keyring directly, so no gpg step either.
+COPY docker/pgdg/apt.postgresql.org.asc /usr/share/keyrings/postgresql-archive-keyring.asc
+RUN . /etc/os-release \
+    && echo "deb [signed-by=/usr/share/keyrings/postgresql-archive-keyring.asc] \
         https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
         > /etc/apt/sources.list.d/pgdg.list \
     && apt-get update \

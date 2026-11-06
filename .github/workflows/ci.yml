@@ -66,12 +66,12 @@ jobs:
   # ubuntu-22.04, on the bare runner, and inside docker (default AND
   # --privileged), even with kernel.apparmor_restrict_unprivileged_userns=0
   # and kernel.unprivileged_userns_clone=1 set. So there is no hosted-runner
-  # configuration where they can run; they self-skip in CI by design.
-  # They ARE exercised where userns works: local dev under Docker/WSL2
-  # (a plain `uv run pytest .../test_sandbox_integration.py`) and the
-  # production daemon container (Docker default profile) — see the #556
-  # enabled-path dogfood. A self-hosted runner on a userns-capable host is
-  # the only way to add them to CI; deferred as not worth the infra now.
+  # configuration where they can run; they self-skipped in CI.
+  # UPDATE (foreman#619): by 2026-10 the hosted ubuntu-latest image boots
+  # bwrap's userns probe, so these tests now RUN in `check`. They must not
+  # depend on the runner's home layout (the job runs as `runner`, and
+  # /root is unreadable to it) — the tests build launchers with no
+  # /root/.claude binds for that reason.
 
   # foreman#464 postmortem: a Dockerfile change (pinning bookworm-pgdg on a
   # base that had silently moved to trixie) merged green because the `check`
