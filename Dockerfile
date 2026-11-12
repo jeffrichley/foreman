@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.28
+# syntax=docker/dockerfile:1.29
 # Foreman daemon image.
 #
 # Layer order chosen for cache locality (per the Docker design spec,
