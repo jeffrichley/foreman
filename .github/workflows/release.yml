@@ -54,7 +54,7 @@ jobs:
       # Stash the dist/ contents for the publish-pypi job. Only wheels —
       # requirements.txt is GH-Release-only; not a PyPI artifact.
       - name: Upload wheels as workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wheels
           path: dist/*.whl
@@ -82,7 +82,7 @@ jobs:
       id-token: write
     steps:
       - name: Download wheels from workflow artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wheels
           path: dist/
